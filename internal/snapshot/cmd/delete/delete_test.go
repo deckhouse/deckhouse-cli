@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -47,6 +48,33 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	}
 
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+}
+
+type getDynamic struct {
+	dynamic.Interface
+	get func(context.Context, string, metav1.GetOptions, ...string) (*unstructured.Unstructured, error)
+}
+
+func (d *getDynamic) Resource(schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return &getResource{get: d.get}
+}
+
+type getResource struct {
+	dynamic.NamespaceableResourceInterface
+	get func(context.Context, string, metav1.GetOptions, ...string) (*unstructured.Unstructured, error)
+}
+
+func (r *getResource) Namespace(string) dynamic.ResourceInterface {
+	return r
+}
+
+func (r *getResource) Get(
+	ctx context.Context,
+	name string,
+	opts metav1.GetOptions,
+	subresources ...string,
+) (*unstructured.Unstructured, error) {
+	return r.get(ctx, name, opts, subresources...)
 }
 
 // snapshotObj builds an unstructured Snapshot with optional labels.
@@ -514,6 +542,98 @@ func TestWaitGone_TimesOut(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Fatalf("error %q does not mention timeout", err.Error())
+	}
+}
+
+func TestWaitGone_ContextBoundsGet(t *testing.T) {
+	t.Parallel()
+
+	errAPI := errors.New("API unavailable")
+	cases := []struct {
+		name         string
+		timeout      time.Duration
+		cancelParent bool
+		apiErr       error
+		present      bool
+		wantIs       error
+		wantContains string
+	}{
+		{
+			name:         "timeout: blocking GET is bounded",
+			timeout:      20 * time.Millisecond,
+			wantIs:       context.DeadlineExceeded,
+			wantContains: "timeout waiting for Snapshot ns/snap-a",
+		},
+		{
+			name:         "timeout: poll interval is bounded",
+			timeout:      20 * time.Millisecond,
+			present:      true,
+			wantIs:       context.DeadlineExceeded,
+			wantContains: "timeout waiting for Snapshot ns/snap-a",
+		},
+		{
+			name:         "cancel: parent cancellation aborts blocking GET",
+			timeout:      time.Second,
+			cancelParent: true,
+			wantIs:       context.Canceled,
+		},
+		{
+			name:         "error: ordinary API error retains object identity",
+			timeout:      time.Second,
+			apiErr:       errAPI,
+			wantIs:       errAPI,
+			wantContains: "get Snapshot ns/snap-a",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			cancelParent := func() {}
+			if tc.cancelParent {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancelParent = cancel
+				t.Cleanup(cancel)
+			}
+
+			dyn := &getDynamic{
+				get: func(getCtx context.Context, _ string, _ metav1.GetOptions, _ ...string) (*unstructured.Unstructured, error) {
+					if tc.apiErr != nil {
+						return nil, tc.apiErr
+					}
+
+					if tc.present {
+						return snapshotObj("ns", "snap-a", nil), nil
+					}
+
+					if tc.cancelParent {
+						cancelParent()
+					}
+
+					<-getCtx.Done()
+
+					return nil, getCtx.Err()
+				},
+			}
+
+			started := time.Now()
+			target := snapshotTarget{name: "snap-a"}
+			err := waitGone(ctx, dyn, "ns", target, tc.timeout, time.Hour, discardLogger())
+			if !errors.Is(err, tc.wantIs) {
+				t.Fatalf("waitGone error = %v, want errors.Is(_, %v)", err, tc.wantIs)
+			}
+
+			if tc.wantContains != "" && !strings.Contains(err.Error(), tc.wantContains) {
+				t.Fatalf("waitGone error = %q, want substring %q", err, tc.wantContains)
+			}
+
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("waitGone returned after %s, want at most 1s", elapsed)
+			}
+		})
 	}
 }
 

@@ -351,10 +351,19 @@ func listTargets(ctx context.Context, dyn dynamic.Interface, namespace, selector
 // waitGone polls the Snapshot until the target identity is no longer found or
 // the timeout elapses. A target without a UID retains name-only wait semantics.
 func waitGone(ctx context.Context, dyn dynamic.Interface, namespace string, target snapshotTarget, timeout, poll time.Duration, log *slog.Logger) error {
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	for {
-		snapshot, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(ctx, target.name, metav1.GetOptions{})
+		if err := waitCtx.Err(); err != nil {
+			return waitGoneContextError(err, namespace, target.name)
+		}
+
+		snapshot, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(waitCtx, target.name, metav1.GetOptions{})
+		if err != nil && waitCtx.Err() != nil {
+			return waitGoneContextError(waitCtx.Err(), namespace, target.name)
+		}
+
 		if kubeerrors.IsNotFound(err) {
 			log.Debug("Snapshot deleted", slog.String("namespace", namespace), slog.String("name", target.name))
 
@@ -365,28 +374,39 @@ func waitGone(ctx context.Context, dyn dynamic.Interface, namespace string, targ
 			return fmt.Errorf("get Snapshot %s/%s: %w", namespace, target.name, err)
 		}
 
+		if err := waitCtx.Err(); err != nil {
+			return waitGoneContextError(err, namespace, target.name)
+		}
+
 		if target.uid != "" && snapshot.GetUID() != target.uid {
 			log.Debug("Snapshot replaced after deletion", slog.String("namespace", namespace), slog.String("name", target.name))
 
 			return nil
 		}
 
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for Snapshot %s/%s to be deleted", namespace, target.name)
-		}
-
-		if !sleepCtx(ctx, poll) {
-			return ctx.Err()
+		if !sleepCtx(waitCtx, poll) {
+			return waitGoneContextError(waitCtx.Err(), namespace, target.name)
 		}
 	}
 }
 
+func waitGoneContextError(err error, namespace, name string) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("timeout waiting for Snapshot %s/%s to be deleted: %w", namespace, name, err)
+	}
+
+	return err
+}
+
 // sleepCtx sleeps for d or until ctx is cancelled, returning false on cancel.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	}
 }
