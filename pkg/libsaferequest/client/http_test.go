@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
@@ -332,6 +334,220 @@ func TestPersistentHTTPClient_ReusesAndClosesConnections(t *testing.T) {
 	})
 }
 
+func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
+	t.Parallel()
+
+	var (
+		newConnections    atomic.Int64
+		closedConnections atomic.Int64
+	)
+
+	activeStarted := make(chan struct{})
+	releaseActive := make(chan struct{}, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/active" {
+			close(activeStarted)
+			<-releaseActive
+		}
+
+		_, _ = io.WriteString(w, "ok")
+	}))
+	srv.EnableHTTP2 = true
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			newConnections.Add(1)
+		case http.StateClosed:
+			closedConnections.Add(1)
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		select {
+		case releaseActive <- struct{}{}:
+		default:
+		}
+	})
+
+	sc := newSharedHTTP2SafeClient(t, srv)
+	results := make(chan persistentClientResult, 2)
+
+	for range 2 {
+		go func() {
+			httpClient, err := newPersistentTestClient(sc, srv, time.Second)
+			results <- persistentClientResult{client: httpClient, err: err}
+		}()
+	}
+
+	clients := make([]*PersistentHTTPClient, 0, 2)
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("NewPersistentHTTPClient: %v", result.err)
+		}
+
+		clients = append(clients, result.client)
+	}
+
+	t.Cleanup(func() {
+		for _, httpClient := range clients {
+			httpClient.CloseIdleConnections()
+		}
+	})
+
+	for _, httpClient := range clients {
+		for range 10 {
+			protoMajor, err := persistentRequest(context.Background(), httpClient, srv.URL)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+
+			if protoMajor != 2 {
+				t.Fatalf("response protocol major = %d, want HTTP/2", protoMajor)
+			}
+		}
+	}
+
+	if got := newConnections.Load(); got != 2 {
+		t.Fatalf("new connections = %d, want one private HTTP/2 connection per client", got)
+	}
+
+	activeResult := make(chan error, 1)
+	go func() {
+		_, err := persistentRequest(context.Background(), clients[1], srv.URL+"/active")
+		activeResult <- err
+	}()
+
+	<-activeStarted
+	clients[0].CloseIdleConnections()
+
+	requireEventually(t, time.Second, func() bool {
+		return closedConnections.Load() == 1
+	})
+
+	select {
+	case err := <-activeResult:
+		t.Fatalf("closing the other client disrupted an active HTTP/2 stream: %v", err)
+	default:
+	}
+
+	releaseActive <- struct{}{}
+
+	if err := <-activeResult; err != nil {
+		t.Fatalf("active request after other client cleanup: %v", err)
+	}
+
+	protoMajor, err := persistentRequest(context.Background(), clients[1], srv.URL)
+	if err != nil {
+		t.Fatalf("request through surviving client: %v", err)
+	}
+
+	if protoMajor != 2 {
+		t.Fatalf("surviving response protocol major = %d, want HTTP/2", protoMajor)
+	}
+
+	if got := newConnections.Load(); got != 2 {
+		t.Fatalf("surviving client opened a new connection after other client cleanup: %d", got)
+	}
+
+	clients[1].CloseIdleConnections()
+
+	requireEventually(t, time.Second, func() bool {
+		return closedConnections.Load() == newConnections.Load()
+	})
+}
+
+func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) {
+	t.Parallel()
+
+	shortStarted := make(chan struct{})
+	longStarted := make(chan struct{})
+	releaseLong := make(chan struct{}, 1)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/short":
+			close(shortStarted)
+			<-r.Context().Done()
+		case "/long":
+			close(longStarted)
+			<-releaseLong
+			_, _ = io.WriteString(w, "ok")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		select {
+		case releaseLong <- struct{}{}:
+		default:
+		}
+	})
+
+	sc := newSharedHTTP2SafeClient(t, srv)
+	shortClient, err := newPersistentTestClient(sc, srv, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("build short-timeout client: %v", err)
+	}
+	t.Cleanup(shortClient.CloseIdleConnections)
+
+	longClient, err := newPersistentTestClient(sc, srv, time.Second)
+	if err != nil {
+		t.Fatalf("build long-timeout client: %v", err)
+	}
+	t.Cleanup(longClient.CloseIdleConnections)
+
+	longResult := make(chan error, 1)
+	go func() {
+		protoMajor, requestErr := persistentRequest(context.Background(), longClient, srv.URL+"/long")
+		if requestErr == nil && protoMajor != 2 {
+			requestErr = fmt.Errorf("response protocol major = %d, want HTTP/2", protoMajor)
+		}
+
+		longResult <- requestErr
+	}()
+
+	<-longStarted
+	start := time.Now()
+	_, err = persistentRequest(context.Background(), shortClient, srv.URL+"/short")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("short-timeout HTTP/2 request unexpectedly succeeded")
+	}
+
+	var timeoutError net.Error
+	if !errors.As(err, &timeoutError) || !timeoutError.Timeout() {
+		t.Fatalf("short HTTP/2 request error = %v, want response-header timeout", err)
+	}
+
+	if elapsed < 25*time.Millisecond {
+		t.Fatalf("short HTTP/2 response-header timeout took only %v", elapsed)
+	}
+
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("short HTTP/2 response-header timeout took %v, want under 500ms", elapsed)
+	}
+
+	<-shortStarted
+
+	select {
+	case err := <-longResult:
+		t.Fatalf("short client timeout disrupted long client: %v", err)
+	default:
+	}
+
+	releaseLong <- struct{}{}
+
+	if err := <-longResult; err != nil {
+		t.Fatalf("long-timeout HTTP/2 request: %v", err)
+	}
+}
+
 func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -548,6 +764,84 @@ func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
 	if dialCalls.Load() == 0 {
 		t.Error("configured dial function was not called")
 	}
+}
+
+type persistentClientResult struct {
+	client *PersistentHTTPClient
+	err    error
+}
+
+func newSharedHTTP2SafeClient(t *testing.T, srv *httptest.Server) *SafeClient {
+	t.Helper()
+
+	certificate := srv.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server has no certificate")
+	}
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(certificate)
+
+	sharedTransport := utilnet.SetTransportDefaults(&http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    rootCAs,
+		},
+	})
+	t.Cleanup(sharedTransport.CloseIdleConnections)
+
+	return &SafeClient{restConfig: &rest.Config{Transport: sharedTransport}}
+}
+
+func newPersistentTestClient(
+	sc *SafeClient,
+	srv *httptest.Server,
+	responseHeaderTimeout time.Duration,
+) (*PersistentHTTPClient, error) {
+	certificate := srv.Certificate()
+	if certificate == nil {
+		return nil, errors.New("TLS test server has no certificate")
+	}
+
+	caData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+	sub := sc.Copy()
+	sub.SetTLSCAData(caData)
+	sub.SetResponseHeaderTimeout(responseHeaderTimeout)
+
+	httpClient, err := sub.NewPersistentHTTPClient()
+	if err != nil {
+		return nil, fmt.Errorf("build persistent test client: %w", err)
+	}
+
+	return httpClient, nil
+}
+
+func persistentRequest(
+	ctx context.Context,
+	httpClient *PersistentHTTPClient,
+	rawURL string,
+) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("do request: %w", err)
+	}
+
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		_ = resp.Body.Close()
+
+		return 0, fmt.Errorf("drain response body: %w", err)
+	}
+
+	if err := resp.Body.Close(); err != nil {
+		return 0, fmt.Errorf("close response body: %w", err)
+	}
+
+	return resp.ProtoMajor, nil
 }
 
 type persistentTestAuthProvider struct{}

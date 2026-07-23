@@ -74,9 +74,10 @@ type SafeClient struct {
 // It is safe for concurrent use. Call CloseIdleConnections when the caller's
 // lifecycle ends so this client's private connection pool is released.
 type PersistentHTTPClient struct {
-	client            *http.Client
-	ownedTransport    http.RoundTripper
-	hasConfiguredAuth bool
+	client             *http.Client
+	ownedTransport     http.RoundTripper
+	ownedHTTPTransport *http.Transport
+	hasConfiguredAuth  bool
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
@@ -93,10 +94,10 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 // bearer, and basic-auth behavior for every request made through the result.
 //
 // The standard client-go base *http.Transport is cloned before caller-installed
-// WrapTransport functions run. This gives each returned client a private idle
-// pool even when client-go's TLS cache supplied the base transport. Cleanup
-// retains the pre-auth wrapper stack directly, so opaque auth-provider wrappers
-// cannot hide the owned transport from CloseIdleConnections.
+// WrapTransport functions run. Its inherited HTTP/2 upgrade closures are
+// suppressed while those wrappers clone and customize the transport, then
+// HTTP/2 is configured anew on the final private transport. Cleanup retains
+// both the pre-auth wrapper stack and the private base transport.
 func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 	if c == nil || c.restConfig == nil {
 		return nil, errors.New("build persistent HTTP client: no rest config")
@@ -105,11 +106,27 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 	config := rest.CopyConfig(c.restConfig)
 	prev := config.WrapTransport
 
-	var ownedTransport http.RoundTripper
+	var (
+		ownedTransport     http.RoundTripper
+		ownedHTTPTransport *http.Transport
+	)
 
 	config.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		var (
+			clonedHTTPTransport *http.Transport
+			enableHTTP2         bool
+		)
+
 		if transport, ok := rt.(*http.Transport); ok {
-			rt = transport.Clone()
+			cloned := transport.Clone()
+			enableHTTP2 = cloned.ForceAttemptHTTP2 || cloned.TLSNextProto["h2"] != nil
+			// Clone copies client-go's x/net/http2 TLSNextProto closures. An
+			// empty map prevents intermediate caller wrappers from enabling or
+			// copying HTTP/2 while they clone this transport.
+			cloned.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+			cloned.ForceAttemptHTTP2 = false
+			clonedHTTPTransport = cloned
+			rt = cloned
 		}
 
 		if prev != nil {
@@ -117,6 +134,17 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		}
 
 		ownedTransport = rt
+
+		ownedHTTPTransport = findHTTPTransport(rt)
+		if ownedHTTPTransport == nil {
+			ownedHTTPTransport = clonedHTTPTransport
+		}
+
+		if ownedHTTPTransport != nil && enableHTTP2 {
+			ownedHTTPTransport.TLSNextProto = nil
+			ownedHTTPTransport.ForceAttemptHTTP2 = true
+			utilnet.SetTransportDefaults(ownedHTTPTransport)
+		}
 
 		return rt
 	}
@@ -127,9 +155,10 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 	}
 
 	return &PersistentHTTPClient{
-		client:            httpClient,
-		ownedTransport:    ownedTransport,
-		hasConfiguredAuth: hasConfiguredAuth(config),
+		client:             httpClient,
+		ownedTransport:     ownedTransport,
+		ownedHTTPTransport: ownedHTTPTransport,
+		hasConfiguredAuth:  hasConfiguredAuth(config),
 	}, nil
 }
 
@@ -159,6 +188,27 @@ func (c *PersistentHTTPClient) CloseIdleConnections() {
 	}
 
 	utilnet.CloseIdleConnectionsFor(c.ownedTransport)
+
+	if c.ownedHTTPTransport != nil {
+		c.ownedHTTPTransport.CloseIdleConnections()
+	}
+}
+
+func findHTTPTransport(rt http.RoundTripper) *http.Transport {
+	for rt != nil {
+		if transport, ok := rt.(*http.Transport); ok {
+			return transport
+		}
+
+		wrapper, ok := rt.(utilnet.RoundTripperWrapper)
+		if !ok {
+			return nil
+		}
+
+		rt = wrapper.WrappedRoundTripper()
+	}
+
+	return nil
 }
 
 func hasConfiguredAuth(config *rest.Config) bool {

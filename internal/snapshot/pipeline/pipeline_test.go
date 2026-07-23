@@ -400,6 +400,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 		closedConnections atomic.Int64
 		hashRequests      atomic.Int64
 		fileRequests      atomic.Int64
+		nonHTTP2Requests  atomic.Int64
 	)
 
 	files := make(map[string][]byte, fileCount)
@@ -417,6 +418,10 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			nonHTTP2Requests.Add(1)
+		}
+
 		if r.URL.Path == "/api/v1/files/" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+strings.Join(items, ",")+`]}`)
@@ -453,6 +458,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 			closedConnections.Add(1)
 		}
 	}
+	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
@@ -489,6 +495,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 	require.NoError(t, runPipeline(context.Background(), cfg))
 	require.Equal(t, int64(fileCount), hashRequests.Load())
 	require.Equal(t, int64(fileCount), fileRequests.Load())
+	require.Zero(t, nonHTTP2Requests.Load(), "production export requests must use HTTP/2")
 
 	connectionCount := newConnections.Load()
 	require.LessOrEqual(t, connectionCount, int64(2*workers+2),
