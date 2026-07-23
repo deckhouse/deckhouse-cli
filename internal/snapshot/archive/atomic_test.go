@@ -14,17 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package archive_test
+package archive
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 // errAfterReader returns data bytes then returns errTrigger on the next Read.
@@ -52,7 +51,7 @@ func TestWriteFileAtomic_success(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	content := []byte("hello atomic world")
 
-	err := archive.WriteFileAtomic(path, bytes.NewReader(content))
+	err := WriteFileAtomic(path, bytes.NewReader(content))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
@@ -87,7 +86,7 @@ func TestWriteFileAtomic_errorLeavesNoFinalFile(t *testing.T) {
 		err:  errors.New("simulated read failure"),
 	}
 
-	err := archive.WriteFileAtomic(path, r)
+	err := WriteFileAtomic(path, r)
 	if err == nil {
 		t.Fatal("expected error from WriteFileAtomic, got nil")
 	}
@@ -111,7 +110,7 @@ func TestAtomicWriter_commitProducesCorrectContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data.bin")
 
-	aw, err := archive.NewAtomicWriter(path)
+	aw, err := NewAtomicWriter(path)
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -145,13 +144,182 @@ func TestAtomicWriter_commitProducesCorrectContent(t *testing.T) {
 	}
 }
 
+func TestAtomicWriter_CommitContextCancelsAfterSyncBeforePublication(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.bin")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aw, err := NewAtomicWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := aw.Write([]byte("new")); err != nil {
+		t.Fatal(err)
+	}
+
+	syncStarted := make(chan struct{})
+	releaseSync := make(chan struct{})
+	aw.ops.syncTemp = func(f *os.File) error {
+		close(syncStarted)
+		<-releaseSync
+
+		return f.Sync()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- aw.CommitContext(ctx)
+	}()
+
+	<-syncStarted
+	cancel()
+	close(releaseSync)
+
+	err = <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CommitContext error = %v, want context.Canceled", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, []byte("old")) {
+		t.Fatalf("final bytes = %q, want unchanged old bytes", got)
+	}
+
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary file survived cancellation: %v", err)
+	}
+}
+
+func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*AtomicWriter, context.CancelFunc, error)
+		published bool
+	}{
+		{
+			name: "SyncErrorDuringCancellation",
+			configure: func(aw *AtomicWriter, cancel context.CancelFunc, sentinel error) {
+				aw.ops.syncTemp = func(*os.File) error {
+					cancel()
+
+					return sentinel
+				}
+			},
+		},
+		{
+			name: "RenameError",
+			configure: func(aw *AtomicWriter, _ context.CancelFunc, sentinel error) {
+				aw.ops.rename = func(string, string) error {
+					return sentinel
+				}
+			},
+		},
+		{
+			name: "ParentSyncErrorAfterPublication",
+			configure: func(aw *AtomicWriter, cancel context.CancelFunc, sentinel error) {
+				aw.ops.syncDir = func(string) error {
+					cancel()
+
+					return sentinel
+				}
+			},
+			published: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data.bin")
+			aw, err := NewAtomicWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := aw.Write([]byte("content")); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			sentinel := errors.New("commit operation sentinel")
+			tt.configure(aw, cancel, sentinel)
+
+			err = aw.CommitContext(ctx)
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("CommitContext error = %v, want operation sentinel", err)
+			}
+
+			if errors.Is(err, context.Canceled) {
+				t.Fatalf("operation error was replaced by cancellation: %v", err)
+			}
+
+			_, statErr := os.Stat(path)
+			if tt.published && statErr != nil {
+				t.Fatalf("published final file missing: %v", statErr)
+			}
+
+			if !tt.published && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("final file published before failed operation: %v", statErr)
+			}
+
+			if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("temporary file survived failed commit: %v", err)
+			}
+		})
+	}
+}
+
+func TestAtomicWriter_CommitContextIgnoresCancellationAfterPublicationBegins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.bin")
+	aw, err := NewAtomicWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := aw.Write([]byte("content")); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rename := aw.ops.rename
+	aw.ops.rename = func(oldPath, newPath string) error {
+		if err := rename(oldPath, newPath); err != nil {
+			return err
+		}
+
+		cancel()
+
+		return nil
+	}
+
+	if err := aw.CommitContext(ctx); err != nil {
+		t.Fatalf("CommitContext after publication began: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, []byte("content")) {
+		t.Fatalf("final bytes = %q, want content", got)
+	}
+}
+
 func TestAtomicWriter_abortLeavesNoFinalFile(t *testing.T) {
 	t.Helper()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aborted.bin")
 
-	aw, err := archive.NewAtomicWriter(path)
+	aw, err := NewAtomicWriter(path)
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -180,7 +348,7 @@ func TestAtomicWriter_openTempReaderKeepsFinalInvisible(t *testing.T) {
 	path := filepath.Join(dir, "validated.bin")
 	content := []byte("validate before publish")
 
-	aw, err := archive.NewAtomicWriter(path)
+	aw, err := NewAtomicWriter(path)
 	if err != nil {
 		t.Fatalf("NewAtomicWriter: %v", err)
 	}
@@ -233,7 +401,7 @@ func TestWriteFileAtomic_emptyReader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.txt")
 
-	err := archive.WriteFileAtomic(path, bytes.NewReader(nil))
+	err := WriteFileAtomic(path, bytes.NewReader(nil))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic empty: %v", err)
 	}
@@ -254,7 +422,7 @@ func TestEnsureDir_createsAndIsDurable(t *testing.T) {
 	base := t.TempDir()
 	nested := filepath.Join(base, "a", "b", "c")
 
-	if err := archive.EnsureDir(nested); err != nil {
+	if err := EnsureDir(nested); err != nil {
 		t.Fatalf("EnsureDir: %v", err)
 	}
 
@@ -273,11 +441,11 @@ func TestEnsureDir_idempotent(t *testing.T) {
 
 	dir := t.TempDir()
 
-	if err := archive.EnsureDir(dir); err != nil {
+	if err := EnsureDir(dir); err != nil {
 		t.Fatalf("first EnsureDir: %v", err)
 	}
 
-	if err := archive.EnsureDir(dir); err != nil {
+	if err := EnsureDir(dir); err != nil {
 		t.Fatalf("second EnsureDir (idempotent): %v", err)
 	}
 }
@@ -290,17 +458,17 @@ func TestWriteFileAtomic_parentDirSynced(t *testing.T) {
 	base := t.TempDir()
 	sub := filepath.Join(base, "sub")
 
-	if err := archive.EnsureDir(sub); err != nil {
+	if err := EnsureDir(sub); err != nil {
 		t.Fatalf("EnsureDir: %v", err)
 	}
 
 	path := filepath.Join(sub, "file.txt")
 
-	err := archive.WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
+	err := WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 }
 
 // Ensure AtomicWriter satisfies io.Writer at compile time.
-var _ io.Writer = (*archive.AtomicWriter)(nil)
+var _ io.Writer = (*AtomicWriter)(nil)

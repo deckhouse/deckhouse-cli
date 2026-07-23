@@ -19,6 +19,7 @@ package volume
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -73,11 +74,10 @@ type TarEntrySource func(yield func(TarEntry) error) error
 // The output file is written atomically (.tmp → fsync → rename).
 //
 // ctx is checked before every entry, around every fixed-size file read, and
-// immediately before commit. If it is cancelled mid-write, the in-progress
-// AtomicWriter is aborted (so no partial file is ever visible at outputPath)
-// and a wrapped ctx.Err() is returned (checkable via errors.Is). Cancellation
-// here never loses data: the per-file staging directory is untouched, so tar
-// assembly simply resumes from the same staged files on the next run.
+// after temporary-file sync/close at AtomicWriter's pre-publication checkpoint.
+// Cancellation observed before publication aborts the temporary output; after
+// publication begins, rename/durability errors determine the result. The
+// staging directory is always untouched, so assembly can be retried.
 func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries TarEntrySource) error {
 	aw, err := archive.NewAtomicWriter(outputPath)
 	if err != nil {
@@ -110,7 +110,11 @@ func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries
 		return fmt.Errorf("tar assembly cancelled before commit: %w", err)
 	}
 
-	return aw.Commit()
+	if err := aw.CommitContext(ctx); err != nil {
+		return fmt.Errorf("commit tar output %s: %w", outputPath, err)
+	}
+
+	return nil
 }
 
 func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entries TarEntrySource) error {
@@ -225,6 +229,10 @@ func (r *tarContextReader) Read(p []byte) (int, error) {
 	}
 
 	n, err := r.reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, err
+	}
+
 	if ctxErr := r.ctx.Err(); ctxErr != nil {
 		return n, ctxErr
 	}

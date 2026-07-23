@@ -329,6 +329,74 @@ func TestWriteTar_CancelledAfterFinalEntryBeforeCommit(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestWriteTar_PreservesReadErrorConcurrentWithCancellation(t *testing.T) {
+	stagingDir := t.TempDir()
+	entryPath := filepath.Join(stagingDir, "unreadable")
+	require.NoError(t, os.Mkdir(entryPath, 0o755))
+
+	probe, err := os.Open(entryPath)
+	require.NoError(t, err)
+	_, readErr := probe.Read(make([]byte, 1))
+	require.NoError(t, probe.Close())
+	if readErr == nil || errors.Is(readErr, io.EOF) {
+		t.Skip("platform does not return a non-EOF error when reading a directory")
+	}
+
+	underlyingReadErr := errors.Unwrap(readErr)
+	require.Error(t, underlyingReadErr)
+
+	ctx := &cancelDuringTarReadContext{
+		Context:  context.Background(),
+		cancelAt: 2,
+		done:     make(chan struct{}),
+	}
+	outPath := filepath.Join(t.TempDir(), "data.tar")
+	entries := sortedTarEntries([]volume.TarEntry{{
+		RelPath:      "unreadable",
+		Type:         "file",
+		Codec:        "none",
+		OriginalPath: "unreadable",
+	}})
+
+	err = volume.WriteTar(ctx, outPath, stagingDir, entries)
+	require.ErrorIs(t, err, underlyingReadErr)
+	require.NotErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	_, err = os.Stat(outPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(outPath + ".tmp")
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type cancelDuringTarReadContext struct {
+	context.Context
+	cancelAt  int
+	checks    int
+	cancelled bool
+	done      chan struct{}
+}
+
+func (c *cancelDuringTarReadContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *cancelDuringTarReadContext) Err() error {
+	if c.cancelled {
+		return context.Canceled
+	}
+
+	c.checks++
+	if c.checks == c.cancelAt {
+		c.cancelled = true
+		close(c.done)
+
+		return nil
+	}
+
+	return nil
+}
+
 type cancelWhenTempGrowsContext struct {
 	context.Context
 	tempPath    string
