@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -3951,6 +3952,112 @@ func requireObservedDoerQuiescent(t *testing.T, doer *observedDoer) {
 	if current := doer.calls.Load(); current != calls {
 		t.Fatalf("request count changed after return: %d -> %d", calls, current)
 	}
+}
+
+func TestDownloadFilesystemVolume_CancelDuringTarAssemblyPreservesInventoryForRetry(t *testing.T) {
+	content := bytes.Repeat([]byte("sole-final-filesystem-entry-"), 160<<10)
+	contentMD5 := md5Hex(content)
+
+	var listingRequests atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/files/" {
+			listingRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(
+				w,
+				`{"apiVersion":"v1","items":[{"name":"large.bin","type":"file","uri":"large.bin","attributes":{"size":%d}}]}`,
+				len(content),
+			)
+
+			return
+		}
+
+		if r.Method == http.MethodHead {
+			w.Header().Set("X-Attribute-Hash-Md5", contentMD5)
+		}
+
+		http.ServeContent(w, r, "large.bin", time.Time{}, bytes.NewReader(content))
+	}))
+	t.Cleanup(srv.Close)
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	inventoryPath := filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.jsonl")
+	stagedPath := filepath.Join(stagingDir, "large.bin")
+	ctx := &cancelWhenTempGrowsContext{
+		Context:   context.Background(),
+		tempPath:  tarPath + ".tmp",
+		threshold: 96 << 10,
+	}
+
+	err := volume.DownloadFilesystemVolume(
+		ctx,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		1<<20,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.LessOrEqual(t, ctx.triggerSize, ctx.threshold+(128<<10))
+
+	_, err = os.Stat(tarPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(tarPath + ".tmp")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	inventoryBefore, err := os.ReadFile(inventoryPath)
+	require.NoError(t, err, "valid inventory must survive cancelled assembly")
+	require.NotEmpty(t, inventoryBefore)
+
+	movedPath := stagedPath + ".moved"
+	require.NoError(t, os.Rename(stagedPath, movedPath), "cancelled assembly must close the staged file")
+	require.NoError(t, os.Rename(movedPath, stagedPath))
+
+	require.NoError(t, volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		1<<20,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	))
+	require.Equal(t, int64(1), listingRequests.Load(), "retry must reuse the preserved valid inventory")
+
+	retried, err := os.ReadFile(tarPath)
+	require.NoError(t, err)
+
+	freshNodeDir := t.TempDir()
+	freshTarPath := filepath.Join(freshNodeDir, archive.FsTarName)
+	require.NoError(t, volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		freshTarPath,
+		filepath.Join(freshNodeDir, archive.FsTarStagingDirName),
+		srv.URL+"/files/",
+		1,
+		1<<20,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	))
+
+	uninterrupted, err := os.ReadFile(freshTarPath)
+	require.NoError(t, err)
+	require.Equal(t, uninterrupted, retried, "retry must match an uninterrupted deterministic tar")
 }
 
 func newLargeLinkInventoryServer(t *testing.T, entries int, reverse bool) *httptest.Server {
