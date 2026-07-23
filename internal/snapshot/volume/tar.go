@@ -72,12 +72,12 @@ type TarEntrySource func(yield func(TarEntry) error) error
 // filepath.FromSlash(entry.RelPath)).
 // The output file is written atomically (.tmp → fsync → rename).
 //
-// ctx is checked once per entry during assembly; if it is cancelled mid-write,
-// the in-progress AtomicWriter is aborted (so no partial file is ever visible
-// at outputPath) and a wrapped ctx.Err() is returned (checkable via
-// errors.Is). Cancellation here never loses data: the per-file staging
-// directory is untouched, so tar assembly simply resumes from the same staged
-// files on the next run.
+// ctx is checked before every entry, around every fixed-size file read, and
+// immediately before commit. If it is cancelled mid-write, the in-progress
+// AtomicWriter is aborted (so no partial file is ever visible at outputPath)
+// and a wrapped ctx.Err() is returned (checkable via errors.Is). Cancellation
+// here never loses data: the per-file staging directory is untouched, so tar
+// assembly simply resumes from the same staged files on the next run.
 func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries TarEntrySource) error {
 	aw, err := archive.NewAtomicWriter(outputPath)
 	if err != nil {
@@ -92,10 +92,22 @@ func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries
 		return err
 	}
 
+	if err := ctx.Err(); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("tar assembly cancelled before close: %w", err)
+	}
+
 	if err := tw.Close(); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("close tar writer: %w", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("tar assembly cancelled before commit: %w", err)
 	}
 
 	return aw.Commit()
@@ -107,7 +119,7 @@ func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entrie
 			return fmt.Errorf("tar assembly cancelled before entry %q: %w", e.RelPath, err)
 		}
 
-		if err := writeEntry(tw, stagingDir, e); err != nil {
+		if err := writeEntry(ctx, tw, stagingDir, e); err != nil {
 			return err
 		}
 
@@ -115,10 +127,10 @@ func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entrie
 	})
 }
 
-func writeEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
+func writeEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e TarEntry) error {
 	switch e.Type {
 	case "file":
-		return writeFileEntry(tw, stagingDir, e)
+		return writeFileEntry(ctx, tw, stagingDir, e)
 	case "dir":
 		return writeDirEntry(tw, e)
 	case "link":
@@ -141,7 +153,7 @@ func normalizeMtime(t time.Time) time.Time {
 	return t
 }
 
-func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
+func writeFileEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e TarEntry) error {
 	metadata, err := archive.NewFSMetadata(e.Codec, e.OriginalPath, e.RawSize)
 	if err != nil {
 		return fmt.Errorf("validate metadata for tar entry %s: %w", e.RelPath, err)
@@ -192,11 +204,32 @@ func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
 		return fmt.Errorf("tar write header %s: %w", e.RelPath, err)
 	}
 
-	if _, err := io.Copy(tw, f); err != nil {
+	const copyBufferSize = 32 << 10
+
+	reader := &tarContextReader{ctx: ctx, reader: f}
+	if _, err := io.CopyBuffer(tw, reader, make([]byte, copyBufferSize)); err != nil {
 		return fmt.Errorf("copy staging file %s: %w", e.RelPath, err)
 	}
 
 	return nil
+}
+
+type tarContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *tarContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	n, err := r.reader.Read(p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+
+	return n, err
 }
 
 func writeDirEntry(tw *tar.Writer, e TarEntry) error {

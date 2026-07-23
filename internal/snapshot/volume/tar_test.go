@@ -249,6 +249,110 @@ func TestWriteTar_CancelledContext(t *testing.T) {
 	assert.NoError(t, stagingErr, "staging file must survive a cancelled assembly for resume")
 }
 
+func TestWriteTar_CancelledDuringOnlyLargeEntryPreservesRetry(t *testing.T) {
+	const (
+		cancelAfter = int64(96 << 10)
+		copyBound   = int64(128 << 10)
+	)
+
+	content := bytes.Repeat([]byte("sole-final-entry-"), 256<<10)
+	stagingDir := t.TempDir()
+	outputDir := t.TempDir()
+	relPath := "large.bin"
+	stagedPath := filepath.Join(stagingDir, relPath)
+	writeStagingFile(t, stagingDir, relPath, content)
+
+	entries := sortedTarEntries([]volume.TarEntry{{
+		RelPath:      relPath,
+		Type:         "file",
+		Codec:        "none",
+		OriginalPath: relPath,
+		RawSize:      int64(len(content)),
+	}})
+	outPath := filepath.Join(outputDir, "data.tar")
+	ctx := &cancelWhenTempGrowsContext{
+		Context:   context.Background(),
+		tempPath:  outPath + ".tmp",
+		threshold: cancelAfter,
+	}
+
+	err := volume.WriteTar(ctx, outPath, stagingDir, entries)
+	require.ErrorIs(t, err, context.Canceled)
+	require.GreaterOrEqual(t, ctx.triggerSize, cancelAfter)
+	require.LessOrEqual(t, ctx.triggerSize, cancelAfter+copyBound,
+		"cancellation must stop within a fixed number of copy buffers")
+
+	_, err = os.Stat(outPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(outPath + ".tmp")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	movedPath := stagedPath + ".moved"
+	require.NoError(t, os.Rename(stagedPath, movedPath), "cancelled copy must close its staging descriptor")
+	require.NoError(t, os.Rename(movedPath, stagedPath))
+
+	require.NoError(t, volume.WriteTar(context.Background(), outPath, stagingDir, entries))
+	retried, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+
+	uninterruptedPath := filepath.Join(t.TempDir(), "data.tar")
+	require.NoError(t, volume.WriteTar(context.Background(), uninterruptedPath, stagingDir, entries))
+	uninterrupted, err := os.ReadFile(uninterruptedPath)
+	require.NoError(t, err)
+	require.Equal(t, uninterrupted, retried, "retry must produce byte-identical deterministic tar output")
+}
+
+func TestWriteTar_CancelledAfterFinalEntryBeforeCommit(t *testing.T) {
+	stagingDir := t.TempDir()
+	outPath := filepath.Join(t.TempDir(), "data.tar")
+	writeStagingFile(t, stagingDir, "final.bin", bytes.Repeat([]byte("F"), 128<<10))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	entries := func(yield func(volume.TarEntry) error) error {
+		err := yield(volume.TarEntry{
+			RelPath:      "final.bin",
+			Type:         "file",
+			Codec:        "none",
+			OriginalPath: "final.bin",
+			RawSize:      128 << 10,
+		})
+		cancel()
+
+		return err
+	}
+
+	err := volume.WriteTar(ctx, outPath, stagingDir, entries)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = os.Stat(outPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(outPath + ".tmp")
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+type cancelWhenTempGrowsContext struct {
+	context.Context
+	tempPath    string
+	threshold   int64
+	triggerSize int64
+	cancelled   bool
+}
+
+func (c *cancelWhenTempGrowsContext) Err() error {
+	if c.cancelled {
+		return context.Canceled
+	}
+
+	info, err := os.Stat(c.tempPath)
+	if err == nil && info.Size() >= c.threshold {
+		c.cancelled = true
+		c.triggerSize = info.Size()
+
+		return context.Canceled
+	}
+
+	return nil
+}
+
 func TestWriteTar_Atomic(t *testing.T) {
 	t.Parallel()
 
