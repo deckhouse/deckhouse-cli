@@ -79,6 +79,9 @@ func (d *recordingDoer) HTTPDo(req *http.Request) (*http.Response, error) {
 		}, nil
 	}
 
+	offset, _ := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+	respHeader.Set("X-Next-Offset", strconv.FormatInt(offset+req.ContentLength, 10))
+
 	return &http.Response{
 		StatusCode: http.StatusCreated,
 		Status:     "201 Created",
@@ -134,8 +137,11 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 	}
 
 	doer := &recordingDoer{resumeOffset: 5}
+	progressCalls := make([]int, 0, 2)
 
-	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), nil, nil); err != nil {
+	if err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", path, "", int64(len(payload)), discardLogger(), func(n int) {
+		progressCalls = append(progressCalls, n)
+	}, nil); err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
 
@@ -155,6 +161,10 @@ func TestPutBlock_ResumesFromServerOffset(t *testing.T) {
 	// The PUT must resume from the server-reported offset, not restart at 0.
 	if got := doer.headers[putIdx].Get("X-Offset"); got != "5" {
 		t.Errorf("X-Offset = %q, want 5 (resume from server offset)", got)
+	}
+
+	if !slices.Equal(progressCalls, []int{5, 8}) {
+		t.Errorf("progress calls = %v, want [5 8] (HEAD prefix exactly once, then PUT suffix)", progressCalls)
 	}
 }
 
@@ -463,9 +473,9 @@ func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
 					"(a regression here means either duplicated already-durable bytes or dropped bytes)", len(got), len(payload))
 			}
 
-			if want := totalSize - partialN; reported != want {
-				t.Errorf("attempt 2 reported %d progress bytes, want %d (only the bytes it actually sent, not "+
-					"re-crediting the pre-crash prefix attempt 1 already reported nothing for)", reported, want)
+			if reported != totalSize {
+				t.Errorf("attempt 2 reported %d progress bytes, want %d (validated HEAD prefix plus newly sent suffix)",
+					reported, totalSize)
 			}
 
 			// Attempt 2 is a partial resume with real remaining bytes to PUT, so it must
@@ -566,6 +576,392 @@ func TestPutBlock_FreshUploadRoundTrip(t *testing.T) {
 				t.Error("activate call count = 0, want >= 1 (a fresh upload with real transfer must activate)")
 			}
 		})
+	}
+}
+
+func TestPutBlock_RawRespectsProducerIngressBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	const producerIngressBodyLimit = int64(64 * 1024 * 1024)
+
+	totalSize := producerIngressBodyLimit + 1
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+
+	file, err := os.Create(dataFile)
+	if err != nil {
+		t.Fatalf("create sparse raw block fixture: %v", err)
+	}
+
+	if err := file.Truncate(totalSize); err != nil {
+		_ = file.Close()
+
+		t.Fatalf("truncate sparse raw block fixture: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("close sparse raw block fixture: %v", err)
+	}
+
+	var (
+		offset   int64
+		putCount int
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodHead:
+			w.Header().Set("X-Next-Offset", strconv.FormatInt(offset, 10))
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			body := http.MaxBytesReader(w, r.Body, producerIngressBodyLimit)
+
+			written, readErr := io.Copy(io.Discard, body)
+			if readErr != nil {
+				http.Error(w, "request exceeds producer ingress body limit", http.StatusRequestEntityTooLarge)
+
+				return
+			}
+
+			if written != r.ContentLength {
+				http.Error(w, "content length mismatch", http.StatusBadRequest)
+
+				return
+			}
+
+			offset += written
+			putCount++
+
+			w.Header().Set("X-Next-Offset", strconv.FormatInt(offset, 10))
+			if offset == totalSize {
+				w.WriteHeader(http.StatusCreated)
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, "", totalSize, discardLogger(), nil, nil); err != nil {
+		t.Fatalf("putBlock: %v", err)
+	}
+
+	if putCount != 3 {
+		t.Errorf("PUT count = %d, want 3 bounded requests for a 64 MiB + 1 byte payload", putCount)
+	}
+}
+
+func TestPutBlock_RawAndZstdUseExactBoundedChunks(t *testing.T) {
+	t.Parallel()
+
+	payload := randomPayload(t, blockPutPayloadLimit+17)
+
+	tests := []struct {
+		name  string
+		codec string
+		ext   string
+	}{
+		{name: "raw", codec: "none"},
+		{name: "zstd", codec: "zstd", ext: ".zst"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataFile := filepath.Join(t.TempDir(), "data.bin"+tc.ext)
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			var (
+				received      []byte
+				requestBodies [][]byte
+				offsets       []int64
+				contentLens   []int64
+			)
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodHead:
+					w.Header().Set("X-Next-Offset", "0")
+					w.WriteHeader(http.StatusOK)
+				case http.MethodPut:
+					offset, parseErr := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+					if parseErr != nil {
+						http.Error(w, parseErr.Error(), http.StatusBadRequest)
+
+						return
+					}
+
+					body, readErr := io.ReadAll(r.Body)
+					if readErr != nil {
+						http.Error(w, readErr.Error(), http.StatusInternalServerError)
+
+						return
+					}
+
+					offsets = append(offsets, offset)
+					contentLens = append(contentLens, r.ContentLength)
+					requestBodies = append(requestBodies, body)
+					received = append(received, body...)
+
+					next := offset + int64(len(body))
+					w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+					if next == int64(len(payload)) {
+						w.WriteHeader(http.StatusCreated)
+					} else {
+						w.WriteHeader(http.StatusNoContent)
+					}
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, int64(len(payload)), discardLogger(), nil, nil); err != nil {
+				t.Fatalf("putBlock: %v", err)
+			}
+
+			wantOffsets := []int64{0, blockPutPayloadLimit}
+			if !slices.Equal(offsets, wantOffsets) {
+				t.Errorf("X-Offset values = %v, want %v", offsets, wantOffsets)
+			}
+
+			wantLengths := []int64{blockPutPayloadLimit, int64(len(payload)) - blockPutPayloadLimit}
+			if !slices.Equal(contentLens, wantLengths) {
+				t.Errorf("Content-Length values = %v, want %v", contentLens, wantLengths)
+			}
+
+			for i, body := range requestBodies {
+				if int64(len(body)) > blockPutPayloadLimit {
+					t.Errorf("PUT %d body length = %d, want <= client cap %d", i, len(body), blockPutPayloadLimit)
+				}
+
+				start := wantOffsets[i]
+				end := start + wantLengths[i]
+				if !bytes.Equal(body, payload[start:end]) {
+					t.Errorf("PUT %d body is not the exact raw suffix [%d,%d)", i, start, end)
+				}
+			}
+
+			if !bytes.Equal(received, payload) {
+				t.Errorf("concatenated PUT bodies differ from the original %d-byte payload", len(payload))
+			}
+		})
+	}
+}
+
+func TestPutBlock_RawAndZstdRepositionAfterConflict(t *testing.T) {
+	t.Parallel()
+
+	payload := randomPayload(t, 1024*1024+31)
+	forwardOffset := int64(len(payload)/3 + 7)
+
+	tests := []struct {
+		name             string
+		codec            string
+		ext              string
+		headOffset       int64
+		repositionOffset int64
+	}{
+		{name: "raw forward", codec: "none", repositionOffset: forwardOffset},
+		{name: "zstd forward", codec: "zstd", ext: ".zst", repositionOffset: forwardOffset},
+		{name: "zstd backward to zero", codec: "zstd", ext: ".zst", headOffset: 19},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataFile := filepath.Join(t.TempDir(), "data.bin"+tc.ext)
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			received := append([]byte(nil), payload[:tc.repositionOffset]...)
+			offsets := make([]int64, 0, 2)
+			putCount := 0
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodHead:
+					// A stale HEAD forces the real producer's 409/X-Expected-Offset recovery path.
+					w.Header().Set("X-Next-Offset", strconv.FormatInt(tc.headOffset, 10))
+					w.WriteHeader(http.StatusOK)
+				case http.MethodPut:
+					offset, parseErr := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+					if parseErr != nil {
+						http.Error(w, parseErr.Error(), http.StatusBadRequest)
+
+						return
+					}
+
+					offsets = append(offsets, offset)
+					putCount++
+
+					body, readErr := io.ReadAll(r.Body)
+					if readErr != nil {
+						http.Error(w, readErr.Error(), http.StatusInternalServerError)
+
+						return
+					}
+
+					if putCount == 1 {
+						// Consuming the whole rejected body proves compressed retry must rebuild
+						// its decoder instead of reusing the now-exhausted stream.
+						w.Header().Set("X-Expected-Offset", strconv.FormatInt(tc.repositionOffset, 10))
+						http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+
+						return
+					}
+
+					received = append(received, body...)
+					next := offset + int64(len(body))
+					w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+					w.WriteHeader(http.StatusCreated)
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			reported := 0
+
+			err := putBlock(
+				context.Background(),
+				plainHTTPDoer{},
+				srv.URL,
+				dataFile,
+				tc.ext,
+				int64(len(payload)),
+				discardLogger(),
+				func(n int) { reported += n },
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("putBlock: %v", err)
+			}
+
+			if !slices.Equal(offsets, []int64{tc.headOffset, tc.repositionOffset}) {
+				t.Errorf("X-Offset values = %v, want [%d %d]", offsets, tc.headOffset, tc.repositionOffset)
+			}
+
+			if !bytes.Equal(received, payload) {
+				t.Errorf("repositioned upload differs from the original %d-byte payload", len(payload))
+			}
+
+			if reported != len(payload) {
+				t.Errorf("reported progress = %d, want %d durable bytes", reported, len(payload))
+			}
+		})
+	}
+}
+
+func TestPutBlock_ConflictRepositionHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("cancel-reposition-"), 256)
+	dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	putCount := 0
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+
+		if req.Method == http.MethodHead {
+			header.Set("X-Next-Offset", "0")
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     header,
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+			}, nil
+		}
+
+		putCount++
+		cancel()
+		header.Set("X-Expected-Offset", "7")
+
+		return &http.Response{
+			StatusCode: http.StatusConflict,
+			Status:     "409 Conflict",
+			Header:     header,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+		}, nil
+	})
+
+	reported := 0
+	err := putBlock(ctx, doer, "https://importer.local/block", dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) {
+		reported += n
+	}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want errors.Is(context.Canceled)", err)
+	}
+
+	if putCount != 1 {
+		t.Errorf("PUT count = %d, want 1 before cancelled decoder rebuild", putCount)
+	}
+
+	if reported != 7 {
+		t.Errorf("reported progress = %d, want validated durable conflict offset 7", reported)
+	}
+}
+
+func TestPutBlock_RejectsConflictOffsetLoopWithoutExtraProgress(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789")
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+		t.Fatalf("write raw block fixture: %v", err)
+	}
+
+	putCount := 0
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+
+		if req.Method == http.MethodHead {
+			header.Set("X-Next-Offset", "0")
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     header,
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+			}, nil
+		}
+
+		putCount++
+		if putCount == 1 {
+			header.Set("X-Expected-Offset", "5")
+		} else {
+			header.Set("X-Expected-Offset", "0")
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusConflict,
+			Status:     "409 Conflict",
+			Header:     header,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+		}, nil
+	})
+
+	reported := 0
+	err := putBlock(context.Background(), doer, "https://importer.local/block", dataFile, "", int64(len(payload)), discardLogger(), func(n int) {
+		reported += n
+	}, nil)
+	if err == nil {
+		t.Fatal("expected offset-loop error, got nil")
+	}
+
+	if putCount != 2 {
+		t.Errorf("PUT count = %d, want 2 before detecting 0 -> 5 -> 0 loop", putCount)
+	}
+
+	if reported != 5 {
+		t.Errorf("reported progress = %d, want only first validated durable offset 5", reported)
 	}
 }
 
@@ -1208,7 +1604,7 @@ func TestHeadBlockOffset_ValidatesServerOffset(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
-		{name: "success: absent header starts at zero", want: 0},
+		{name: "error: absent header", wantErr: true},
 		{name: "success: zero", header: "0", want: 0},
 		{name: "success: total", header: "10", want: totalSize},
 		{name: "error: malformed", header: "wat", wantErr: true},
@@ -1258,8 +1654,9 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 	t.Parallel()
 
 	const (
-		offset    = int64(4)
-		totalSize = int64(10)
+		offset     = int64(4)
+		requestEnd = int64(7)
+		totalSize  = int64(10)
 	)
 
 	tests := []struct {
@@ -1268,9 +1665,9 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
-		{name: "success: absent header means total", want: totalSize},
+		{name: "error: absent header", wantErr: true},
 		{name: "success: advancing partial", header: "7", want: 7},
-		{name: "success: advancing to total", header: "10", want: totalSize},
+		{name: "error: mismatched request end", header: "10", wantErr: true},
 		{name: "error: malformed", header: "wat", wantErr: true},
 		{name: "error: negative", header: "-1", wantErr: true},
 		{name: "error: overshoot", header: "11", wantErr: true},
@@ -1301,7 +1698,7 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 				t.Fatalf("build request: %v", err)
 			}
 
-			got, err := doBlockChunk(doer, req, offset, totalSize)
+			got, reposition, err := doBlockChunk(doer, req, offset, requestEnd, totalSize)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -1317,6 +1714,81 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("next offset = %d, want %d", got, tc.want)
 			}
+
+			if reposition {
+				t.Error("successful PUT unexpectedly requested reposition")
+			}
+		})
+	}
+}
+
+func TestDoBlockChunk_ValidatesConflictOffset(t *testing.T) {
+	t.Parallel()
+
+	const (
+		offset     = int64(4)
+		requestEnd = int64(7)
+		totalSize  = int64(10)
+	)
+
+	tests := []struct {
+		name    string
+		header  string
+		want    int64
+		wantErr bool
+	}{
+		{name: "success: reposition forward", header: "8", want: 8},
+		{name: "success: reposition backward", header: "2", want: 2},
+		{name: "error: absent", wantErr: true},
+		{name: "error: malformed", header: "wat", wantErr: true},
+		{name: "error: negative", header: "-1", wantErr: true},
+		{name: "error: overshoot", header: "11", wantErr: true},
+		{name: "error: non-progressing", header: "4", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				if tc.header != "" {
+					header.Set("X-Expected-Offset", tc.header)
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusConflict,
+					Status:     "409 Conflict",
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.local/block", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			got, reposition, err := doBlockChunk(doer, req, offset, requestEnd, totalSize)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("doBlockChunk: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("reposition offset = %d, want %d", got, tc.want)
+			}
+
+			if !reposition {
+				t.Error("409 response did not request reposition")
+			}
 		})
 	}
 }
@@ -1327,17 +1799,20 @@ func TestSendVolumeData_BlockOffsetsGateProgressAndFinalize(t *testing.T) {
 	const totalSize = int64(10)
 
 	tests := []struct {
-		name      string
-		head      string
-		put       string
-		wantError bool
-		wantPUT   bool
-		wantPOST  bool
+		name         string
+		head         string
+		put          string
+		wantError    bool
+		wantPUT      bool
+		wantPOST     bool
+		wantProgress int
 	}{
+		{name: "error: missing HEAD", wantError: true},
 		{name: "error: malformed HEAD", head: "wat", wantError: true},
 		{name: "error: negative HEAD", head: "-1", wantError: true},
 		{name: "error: overshoot HEAD", head: "11", wantError: true},
-		{name: "success: HEAD equal total finalizes without PUT", head: "10", wantPOST: true},
+		{name: "success: HEAD equal total finalizes without PUT", head: "10", wantPOST: true, wantProgress: 10},
+		{name: "error: missing PUT", head: "0", wantError: true, wantPUT: true},
 		{name: "error: malformed PUT", head: "0", put: "wat", wantError: true, wantPUT: true},
 		{name: "error: negative PUT", head: "0", put: "-1", wantError: true, wantPUT: true},
 		{name: "error: overshoot PUT", head: "0", put: "11", wantError: true, wantPUT: true},
@@ -1403,8 +1878,8 @@ func TestSendVolumeData_BlockOffsetsGateProgressAndFinalize(t *testing.T) {
 				t.Fatalf("sendVolumeData: %v", err)
 			}
 
-			if reported != 0 {
-				t.Errorf("reported progress = %d, want 0 before validating server offset", reported)
+			if reported != tc.wantProgress {
+				t.Errorf("reported progress = %d, want %d", reported, tc.wantProgress)
 			}
 
 			gotPUT := slices.Contains(methods, http.MethodPut)
@@ -1435,8 +1910,9 @@ func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "data.bin.zst")
 
 	activated := 0
+	reported := 0
 
-	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), nil, func() { activated++ }); err != nil {
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), func(n int) { reported += n }, func() { activated++ }); err != nil {
 		t.Fatalf("putBlock with offset==totalSize must skip decoding entirely, got error: %v", err)
 	}
 
@@ -1444,6 +1920,10 @@ func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
 	// activate the caller's progress stream (backlog #21 Bug A).
 	if activated != 0 {
 		t.Errorf("activate call count = %d, want 0 (a fully server-side-skipped upload must never activate)", activated)
+	}
+
+	if reported != 100 {
+		t.Errorf("reported progress = %d, want 100 durable bytes from HEAD", reported)
 	}
 }
 
@@ -1699,15 +2179,31 @@ func newMemoryBoundedBlockServer(t *testing.T) *httptest.Server {
 			w.Header().Set("X-Next-Offset", "0")
 			w.WriteHeader(http.StatusOK)
 		case http.MethodPut:
-			total := r.Header.Get("X-Content-Length")
+			offset, err := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 
 			if _, err := io.Copy(io.Discard, r.Body); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
-			w.Header().Set("X-Next-Offset", total)
-			w.WriteHeader(http.StatusCreated)
+			next := offset + r.ContentLength
+			w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+
+			total, err := strconv.ParseInt(r.Header.Get("X-Content-Length"), 10, 64)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			if next == total {
+				w.WriteHeader(http.StatusCreated)
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
 		case http.MethodPost:
 			w.WriteHeader(http.StatusOK)
 		default:
