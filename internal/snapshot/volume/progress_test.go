@@ -798,6 +798,61 @@ func TestScanFSResumeProgress_CancellationIsPromptAndCompatible(t *testing.T) {
 	})
 }
 
+func TestScanFSStagingSizes_CancelsWithinBoundedSidecarBytes(t *testing.T) {
+	const (
+		sidecarBytes = 16 << 20
+		maxAllocated = 4 << 20
+	)
+
+	tests := []struct {
+		name   string
+		legacy bool
+		prefix string
+		fill   byte
+	}{
+		{name: "CurrentWhitespace", prefix: "{", fill: ' '},
+		{name: "CurrentFragmentedString", prefix: `{"files":{"`, fill: 'a'},
+		{name: "LegacyWhitespace", legacy: true, prefix: "{", fill: ' '},
+		{name: "LegacyFragmentedString", legacy: true, prefix: `{"files":{"`, fill: 'a'},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stagingDir := t.TempDir()
+			sidecarDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+			if tt.legacy {
+				sidecarDir = stagingDir
+			}
+
+			require.NoError(t, os.MkdirAll(sidecarDir, 0o755))
+
+			sidecar, err := os.Create(filepath.Join(sidecarDir, volume.FSSizesSidecarName))
+			require.NoError(t, err)
+			_, err = io.WriteString(sidecar, tt.prefix)
+			require.NoError(t, err)
+			_, err = io.CopyN(sidecar, repeatedByteReader(tt.fill), sidecarBytes)
+			require.NoError(t, err)
+			require.NoError(t, sidecar.Close())
+
+			runtime.GC()
+
+			var baseline runtime.MemStats
+			runtime.ReadMemStats(&baseline)
+
+			ctx := &cancelAfterChecksContext{Context: context.Background(), cancelAt: 5}
+			_, _, _, err = volume.ScanFSStagingSizes(ctx, stagingDir, "")
+			require.ErrorIs(t, err, context.Canceled)
+			require.LessOrEqual(t, ctx.checks, ctx.cancelAt+2)
+
+			var current runtime.MemStats
+			runtime.ReadMemStats(&current)
+
+			require.LessOrEqual(t, current.TotalAlloc-baseline.TotalAlloc, uint64(maxAllocated))
+			require.NoError(t, os.RemoveAll(stagingDir), "cancellation must close the sidecar descriptor")
+		})
+	}
+}
+
 type cancelAfterChecksContext struct {
 	context.Context
 	cancelAt int

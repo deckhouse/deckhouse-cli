@@ -2174,7 +2174,7 @@ func scanFSSizesFile(ctx context.Context, path, stagingDir, ext string) (int64, 
 
 	defer func() { _ = f.Close() }()
 
-	reader := bufio.NewReaderSize(f, 4<<10)
+	reader := bufio.NewReaderSize(&fsSizesContextReader{ctx: ctx, reader: f}, 4<<10)
 	if err := expectFSSizesJSONByte(reader, '{'); err != nil {
 		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
 	}
@@ -2317,6 +2317,19 @@ func scanFSSizesFile(ctx context.Context, path, stagingDir, ext string) (int64, 
 	}
 
 	return total, staged, nil
+}
+
+type fsSizesContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *fsSizesContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return r.reader.Read(p)
 }
 
 // Sidecar limits are per encoded key/value, not per document, so inode count remains
