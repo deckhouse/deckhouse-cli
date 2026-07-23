@@ -26,7 +26,6 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -350,7 +349,7 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		}
 
 	case volumeModeBlock:
-		ext := filepath.Ext(leaf.DataFile)
+		ext := leaf.Ext
 
 		totalSize, err := blockTotalSize(leaf.DataFile, leaf.Size, ext)
 		if err != nil {
@@ -493,30 +492,53 @@ type httpDoer interface {
 	HTTPDo(req *http.Request) (*http.Response, error)
 }
 
+// ErrRawBlockSizeMismatch is returned by blockTotalSize when a raw (codec
+// none) data.bin file's on-disk size does not match the size captured in the
+// archive's VolumeInfo. Unlike a compressed payload, a raw payload has no
+// separate decompressed size to fall back on — stat size and captured size
+// are the SAME quantity — so any disagreement means a truncated, corrupted, or
+// mismatched archive. Checking this before any HEAD/PUT keeps the failure
+// deterministic and sends zero HTTP requests, instead of streaming a wrong
+// byte count to the importer and only discovering the mismatch mid-transfer.
+var ErrRawBlockSizeMismatch = errors.New("raw block size mismatch")
+
 // blockTotalSize returns the exact decompressed byte count of a node's block-volume data
-// file without decompressing it. A raw file (ext=="") carries its exact size on disk
-// (os.Stat); a compressed file's decompressed size is definitionally the captured
-// volume's real allocated size (size, a resource.Quantity string like "10Gi", sourced
-// from VolumeSnapshotContent.status.restoreSize — see archive.VolumeInfo.Size) because a
-// block-volume capture always reads exactly the device's provisioned byte size. Parsing
+// file without decompressing it. size (a resource.Quantity string like "10Gi", sourced from
+// VolumeSnapshotContent.status.restoreSize — see archive.VolumeInfo.Size) is parsed for
+// EVERY codec, including raw: a block-volume capture always reads exactly the device's
+// provisioned byte size, so the captured size is the total regardless of codec. Parsing
 // size instead of decompressing avoids a full decompression pass purely to learn a byte
 // count, which is the whole point of the streaming upload path.
+//
+// For a raw file (ext==""), the parsed size is additionally cross-checked against the
+// file's actual on-disk size (os.Stat) — see ErrRawBlockSizeMismatch — because a raw
+// payload's stat size and its captured size are definitionally the same number, so any
+// difference is a corrupt/mismatched archive rather than a codec-driven size difference.
+// A compressed file's on-disk (compressed) size is not comparable to the captured
+// (decompressed) size at all, so no such check is possible or meaningful for ext != "".
 func blockTotalSize(dataFile, size, ext string) (int64, error) {
-	if ext == "" {
-		info, err := os.Stat(dataFile)
-		if err != nil {
-			return 0, fmt.Errorf("stat volume data %s: %w", dataFile, err)
-		}
-
-		return info.Size(), nil
-	}
-
 	q, err := resource.ParseQuantity(size)
 	if err != nil {
 		return 0, fmt.Errorf("parsing captured volume size %q for %s: %w", size, dataFile, err)
 	}
 
-	return q.Value(), nil
+	captured := q.Value()
+
+	if ext != "" {
+		return captured, nil
+	}
+
+	info, err := os.Stat(dataFile)
+	if err != nil {
+		return 0, fmt.Errorf("stat volume data %s: %w", dataFile, err)
+	}
+
+	if info.Size() != captured {
+		return 0, fmt.Errorf("%s: on-disk size %d does not match captured volume size %d (%q): %w",
+			dataFile, info.Size(), captured, size, ErrRawBlockSizeMismatch)
+	}
+
+	return captured, nil
 }
 
 // putBlock streams the block-volume payload at dataFile to the importer's block

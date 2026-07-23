@@ -17,6 +17,7 @@ limitations under the License.
 package snapimport
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,6 +146,121 @@ func TestBuildPlan_PostOrder(t *testing.T) {
 
 	if len(plan[1].Manifests) != 1 || plan[1].Manifests[0].GetKind() != "ConfigMap" {
 		t.Errorf("root manifests not read correctly: %+v", plan[1].Manifests)
+	}
+}
+
+// TestBuildPlan_BlockExtCarriedExplicitly verifies that PlannedNode.Ext is
+// resolved by archive.ClassifyBlockPayload for every recognized codec name,
+// and in particular that the raw "data.bin" case resolves Ext to "" — NOT
+// filepath.Ext("data.bin")'s ".bin" (the bug this task fixes: the block
+// upload path previously derived ext via filepath.Ext(leaf.DataFile) and
+// therefore always mis-detected the raw/none codec).
+func TestBuildPlan_BlockExtCarriedExplicitly(t *testing.T) {
+	tests := []struct {
+		fileName string
+		wantExt  string
+	}{
+		{"data.bin", ""},
+		{"data.bin.zst", ".zst"},
+		{"data.bin.gz", ".gz"},
+		{"data.bin.lz4", ".lz4"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.fileName, func(t *testing.T) {
+			root := t.TempDir()
+
+			writeArchiveNode(t, root, archiveNode{
+				apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+				kind:       "Snapshot",
+				name:       "root",
+			})
+
+			if err := os.WriteFile(filepath.Join(root, tc.fileName), []byte("rawbytes"), 0o600); err != nil {
+				t.Fatalf("write %s: %v", tc.fileName, err)
+			}
+
+			plan, err := BuildPlan(root)
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			if !plan[0].HasBlockData() {
+				t.Fatal("expected HasBlockData() == true")
+			}
+
+			if plan[0].Ext != tc.wantExt {
+				t.Errorf("Ext = %q, want %q", plan[0].Ext, tc.wantExt)
+			}
+
+			wantPath := filepath.Join(root, tc.fileName)
+			if plan[0].DataFile != wantPath {
+				t.Errorf("DataFile = %q, want %q", plan[0].DataFile, wantPath)
+			}
+		})
+	}
+}
+
+// TestBuildPlan_RejectsInvalidBlockPayload verifies that BuildPlan fails
+// deterministically — instead of silently picking one file via a
+// first-glob-match — when a node directory's block payload shape is
+// unknown/chained, ambiguous (multiple files), or coexists with data.tar.
+// This is the same classifier ComputeNodeChecksum uses (see
+// archive.ClassifyBlockPayload), so checksum and upload always agree.
+func TestBuildPlan_RejectsInvalidBlockPayload(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+	}{
+		{
+			name:  "unknown codec suffix",
+			files: map[string]string{"data.bin.foo": "x"},
+		},
+		{
+			name:  "chained suffix",
+			files: map[string]string{"data.bin.zst.bak": "x"},
+		},
+		{
+			name: "multiple block files",
+			files: map[string]string{
+				"data.bin.zst": "x",
+				"data.bin.gz":  "y",
+			},
+		},
+		{
+			name: "block payload coexists with data.tar",
+			files: map[string]string{
+				"data.bin.zst":    "x",
+				archive.FsTarName: "y",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+
+			writeArchiveNode(t, root, archiveNode{
+				apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+				kind:       "Snapshot",
+				name:       "root",
+			})
+
+			for name, content := range tc.files {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+
+			_, err := BuildPlan(root)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if !errors.Is(err, archive.ErrInvalidBlockPayload) {
+				t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+			}
+		})
 	}
 }
 

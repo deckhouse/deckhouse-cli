@@ -326,6 +326,45 @@ func TestComputeNodeChecksum_ChunkMetaExcluded(t *testing.T) {
 	})
 }
 
+// TestComputeNodeChecksum_RejectsInvalidBlockPayload verifies that
+// ComputeNodeChecksum (via ClassifyBlockPayload, the classifier shared with
+// snapimport.BuildPlan) fails deterministically instead of silently picking
+// one file when the flat node directory carries an ambiguous or invalid
+// data.bin* shape.
+func TestComputeNodeChecksum_RejectsInvalidBlockPayload(t *testing.T) {
+	t.Run("multiple block files", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, DataBlockName(".zst")), "a")
+		writeFile(t, filepath.Join(nodeDir, DataBlockName(".gz")), "b")
+
+		_, err := ComputeNodeChecksum(nodeDir)
+		if !errors.Is(err, ErrInvalidBlockPayload) {
+			t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+		}
+	})
+
+	t.Run("unknown suffix", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, DataBlockBase+".foo"), "a")
+
+		_, err := ComputeNodeChecksum(nodeDir)
+		if !errors.Is(err, ErrInvalidBlockPayload) {
+			t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+		}
+	})
+
+	t.Run("block payload coexists with data.tar", func(t *testing.T) {
+		nodeDir := makeNodeDir(t)
+		writeFile(t, filepath.Join(nodeDir, DataBlockName(".zst")), "a")
+		writeFile(t, filepath.Join(nodeDir, FsTarName), "b")
+
+		_, err := ComputeNodeChecksum(nodeDir)
+		if !errors.Is(err, ErrInvalidBlockPayload) {
+			t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+		}
+	})
+}
+
 // TestShortChecksum verifies that ShortChecksum returns the first 8 hex chars.
 func TestShortChecksum(t *testing.T) {
 	cases := []struct {

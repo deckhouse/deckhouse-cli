@@ -15,14 +15,17 @@ limitations under the License.
 */
 
 // Package archive provides deterministic naming helpers for the snapshot output tree.
-// All functions are pure and free of I/O, except FindBlockData which performs a
-// directory glob to locate an existing block-volume file.
+// All functions are pure and free of I/O, except FindBlockData and
+// ClassifyBlockPayload, which read a node directory's entries to locate an
+// existing block-volume file.
 package archive
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -158,6 +161,127 @@ func FindBlockData(nodeDir string) (string, bool, error) {
 	}
 
 	return "", false, nil
+}
+
+// ErrInvalidBlockPayload is returned by ClassifyBlockPayload when a node
+// directory's data.bin*-prefixed contents do not resolve to exactly one
+// recognized block payload: an unrecognized or chained suffix, more than one
+// block file, or a block file coexisting with the filesystem volume
+// (FsTarName).
+var ErrInvalidBlockPayload = errors.New("invalid block payload")
+
+// blockPayloadExts is the fixed allow-list ClassifyBlockPayload validates
+// entries against, keyed by exact filename. It is the single source of truth
+// for "what counts as a block payload" — no other data.bin*-prefixed name is
+// ever treated as one, however plausible it looks.
+var blockPayloadExts = map[string]string{
+	DataBlockBase:         "",
+	DataBlockName(".zst"): ".zst",
+	DataBlockName(".gz"):  ".gz",
+	DataBlockName(".lz4"): ".lz4",
+}
+
+// BlockPayload identifies the single block-volume payload resolved by
+// ClassifyBlockPayload for one node directory.
+type BlockPayload struct {
+	// Path is the absolute path to the payload file.
+	Path string
+	// Ext is the payload's codec extension: "" (raw/none codec), ".zst",
+	// ".gz", or ".lz4" — matching compress.Codec.Ext. Callers MUST use this
+	// value and never re-derive it via filepath.Ext(Path): filepath.Ext on
+	// the raw name "data.bin" returns ".bin" (the base name's own suffix,
+	// since "data.bin" has no separate codec suffix of its own), not "" —
+	// exactly the bug this field exists to prevent downstream.
+	Ext string
+}
+
+// ClassifyBlockPayload resolves nodeDir's block-volume payload strictly
+// against the fixed data.bin[.<ext>] allow-list (blockPayloadExts), replacing
+// the earlier first-glob-match behavior of FindBlockData. It is the single
+// classifier ComputeNodeChecksum and snapimport.BuildPlan both call, so a
+// node's checksum and its upload always agree on what "the block payload" is.
+//
+// Accepted names (exactly): "data.bin" (ext ""), "data.bin.zst", "data.bin.gz",
+// "data.bin.lz4". The staging directory (BlockChunksDirName, "data.bin.d") is
+// the only directory entry ignored. Every other entry whose name starts with
+// DataBlockBase — an unrecognized codec suffix ("data.bin.foo"), a chained
+// suffix ("data.bin.zst.bak"), or any directory other than the staging dir —
+// is rejected as ErrInvalidBlockPayload rather than silently skipped:
+// silently ignoring it would mean the checksum or the upload picks a
+// DIFFERENT file than a human inspecting the directory would expect, or
+// drops volume bytes outright. More than one recognized block file, or a
+// recognized block file coexisting with the filesystem volume (FsTarName,
+// "data.tar"), is rejected for the same reason — a node owns AT MOST ONE
+// volume payload.
+//
+// Returns (BlockPayload{}, false, nil) when nodeDir carries no block payload
+// at all (not an error: the normal shape for a filesystem-volume or purely
+// structural node, and for a nodeDir that does not exist yet).
+func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
+	entries, err := os.ReadDir(nodeDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return BlockPayload{}, false, nil
+		}
+
+		return BlockPayload{}, false, fmt.Errorf("read %s: %w", nodeDir, err)
+	}
+
+	var found []BlockPayload
+
+	hasTar := false
+
+	for _, e := range entries {
+		name := e.Name()
+
+		if name == FsTarName && !e.IsDir() {
+			hasTar = true
+			continue
+		}
+
+		if !strings.HasPrefix(name, DataBlockBase) {
+			continue
+		}
+
+		if name == BlockChunksDirName {
+			if !e.IsDir() {
+				return BlockPayload{}, false, fmt.Errorf("%s: %q must be the staging directory but is a file: %w",
+					nodeDir, name, ErrInvalidBlockPayload)
+			}
+
+			continue
+		}
+
+		ext, recognized := blockPayloadExts[name]
+		if !recognized || e.IsDir() {
+			return BlockPayload{}, false, fmt.Errorf("%s: unrecognized block payload entry %q: %w",
+				nodeDir, name, ErrInvalidBlockPayload)
+		}
+
+		found = append(found, BlockPayload{Path: filepath.Join(nodeDir, name), Ext: ext})
+	}
+
+	if len(found) == 0 {
+		return BlockPayload{}, false, nil
+	}
+
+	if len(found) > 1 {
+		names := make([]string, 0, len(found))
+		for _, p := range found {
+			names = append(names, filepath.Base(p.Path))
+		}
+
+		sort.Strings(names)
+
+		return BlockPayload{}, false, fmt.Errorf("%s: multiple block payload files %v: %w", nodeDir, names, ErrInvalidBlockPayload)
+	}
+
+	if hasTar {
+		return BlockPayload{}, false, fmt.Errorf("%s: block payload %s coexists with %s: %w",
+			nodeDir, filepath.Base(found[0].Path), FsTarName, ErrInvalidBlockPayload)
+	}
+
+	return found[0], true, nil
 }
 
 // NodeDirName returns the directory name for a child snapshot node.
