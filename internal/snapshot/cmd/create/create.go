@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -125,6 +126,15 @@ to block until it reports Ready, after which it can be listed, downloaded, and i
 
 // Run resolves flags, builds the dynamic client, and creates the Snapshot.
 func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
+	return run(log, cmd, args, utilk8s.NewDynamicClient)
+}
+
+func run(
+	log *slog.Logger,
+	cmd *cobra.Command,
+	args []string,
+	newDynamicClient func(*cobra.Command) (dynamic.Interface, error),
+) error {
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -135,7 +145,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	dyn, err := utilk8s.NewDynamicClient(cmd)
+	dyn, err := newDynamicClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -258,26 +268,53 @@ func parseMatchLabels(selector string) (map[string]interface{}, error) {
 		return nil, nil
 	}
 
-	labels := map[string]interface{}{}
+	parts := strings.Split(selector, ",")
+	labels := make(map[string]interface{}, len(parts))
 
-	for _, part := range strings.Split(selector, ",") {
+	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			continue
+			return nil, fmt.Errorf("invalid --%s %q: empty selector component", flagSelector, selector)
 		}
 
-		key, value, found := strings.Cut(part, "=")
+		if strings.Count(part, "=") != 1 {
+			return nil, fmt.Errorf(
+				"invalid --%s %q: component %q must contain exactly one '='",
+				flagSelector,
+				selector,
+				part,
+			)
+		}
+
+		key, value, _ := strings.Cut(part, "=")
 		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
 
-		if !found || key == "" {
-			return nil, fmt.Errorf("invalid --%s %q: expected comma-separated key=value pairs", flagSelector, selector)
+		if problems := validation.IsQualifiedName(key); len(problems) > 0 {
+			return nil, fmt.Errorf(
+				"invalid --%s %q: invalid label key %q: %s",
+				flagSelector,
+				selector,
+				key,
+				strings.Join(problems, "; "),
+			)
 		}
 
-		labels[key] = strings.TrimSpace(value)
-	}
+		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
+			return nil, fmt.Errorf(
+				"invalid --%s %q: invalid label value %q: %s",
+				flagSelector,
+				selector,
+				value,
+				strings.Join(problems, "; "),
+			)
+		}
 
-	if len(labels) == 0 {
-		return nil, nil
+		if _, exists := labels[key]; exists {
+			return nil, fmt.Errorf("invalid --%s %q: duplicate label key %q", flagSelector, selector, key)
+		}
+
+		labels[key] = value
 	}
 
 	return labels, nil

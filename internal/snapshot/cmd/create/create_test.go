@@ -26,10 +26,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
@@ -101,6 +103,8 @@ func TestBuildSnapshot_WithSelector(t *testing.T) {
 }
 
 func TestParseMatchLabels(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name    string
 		in      string
@@ -111,17 +115,32 @@ func TestParseMatchLabels(t *testing.T) {
 		{"whitespace", "   ", nil, false},
 		{"single", "app=demo", map[string]interface{}{"app": "demo"}, false},
 		{"multi with spaces", " app=demo , tier=db ", map[string]interface{}{"app": "demo", "tier": "db"}, false},
-		{"empty value", "app=", map[string]interface{}{"app": ""}, false},
+		{"qualified key", "app.example.com/tier=backend-1", map[string]interface{}{"app.example.com/tier": "backend-1"}, false},
+		{"empty value", "app=demo,tier=", map[string]interface{}{"app": "demo", "tier": ""}, false},
+		{"empty components", ",", nil, true},
+		{"whitespace components", " , ", nil, true},
+		{"trailing component", "app=demo,", nil, true},
+		{"double component", "app=demo,,tier=db", nil, true},
+		{"duplicate key", "env=prod,env=staging", nil, true},
+		{"extra equals", "a==b", nil, true},
 		{"missing eq", "app", nil, true},
 		{"empty key", "=demo", nil, true},
+		{"invalid key", "bad/key/name=demo", nil, true},
+		{"invalid value", "app=bad/value", nil, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := parseMatchLabels(tc.in)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q, got nil", tc.in)
+				}
+
+				if !strings.Contains(err.Error(), "--selector") {
+					t.Fatalf("error %q does not identify --selector", err)
 				}
 
 				return
@@ -135,6 +154,38 @@ func TestParseMatchLabels(t *testing.T) {
 				t.Fatalf("parseMatchLabels(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRun_InvalidSelectorDoesNotCreateSnapshot(t *testing.T) {
+	t.Parallel()
+
+	dyn := newFakeDynamic()
+	cmd := NewCommand(discardLogger())
+
+	if err := cmd.Flags().Set(flagNamespace, "ns"); err != nil {
+		t.Fatalf("set --%s: %v", flagNamespace, err)
+	}
+
+	if err := cmd.Flags().Set(flagSelector, "app=demo,"); err != nil {
+		t.Fatalf("set --%s: %v", flagSelector, err)
+	}
+
+	err := run(discardLogger(), cmd, []string{"snap"}, func(*cobra.Command) (dynamic.Interface, error) {
+		return dyn, nil
+	})
+	if err == nil {
+		t.Fatal("expected invalid selector error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "--selector") {
+		t.Fatalf("error %q does not identify --selector", err)
+	}
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "create" {
+			t.Fatalf("invalid selector performed Create action: %#v", action)
+		}
 	}
 }
 
