@@ -1268,6 +1268,10 @@ func stageFSInventoryFiles(
 	waitErr := g.Wait()
 
 	if produceErr != nil {
+		if waitErr != nil && ctx.Err() == nil && errors.Is(produceErr, context.Canceled) {
+			return waitErr
+		}
+
 		return produceErr
 	}
 

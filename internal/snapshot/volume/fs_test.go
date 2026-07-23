@@ -3692,6 +3692,267 @@ func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *test
 	}
 }
 
+func TestDownloadFilesystemVolume_PreservesCausalStagingWorkerError(t *testing.T) {
+	const entries = 3_000
+
+	errSourceMD5 := errors.New("source MD5 sentinel")
+	errFileGET := errors.New("file GET sentinel")
+
+	tests := []struct {
+		name          string
+		advertisedMD5 string
+		wantErr       error
+		newFetcher    func(*httptest.Server) (*exporter.Fetcher, []*observedDoer)
+	}{
+		{
+			name:          "SourceMD5",
+			advertisedMD5: md5Hex([]byte("x")),
+			wantErr:       errSourceMD5,
+			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+				sourceDoer := &observedDoer{
+					do: func(*http.Request) (*http.Response, error) {
+						return nil, errSourceMD5
+					},
+				}
+
+				return exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)), []*observedDoer{sourceDoer}
+			},
+		},
+		{
+			name:          "FileGET",
+			advertisedMD5: md5Hex([]byte("x")),
+			wantErr:       errFileGET,
+			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+				fileDoer := &observedDoer{
+					do: func(req *http.Request) (*http.Response, error) {
+						if req.Method == http.MethodGet && req.URL.Path != "/files/" {
+							return nil, errFileGET
+						}
+
+						return srv.Client().Do(req)
+					},
+				}
+
+				return exporter.NewFetcher(fileDoer, exporter.WithSourceHashDoer(srv.Client())), []*observedDoer{fileDoer}
+			},
+		},
+		{
+			name:          "SourceDigest",
+			advertisedMD5: md5Hex([]byte("different")),
+			wantErr:       volume.ErrSourceHashMismatch,
+			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+				return exporter.NewFetcher(srv.Client()), nil
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newLargeFileInventoryServer(t, entries, tt.advertisedMD5)
+			fetcher, observed := tt.newFetcher(srv)
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+			err := volume.DownloadFilesystemVolume(
+				context.Background(),
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+				tarPath,
+				stagingDir,
+				srv.URL+"/files/",
+				1,
+				0,
+				fetcher,
+				mustCodec(t, "none"),
+				nil,
+				nil,
+			)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("DownloadFilesystemVolume error = %v, want errors.Is(_, %v)", err, tt.wantErr)
+			}
+
+			for _, doer := range observed {
+				requireObservedDoerQuiescent(t, doer)
+			}
+
+			if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+				t.Fatalf("causal worker failure committed data.tar: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestDownloadFilesystemVolume_InventoryErrorRemainsCausal(t *testing.T) {
+	const entries = 50
+
+	srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	inventoryPath := filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.jsonl")
+
+	var truncateOnce sync.Once
+
+	sourceDoer := &observedDoer{
+		do: func(req *http.Request) (*http.Response, error) {
+			var truncateErr error
+
+			truncateOnce.Do(func() {
+				info, err := os.Stat(inventoryPath)
+				if err != nil {
+					truncateErr = err
+
+					return
+				}
+
+				truncateErr = os.Truncate(inventoryPath, info.Size()-64)
+			})
+			if truncateErr != nil {
+				return nil, fmt.Errorf("truncate inventory fixture: %w", truncateErr)
+			}
+
+			return srv.Client().Do(req)
+		},
+	}
+
+	err := volume.DownloadFilesystemVolume(
+		context.Background(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "filesystem inventory spool is corrupt") {
+		t.Fatalf("DownloadFilesystemVolume error = %v, want independent inventory corruption", err)
+	}
+
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("independent inventory corruption was replaced by cancellation: %v", err)
+	}
+
+	requireObservedDoerQuiescent(t, sourceDoer)
+}
+
+func TestDownloadFilesystemVolume_StagingCallerCancellationRemainsCausal(t *testing.T) {
+	const entries = 3_000
+
+	srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	sourceDoer := &observedDoer{
+		do: func(req *http.Request) (*http.Response, error) {
+			cancel()
+			<-req.Context().Done()
+
+			return nil, req.Context().Err()
+		},
+	}
+
+	nodeDir := t.TempDir()
+	err := volume.DownloadFilesystemVolume(
+		ctx,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		filepath.Join(nodeDir, archive.FsTarName),
+		filepath.Join(nodeDir, archive.FsTarStagingDirName),
+		srv.URL+"/files/",
+		1,
+		0,
+		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DownloadFilesystemVolume error = %v, want parent context cancellation", err)
+	}
+
+	requireObservedDoerQuiescent(t, sourceDoer)
+}
+
+func md5Hex(data []byte) string {
+	sum := md5.Sum(data)
+
+	return hex.EncodeToString(sum[:])
+}
+
+func newLargeFileInventoryServer(t *testing.T, entries int, advertisedMD5 string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/files/" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+
+			encoder := json.NewEncoder(w)
+			for index := range entries {
+				if index > 0 {
+					_, _ = io.WriteString(w, ",")
+				}
+
+				if err := encoder.Encode(exporter.Item{
+					Name:       fmt.Sprintf("file-%06d", index),
+					Type:       "file",
+					URI:        fmt.Sprintf("file-%06d", index),
+					Attributes: map[string]any{"size": 1},
+				}); err != nil {
+					return
+				}
+			}
+
+			_, _ = io.WriteString(w, `]}`)
+
+			return
+		}
+
+		if r.Method == http.MethodHead {
+			w.Header().Set("X-Attribute-Hash-Md5", advertisedMD5)
+		}
+
+		http.ServeContent(w, r, filepath.Base(r.URL.Path), time.Time{}, strings.NewReader("x"))
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+type observedDoer struct {
+	do     func(*http.Request) (*http.Response, error)
+	active atomic.Int64
+	calls  atomic.Int64
+}
+
+func (d *observedDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls.Add(1)
+	d.active.Add(1)
+
+	defer d.active.Add(-1)
+
+	return d.do(req)
+}
+
+func requireObservedDoerQuiescent(t *testing.T, doer *observedDoer) {
+	t.Helper()
+
+	if active := doer.active.Load(); active != 0 {
+		t.Fatalf("active requests after return = %d, want 0", active)
+	}
+
+	calls := doer.calls.Load()
+	for range 10 {
+		runtime.Gosched()
+	}
+
+	if current := doer.calls.Load(); current != calls {
+		t.Fatalf("request count changed after return: %d -> %d", calls, current)
+	}
+}
+
 func newLargeLinkInventoryServer(t *testing.T, entries int, reverse bool) *httptest.Server {
 	t.Helper()
 
