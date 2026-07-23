@@ -649,6 +649,58 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 	}
 }
 
+func TestValidationResolveModuleFlags(t *testing.T) {
+	tests := []struct {
+		name              string
+		noModules         bool
+		modulesWhitelist  []string
+		expectedNoModules bool
+	}{
+		{
+			name:              "include-module drops no-modules",
+			noModules:         true,
+			modulesWhitelist:  []string{"prometheus"},
+			expectedNoModules: false,
+		},
+		{
+			name:              "no-modules alone is kept",
+			noModules:         true,
+			modulesWhitelist:  nil,
+			expectedNoModules: true,
+		},
+		{
+			name:              "include-module without no-modules is untouched",
+			noModules:         false,
+			modulesWhitelist:  []string{"prometheus"},
+			expectedNoModules: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Snapshot global state — these flags are package-level.
+			originals := struct {
+				noModules        bool
+				modulesWhitelist []string
+			}{
+				noModules:        pullflags.NoModules,
+				modulesWhitelist: pullflags.ModulesWhitelist,
+			}
+			defer func() {
+				pullflags.NoModules = originals.noModules
+				pullflags.ModulesWhitelist = originals.modulesWhitelist
+			}()
+
+			pullflags.NoModules = tt.noModules
+			pullflags.ModulesWhitelist = tt.modulesWhitelist
+
+			resolveModuleFlags()
+
+			assert.Equal(t, tt.expectedNoModules, pullflags.NoModules)
+		})
+	}
+}
+
 func TestValidationValidateChunkSizeFlag(t *testing.T) {
 	tests := []struct {
 		name        string

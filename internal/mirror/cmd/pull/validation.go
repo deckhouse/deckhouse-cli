@@ -42,6 +42,8 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	resolveModuleFlags()
+
 	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
@@ -167,6 +169,16 @@ func parseAndValidateVersionFlags() error {
 	}
 
 	return nil
+}
+
+// resolveModuleFlags settles the contradiction between --no-modules and
+// --include-module. A whitelist means the user wants those modules, so it
+// wins: --no-modules is dropped and only the listed modules are mirrored.
+func resolveModuleFlags() {
+	if pullflags.NoModules && len(pullflags.ModulesWhitelist) > 0 {
+		pullflags.NoModules = false
+		fmt.Fprintln(os.Stderr, "Warning: --no-modules is ignored because --include-module is set; mirroring only the whitelisted modules.")
+	}
 }
 
 // validateProxyRegistryFlag enforces the combinations the proxy-registry
