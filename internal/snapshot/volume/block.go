@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -476,8 +477,8 @@ func fetchChunkRaw(
 // observation used to seed a progress display before any transfer starts. It
 // mirrors downloadChunk/fetchChunkRaw's own chunk-boundary formula exactly:
 // each already-final chunk contributes its full raw length, and a still-open
-// chunk contributes its TRUSTED ".part" prefix (see partialChunkSizeReadOnly
-// — the offset proven durable by an fsync, capped at that chunk's raw
+// chunk contributes its TRUSTED ".part" prefix (the offset proven durable by
+// an fsync, capped at that chunk's raw
 // length; never the raw file size alone). Unlike the download path's
 // partialChunkSize, an oversized ".part" is left untouched on disk here —
 // the file gets treated as contributing only its trusted (safe) prefix, not
@@ -504,39 +505,190 @@ func fetchChunkRaw(
 // the only divergence is deliberate: because this scan is strictly read-only,
 // an oversized ".part" never disappears out from under a display-only scan.
 func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
-	meta, found, err := archive.ReadChunkMeta(chunkDir)
-	if err != nil && !errors.Is(err, archive.ErrCorruptChunkMeta) {
-		return 0, 0, fmt.Errorf("read chunk metadata in %s: %w", chunkDir, err)
+	return ScanBlockChunkProgressContext(context.Background(), chunkDir, ext)
+}
+
+// ScanBlockChunkProgressContext is ScanBlockChunkProgress with prompt cancellation.
+func ScanBlockChunkProgressContext(ctx context.Context, chunkDir, ext string) (int64, int64, error) {
+	root, err := archive.OpenRootedSource(chunkDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+
+		return 0, 0, fmt.Errorf("open chunk directory %s: %w", chunkDir, err)
 	}
 
-	if err != nil || !found || meta.ChunkSize <= 0 || meta.TotalSize <= 0 {
+	defer func() { _ = root.Close() }()
+
+	directory, err := root.OpenDirectoryPath(".")
+	if err != nil {
+		return 0, 0, fmt.Errorf("pin chunk directory %s: %w", chunkDir, err)
+	}
+
+	defer func() { _ = directory.Close() }()
+
+	return scanPinnedBlockChunkProgress(ctx, directory, ext)
+}
+
+// maxProgressChunkCount still covers 16 PiB at the production 256 MiB chunk
+// size while bounding corrupt one-byte geometry to a fixed amount of stat work.
+const maxProgressChunkCount int64 = 1 << 16
+
+func scanPinnedBlockChunkProgress(
+	ctx context.Context,
+	directory *archive.PinnedDirectory,
+	ext string,
+) (int64, int64, error) {
+	metaFile, err := directory.OpenRegularFile(archive.ChunkMetaFileName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, nil
+		}
+
+		return 0, 0, fmt.Errorf("open chunk metadata in %s: %w", directory.Path(), err)
+	}
+
+	meta, found, readErr := archive.ReadChunkMetaFrom(ctx, metaFile, filepath.Join(directory.Path(), archive.ChunkMetaFileName))
+	closeErr := metaFile.Close()
+
+	if readErr != nil {
+		if errors.Is(readErr, archive.ErrCorruptChunkMeta) {
+			return 0, 0, nil
+		}
+
+		return 0, 0, fmt.Errorf("read chunk metadata in %s: %w", directory.Path(), readErr)
+	}
+
+	if closeErr != nil {
+		return 0, 0, fmt.Errorf("close chunk metadata in %s: %w", directory.Path(), closeErr)
+	}
+
+	if !found || meta.ChunkSize <= 0 || meta.TotalSize <= 0 {
 		return 0, 0, nil
 	}
 
-	numChunks := int((meta.TotalSize + meta.ChunkSize - 1) / meta.ChunkSize)
+	return scanPinnedBlockChunkProgressWithMeta(ctx, directory, ext, meta)
+}
+
+func scanPinnedBlockChunkProgressWithMeta(
+	ctx context.Context,
+	directory *archive.PinnedDirectory,
+	ext string,
+	meta archive.ChunkMeta,
+) (int64, int64, error) {
+	if meta.ChunkSize <= 0 || meta.TotalSize <= 0 {
+		return 0, 0, nil
+	}
+
+	numChunks := 1 + (meta.TotalSize-1)/meta.ChunkSize
+	if numChunks > maxProgressChunkCount {
+		return 0, 0, nil
+	}
 
 	var committed int64
 
-	for idx := range numChunks {
-		startByte := int64(idx) * meta.ChunkSize
-		endByte := min(startByte+meta.ChunkSize, meta.TotalSize) - 1
-		rawLen := endByte - startByte + 1
+	for idx := int64(0); idx < numChunks; idx++ {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, fmt.Errorf("scan chunk %d in %s: %w", idx, directory.Path(), err)
+		}
 
-		finalPath := filepath.Join(chunkDir, archive.ChunkFileName(idx, ext))
-		if _, statErr := os.Stat(finalPath); statErr == nil {
+		startByte := idx * meta.ChunkSize
+		rawLen := min(meta.ChunkSize, meta.TotalSize-startByte)
+		chunkName := archive.ChunkFileName(int(idx), ext)
+
+		final, openErr := directory.OpenRegularFile(chunkName)
+		if openErr == nil {
+			if err := final.Close(); err != nil {
+				return 0, 0, fmt.Errorf("close chunk %d in %s: %w", idx, directory.Path(), err)
+			}
+
+			if committed > math.MaxInt64-rawLen {
+				return 0, 0, fmt.Errorf("committed chunk bytes in %s overflow int64", directory.Path())
+			}
+
 			committed += rawLen
+
 			continue
 		}
 
-		partial, partErr := partialChunkSizeReadOnly(finalPath+partSuffix, rawLen)
-		if partErr != nil {
-			return 0, 0, fmt.Errorf("stat partial chunk %d in %s: %w", idx, chunkDir, partErr)
+		if !errors.Is(openErr, os.ErrNotExist) {
+			return 0, 0, fmt.Errorf("open chunk %d in %s: %w", idx, directory.Path(), openErr)
+		}
+
+		partial, err := pinnedPartialChunkSizeReadOnly(ctx, directory, chunkName+partSuffix, rawLen)
+		if err != nil {
+			return 0, 0, fmt.Errorf("stat partial chunk %d in %s: %w", idx, directory.Path(), err)
+		}
+
+		if committed > math.MaxInt64-partial {
+			return 0, 0, fmt.Errorf("committed partial bytes in %s overflow int64", directory.Path())
 		}
 
 		committed += partial
 	}
 
 	return committed, meta.TotalSize, nil
+}
+
+func pinnedPartialChunkSizeReadOnly(
+	ctx context.Context,
+	directory *archive.PinnedDirectory,
+	partName string,
+	rawLen int64,
+) (int64, error) {
+	part, err := directory.OpenRegularFile(partName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+
+		return 0, err
+	}
+
+	info, statErr := part.Stat()
+	closeErr := part.Close()
+
+	if statErr != nil {
+		return 0, fmt.Errorf("inspect %s: %w", partName, statErr)
+	}
+
+	if closeErr != nil {
+		return 0, fmt.Errorf("close %s: %w", partName, closeErr)
+	}
+
+	offsetFile, err := directory.OpenRegularFile(partName + partOffsetSuffix)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+
+		return 0, err
+	}
+
+	const maxOffsetBytes = 64
+
+	data, readErr := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, src: offsetFile}, maxOffsetBytes+1))
+	closeErr = offsetFile.Close()
+
+	if readErr != nil {
+		return 0, readErr
+	}
+
+	if closeErr != nil {
+		return 0, fmt.Errorf("close durable offset for %s: %w", partName, closeErr)
+	}
+
+	if len(data) > maxOffsetBytes {
+		return 0, nil
+	}
+
+	offset, parseErr := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if parseErr != nil || offset < 0 {
+		return 0, nil
+	}
+
+	return min(offset, info.Size(), rawLen), nil
 }
 
 // partialChunkSize returns the number of bytes at the START of the durable
@@ -590,26 +742,8 @@ func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 	return trusted, nil
 }
 
-// partialChunkSizeReadOnly returns the same TRUSTED prefix length as
-// partialChunkSize (see its doc for the full durability rationale) but never
-// mutates partPath: a ".part" file whose on-disk size exceeds the trusted
-// offset is left exactly as it is on disk, and only the trusted (safe)
-// portion is reported as committed for display purposes.
-//
-// Callers that only OBSERVE resume progress before any transfer starts
-// (ScanBlockChunkProgress, and transitively ScanFSStagingProgress) MUST use
-// this variant, never partialChunkSize: a scan used purely to seed a
-// progress display must be side-effect-free, and discarding a stale/oversized
-// partial is a decision that belongs to the actual download path
-// (ensureChunkGeometry / fetchChunkRaw via partialChunkSize), which is about
-// to act on the chunk's geometry anyway.
-func partialChunkSizeReadOnly(partPath string, rawLen int64) (int64, error) {
-	trusted, _, err := trustedPartPrefix(partPath, rawLen)
-	return trusted, err
-}
-
-// trustedPartPrefix is the shared, side-effect-free computation behind both
-// partialChunkSize and partialChunkSizeReadOnly: it stats partPath and its
+// trustedPartPrefix is the side-effect-free computation behind
+// partialChunkSize: it stats partPath and its
 // durable-offset sidecar and returns the resulting TRUSTED prefix length
 // (min(durable offset, on-disk size, rawLen)), together with the os.FileInfo
 // it stat'd so a mutating caller can compare it against the trusted value

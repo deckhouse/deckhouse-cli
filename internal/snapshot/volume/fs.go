@@ -1764,19 +1764,42 @@ func stageWholeFile(
 //     (stagingDir/<relPath><ext>.d) are not scanned; such a file re-downloads
 //     once, which is acceptable and preferable to risking a user-blob alias.
 func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, error) {
+	return scanFSStagingProgress(ctx, stagingDir, ext, nil)
+}
+
+// ScanFSStagingProgressWithHook is ScanFSStagingProgress with a deterministic
+// descriptor-boundary hook for adversarial replacement tests.
+func ScanFSStagingProgressWithHook(
+	ctx context.Context,
+	stagingDir string,
+	ext string,
+	hook archive.OpenBoundaryHook,
+) (int64, error) {
+	return scanFSStagingProgress(ctx, stagingDir, ext, hook)
+}
+
+func scanFSStagingProgress(
+	ctx context.Context,
+	stagingDir string,
+	ext string,
+	hook archive.OpenBoundaryHook,
+) (int64, error) {
 	chunksRoot := filepath.Join(stagingDir, FSMetaDirName, archive.FSChunksDirName)
 
 	if err := ctx.Err(); err != nil {
 		return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
 	}
 
-	if _, err := os.Stat(chunksRoot); err != nil {
-		if os.IsNotExist(err) {
+	root, err := archive.OpenRootedSourceWithHook(chunksRoot, hook)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil
 		}
 
-		return 0, fmt.Errorf("stat fs chunks dir %s: %w", chunksRoot, err)
+		return 0, fmt.Errorf("open fs chunks dir %s: %w", chunksRoot, err)
 	}
+
+	defer func() { _ = root.Close() }()
 
 	queueFile, err := os.CreateTemp("", "d8-snapshot-fs-progress-*.jsonl")
 	if err != nil {
@@ -1818,13 +1841,21 @@ func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, 
 
 		directoryCommitted, children, err := scanFSProgressDirectory(
 			ctx,
-			chunksRoot,
+			root,
 			record.RelPrefix,
 			ext,
 			queueFile,
 		)
 		if err != nil {
 			return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
+		}
+
+		if committed > math.MaxInt64-directoryCommitted {
+			return 0, fmt.Errorf("committed fs staging progress in %s overflows int64", chunksRoot)
+		}
+
+		if queued > math.MaxInt64-children {
+			return 0, fmt.Errorf("fs progress directory count in %s overflows int64", chunksRoot)
 		}
 
 		committed += directoryCommitted
@@ -1840,7 +1871,7 @@ func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, 
 // including the transient chunks.meta read.
 func scanFSProgressDirectory(
 	ctx context.Context,
-	chunksRoot string,
+	root *archive.RootedSource,
 	relPath string,
 	ext string,
 	queueFile *os.File,
@@ -1849,11 +1880,9 @@ func scanFSProgressDirectory(
 		return 0, 0, fmt.Errorf("chunk directory path exceeds %d-byte limit", fsProgressMaxPathSize)
 	}
 
-	path := filepath.Join(chunksRoot, filepath.FromSlash(relPath))
-
-	directory, err := os.Open(path)
+	directory, err := root.OpenDirectoryPath(relPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("open chunk directory %s: %w", path, err)
+		return 0, 0, fmt.Errorf("open chunk directory %s: %w", relPath, err)
 	}
 
 	defer func() { _ = directory.Close() }()
@@ -1868,7 +1897,7 @@ func scanFSProgressDirectory(
 			return 0, 0, err
 		}
 
-		entries, readErr := directory.ReadDir(fsProgressReadBatchSize)
+		entries, readErr := directory.ReadDirectory(fsProgressReadBatchSize)
 		slices.SortFunc(entries, func(left, right fs.DirEntry) int {
 			return cmp.Compare(left.Name(), right.Name())
 		})
@@ -1891,18 +1920,66 @@ func scanFSProgressDirectory(
 				return 0, 0, fmt.Errorf("chunk directory path exceeds %d-byte limit", fsProgressMaxPathSize)
 			}
 
-			childPath := filepath.Join(chunksRoot, filepath.FromSlash(childRelPath))
+			child, openErr := directory.OpenDirectory(entry.Name())
+			if openErr != nil {
+				return 0, 0, openErr
+			}
 
-			_, found, metaErr := archive.ReadChunkMeta(childPath)
-			if metaErr == nil && found {
-				fileCommitted, _, scanErr := ScanBlockChunkProgress(childPath, ext)
+			metaFile, metaOpenErr := child.OpenRegularFile(archive.ChunkMetaFileName)
+			if metaOpenErr == nil {
+				meta, found, metaErr := archive.ReadChunkMetaFrom(
+					ctx,
+					metaFile,
+					filepath.Join(child.Path(), archive.ChunkMetaFileName),
+				)
+				closeErr := metaFile.Close()
+
+				if metaErr != nil && !errors.Is(metaErr, archive.ErrCorruptChunkMeta) {
+					_ = child.Close()
+
+					return 0, 0, metaErr
+				}
+
+				if closeErr != nil {
+					_ = child.Close()
+
+					return 0, 0, closeErr
+				}
+
+				if metaErr != nil || !found {
+					_ = child.Close()
+
+					continue
+				}
+
+				fileCommitted, _, scanErr := scanPinnedBlockChunkProgressWithMeta(ctx, child, ext, meta)
+				closeErr = child.Close()
+
 				if scanErr != nil {
 					return 0, 0, scanErr
+				}
+
+				if closeErr != nil {
+					return 0, 0, closeErr
+				}
+
+				if committed > math.MaxInt64-fileCommitted {
+					return 0, 0, fmt.Errorf("committed fs chunk bytes overflow int64")
 				}
 
 				committed += fileCommitted
 
 				continue
+			}
+
+			if !errors.Is(metaOpenErr, os.ErrNotExist) {
+				_ = child.Close()
+
+				return 0, 0, metaOpenErr
+			}
+
+			if err := child.Close(); err != nil {
+				return 0, 0, err
 			}
 
 			if err := appendDirectoryRecord(queueFile, fsDirectoryRecord{RelPrefix: childRelPath}); err != nil {
@@ -1917,7 +1994,7 @@ func scanFSProgressDirectory(
 		}
 
 		if readErr != nil {
-			return 0, 0, fmt.Errorf("read chunk directory %s: %w", path, readErr)
+			return 0, 0, fmt.Errorf("read chunk directory %s: %w", directory.Path(), readErr)
 		}
 	}
 

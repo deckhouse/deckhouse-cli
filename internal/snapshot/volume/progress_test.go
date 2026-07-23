@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -643,6 +644,195 @@ func TestScanFSStagingProgress_MissingStagingDir(t *testing.T) {
 	committed, err := volume.ScanFSStagingProgress(context.Background(), filepath.Join(t.TempDir(), "absent"), ".zst")
 	require.NoError(t, err)
 	require.Zero(t, committed)
+}
+
+func TestScanFSStagingProgress_RejectsLinkAndReplacementEscapes(t *testing.T) {
+	const chunkSize int64 = 100
+
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, stagingDir, chunksRoot, outside string) archive.OpenBoundaryHook
+	}{
+		{
+			name: "StaticSymlinkRoot",
+			prepare: func(t *testing.T, _, chunksRoot, outside string) archive.OpenBoundaryHook {
+				t.Helper()
+				require.NoError(t, os.MkdirAll(filepath.Dir(chunksRoot), 0o755))
+				if err := os.Symlink(outside, chunksRoot); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+
+				return nil
+			},
+		},
+		{
+			name: "IntermediateDirectoryReplacement",
+			prepare: func(t *testing.T, _, chunksRoot, outside string) archive.OpenBoundaryHook {
+				t.Helper()
+				parent := filepath.Join(chunksRoot, "parent")
+				require.NoError(t, os.MkdirAll(filepath.Join(parent, "file.d"), 0o755))
+
+				replaced := false
+
+				return func(path string) {
+					if replaced || path != parent {
+						return
+					}
+
+					replaced = true
+					require.NoError(t, os.Rename(parent, parent+".detached"))
+					require.NoError(t, os.Symlink(outside, parent))
+				}
+			},
+		},
+		{
+			name: "FinalMetadataReplacement",
+			prepare: func(t *testing.T, _, chunksRoot, outside string) archive.OpenBoundaryHook {
+				t.Helper()
+				chunkDir := filepath.Join(chunksRoot, "file.d")
+				require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+				require.NoError(t, archive.WriteChunkMeta(
+					chunkDir,
+					archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize},
+				))
+
+				metaPath := filepath.Join(chunkDir, archive.ChunkMetaFileName)
+				outsideMeta := filepath.Join(outside, archive.ChunkMetaFileName)
+				replaced := false
+
+				return func(path string) {
+					if replaced || path != metaPath {
+						return
+					}
+
+					replaced = true
+					require.NoError(t, os.Rename(metaPath, metaPath+".detached"))
+					require.NoError(t, os.Symlink(outsideMeta, metaPath))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stagingDir := t.TempDir()
+			chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
+			outside := t.TempDir()
+			outsideChunkDir := filepath.Join(outside, "file.d")
+			require.NoError(t, os.MkdirAll(outsideChunkDir, 0o755))
+			require.NoError(t, archive.WriteChunkMeta(
+				outsideChunkDir,
+				archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize},
+			))
+			require.NoError(t, os.WriteFile(
+				filepath.Join(outsideChunkDir, archive.ChunkFileName(0, "")),
+				[]byte("outside"),
+				0o644,
+			))
+			require.NoError(t, os.WriteFile(
+				filepath.Join(outside, archive.ChunkMetaFileName),
+				[]byte(`{"chunkSize":100,"totalSize":100}`),
+				0o644,
+			))
+
+			hook := tt.prepare(t, stagingDir, chunksRoot, outside)
+			committed, err := volume.ScanFSStagingProgressWithHook(context.Background(), stagingDir, "", hook)
+			require.Error(t, err)
+			require.Zero(t, committed, "outside chunk bytes must never be credited")
+		})
+	}
+}
+
+func TestScanBlockChunkProgress_BoundsGeometryAndCancellation(t *testing.T) {
+	t.Run("MaxIntGeometry", func(t *testing.T) {
+		chunkDir := t.TempDir()
+		require.NoError(t, archive.WriteChunkMeta(
+			chunkDir,
+			archive.ChunkMeta{ChunkSize: 1, TotalSize: math.MaxInt64},
+		))
+
+		committed, total, err := volume.ScanBlockChunkProgressContext(context.Background(), chunkDir, "")
+		require.NoError(t, err)
+		require.Zero(t, committed)
+		require.Zero(t, total)
+	})
+
+	t.Run("CancellationDuringChunkIndexScan", func(t *testing.T) {
+		chunkDir := t.TempDir()
+		require.NoError(t, archive.WriteChunkMeta(
+			chunkDir,
+			archive.ChunkMeta{ChunkSize: 1, TotalSize: 10_000},
+		))
+
+		ctx := &cancelAfterChecksContext{Context: context.Background(), cancelAt: 20}
+		_, _, err := volume.ScanBlockChunkProgressContext(ctx, chunkDir, "")
+		require.ErrorIs(t, err, context.Canceled)
+		require.LessOrEqual(t, ctx.checks, ctx.cancelAt+2)
+	})
+}
+
+func TestScanFSStagingProgress_RejectsAggregateOverflow(t *testing.T) {
+	stagingDir := t.TempDir()
+	chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
+
+	for _, name := range []string{"a.d", "b.d"} {
+		chunkDir := filepath.Join(chunksRoot, name)
+		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+		require.NoError(t, archive.WriteChunkMeta(
+			chunkDir,
+			archive.ChunkMeta{ChunkSize: math.MaxInt64, TotalSize: math.MaxInt64},
+		))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(chunkDir, archive.ChunkFileName(0, "")),
+			nil,
+			0o644,
+		))
+	}
+
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, "")
+	require.Error(t, err)
+	require.Zero(t, committed)
+	require.Contains(t, err.Error(), "overflow")
+}
+
+func TestScanFSStagingProgress_DeepTraversalKeepsDescriptorsBounded(t *testing.T) {
+	stagingDir := t.TempDir()
+	chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
+	current := chunksRoot
+
+	for range 300 {
+		current = filepath.Join(current, "d")
+		require.NoError(t, os.MkdirAll(current, 0o755))
+	}
+
+	baseline, ok := countOpenTestDescriptors()
+	if !ok {
+		t.Skip("descriptor directory unavailable")
+	}
+
+	peak := baseline
+	hook := func(string) {
+		currentCount, available := countOpenTestDescriptors()
+		if available && currentCount > peak {
+			peak = currentCount
+		}
+	}
+
+	committed, err := volume.ScanFSStagingProgressWithHook(context.Background(), stagingDir, "", hook)
+	require.NoError(t, err)
+	require.Zero(t, committed)
+	require.LessOrEqual(t, peak-baseline, 12)
+}
+
+func countOpenTestDescriptors() (int, bool) {
+	for _, path := range []string{"/dev/fd", "/proc/self/fd"} {
+		entries, err := os.ReadDir(path)
+		if err == nil {
+			return len(entries), true
+		}
+	}
+
+	return 0, false
 }
 
 func TestScanFSStagingProgress_WideEmptyHierarchyHasCountIndependentHeap(t *testing.T) {

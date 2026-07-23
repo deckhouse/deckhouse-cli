@@ -17,9 +17,12 @@ limitations under the License.
 package archive_test
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -123,6 +126,80 @@ func TestChunkMeta_CorruptFileIsAnError(t *testing.T) {
 	if found {
 		t.Error("found = true; want false on a read error")
 	}
+}
+
+func TestChunkMeta_RejectsOversizedInputBeforeMaterialization(t *testing.T) {
+	const maxAllocated = 1 << 20
+
+	runtime.GC()
+
+	var baseline runtime.MemStats
+	runtime.ReadMemStats(&baseline)
+
+	_, found, err := archive.ReadChunkMetaFrom(
+		context.Background(),
+		io.LimitReader(chunkMetaRepeatedByteReader('x'), 16<<20),
+		"streamed chunks.meta",
+	)
+	if !errors.Is(err, archive.ErrCorruptChunkMeta) {
+		t.Fatalf("ReadChunkMetaFrom error = %v, want ErrCorruptChunkMeta", err)
+	}
+
+	if found {
+		t.Fatal("found = true, want false for oversized metadata")
+	}
+
+	var current runtime.MemStats
+	runtime.ReadMemStats(&current)
+
+	if allocated := current.TotalAlloc - baseline.TotalAlloc; allocated > maxAllocated {
+		t.Fatalf("oversized metadata allocated %d bytes, want <= %d", allocated, maxAllocated)
+	}
+}
+
+func TestChunkMeta_ReadCancellationIsPromptAndCompatible(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancelChunkMetaReader{
+		cancel: cancel,
+		reader: io.LimitReader(chunkMetaRepeatedByteReader('x'), 16<<20),
+	}
+
+	_, found, err := archive.ReadChunkMetaFrom(ctx, reader, "cancelled chunks.meta")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadChunkMetaFrom error = %v, want context.Canceled", err)
+	}
+
+	if found {
+		t.Fatal("found = true, want false after cancellation")
+	}
+
+	if reader.bytesRead > archive.ChunkMetaMaxEncodedSize {
+		t.Fatalf("read %d bytes after cancellation, want <= %d", reader.bytesRead, archive.ChunkMetaMaxEncodedSize)
+	}
+}
+
+type chunkMetaRepeatedByteReader byte
+
+func (r chunkMetaRepeatedByteReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = byte(r)
+	}
+
+	return len(p), nil
+}
+
+type cancelChunkMetaReader struct {
+	cancel    context.CancelFunc
+	reader    io.Reader
+	bytesRead int
+}
+
+func (r *cancelChunkMetaReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p[:min(len(p), 128)])
+	r.bytesRead += n
+	r.cancel()
+
+	return n, err
 }
 
 // TestChunkMeta_DetectsMismatch pins the exact comparison the geometry guard
