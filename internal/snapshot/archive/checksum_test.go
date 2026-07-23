@@ -20,6 +20,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -77,6 +79,117 @@ func TestComputeNodeChecksum_Deterministic(t *testing.T) {
 
 	if len(c1.Hex) != 64 {
 		t.Errorf("hex length: got %d, want 64", len(c1.Hex))
+	}
+}
+
+func TestComputeNodeChecksumRejectsNonRegularArchiveArtifacts(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, nodeDir string) string
+	}{
+		{
+			name: "manifests directory symlink",
+			mutate: func(t *testing.T, nodeDir string) string {
+				t.Helper()
+
+				path := filepath.Join(nodeDir, ManifestsDirName)
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove manifests: %v", err)
+				}
+
+				outside := filepath.Join(t.TempDir(), ManifestsDirName)
+				if err := os.Mkdir(outside, 0o755); err != nil {
+					t.Fatalf("mkdir outside manifests: %v", err)
+				}
+
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatalf("symlink manifests: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "manifest file symlink",
+			mutate: func(t *testing.T, nodeDir string) string {
+				t.Helper()
+
+				outside := filepath.Join(t.TempDir(), "outside.yaml")
+				writeFile(t, outside, "kind: ConfigMap\n")
+
+				path := filepath.Join(nodeDir, ManifestsDirName, "configmap_outside.yaml")
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatalf("symlink manifest: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "filesystem payload fifo",
+			mutate: func(t *testing.T, nodeDir string) string {
+				t.Helper()
+
+				path := filepath.Join(nodeDir, FsTarName)
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "legacy data directory symlink",
+			mutate: func(t *testing.T, nodeDir string) string {
+				t.Helper()
+
+				outside := filepath.Join(t.TempDir(), DataDirName)
+				if err := os.Mkdir(outside, 0o755); err != nil {
+					t.Fatalf("mkdir outside data: %v", err)
+				}
+
+				path := filepath.Join(nodeDir, DataDirName)
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatalf("symlink data: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "legacy data file fifo",
+			mutate: func(t *testing.T, nodeDir string) string {
+				t.Helper()
+
+				dataDir := filepath.Join(nodeDir, DataDirName)
+				if err := os.Mkdir(dataDir, 0o755); err != nil {
+					t.Fatalf("mkdir data: %v", err)
+				}
+
+				path := filepath.Join(dataDir, "pvc.bin")
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				return path
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeDir := makeNodeDir(t)
+			path := tc.mutate(t, nodeDir)
+
+			_, err := ComputeNodeChecksum(nodeDir)
+			if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+				t.Fatalf("ComputeNodeChecksum error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+		})
 	}
 }
 

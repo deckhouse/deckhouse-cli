@@ -18,8 +18,11 @@ package archive_test
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -492,6 +495,86 @@ func TestClassifyBlockPayload_Invalid(t *testing.T) {
 
 			if !errors.Is(err, archive.ErrInvalidBlockPayload) {
 				t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestClassifyBlockPayload_RejectsNonRegularExactNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T, path string)
+	}{
+		{
+			name: "symlink",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				target := filepath.Join(t.TempDir(), "outside")
+				if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+					t.Fatalf("write target: %v", err)
+				}
+
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink payload: %v", err)
+				}
+			},
+		},
+		{
+			name: "fifo",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+			},
+		},
+		{
+			name: "socket",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				listener, err := net.Listen("unix", path)
+				if err != nil {
+					t.Fatalf("listen unix: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			if tc.name == "socket" {
+				var err error
+
+				nodeDir, err = os.MkdirTemp("", "d8-snapshot-socket-")
+				if err != nil {
+					t.Fatalf("mkdir temp: %v", err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(nodeDir) })
+			}
+
+			path := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+			tc.build(t, path)
+
+			_, found, err := archive.ClassifyBlockPayload(nodeDir)
+			if found {
+				t.Error("found = true, want false")
+			}
+
+			if !errors.Is(err, archive.ErrInvalidBlockPayload) {
+				t.Errorf("error = %v, want ErrInvalidBlockPayload", err)
+			}
+
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Errorf("error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
 			}
 		})
 	}

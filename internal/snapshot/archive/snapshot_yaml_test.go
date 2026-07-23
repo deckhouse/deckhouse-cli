@@ -18,13 +18,134 @@ package archive_test
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
+
+func TestReadSnapshotYAMLRejectsSymlinkBeforeReadingTarget(t *testing.T) {
+	nodeDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outsidePath, []byte("apiVersion: escaped/v1\nkind: Escaped\nname: escaped\n"), 0o600); err != nil {
+		t.Fatalf("write outside snapshot: %v", err)
+	}
+
+	snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+	if err := os.Symlink(outsidePath, snapshotPath); err != nil {
+		t.Fatalf("symlink snapshot.yaml: %v", err)
+	}
+
+	_, err := archive.ReadSnapshotYAML(nodeDir)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("ReadSnapshotYAML error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if !strings.Contains(err.Error(), snapshotPath) {
+		t.Errorf("error %q does not contain offending path %q", err, snapshotPath)
+	}
+}
+
+func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T) string
+	}{
+		{
+			name: "directory",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				return t.TempDir()
+			},
+		},
+		{
+			name: "symlink",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+					t.Fatalf("write target: %v", err)
+				}
+
+				path := filepath.Join(t.TempDir(), "artifact")
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink artifact: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "fifo",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				path := filepath.Join(t.TempDir(), "artifact")
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				return path
+			},
+		},
+		{
+			name: "unix socket",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				dir, err := os.MkdirTemp("", "d8-snapshot-socket-")
+				if err != nil {
+					t.Fatalf("mkdir temp: %v", err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+				path := filepath.Join(dir, "artifact")
+				listener, err := net.Listen("unix", path)
+				if err != nil {
+					t.Fatalf("listen unix: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+
+				return path
+			},
+		},
+	}
+
+	if info, err := os.Lstat("/dev/null"); err == nil && info.Mode()&os.ModeDevice != 0 {
+		tests = append(tests, struct {
+			name  string
+			build func(t *testing.T) string
+		}{
+			name:  "device",
+			build: func(*testing.T) string { return "/dev/null" },
+		})
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.build(t)
+
+			file, err := archive.OpenRegularFile(path)
+			if file != nil {
+				_ = file.Close()
+			}
+
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("OpenRegularFile error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+		})
+	}
+}
 
 // validChecksum returns a well-formed NodeChecksum (sha256, 64 lowercase hex, consistent short).
 func validChecksum() archive.NodeChecksum {

@@ -213,6 +213,167 @@ func TestBuildPlan_PostOrder(t *testing.T) {
 	}
 }
 
+func TestBuildPlanRejectsHostFilesystemSymlinks(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T) (string, string)
+	}{
+		{
+			name: "archive root",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				target := buildTwoLevelArchive(t)
+				path := filepath.Join(t.TempDir(), "archive")
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink archive root: %v", err)
+				}
+
+				return path, path
+			},
+		},
+		{
+			name: "snapshot yaml",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotYAMLName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifests directory",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.ManifestsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifest file",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				entries, err := os.ReadDir(filepath.Join(root, archive.ManifestsDirName))
+				if err != nil {
+					t.Fatalf("read manifests: %v", err)
+				}
+
+				path := filepath.Join(root, archive.ManifestsDirName, entries[0].Name())
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "snapshots directory",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "child node directory",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := childDir(root, "VolumeSnapshot", "pvc-1")
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "block payload",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "filesystem payload",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1",
+					kind:       "VolumeSnapshot",
+					name:       "pvc-1",
+					tarData:    []byte("tar bytes are never read"),
+				})
+
+				path := filepath.Join(root, archive.FsTarName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "legacy data directory",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.DataDirName)
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("mkdir legacy data: %v", err)
+				}
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := tc.build(t)
+
+			_, err := BuildPlan(root)
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("BuildPlan error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+		})
+	}
+}
+
+func moveOutsideAndSymlink(t *testing.T, path string) {
+	t.Helper()
+
+	outside := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.Rename(path, outside); err != nil {
+		t.Fatalf("move %s outside archive: %v", path, err)
+	}
+
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatalf("symlink %s: %v", path, err)
+	}
+}
+
 func TestBuildPlan_RejectsDuplicateCanonicalIdentities(t *testing.T) {
 	const duplicateAPIVersion = "domain.example.io/v1"
 

@@ -25,11 +25,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -619,6 +621,216 @@ func TestRun_CorruptSkippedBlockPayload_NoMutation(t *testing.T) {
 
 	if acts := dyn.Actions(); len(acts) != 0 {
 		t.Errorf("dynamic-client actions = %d, want 0 (no cluster reads or writes before preflight): %v", len(acts), acts)
+	}
+}
+
+func TestRunRejectsNonRegularArchiveArtifactsBeforeExternalCalls(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T) (string, string)
+	}{
+		{
+			name: "snapshot yaml symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotYAMLName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifests directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.ManifestsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifest symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				entries, err := os.ReadDir(filepath.Join(root, archive.ManifestsDirName))
+				if err != nil {
+					t.Fatalf("read manifests: %v", err)
+				}
+
+				path := filepath.Join(root, archive.ManifestsDirName, entries[0].Name())
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "snapshots directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "block payload symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "block payload fifo",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove block payload: %v", err)
+				}
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				return root, path
+			},
+		},
+		{
+			name: "block payload socket",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root, err := os.MkdirTemp("/tmp", "d8-snapshot-socket-")
+				if err != nil {
+					t.Fatalf("mkdir temp: %v", err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(root) })
+
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+				})
+
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1",
+					kind:       "VolumeSnapshot",
+					name:       "pvc-1",
+					blockData:  []byte("rawbytes"),
+				})
+
+				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove block payload: %v", err)
+				}
+
+				listener, err := net.Listen("unix", path)
+				if err != nil {
+					t.Fatalf("listen unix: %v", err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+
+				return root, path
+			},
+		},
+		{
+			name: "filesystem payload symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+				})
+
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1",
+					kind:       "VolumeSnapshot",
+					name:       "pvc-1",
+					tarData:    []byte("tar bytes are never read"),
+				})
+
+				path := filepath.Join(leaf, archive.FsTarName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "legacy data directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.DataDirName)
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("mkdir legacy data: %v", err)
+				}
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := tc.build(t)
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+			mapper := &countingRESTMapper{RESTMapper: testMapper()}
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.Mapper = mapper
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			err := Run(ctx, cfg)
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+
+			if calls := mapper.calls.Load(); calls != 0 {
+				t.Errorf("RESTMapper calls = %d, want 0", calls)
+			}
+
+			if actions := dyn.Actions(); len(actions) != 0 {
+				t.Errorf("dynamic client actions = %v, want none", actions)
+			}
+
+			if len(up.calls) != 0 {
+				t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+			}
+
+			if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+				t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+			}
+		})
 	}
 }
 
