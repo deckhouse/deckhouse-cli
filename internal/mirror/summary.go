@@ -141,10 +141,10 @@ type PullSummary struct {
 	// registry path. Empty for a custom registry with no edition segment, in
 	// which case the summary omits the Edition line.
 	Edition string
-	// Registry is where each component reads from in the source registry. The
-	// summary shows it when the modules path was moved off the default, or in
-	// verbose mode. Filled by the CLI.
-	Registry RegistryLayout
+	// ModulesPath is where modules were read from in the source registry. The
+	// summary warns about it only when the path was moved off the default and
+	// modules were actually pulled. Filled by the CLI.
+	ModulesPath ModulesPathReport
 	// Elapsed is the wall-clock duration of the pull, filled by the CLI.
 	Elapsed time.Duration
 
@@ -168,9 +168,10 @@ type PushSummary struct {
 	// Failed marks a hard-error abort. The summary still renders, in a FAILED
 	// state. Mutually exclusive with Cancelled.
 	Failed bool
-	// Registry is where each component was written in the target registry, with a
-	// moved modules path (--modules-path-suffix) highlighted. Filled by PushService.
-	Registry RegistryLayout
+	// ModulesPath is where modules were written in the target registry. The
+	// summary warns about it only when the path was moved off the default and
+	// modules were actually pushed. Filled by PushService.
+	ModulesPath ModulesPathReport
 	// Elapsed is the wall-clock duration of the push, filled by the CLI.
 	Elapsed time.Duration
 

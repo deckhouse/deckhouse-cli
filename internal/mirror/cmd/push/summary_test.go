@@ -38,9 +38,9 @@ func TestRenderPushSummary(t *testing.T) {
 		notContains []string
 	}{
 		{
-			name: "default layout lists every component",
+			name: "default path shows no warning",
 			summary: &mirror.PushSummary{
-				Registry:          mirror.BuildRegistryLayout(root, "/modules", root+"/installer"),
+				ModulesPath:       mirror.BuildModulesPathReport(root, "/modules"),
 				PlatformPushed:    true,
 				InstallerPushed:   true,
 				SecurityDatabases: 4,
@@ -50,43 +50,51 @@ func TestRenderPushSummary(t *testing.T) {
 			},
 			contains: []string{
 				"Push summary",
-				"Registry:", root + "/modules",
 				"Platform:", "pushed",
 				"Security:", "4 databases",
 				"Modules:", "12",
 				"Packages:", "3",
 				"Elapsed: 2m4s",
 			},
-			notContains: []string{"default:", "Warning", "failed", "cancelled", "not present"},
+			notContains: []string{"Warning", "default:", "failed", "cancelled", "not present"},
 		},
 		{
-			name: "moved modules path is highlighted with a default hint",
+			name: "moved modules path with modules pushed is warned about",
 			summary: &mirror.PushSummary{
-				Registry:       mirror.BuildRegistryLayout(root, "/", root+"/installer"),
+				ModulesPath:    mirror.BuildModulesPathReport(root, "/"),
 				PlatformPushed: true,
 				Modules:        5,
 			},
 			contains: []string{
-				"Registry:",
 				"Warning: modules use a non-default path (--modules-path-suffix)",
+				"Modules", root,
 				"default: " + root + "/modules",
 				"Installer:", "not present", // no installer.tar in this push
-				"Modules:", "5",
 			},
+		},
+		{
+			name: "moved modules path with no modules pushed is silent",
+			summary: &mirror.PushSummary{
+				ModulesPath:    mirror.BuildModulesPathReport(root, "/"),
+				PlatformPushed: true,
+				Modules:        0,
+			},
+			// Nothing went through the moved path: no warning.
+			notContains: []string{"Warning", "default:"},
 		},
 		{
 			name: "failed push renders a FAILED state",
 			summary: &mirror.PushSummary{
-				Registry: mirror.BuildRegistryLayout(root, "/modules", root+"/installer"),
-				Failed:   true,
+				ModulesPath: mirror.BuildModulesPathReport(root, "/modules"),
+				Failed:      true,
 			},
 			contains: []string{"Push failed", "Push failed; the above reflects what completed"},
 		},
 		{
 			name: "cancelled push renders a cancellation state",
 			summary: &mirror.PushSummary{
-				Registry:  mirror.BuildRegistryLayout(root, "/modules", root+"/installer"),
-				Cancelled: true,
+				ModulesPath: mirror.BuildModulesPathReport(root, "/modules"),
+				Cancelled:   true,
 			},
 			contains: []string{"Push was cancelled; the above reflects what completed"},
 		},

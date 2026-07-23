@@ -28,60 +28,65 @@ import (
 
 const layoutRoot = "registry.example.com/deckhouse/ee"
 
-func renderLayout(t *testing.T, l mirror.RegistryLayout, show bool) string {
+func renderWarning(t *testing.T, m mirror.ModulesPathReport, transferred bool) string {
 	t.Helper()
 
 	var b strings.Builder
-	WriteRegistryLayout(&b, l, show)
+	WriteModulesPathWarning(&b, m, transferred)
 
 	return b.String()
 }
 
-func TestWriteRegistryLayout_Hidden(t *testing.T) {
-	out := renderLayout(t, mirror.BuildRegistryLayout(layoutRoot, "/", ""), false)
-	require.Empty(t, out, "show=false writes nothing")
-}
-
-func TestWriteRegistryLayout_Default(t *testing.T) {
+func TestWriteModulesPathWarning_DefaultPath(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 	color.NoColor = true
 
-	out := renderLayout(t, mirror.BuildRegistryLayout(layoutRoot, "/modules", ""), true)
-
-	require.Contains(t, out, "Registry:")
-	require.Contains(t, out, layoutRoot)
-	for _, label := range []string{"Platform", "Modules", "Security", "Packages"} {
-		require.Contains(t, out, label)
-	}
-	require.Contains(t, out, layoutRoot+"/modules")
-	require.NotContains(t, out, "default:", "no default hint without an override")
-	require.NotContains(t, out, "Warning", "no warning header without an override")
+	// A default modules path is never worth a warning, even when modules moved.
+	out := renderWarning(t, mirror.BuildModulesPathReport(layoutRoot, "/modules"), true)
+	require.Empty(t, out, "default path writes nothing")
 }
 
-func TestWriteRegistryLayout_OverrideHint(t *testing.T) {
+func TestWriteModulesPathWarning_MovedButNoModules(t *testing.T) {
+	orig := color.NoColor
+	defer func() { color.NoColor = orig }()
+	color.NoColor = true
+
+	// Path moved, but nothing went through it: no warning.
+	out := renderWarning(t, mirror.BuildModulesPathReport(layoutRoot, "/"), false)
+	require.Empty(t, out, "a moved path with no transferred modules writes nothing")
+}
+
+func TestWriteModulesPathWarning_MovedWithModules(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 	color.NoColor = true
 
 	// "/" places modules at the repo root; the hint points at the standard path.
-	out := renderLayout(t, mirror.BuildRegistryLayout(layoutRoot, "/", ""), true)
+	out := renderWarning(t, mirror.BuildModulesPathReport(layoutRoot, "/"), true)
 
 	require.Contains(t, out, "Warning: modules use a non-default path (--modules-path-suffix)")
+	require.Contains(t, out, "Modules")
 	require.Contains(t, out, "default: "+layoutRoot+"/modules")
+
+	// Only the moved modules path is reported: no full layout, no other rows.
+	require.NotContains(t, out, "Registry:")
+	for _, label := range []string{"Platform", "Security", "Packages", "Installer"} {
+		require.NotContains(t, out, label)
+	}
 }
 
-func TestWriteRegistryLayout_OverrideColor(t *testing.T) {
+func TestWriteModulesPathWarning_Color(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()
 
-	l := mirror.BuildRegistryLayout(layoutRoot, "mymods", "")
+	m := mirror.BuildModulesPathReport(layoutRoot, "mymods")
 
 	color.NoColor = false
-	require.Contains(t, renderLayout(t, l, true), "\x1b[",
+	require.Contains(t, renderWarning(t, m, true), "\x1b[",
 		"non-default modules path must be highlighted when colour is enabled")
 
 	color.NoColor = true
-	require.NotContains(t, renderLayout(t, l, true), "\x1b[",
+	require.NotContains(t, renderWarning(t, m, true), "\x1b[",
 		"no ANSI escape codes when colour is disabled")
 }

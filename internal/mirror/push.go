@@ -123,8 +123,8 @@ func NewPushService(
 // The key principle: no path transformations. Whatever path the layout has
 // in the unpacked directory becomes its path in the registry.
 func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
-	// Registry layout is known up front, so it is on the summary even on error.
-	summary := &PushSummary{Registry: svc.registryLayout()}
+	// The modules path is known up front, so it is on the summary even on error.
+	summary := &PushSummary{ModulesPath: svc.modulesPathReport()}
 
 	// Create unified directory for unpacking
 	dirPath := filepath.Join(svc.options.WorkingDir, "unified")
@@ -169,14 +169,10 @@ func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
 	return summary, nil
 }
 
-// registryLayout maps each component to its target registry path for the push
-// summary, honoring --modules-path-suffix. The installer repo lives at
-// <target>/installer.
-func (svc *PushService) registryLayout() RegistryLayout {
-	root := svc.client.GetRegistry()
-	installerPath := path.Join(root, internal.InstallerSegment)
-
-	return BuildRegistryLayout(root, svc.options.ModulesPathSuffix, installerPath)
+// modulesPathReport resolves the target modules path for the push summary,
+// honoring --modules-path-suffix.
+func (svc *PushService) modulesPathReport() ModulesPathReport {
+	return BuildModulesPathReport(svc.client.GetRegistry(), svc.options.ModulesPathSuffix)
 }
 
 // modulesPath returns the registry path for module repositories, relative to

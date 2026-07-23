@@ -73,13 +73,8 @@ var (
 //	║ Edition:    EE
 //	║
 //	║ Warning: modules use a non-default path (--modules-path-suffix)
-//	║ Registry:   registry.deckhouse.io/deckhouse/ee
-//	║   Platform   registry.deckhouse.io/deckhouse/ee
 //	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
 //	║              default: registry.deckhouse.io/deckhouse/ee/modules
-//	║   Security   registry.deckhouse.io/deckhouse/ee/security
-//	║   Packages   registry.deckhouse.io/deckhouse/ee/packages
-//	║   Installer  registry.deckhouse.io/deckhouse/installer
 //	║
 //	║ Platform:   v1.69.1 (5 channels)
 //	║ Installer:  v1.69.1
@@ -98,10 +93,10 @@ var (
 //	║ Elapsed: 3m12s
 //	╚═══════════════════════════════════════════════════════
 //
-// The Registry section appears only under --verbose-summary or when the modules
-// path was moved; its Warning header only when the path was moved. The Elapsed
-// line is preceded by a state line on a non-success outcome: "Pull failed; ...",
-// "Pull was cancelled; ...", or "No images were downloaded (dry-run).".
+// The Warning block appears only when --modules-path-suffix moved modules off
+// the default and modules were actually pulled. The Elapsed line is preceded by
+// a state line on a non-success outcome: "Pull failed; ...", "Pull was
+// cancelled; ...", or "No images were downloaded (dry-run).".
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -114,9 +109,8 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 		fmt.Fprintf(&b, "%s %s %s\n", bar(), cLabel(padLabel("Edition")), cCount(strings.ToUpper(s.Edition)))
 	}
 
-	// Registry layout: shown when the modules path was moved off the default, or
-	// on request via --verbose-summary.
-	summaryui.WriteRegistryLayout(&b, s.Registry, verbose || s.Registry.HasOverride)
+	// Warn only when the modules path was moved and modules were actually pulled.
+	summaryui.WriteModulesPathWarning(&b, s.ModulesPath, modulesPulled(s.Modules))
 
 	writeComponent(&b, "Platform", s.Platform)
 	writeComponent(&b, "Installer", s.Installer)
@@ -249,6 +243,13 @@ func writeSecurity(b *strings.Builder, s mirror.SecurityStats) {
 
 		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cGood(databases))
 	}
+}
+
+// modulesPulled reports whether at least one module was pulled (or planned, in
+// dry-run). A moved modules path is only worth warning about when modules
+// actually went through it.
+func modulesPulled(m mirror.ModulesStats) bool {
+	return len(m.Modules) > 0
 }
 
 // writeModules renders the modules line, and per-module detail when verbose.

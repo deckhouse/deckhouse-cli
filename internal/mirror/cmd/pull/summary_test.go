@@ -421,45 +421,47 @@ func TestRenderPullSummary(t *testing.T) {
 			skippedCount: 5,
 		},
 		{
-			name: "registry section highlights a moved modules path without verbose",
+			name: "moved modules path with modules pulled is warned about",
 			summary: &mirror.PullSummary{
 				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
-				Registry: mirror.BuildRegistryLayout(
-					"registry.deckhouse.io/deckhouse/ee", "/",
-					"registry.deckhouse.io/deckhouse/installer"),
+				Modules: mirror.ModulesStats{
+					Attempted: true,
+					Modules:   []mirror.ModuleStat{{Name: "console", Images: 1}},
+				},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/"),
 			},
 			verbose: false,
 			contains: []string{
-				"Registry:",
 				"Warning: modules use a non-default path (--modules-path-suffix)",
-				"registry.deckhouse.io/deckhouse/ee/security",
 				"default: registry.deckhouse.io/deckhouse/ee/modules",
 			},
+			// Only the moved modules path: no full layout, no other component paths.
+			notContains:  []string{"Registry:", "registry.deckhouse.io/deckhouse/ee/security"},
 			skippedCount: -1,
 		},
 		{
-			name: "registry section shown in verbose even at the default path",
+			name: "moved modules path but no modules pulled is silent even in verbose",
 			summary: &mirror.PullSummary{
-				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
-				Registry: mirror.BuildRegistryLayout(
-					"registry.deckhouse.io/deckhouse/ee", "/modules",
-					"registry.deckhouse.io/deckhouse/installer"),
+				Platform:    mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Modules:     mirror.ModulesStats{Attempted: true, Modules: []mirror.ModuleStat{}},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/"),
 			},
 			verbose:      true,
-			contains:     []string{"Registry:", "registry.deckhouse.io/deckhouse/ee/modules"},
-			notContains:  []string{"default:", "Warning"},
+			notContains:  []string{"Warning", "default:", "Registry:"},
 			skippedCount: -1,
 		},
 		{
-			name: "registry section hidden at the default path without verbose",
+			name: "default modules path is silent even with modules pulled",
 			summary: &mirror.PullSummary{
 				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
-				Registry: mirror.BuildRegistryLayout(
-					"registry.deckhouse.io/deckhouse/ee", "/modules",
-					"registry.deckhouse.io/deckhouse/installer"),
+				Modules: mirror.ModulesStats{
+					Attempted: true,
+					Modules:   []mirror.ModuleStat{{Name: "console", Images: 1}},
+				},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/modules"),
 			},
-			verbose:      false,
-			notContains:  []string{"Registry:"},
+			verbose:      true,
+			notContains:  []string{"Warning", "default:", "Registry:"},
 			skippedCount: -1,
 		},
 	}

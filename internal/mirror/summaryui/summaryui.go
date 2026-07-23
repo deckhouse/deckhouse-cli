@@ -40,7 +40,7 @@ const (
 	NameWidth = 30
 	// SizeWidth right-aligns bundle artifact sizes.
 	SizeWidth = 10
-	// layoutNameWidth left-aligns component names in the registry layout section.
+	// layoutNameWidth left-aligns the "Modules" label in the moved-path warning.
 	layoutNameWidth = 10
 )
 
@@ -127,59 +127,40 @@ func HumanSize(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), units[exp])
 }
 
-// WriteRegistryLayout writes the registry layout section: the root registry and
-// where each component lives, with any non-default path (a moved modules path)
-// in yellow plus a dimmed hint of the standard path. Writes nothing when show is
-// false.
+// WriteModulesPathWarning warns that modules were mirrored to a non-default
+// registry path (--modules-path-suffix): the moved path in yellow plus a dimmed
+// hint of the standard path.
 //
-// The block is wrapped in blank lines to set it apart. A moved modules path adds
-// a plain-text warning header and highlights the Modules line.
+// It writes nothing unless the path was moved AND modules were actually
+// transferred (transferred=true). A moved path is only worth flagging when
+// modules went through it; a run that pulled or pushed no modules needs no
+// warning.
+//
+// The block is wrapped in blank lines to set it apart.
 //
 // Example output for --modules-path-suffix mymods (colour stripped; the warning
 // header and the Modules path are yellow):
 //
 //	║
 //	║ Warning: modules use a non-default path (--modules-path-suffix)
-//	║ Registry:   registry.deckhouse.io/deckhouse/ee
-//	║   Platform   registry.deckhouse.io/deckhouse/ee
 //	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
 //	║              default: registry.deckhouse.io/deckhouse/ee/modules
-//	║   Security   registry.deckhouse.io/deckhouse/ee/security
-//	║   Packages   registry.deckhouse.io/deckhouse/ee/packages
-//	║   Installer  registry.deckhouse.io/deckhouse/installer
 //	║
-//
-// With a default modules path the warning header is omitted and the Modules line
-// is plain.
-func WriteRegistryLayout(b *strings.Builder, layout mirror.RegistryLayout, show bool) {
-	// No rows means an unpopulated layout; never emit a bare header.
-	if !show || len(layout.Rows) == 0 {
+func WriteModulesPathWarning(b *strings.Builder, m mirror.ModulesPathReport, transferred bool) {
+	if !m.Moved || !transferred {
 		return
 	}
 
 	// Blank lines above and below set the block apart from the summary stats.
 	b.WriteString(Bar() + "\n")
 
-	// A moved modules path is unusual; call it out in plain text, not by colour
-	// alone (colour is lost in piped logs and to colour-blind readers).
-	if layout.HasOverride {
-		fmt.Fprintf(b, "%s %s\n", Bar(), Warn("Warning: modules use a non-default path (--modules-path-suffix)"))
-	}
+	// Call it out in plain text, not by colour alone (colour is lost in piped
+	// logs and to colour-blind readers).
+	fmt.Fprintf(b, "%s %s\n", Bar(), Warn("Warning: modules use a non-default path (--modules-path-suffix)"))
 
-	fmt.Fprintf(b, "%s %s %s\n", Bar(), Label(PadLabel("Registry")), layout.Root)
-
-	for _, row := range layout.Rows {
-		name := fmt.Sprintf("%-*s", layoutNameWidth, row.Label)
-
-		if row.NonDefault {
-			fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), Warn(row.Path))
-			fmt.Fprintf(b, "%s   %s %s\n", Bar(), strings.Repeat(" ", layoutNameWidth), Dim("default: "+row.DefaultPath))
-
-			continue
-		}
-
-		fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), row.Path)
-	}
+	name := fmt.Sprintf("%-*s", layoutNameWidth, "Modules")
+	fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), Warn(m.Path))
+	fmt.Fprintf(b, "%s   %s %s\n", Bar(), strings.Repeat(" ", layoutNameWidth), Dim("default: "+m.DefaultPath))
 
 	b.WriteString(Bar() + "\n")
 }

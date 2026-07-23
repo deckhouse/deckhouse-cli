@@ -25,9 +25,8 @@ import (
 )
 
 // renderPushSummary formats a PushSummary as a single multi-line, framed block,
-// matching the pull summary's look. The registry layout section is always shown:
-// telling the operator where each component landed is the point of the push
-// summary, and it highlights a moved modules path (--modules-path-suffix).
+// matching the pull summary's look. It warns about a moved modules path
+// (--modules-path-suffix) only when modules were actually pushed to it.
 //
 // Example output for --modules-path-suffix / (colour stripped; the warning
 // header and the moved Modules path are yellow):
@@ -35,13 +34,8 @@ import (
 //	╔══ Push summary ═══════════════════════════════════════
 //	║
 //	║ Warning: modules use a non-default path (--modules-path-suffix)
-//	║ Registry:   registry.example.com/deckhouse/ee
-//	║   Platform   registry.example.com/deckhouse/ee
 //	║   Modules    registry.example.com/deckhouse/ee
 //	║              default: registry.example.com/deckhouse/ee/modules
-//	║   Security   registry.example.com/deckhouse/ee/security
-//	║   Packages   registry.example.com/deckhouse/ee/packages
-//	║   Installer  registry.example.com/deckhouse/ee/installer
 //	║
 //	║ Platform:   pushed
 //	║ Installer:  not present
@@ -60,7 +54,8 @@ func renderPushSummary(s *mirror.PushSummary) string {
 	b.WriteByte('\n')
 	summaryui.WriteTopBorder(&b, pushSummaryTitle(s))
 
-	summaryui.WriteRegistryLayout(&b, s.Registry, true)
+	// Warn only when the modules path was moved and modules were actually pushed.
+	summaryui.WriteModulesPathWarning(&b, s.ModulesPath, s.Modules > 0)
 
 	writePushPresence(&b, "Platform", s.PlatformPushed)
 	writePushPresence(&b, "Installer", s.InstallerPushed)

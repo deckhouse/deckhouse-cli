@@ -310,7 +310,7 @@ If `--gost-digest` is specified, `.gostsum` files are created alongside each `.t
 
 After a pull, `d8 mirror` prints a framed summary of what was pulled (platform, installer, security databases, modules, packages) and the bundle size.
 
-The summary also shows a **Registry** section - the source repo and the path each component reads from - when `--modules-path-suffix` moves modules off the default `modules/`, or when `--verbose-summary` is set. A moved modules path is highlighted, with a hint of the standard path, so a non-standard layout is easy to spot.
+When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pulled, the summary warns about the non-default modules path, highlighting it with a hint of the standard path so a non-standard layout is easy to spot. A default path, or a moved path that no module went through, produces no warning.
 
 ---
 
@@ -377,7 +377,7 @@ d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse \
 
 After a push, `d8 mirror` prints a framed summary of what was written to the target registry (platform, installer, security databases, module and package counts).
 
-It always shows a **Registry** section with the target repo and the path each component was written to. When `--modules-path-suffix` moves modules off the default `modules/`, the moved path is highlighted with a hint of the standard path.
+When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pushed, the summary warns about the non-default modules path, highlighting it with a hint of the standard path. A default path, or a moved path that no module went through, produces no warning.
 
 ### Environment Variables
 

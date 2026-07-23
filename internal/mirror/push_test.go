@@ -144,12 +144,12 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 			require.NoError(t, err, "push must succeed")
 
 			// Summary reflects what was pushed: one module and the install
-			// layout (counted as platform). Override tracks a moved modules path.
+			// layout (counted as platform). Moved tracks a non-default modules path.
 			assert.Equal(t, 1, summary.Modules, "one module pushed")
 			assert.True(t, summary.PlatformPushed, "install layout counts as platform")
-			wantOverride := tt.wantModule != "modules/"+moduleName
-			assert.Equal(t, wantOverride, summary.Registry.HasOverride,
-				"registry override reflects a moved modules path")
+			wantMoved := tt.wantModule != "modules/"+moduleName
+			assert.Equal(t, wantMoved, summary.ModulesPath.Moved,
+				"modules path report reflects a moved modules path")
 
 			ctx := context.Background()
 
