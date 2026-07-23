@@ -724,9 +724,9 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 
 	dest := flatDest(task.nodeDir, cfg.Compression.Ext())
 
-	_, blockAlreadyMerged, err := archive.FindBlockData(task.nodeDir)
+	_, blockAlreadyMerged, err := archive.ClassifyBlockPayload(task.nodeDir)
 	if err != nil {
-		return fmt.Errorf("find block data in %s: %w", task.nodeDir, err)
+		return fmt.Errorf("classify block data in %s: %w", task.nodeDir, err)
 	}
 
 	fsTarDone, err := fsTarComplete(dest.fsTarPath)
@@ -742,9 +742,9 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.DisplayLabel()))
 
-		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
-		// window in volume.MergeBlockChunks between committing the merged file
-		// and removing the chunk dir (inv. #1); no later run ever revisits it.
+		// The final name is published only after decoded-length verification.
+		// The skip branch owns leftover-chunk-dir cleanup for a crash after that
+		// durable commit but before staging removal (inv. #1).
 		removeMergedBlockChunkDir(cfg, dest.chunkDir)
 
 		if handle.stream != nil {
@@ -798,9 +798,9 @@ func downloadOwnData(
 	dest := flatDest(nodeDir, cfg.Compression.Ext())
 	handle := lookupStream(streams, node)
 
-	_, found, err := archive.FindBlockData(nodeDir)
+	_, found, err := archive.ClassifyBlockPayload(nodeDir)
 	if err != nil {
-		return fmt.Errorf("find block data in %s: %w", nodeDir, err)
+		return fmt.Errorf("classify block data in %s: %w", nodeDir, err)
 	}
 
 	if found {
@@ -808,9 +808,9 @@ func downloadOwnData(
 			slog.String("kind", node.Kind),
 			slog.String("name", node.DisplayLabel()))
 
-		// The skip branch OWNS the leftover-chunk-dir cleanup for the crash
-		// window in volume.MergeBlockChunks between committing the merged file
-		// and removing the chunk dir (inv. #1); no later run ever revisits it.
+		// The final name is published only after decoded-length verification.
+		// The skip branch owns leftover-chunk-dir cleanup for a crash after that
+		// durable commit but before staging removal (inv. #1).
 		removeMergedBlockChunkDir(cfg, dest.chunkDir)
 
 		if handle.stream != nil {
@@ -842,13 +842,15 @@ func downloadOwnData(
 
 // removeMergedBlockChunkDir deletes a leftover block chunk staging directory
 // (data.bin.d/) found next to an already-merged data.bin* file, compensating the
-// crash window in volume.MergeBlockChunks between committing the merged file
-// (aw.Commit) and removing the chunk dir (os.RemoveAll). A hard kill in that
-// window leaves BOTH the durable merged file and a full compressed copy of the
-// volume in the chunk dir; every later resume takes the blockAlreadyMerged skip
-// branch and nothing else ever revisits the chunk dir, so without this cleanup
-// the staging copy leaks permanently (inv. #1 — the skip branch owns leftover
-// cleanup). os.RemoveAll is a no-op when the chunk dir is absent, so the normal
+// crash window in volume.MergeBlockChunks between committing the already-
+// verified merged file (aw.Commit) and removing the chunk dir (os.RemoveAll).
+// A hard kill in that window leaves BOTH the durable verified file and a full
+// compressed copy of the volume in the chunk dir; every later resume takes the
+// blockAlreadyMerged skip branch and nothing else revisits the chunk dir, so
+// without this cleanup the staging copy leaks permanently (inv. #1 — the skip
+// branch owns leftover cleanup). ClassifyBlockPayload recognizes only exact
+// final payload names, so an unpublished AtomicWriter .tmp can never enter this
+// branch. os.RemoveAll is a no-op when the chunk dir is absent, so the normal
 // (no-leftover) path is unchanged.
 //
 // A RemoveAll failure is logged as a WARN and swallowed, never returned: the

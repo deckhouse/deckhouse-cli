@@ -319,8 +319,70 @@ func TestMergeBlockChunks_CancelledContext(t *testing.T) {
 	}
 }
 
+type cancelDuringVerificationContext struct {
+	context.Context
+	cancel context.CancelFunc
+	checks int
+}
+
+func (c *cancelDuringVerificationContext) Err() error {
+	c.checks++
+	if c.checks >= 2 {
+		c.cancel()
+	}
+
+	return c.Context.Err()
+}
+
+func TestMergeBlockChunks_CancelledDuringVerificationPreservesChunks(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("verification must be cancellable")
+	chunkSize := int64(len(payload))
+	makeChunkFramesWithCodec(t, chunkDir, [][]byte{payload}, "none")
+
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize}); err != nil {
+		t.Fatalf("WriteChunkMeta: %v", err)
+	}
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	ctx := &cancelDuringVerificationContext{Context: baseCtx, cancel: cancel}
+	err := volume.MergeBlockChunks(ctx, chunkDir, outPath, chunkSize, chunkSize, "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("MergeBlockChunks error = %v; want context.Canceled", err)
+	}
+
+	if ctx.checks < 2 {
+		t.Fatalf("context checked %d times; want cancellation during verification", ctx.checks)
+	}
+
+	if _, statErr := os.Stat(outPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("final output must remain unpublished after verification cancellation, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(outPath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary output must be aborted after verification cancellation, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(chunkDir, archive.ChunkFileName(0, ""))); statErr != nil {
+		t.Fatalf("chunk must survive verification cancellation: %v", statErr)
+	}
+
+	if _, found, metaErr := archive.ReadChunkMeta(chunkDir); metaErr != nil || !found {
+		t.Fatalf("chunks.meta must survive verification cancellation: found=%v err=%v", found, metaErr)
+	}
+}
+
 // TestMergeBlockChunks_VerifiesDecodedLength_AllCodecs proves the new
-// post-merge decoded-length check succeeds (does not falsely reject) a
+// pre-publish decoded-length check succeeds (does not falsely reject) a
 // correctly merged volume for every registered codec, including gzip and
 // lz4, whose concatenated-frame decoding is exercised end-to-end here for
 // the first time via a multi-chunk merge (gzip relies on its reader's
@@ -357,13 +419,12 @@ func TestMergeBlockChunks_VerifiesDecodedLength_AllCodecs(t *testing.T) {
 	}
 }
 
-// TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput simulates
+// TestMergeBlockChunks_DecodedLengthMismatch_FailsBeforePublish simulates
 // a truncated/short merged stream: two 5-byte chunks decode to 10 raw bytes,
 // but the declared totalSize (20) claims twice that. MergeBlockChunks must
-// fail with ErrDecodedLengthMismatch and must not leave the corrupt merged
-// file at outPath -- otherwise a future resume's data.bin* glob check would
-// treat this node's volume as already complete forever.
-func TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput(t *testing.T) {
+// fail with ErrDecodedLengthMismatch before the final path is visible, abort
+// the temporary file, and preserve the chunks and geometry for resume.
+func TestMergeBlockChunks_DecodedLengthMismatch_FailsBeforePublish(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
@@ -378,6 +439,10 @@ func TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput(t *testing
 
 	makeChunkFrames(t, chunkDir, payloads)
 
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: declaredTotalSize}); err != nil {
+		t.Fatalf("WriteChunkMeta: %v", err)
+	}
+
 	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, declaredTotalSize, chunkSize, ".zst")
 	if err == nil {
 		t.Fatal("expected an error for decoded length mismatch, got nil")
@@ -388,25 +453,35 @@ func TestMergeBlockChunks_DecodedLengthMismatch_FailsAndRemovesOutput(t *testing
 	}
 
 	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
-		t.Error("merged output should be removed after a decoded-length mismatch")
+		t.Error("merged output must never be published after a decoded-length mismatch")
 	}
 
-	// The chunk directory is removed unconditionally right after a
-	// successful commit, before verification runs -- see the resume-on-
-	// corruption doc comment on MergeBlockChunks: this forces the next run
-	// to re-fetch every chunk from the exporter rather than re-merging the
-	// same untrustworthy chunk files forever.
-	if _, statErr := os.Stat(chunkDir); !os.IsNotExist(statErr) {
-		t.Error("chunk dir should be removed after commit even when verification later fails")
+	if _, statErr := os.Stat(outPath + ".tmp"); !os.IsNotExist(statErr) {
+		t.Error("temporary merged output must be aborted after a decoded-length mismatch")
+	}
+
+	for i := range payloads {
+		if _, statErr := os.Stat(filepath.Join(chunkDir, archive.ChunkFileName(i, ".zst"))); statErr != nil {
+			t.Errorf("chunk %d must survive a decoded-length mismatch: %v", i, statErr)
+		}
+	}
+
+	meta, found, metaErr := archive.ReadChunkMeta(chunkDir)
+	if metaErr != nil || !found {
+		t.Fatalf("chunks.meta must survive a decoded-length mismatch: found=%v err=%v", found, metaErr)
+	}
+
+	if meta != (archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: declaredTotalSize}) {
+		t.Errorf("chunks.meta changed: got %+v", meta)
 	}
 }
 
-// TestMergeBlockChunks_DecodedLengthOverrun_FailsAndRemovesOutput mirrors the
+// TestMergeBlockChunks_DecodedLengthOverrun_FailsBeforePublish mirrors the
 // truncation case above for an over-sent merged stream: chunk 1's frame
 // decodes to MORE raw bytes (10) than its slot's share of totalSize implies,
 // so the two present chunks (satisfying the numChunks=2 presence check)
 // decode to 15 total raw bytes against a declared totalSize of 10.
-func TestMergeBlockChunks_DecodedLengthOverrun_FailsAndRemovesOutput(t *testing.T) {
+func TestMergeBlockChunks_DecodedLengthOverrun_FailsBeforePublish(t *testing.T) {
 	nodeDir := t.TempDir()
 	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
 	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
@@ -432,6 +507,135 @@ func TestMergeBlockChunks_DecodedLengthOverrun_FailsAndRemovesOutput(t *testing.
 
 	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
 		t.Error("merged output should be removed after a decoded-length mismatch")
+	}
+}
+
+func TestMergeBlockChunks_DecodeErrorFailsBeforePublish(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	chunkPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst"))
+	if err := os.WriteFile(chunkPath, []byte("not a zstd frame"), 0o600); err != nil {
+		t.Fatalf("write corrupt chunk: %v", err)
+	}
+
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: 16, TotalSize: 16}); err != nil {
+		t.Fatalf("WriteChunkMeta: %v", err)
+	}
+
+	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, 16, 16, ".zst")
+	if err == nil {
+		t.Fatal("expected a decode error, got nil")
+	}
+
+	if _, statErr := os.Stat(outPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("final output must remain unpublished after a decode error, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(outPath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary output must be aborted after a decode error, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(chunkPath); statErr != nil {
+		t.Fatalf("corrupt chunk must remain available for resume handling: %v", statErr)
+	}
+
+	if _, found, metaErr := archive.ReadChunkMeta(chunkDir); metaErr != nil || !found {
+		t.Fatalf("chunks.meta must survive a decode error: found=%v err=%v", found, metaErr)
+	}
+}
+
+func TestMergeBlockChunks_CommitErrorPreservesChunksAndAbortsTemp(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("verified bytes")
+	chunkSize := int64(len(payload))
+	makeChunkFramesWithCodec(t, chunkDir, [][]byte{payload}, "none")
+
+	// A directory at the final path deterministically makes the atomic rename
+	// fail after verification, without weakening production encapsulation with
+	// a test-only commit hook.
+	if err := os.Mkdir(outPath, 0o755); err != nil {
+		t.Fatalf("Mkdir final-path blocker: %v", err)
+	}
+
+	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, chunkSize, chunkSize, "")
+	if err == nil {
+		t.Fatal("expected a commit error, got nil")
+	}
+
+	info, statErr := os.Stat(outPath)
+	if statErr != nil {
+		t.Fatalf("stat final-path blocker: %v", statErr)
+	}
+
+	if !info.IsDir() {
+		t.Fatal("failed commit must not replace the final-path blocker")
+	}
+
+	if _, statErr := os.Stat(outPath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary output must be aborted after a commit error, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(chunkDir, archive.ChunkFileName(0, ""))); statErr != nil {
+		t.Fatalf("chunk must survive a commit error: %v", statErr)
+	}
+}
+
+func TestMergeBlockChunks_RemoveErrorOccursAfterVerifiedCommit(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission bits are not enforced for root; cannot force os.RemoveAll to fail")
+	}
+
+	chunkParent := t.TempDir()
+	chunkDir := filepath.Join(chunkParent, archive.BlockChunksDirName)
+	outPath := filepath.Join(t.TempDir(), archive.DataBlockName(""))
+
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("durable before cleanup")
+	chunkSize := int64(len(payload))
+	makeChunkFramesWithCodec(t, chunkDir, [][]byte{payload}, "none")
+
+	if err := os.Chmod(chunkParent, 0o555); err != nil {
+		t.Fatalf("make chunk parent read-only: %v", err)
+	}
+
+	t.Cleanup(func() { _ = os.Chmod(chunkParent, 0o755) })
+
+	err := volume.MergeBlockChunks(context.Background(), chunkDir, outPath, chunkSize, chunkSize, "")
+	if err == nil {
+		t.Fatal("expected a chunk removal error, got nil")
+	}
+
+	got, readErr := os.ReadFile(outPath)
+	if readErr != nil {
+		t.Fatalf("verified final must be committed before chunk removal: %v", readErr)
+	}
+
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("committed output = %q; want %q", got, payload)
+	}
+
+	if _, statErr := os.Stat(outPath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary output must be absent after verified commit, Stat error: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(chunkDir); statErr != nil {
+		t.Fatalf("failed removal must leave the chunk directory for pipeline cleanup: %v", statErr)
 	}
 }
 

@@ -53,9 +53,9 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 //
 // MERGE STRATEGY is the same for every codec (gzip, lz4, none, and zstd):
 // mergeByConcatenation copies each chunk's already-finalized, independently-
-// encoded frame byte-for-byte into outPath, in ascending order. Concatenation
-// of independent frames is itself a valid multi-frame stream decodable by
-// stock tools.
+// encoded frame byte-for-byte into an unpublished AtomicWriter temporary file,
+// in ascending order. Concatenation of independent frames is itself a valid
+// multi-frame stream decodable by stock tools.
 //
 // HISTORY: a native-zstd-seekable-format merge path (decoding each zstd chunk
 // back to raw bytes and re-encoding it through a seekable.Writer to embed a
@@ -85,12 +85,13 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 // The restore/import decode counterparts rely on this "zero frames == zero
 // bytes" contract, so it must not change without updating them.
 //
-// ctx is checked once per chunk during the copy/re-encode loop; if it is
-// cancelled mid-merge, the in-progress AtomicWriter is aborted (so no partial
-// file is ever visible at outPath) and a wrapped ctx.Err() is returned
-// (checkable via errors.Is). A hard kill or graceful cancellation here never
-// loses data: the chunk directory is only removed after a full successful
-// Commit, so the merge simply resumes from the same chunks on the next run.
+// ctx is checked once per chunk during the copy loop and on every read during
+// decoded-length verification. Cancellation aborts the in-progress
+// AtomicWriter (so no partial file is ever visible at outPath) and returns a
+// wrapped ctx.Err() (checkable via errors.Is). A hard kill or graceful
+// cancellation never loses data: the chunk directory is only removed after
+// verification and a full successful Commit, so the merge resumes from the
+// same chunks on the next run.
 func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
 	if totalSize == 0 {
 		return commitEmptyBlock(chunkDir, outPath)
@@ -116,30 +117,28 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		}
 	}
 
-	if err := mergeByConcatenation(ctx, chunkDir, outPath, numChunks, ext); err != nil {
+	aw, err := mergeByConcatenation(ctx, chunkDir, outPath, numChunks, ext)
+	if err != nil {
 		return err
 	}
 
-	// Remove the temporary chunk directory after successful commit.
-	if err := os.RemoveAll(chunkDir); err != nil {
-		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
-	}
-
-	// Verify the merged stream decodes to exactly totalSize AFTER chunkDir is
-	// already gone (matching the filesystem MD5-verification precedent in
-	// stageChunkedFile): a mismatch removes the corrupt outPath and returns,
-	// so the NEXT run finds neither a chunk dir nor a data.bin and re-fetches
-	// every chunk from the exporter fresh rather than repeatedly re-merging
-	// the same untrustworthy chunk files forever.
-	if err := verifyDecodedLength(outPath, ext, totalSize); err != nil {
-		if removeErr := os.Remove(outPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			return errors.Join(
-				fmt.Errorf("verify merged %s: %w", outPath, err),
-				fmt.Errorf("remove corrupt merged file: %w", removeErr),
-			)
-		}
+	if err := verifyPendingBlock(ctx, aw, outPath, ext, totalSize); err != nil {
+		aw.Abort()
 
 		return fmt.Errorf("verify merged %s: %w", outPath, err)
+	}
+
+	if err := aw.Commit(); err != nil {
+		aw.Abort()
+
+		return fmt.Errorf("commit verified %s: %w", outPath, err)
+	}
+
+	// Chunks remain the recovery source until the verified final artifact is
+	// durably published. A removal error therefore leaves both the verified
+	// final and the redundant chunks for the pipeline's already-merged cleanup.
+	if err := os.RemoveAll(chunkDir); err != nil {
+		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
 	}
 
 	return nil
@@ -147,33 +146,36 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 
 // mergeByConcatenation implements MergeBlockChunks' merge path for every
 // codec (gzip, lz4, none, and zstd): each chunk's already-finalized,
-// independently-encoded frame is copied byte-for-byte into outPath, in
-// ascending order, via AtomicWriter.
-func mergeByConcatenation(ctx context.Context, chunkDir, outPath string, numChunks int, ext string) error {
+// independently-encoded frame is copied byte-for-byte into an unpublished
+// AtomicWriter temporary file, in ascending order. The caller verifies and
+// commits the returned writer.
+func mergeByConcatenation(
+	ctx context.Context,
+	chunkDir string,
+	outPath string,
+	numChunks int,
+	ext string,
+) (*archive.AtomicWriter, error) {
 	aw, err := archive.NewAtomicWriter(outPath)
 	if err != nil {
-		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
+		return nil, fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
 
 	for i := range numChunks {
 		if err := ctx.Err(); err != nil {
 			aw.Abort()
-			return fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
+			return nil, fmt.Errorf("merge cancelled before chunk %d: %w", i, err)
 		}
 
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
 		if err := copyFile(aw, p); err != nil {
 			aw.Abort()
-			return fmt.Errorf("copy chunk %d into merged file: %w", i, err)
+			return nil, fmt.Errorf("copy chunk %d into merged file: %w", i, err)
 		}
 	}
 
-	if err := aw.Commit(); err != nil {
-		return fmt.Errorf("commit %s: %w", outPath, err)
-	}
-
-	return nil
+	return aw, nil
 }
 
 // commitEmptyBlock durably writes an empty outPath and drops the (empty or
@@ -188,6 +190,8 @@ func commitEmptyBlock(chunkDir, outPath string) error {
 	}
 
 	if err := aw.Commit(); err != nil {
+		aw.Abort()
+
 		return fmt.Errorf("commit empty %s: %w", outPath, err)
 	}
 
@@ -198,63 +202,145 @@ func commitEmptyBlock(chunkDir, outPath string) error {
 	return nil
 }
 
-// verifyDecodedLength decodes outPath — a codec-compressed stream identified
-// by ext (as codec.Ext() returns it: "", ".zst", ".gz", or ".lz4") that may
-// be a concatenation of multiple independent frames — and asserts it yields
-// exactly wantSize raw bytes. Decoding streams through the codec's reader
-// into a discarding counter (decodeVolumeStream, shared with the filesystem
-// per-file verification path in fs.go), so no whole-volume buffer is
-// introduced regardless of volume size.
-//
-// EXTENSION POINT: if a future exporter version starts sending a block-level
-// content digest, verify it here alongside the length check — do not invent
-// one now (the current exporter sends none, see ErrDecodedLengthMismatch).
+// verifyPendingBlock opens the AtomicWriter's unpublished temporary file and
+// verifies it before Commit can make outPath visible.
+func verifyPendingBlock(
+	ctx context.Context,
+	aw *archive.AtomicWriter,
+	outPath string,
+	ext string,
+	wantSize int64,
+) error {
+	reader, err := aw.OpenTempReader()
+	if err != nil {
+		return err
+	}
+
+	verifyErr := verifyDecodedReader(ctx, reader, outPath, ext, wantSize)
+	closeErr := reader.Close()
+
+	if verifyErr != nil {
+		if closeErr != nil {
+			return errors.Join(verifyErr, fmt.Errorf("close merged file %s after verification: %w", outPath, closeErr))
+		}
+
+		return verifyErr
+	}
+
+	if closeErr != nil {
+		return fmt.Errorf("close merged file %s after verification: %w", outPath, closeErr)
+	}
+
+	return nil
+}
+
+// verifyDecodedLength verifies an already-published file. MergeBlockChunks uses
+// verifyPendingBlock instead so the final path remains invisible until this
+// check has succeeded.
 func verifyDecodedLength(outPath, ext string, wantSize int64) error {
 	f, err := os.Open(outPath)
 	if err != nil {
 		return fmt.Errorf("open merged file %s: %w", outPath, err)
 	}
 
-	defer func() { _ = f.Close() }()
-
-	// Defensive symmetry with the MergeBlockChunks zero-size short-circuit: an
-	// empty file trivially decodes to zero raw bytes under every codec, but
-	// gzip's reader rejects an empty stream with EOF (a gzip member needs a
-	// header). Treat an empty input as a valid zero-length decode so ad-hoc
-	// callers stay safe without a per-codec special-case.
+	// An empty file is the canonical zero-frame representation of a zero-size
+	// volume, including gzip whose reader otherwise rejects it with EOF.
 	if wantSize == 0 {
 		info, statErr := f.Stat()
 		if statErr != nil {
+			_ = f.Close()
+
 			return fmt.Errorf("stat merged file %s: %w", outPath, statErr)
 		}
 
 		if info.Size() == 0 {
+			if closeErr := f.Close(); closeErr != nil {
+				return fmt.Errorf("close merged file %s after verification: %w", outPath, closeErr)
+			}
+
 			return nil
 		}
 	}
 
-	var counter byteCounter
+	verifyErr := verifyDecodedReader(context.Background(), f, outPath, ext, wantSize)
+	closeErr := f.Close()
 
-	if err := decodeVolumeStream(&counter, f, ext); err != nil {
-		return fmt.Errorf("decode merged file %s: %w", outPath, err)
+	if verifyErr != nil {
+		if closeErr != nil {
+			return errors.Join(verifyErr, fmt.Errorf("close merged file %s after verification: %w", outPath, closeErr))
+		}
+
+		return verifyErr
 	}
 
-	if counter.n != wantSize {
-		return fmt.Errorf("decoded %d bytes, want %d: %w", counter.n, wantSize, ErrDecodedLengthMismatch)
+	if closeErr != nil {
+		return fmt.Errorf("close merged file %s after verification: %w", outPath, closeErr)
 	}
 
 	return nil
 }
 
-// byteCounter is an io.Writer that discards its input and sums the total
-// bytes written, used to measure a decoded stream's length without buffering it.
-type byteCounter struct {
-	n int64
+// verifyDecodedReader decodes src — a codec-compressed stream identified
+// by ext (as codec.Ext() returns it: "", ".zst", ".gz", or ".lz4") that may
+// be a concatenation of multiple independent frames — and asserts it yields
+// exactly wantSize raw bytes. Decoding streams through the codec's reader
+// into a discarding counter (decodeVolumeStream, shared with the filesystem
+// per-file verification path in fs.go), so no whole-volume buffer is
+// introduced regardless of volume size. contextReader checks ctx before every
+// compressed-input read, making cancellation errors errors.Is-compatible.
+//
+// EXTENSION POINT: if a future exporter version starts sending a block-level
+// content digest, verify it here alongside the length check — do not invent
+// one now (the current exporter sends none, see ErrDecodedLengthMismatch).
+func verifyDecodedReader(ctx context.Context, src io.Reader, outPath, ext string, wantSize int64) error {
+	verifier := decodedLengthVerifier{ctx: ctx, want: wantSize}
+
+	if err := decodeVolumeStream(&verifier, &contextReader{ctx: ctx, src: src}, ext); err != nil {
+		return fmt.Errorf("decode merged file %s: %w", outPath, err)
+	}
+
+	if verifier.n != wantSize {
+		return fmt.Errorf("decoded %d bytes, want %d: %w", verifier.n, wantSize, ErrDecodedLengthMismatch)
+	}
+
+	return nil
 }
 
-// Write implements io.Writer.
-func (c *byteCounter) Write(p []byte) (int, error) {
-	c.n += int64(len(p))
+type contextReader struct {
+	ctx context.Context
+	src io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, fmt.Errorf("block verification cancelled: %w", err)
+	}
+
+	return r.src.Read(p)
+}
+
+// decodedLengthVerifier checks cancellation on decoded output as well as
+// compressed input, and stops as soon as the declared length is exceeded.
+// This keeps verification responsive even when a decoder buffers compressed
+// input internally and bounds decompression work for an over-sent stream.
+type decodedLengthVerifier struct {
+	ctx  context.Context
+	want int64
+	n    int64
+}
+
+func (v *decodedLengthVerifier) Write(p []byte) (int, error) {
+	if err := v.ctx.Err(); err != nil {
+		return 0, fmt.Errorf("block verification cancelled: %w", err)
+	}
+
+	n := int64(len(p))
+	if n > v.want-v.n {
+		return 0, fmt.Errorf("decoded more than %d bytes: %w", v.want, ErrDecodedLengthMismatch)
+	}
+
+	v.n += n
+
 	return len(p), nil
 }
 
