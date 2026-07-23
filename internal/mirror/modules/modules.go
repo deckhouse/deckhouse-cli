@@ -934,6 +934,11 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 	return extraImages
 }
 
+// errExtraImagesJSONNotFound marks that the image has no extra_images.json.
+// This is a legitimate skip (not every module version declares extra images),
+// distinct from a network/stream error while reading the layer.
+var errExtraImagesJSONNotFound = errors.New("extra_images.json not found in image")
+
 // extractExtraImagesJSON extracts extra_images.json from an image
 func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[string]interface{}, error) {
 	rc := img.Extract()
@@ -943,7 +948,7 @@ func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[strin
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return nil, fmt.Errorf("extra_images.json not found in image")
+			return nil, errExtraImagesJSONNotFound
 		}
 
 		if err != nil {
