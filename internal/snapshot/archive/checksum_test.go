@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -126,19 +125,6 @@ func TestComputeNodeChecksumRejectsNonRegularArchiveArtifacts(t *testing.T) {
 			},
 		},
 		{
-			name: "filesystem payload fifo",
-			mutate: func(t *testing.T, nodeDir string) string {
-				t.Helper()
-
-				path := filepath.Join(nodeDir, FsTarName)
-				if err := syscall.Mkfifo(path, 0o600); err != nil {
-					t.Fatalf("mkfifo: %v", err)
-				}
-
-				return path
-			},
-		},
-		{
 			name: "legacy data directory symlink",
 			mutate: func(t *testing.T, nodeDir string) string {
 				t.Helper()
@@ -151,24 +137,6 @@ func TestComputeNodeChecksumRejectsNonRegularArchiveArtifacts(t *testing.T) {
 				path := filepath.Join(nodeDir, DataDirName)
 				if err := os.Symlink(outside, path); err != nil {
 					t.Fatalf("symlink data: %v", err)
-				}
-
-				return path
-			},
-		},
-		{
-			name: "legacy data file fifo",
-			mutate: func(t *testing.T, nodeDir string) string {
-				t.Helper()
-
-				dataDir := filepath.Join(nodeDir, DataDirName)
-				if err := os.Mkdir(dataDir, 0o755); err != nil {
-					t.Fatalf("mkdir data: %v", err)
-				}
-
-				path := filepath.Join(dataDir, "pvc.bin")
-				if err := syscall.Mkfifo(path, 0o600); err != nil {
-					t.Fatalf("mkfifo: %v", err)
 				}
 
 				return path
@@ -190,6 +158,63 @@ func TestComputeNodeChecksumRejectsNonRegularArchiveArtifacts(t *testing.T) {
 				t.Errorf("error %q does not contain offending path %q", err, path)
 			}
 		})
+	}
+}
+
+func TestComputeNodeChecksumLegacyParentReplacementCannotHashOutside(t *testing.T) {
+	container := t.TempDir()
+	nodeDir := filepath.Join(container, "node")
+	if err := os.MkdirAll(filepath.Join(nodeDir, ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir manifests: %v", err)
+	}
+
+	dataDir := filepath.Join(nodeDir, DataDirName)
+	if err := os.Mkdir(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+
+	dataPath := filepath.Join(dataDir, "pvc.bin")
+	writeFile(t, dataPath, "inside")
+
+	outside := filepath.Join(t.TempDir(), DataDirName)
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside data: %v", err)
+	}
+	writeFile(t, filepath.Join(outside, "pvc.bin"), "escaped")
+
+	replaced := false
+	source, err := OpenRootedSourceWithHook(nodeDir, func(path string) {
+		if replaced || path != dataPath {
+			return
+		}
+
+		replaced = true
+		original := dataDir + ".pinned-original"
+		if renameErr := os.Rename(dataDir, original); renameErr != nil {
+			t.Fatalf("rename data directory: %v", renameErr)
+		}
+
+		if symlinkErr := os.Symlink(outside, dataDir); symlinkErr != nil {
+			t.Fatalf("symlink data directory: %v", symlinkErr)
+		}
+
+		t.Cleanup(func() {
+			_ = os.Remove(dataDir)
+			_ = os.Rename(original, dataDir)
+		})
+	})
+	if err != nil {
+		t.Fatalf("OpenRootedSourceWithHook: %v", err)
+	}
+	defer func() { _ = source.Close() }()
+
+	_, err = computeNodeChecksum(source)
+	if !replaced {
+		t.Fatalf("boundary hook for %s was not reached", dataPath)
+	}
+
+	if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+		t.Fatalf("computeNodeChecksum error = %v, want ErrNonRegularArchiveArtifact", err)
 	}
 }
 

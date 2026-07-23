@@ -23,7 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	sigsyaml "sigs.k8s.io/yaml"
@@ -172,16 +172,87 @@ func WriteSnapshotYAML(nodeDir string, sy SnapshotYAML) error {
 	return WriteFileAtomic(path, bytes.NewReader(data))
 }
 
-// OpenRegularFile rejects a final-component symlink and verifies the opened descriptor still
-// identifies the same regular file observed before and after open. O_NONBLOCK keeps a malicious
-// FIFO or device replacement from hanging the open-and-verify boundary check.
-func OpenRegularFile(path string) (*os.File, error) {
-	return openArchiveEntry(path, false)
+// RootedSource pins one verified archive directory and opens descendants relative to its
+// descriptor or handle. Retaining the source prevents path replacement from redirecting later
+// opens. Every child source also verifies its retained parent chain before use, so replacing an
+// already-validated archive directory fails closed instead of silently continuing through a
+// detached tree.
+type RootedSource struct {
+	dir    *os.File
+	path   string
+	parent *RootedSource
+	name   string
+	hook   OpenBoundaryHook
 }
 
-// ReadDirectory returns entries from a descriptor opened and verified as a real directory.
-func ReadDirectory(path string) ([]os.DirEntry, error) {
-	dir, err := openArchiveEntry(path, true)
+// OpenBoundaryHook runs immediately before a rooted descendant or enumeration open. It exists
+// to make adversarial replacement tests deterministic; production callers pass nil.
+type OpenBoundaryHook func(path string)
+
+// OpenRootedSource opens path as a real directory without following its final component and
+// pins the resulting descriptor or handle. Callers must close the returned source.
+func OpenRootedSource(path string) (*RootedSource, error) {
+	return OpenRootedSourceWithHook(path, nil)
+}
+
+// OpenRootedSourceWithHook is OpenRootedSource with a deterministic boundary hook.
+func OpenRootedSourceWithHook(path string, hook OpenBoundaryHook) (*RootedSource, error) {
+	dir, err := openArchiveRoot(path)
+	if err != nil {
+		return nil, err
+	}
+
+	source := &RootedSource{dir: dir, path: path, hook: hook}
+	if err := source.verifyCurrent(); err != nil {
+		_ = dir.Close()
+
+		return nil, err
+	}
+
+	return source, nil
+}
+
+// Close releases the directory descriptor or handle retained by source.
+func (s *RootedSource) Close() error {
+	return s.dir.Close()
+}
+
+// Path returns the diagnostic host path represented by source.
+func (s *RootedSource) Path() string {
+	return s.path
+}
+
+// OpenDirectory opens one real child directory relative to source. The parent source must
+// remain open until the child is closed.
+func (s *RootedSource) OpenDirectory(name string) (*RootedSource, error) {
+	if err := validateArchiveComponent(name); err != nil {
+		return nil, fmt.Errorf("open archive directory %s: %w", filepath.Join(s.path, name), err)
+	}
+
+	path := filepath.Join(s.path, name)
+	s.runHook(path)
+
+	if err := s.verifyCurrent(); err != nil {
+		return nil, err
+	}
+
+	dir, err := openArchiveDirectoryAt(s.dir, name, path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &RootedSource{dir: dir, path: path, parent: s, name: name, hook: s.hook}, nil
+}
+
+// ReadDirectory reads source through a fresh descriptor so repeated enumeration is stable.
+func (s *RootedSource) ReadDirectory() ([]os.DirEntry, error) {
+	s.runHook(s.path)
+
+	if err := s.verifyCurrent(); err != nil {
+		return nil, err
+	}
+
+	dir, err := openArchiveDirectoryAt(s.dir, ".", s.path)
 	if err != nil {
 		return nil, err
 	}
@@ -190,56 +261,163 @@ func ReadDirectory(path string) ([]os.DirEntry, error) {
 
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", path, err)
+		return nil, fmt.Errorf("read directory %s: %w", s.path, err)
 	}
 
 	return entries, nil
 }
 
-func openArchiveEntry(path string, wantDir bool) (*os.File, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("inspect archive path %s: %w", path, err)
+// OpenRegularFile opens one regular child file without following a final symlink or reparse
+// point. Ordinary hard links remain supported because they are regular files; host link count
+// does not imply archive/tar hard-link semantics.
+func (s *RootedSource) OpenRegularFile(name string) (*os.File, error) {
+	if err := validateArchiveComponent(name); err != nil {
+		return nil, fmt.Errorf("open archive file %s: %w", filepath.Join(s.path, name), err)
 	}
 
-	if !archiveModeMatches(before.Mode(), wantDir) {
-		return nil, archiveModeError(path, before.Mode(), wantDir)
+	path := filepath.Join(s.path, name)
+	s.runHook(path)
+
+	if err := s.verifyCurrent(); err != nil {
+		return nil, err
 	}
 
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		current, statErr := os.Lstat(path)
-		if statErr == nil && !archiveModeMatches(current.Mode(), wantDir) {
-			return nil, archiveModeError(path, current.Mode(), wantDir)
+	return openArchiveRegularAt(s.dir, name, path)
+}
+
+// OpenRegularPath descends through real directories beneath source and opens the final regular
+// file without following links at any component.
+func (s *RootedSource) OpenRegularPath(path string) (*os.File, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsLocal(clean) || clean == "." {
+		return nil, fmt.Errorf("invalid archive relative path %q: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	components := strings.Split(clean, string(filepath.Separator))
+	current := s
+
+	opened := make([]*RootedSource, 0, len(components)-1)
+
+	defer func() {
+		for i := len(opened) - 1; i >= 0; i-- {
+			_ = opened[i].Close()
+		}
+	}()
+
+	for _, component := range components[:len(components)-1] {
+		child, err := current.OpenDirectory(component)
+		if err != nil {
+			return nil, err
 		}
 
-		return nil, fmt.Errorf("open archive path %s: %w", path, err)
+		opened = append(opened, child)
+		current = child
 	}
 
-	opened, err := file.Stat()
+	return current.OpenRegularFile(components[len(components)-1])
+}
+
+func (s *RootedSource) verifyCurrent() error {
+	if s.parent == nil {
+		return verifyArchiveRoot(s.path, s.dir)
+	}
+
+	if err := s.parent.verifyCurrent(); err != nil {
+		return err
+	}
+
+	current, err := openArchiveDirectoryAt(s.parent.dir, s.name, s.path)
 	if err != nil {
-		_ = file.Close()
-
-		return nil, fmt.Errorf("inspect opened archive path %s: %w", path, err)
+		return err
 	}
 
-	after, err := os.Lstat(path)
+	defer func() { _ = current.Close() }()
+
+	expectedInfo, err := s.dir.Stat()
 	if err != nil {
-		_ = file.Close()
-
-		return nil, fmt.Errorf("reinspect archive path %s: %w", path, err)
+		return fmt.Errorf("inspect pinned archive directory %s: %w", s.path, err)
 	}
 
-	if !archiveModeMatches(opened.Mode(), wantDir) ||
-		!archiveModeMatches(after.Mode(), wantDir) ||
-		!os.SameFile(before, opened) ||
-		!os.SameFile(opened, after) {
-		_ = file.Close()
-
-		return nil, fmt.Errorf("%s changed while opening: %w", path, ErrNonRegularArchiveArtifact)
+	currentInfo, err := current.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect current archive directory %s: %w", s.path, err)
 	}
 
-	return file, nil
+	if !os.SameFile(expectedInfo, currentInfo) {
+		return fmt.Errorf("%s changed after validation: %w", s.path, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+func (s *RootedSource) runHook(path string) {
+	if s.hook != nil {
+		s.hook(path)
+	}
+}
+
+func validateArchiveComponent(name string) error {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return fmt.Errorf("invalid archive path component %q: %w", name, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+// OpenRegularFile rejects unsafe path components and opens the final regular file relative to
+// a pinned descriptor for its parent directory.
+func OpenRegularFile(path string) (*os.File, error) {
+	parent, err := OpenRootedSource(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = parent.Close() }()
+
+	return parent.OpenRegularFile(filepath.Base(path))
+}
+
+// ReadDirectory returns entries from a pinned descriptor opened as a real directory.
+func ReadDirectory(path string) ([]os.DirEntry, error) {
+	dir, err := OpenRootedSource(path)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = dir.Close() }()
+
+	return dir.ReadDirectory()
+}
+
+func verifyArchiveRoot(path string, dir *os.File) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect archive root %s: %w", path, err)
+	}
+
+	if !current.Mode().IsDir() {
+		return archiveModeError(path, current.Mode(), true)
+	}
+
+	opened, err := dir.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect pinned archive root %s: %w", path, err)
+	}
+
+	if !opened.Mode().IsDir() || !os.SameFile(current, opened) {
+		return fmt.Errorf("%s changed after validation: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+func classifyArchiveOpenError(path string, wantDir bool, openErr error) error {
+	current, err := os.Lstat(path)
+	if err == nil && !archiveModeMatches(current.Mode(), wantDir) {
+		return archiveModeError(path, current.Mode(), wantDir)
+	}
+
+	return fmt.Errorf("open archive path %s: %w", path, openErr)
 }
 
 func archiveModeMatches(mode os.FileMode, wantDir bool) bool {
@@ -262,9 +440,18 @@ func archiveModeError(path string, mode os.FileMode, wantDir bool) error {
 // ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml.
 // Returns an error wrapping os.ErrNotExist when the file is absent.
 func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
-	path := filepath.Join(nodeDir, SnapshotYAMLName)
+	source, err := OpenRootedSource(nodeDir)
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
+	}
 
-	file, err := OpenRegularFile(path)
+	defer func() { _ = source.Close() }()
+
+	return readSnapshotYAML(source)
+}
+
+func readSnapshotYAML(source *RootedSource) (SnapshotYAML, error) {
+	file, err := source.OpenRegularFile(SnapshotYAMLName)
 	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
 	}

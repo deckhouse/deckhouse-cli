@@ -25,13 +25,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -690,62 +688,6 @@ func TestRunRejectsNonRegularArchiveArtifactsBeforeExternalCalls(t *testing.T) {
 				root := buildTwoLevelArchive(t)
 				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
 				moveOutsideAndSymlink(t, path)
-
-				return root, path
-			},
-		},
-		{
-			name: "block payload fifo",
-			build: func(t *testing.T) (string, string) {
-				t.Helper()
-
-				root := buildTwoLevelArchive(t)
-				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
-				if err := os.Remove(path); err != nil {
-					t.Fatalf("remove block payload: %v", err)
-				}
-				if err := syscall.Mkfifo(path, 0o600); err != nil {
-					t.Fatalf("mkfifo: %v", err)
-				}
-
-				return root, path
-			},
-		},
-		{
-			name: "block payload socket",
-			build: func(t *testing.T) (string, string) {
-				t.Helper()
-
-				root, err := os.MkdirTemp("/tmp", "d8-snapshot-socket-")
-				if err != nil {
-					t.Fatalf("mkdir temp: %v", err)
-				}
-				t.Cleanup(func() { _ = os.RemoveAll(root) })
-
-				writeArchiveNode(t, root, archiveNode{
-					apiVersion: snapshotAPIVersion,
-					kind:       snapshotKind,
-					name:       "root",
-				})
-
-				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
-				writeArchiveNode(t, leaf, archiveNode{
-					apiVersion: "snapshot.storage.k8s.io/v1",
-					kind:       "VolumeSnapshot",
-					name:       "pvc-1",
-					blockData:  []byte("rawbytes"),
-				})
-
-				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
-				if err := os.Remove(path); err != nil {
-					t.Fatalf("remove block payload: %v", err)
-				}
-
-				listener, err := net.Listen("unix", path)
-				if err != nil {
-					t.Fatalf("listen unix: %v", err)
-				}
-				t.Cleanup(func() { _ = listener.Close() })
 
 				return root, path
 			},

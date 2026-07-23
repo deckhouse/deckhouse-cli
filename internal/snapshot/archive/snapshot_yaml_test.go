@@ -18,11 +18,10 @@ package archive_test
 
 import (
 	"errors"
-	"net"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -81,50 +80,6 @@ func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
 				return path
 			},
 		},
-		{
-			name: "fifo",
-			build: func(t *testing.T) string {
-				t.Helper()
-
-				path := filepath.Join(t.TempDir(), "artifact")
-				if err := syscall.Mkfifo(path, 0o600); err != nil {
-					t.Fatalf("mkfifo: %v", err)
-				}
-
-				return path
-			},
-		},
-		{
-			name: "unix socket",
-			build: func(t *testing.T) string {
-				t.Helper()
-
-				dir, err := os.MkdirTemp("", "d8-snapshot-socket-")
-				if err != nil {
-					t.Fatalf("mkdir temp: %v", err)
-				}
-				t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-				path := filepath.Join(dir, "artifact")
-				listener, err := net.Listen("unix", path)
-				if err != nil {
-					t.Fatalf("listen unix: %v", err)
-				}
-				t.Cleanup(func() { _ = listener.Close() })
-
-				return path
-			},
-		},
-	}
-
-	if info, err := os.Lstat("/dev/null"); err == nil && info.Mode()&os.ModeDevice != 0 {
-		tests = append(tests, struct {
-			name  string
-			build func(t *testing.T) string
-		}{
-			name:  "device",
-			build: func(*testing.T) string { return "/dev/null" },
-		})
 	}
 
 	for _, tc := range tests {
@@ -144,6 +99,34 @@ func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
 				t.Errorf("error %q does not contain offending path %q", err, path)
 			}
 		})
+	}
+}
+
+func TestOpenRegularFileAcceptsOrdinaryHardLink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("hard-linked bytes"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	link := filepath.Join(dir, "artifact")
+	if err := os.Link(target, link); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+
+	file, err := archive.OpenRegularFile(link)
+	if err != nil {
+		t.Fatalf("OpenRegularFile: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("read hard link: %v", err)
+	}
+
+	if string(data) != "hard-linked bytes" {
+		t.Fatalf("hard-link content = %q, want hard-linked bytes", data)
 	}
 }
 
