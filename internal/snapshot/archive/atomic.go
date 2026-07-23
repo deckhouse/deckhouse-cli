@@ -52,6 +52,17 @@ func (w *AtomicWriter) Write(p []byte) (int, error) {
 	return w.f.Write(p)
 }
 
+// OpenTempReader opens the unpublished temporary file for validation. The
+// caller must close the returned reader before calling Commit or Abort.
+func (w *AtomicWriter) OpenTempReader() (io.ReadCloser, error) {
+	f, err := os.Open(w.tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s for validation: %w", w.tmpPath, err)
+	}
+
+	return f, nil
+}
+
 // Commit fsyncs and closes the temporary file, atomically renames it to the
 // final path, then fsyncs the parent directory for durability.
 // After Commit the AtomicWriter must not be used again.

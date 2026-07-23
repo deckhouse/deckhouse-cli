@@ -3297,7 +3297,7 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 
 // seedLeftoverBlockChunkDir creates a populated flat block chunk staging
 // directory (data.bin.d/) inside nodeDir, simulating the residue of a crash in
-// volume.MergeBlockChunks between committing the merged data.bin* file and
+// volume.MergeBlockChunks between committing the verified data.bin* file and
 // os.RemoveAll'ing the chunk dir. It returns the chunk dir path. The chunk
 // contents are never read by the already-merged skip branch, so any bytes will
 // do.
@@ -3317,8 +3317,8 @@ func seedLeftoverBlockChunkDir(t *testing.T, nodeDir string) string {
 
 // TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir covers the
 // downloadOwnDataRefs already-merged skip branch: a node dir holding both a
-// merged data.bin.zst and a leftover chunk dir (the MergeBlockChunks
-// commit->RemoveAll crash window) must resume to Done with the chunk dir
+// verified, merged data.bin.zst and a leftover chunk dir (the MergeBlockChunks
+// verify->commit->RemoveAll crash window) must resume to Done with the chunk dir
 // removed, so the compressed copy of the volume cannot leak forever. The
 // no-leftover row pins that a normal already-merged node (no chunk dir) is
 // unchanged.
@@ -3387,8 +3387,8 @@ func TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir(t *testi
 // symmetric processVolumeNode (Binding leaf) already-merged skip branch. The
 // partial state is produced by running the pipeline once, then re-stamping the
 // identity marker finalize removed, re-creating a leftover chunk dir next to the
-// merged file, and deleting snapshot.yaml — exactly the commit->RemoveAll crash
-// residue (marker present, snapshot.yaml absent).
+// merged file, and deleting snapshot.yaml — exactly the
+// verify->commit->RemoveAll crash residue (marker present, snapshot.yaml absent).
 func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testing.T) {
 	t.Parallel()
 
@@ -3441,9 +3441,10 @@ func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testi
 }
 
 // TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally pins that the
-// cleanup is confined to the already-merged branch: a chunk dir present WITHOUT
-// a merged data.bin* file is a normal in-progress download, so the skip branch
-// must not fire and the volume must download normally.
+// cleanup is confined to the already-merged branch: a chunk dir and stale
+// AtomicWriter .tmp present WITHOUT an exact final data.bin[.<ext>] file are a
+// normal interrupted download, so the skip branch must not fire and the volume
+// must download normally.
 func TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally(t *testing.T) {
 	t.Parallel()
 
@@ -3459,9 +3460,12 @@ func TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally(t *testing.T)
 		archive.NodeDirName(childKind, diskSnapName))
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
-	// An empty chunk dir with NO merged data.bin* file: FindBlockData reports
-	// not-found, the already-merged branch is skipped, and download proceeds.
+	// An empty chunk dir and stale unpublished temp with NO exact final payload:
+	// the resume sweep removes the .tmp, ClassifyBlockPayload reports not-found,
+	// the already-merged branch is skipped, and download proceeds.
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.BlockChunksDirName), 0o755))
+	tmpPath := filepath.Join(diskSnapDir, archive.DataBlockName(".zst")+".tmp")
+	require.NoError(t, os.WriteFile(tmpPath, []byte("unverified merged bytes"), 0o644))
 
 	var openExportCalled atomic.Bool
 
@@ -3482,9 +3486,12 @@ func TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally(t *testing.T)
 	require.NoError(t, runPipeline(context.Background(), cfg))
 
 	require.True(t, openExportCalled.Load(),
-		"with no merged file present the volume must download normally, not skip")
+		"an unpublished .tmp must not make the pipeline skip the volume download")
 
 	assertNodeComplete(t, diskSnapDir)
+
+	_, statErr := os.Stat(tmpPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "unpublished .tmp must not survive resume")
 
 	compressed, err := os.ReadFile(filepath.Join(diskSnapDir, archive.DataBlockName(".zst")))
 	require.NoError(t, err)

@@ -173,6 +173,60 @@ func TestAtomicWriter_abortLeavesNoFinalFile(t *testing.T) {
 	}
 }
 
+func TestAtomicWriter_openTempReaderKeepsFinalInvisible(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "validated.bin")
+	content := []byte("validate before publish")
+
+	aw, err := archive.NewAtomicWriter(path)
+	if err != nil {
+		t.Fatalf("NewAtomicWriter: %v", err)
+	}
+
+	if _, err := aw.Write(content); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	reader, err := aw.OpenTempReader()
+	if err != nil {
+		t.Fatalf("OpenTempReader: %v", err)
+	}
+
+	got, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+
+	if readErr != nil {
+		t.Fatalf("ReadAll: %v", readErr)
+	}
+
+	if closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatalf("temporary content = %q; want %q", got, content)
+	}
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final file must remain invisible before Commit, Stat error: %v", err)
+	}
+
+	if err := aw.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	got, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	if !bytes.Equal(got, content) {
+		t.Fatalf("committed content = %q; want %q", got, content)
+	}
+}
+
 func TestWriteFileAtomic_emptyReader(t *testing.T) {
 	t.Helper()
 
