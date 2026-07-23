@@ -187,3 +187,24 @@ func TestConfirmFileDurability_WindowsIsSingleWriteThroughConfirmation(t *testin
 		t.Fatalf("durability confirmations = %d, want 1", calls)
 	}
 }
+
+func TestEnsureDir_WindowsUsesMkdirAllContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a", "b", "c")
+
+	if err := EnsureDir(path); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+
+	if err := EnsureDir(path); err != nil {
+		t.Fatalf("idempotent EnsureDir: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", path)
+	}
+}

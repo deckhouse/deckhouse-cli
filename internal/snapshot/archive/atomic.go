@@ -275,13 +275,10 @@ func WriteFileAtomicContext(ctx context.Context, path string, r io.Reader) error
 	return aw.CommitContext(ctx)
 }
 
-// EnsureDir creates path and all parents. Unix then syncs the directory.
+// EnsureDir creates path and all parents with the platform durability contract.
+// Unix persists every containing-directory entry back to the filesystem root.
 // Windows has no documented unprivileged directory-flush API, so directory
 // creation cannot be given the same explicit POSIX durability guarantee.
 func EnsureDir(path string) error {
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return fmt.Errorf("creating dir %s: %w", path, err)
-	}
-
-	return syncDir(path)
+	return ensureDirDurably(path)
 }

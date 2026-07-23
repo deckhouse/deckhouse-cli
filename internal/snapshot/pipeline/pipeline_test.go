@@ -387,6 +387,37 @@ func TestPipeline_UnsupportedFilesystemEntryDoesNotFinalizeNode(t *testing.T) {
 	require.Zero(t, fileGets.Load(), "listing validation must finish before any regular file is staged")
 }
 
+func TestPipeline_DirectoryCreationFailureDoesNotFinalizeNode(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	scaffoldPath := filepath.Join(outputDir, archive.SnapshotsDirName)
+	require.NoError(t, os.WriteFile(scaffoldPath, []byte("not a directory"), 0o644))
+
+	cfg := pipeline.Config{
+		Namespace:        testNS,
+		RootSnapshot:     rootSnapshot,
+		OutputDir:        outputDir,
+		Workers:          1,
+		KubeClient:       buildFakeClient(t),
+		SelectedNodeKind: childKind,
+		SelectedNodeName: diskSnapName,
+		OpenExport: func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+			t.Fatal("OpenExport must not run after scaffold creation fails")
+
+			return nil, nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "scaffold")
+
+	_, statErr := os.Stat(filepath.Join(outputDir, archive.SnapshotYAMLName))
+	require.ErrorIs(t, statErr, os.ErrNotExist,
+		"directory creation failure must stop before node finalization")
+}
+
 func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 	t.Parallel()
 

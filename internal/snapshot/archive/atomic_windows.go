@@ -18,6 +18,7 @@ package archive
 
 import (
 	"fmt"
+	"os"
 
 	"golang.org/x/sys/windows"
 )
@@ -56,5 +57,17 @@ func moveFileDurably(oldPath, newPath string, move moveFileExFunc) error {
 // return guarantees that the move reached disk. Windows exposes no equivalent
 // supported operation for separately confirming MkdirAll directory creation.
 func syncDir(string) error {
+	return nil
+}
+
+// ensureDirDurably deliberately provides only MkdirAll semantics on Windows.
+// Windows exposes no documented unprivileged equivalent of syncing every
+// containing directory entry, so success does not claim POSIX-style namespace
+// durability.
+func ensureDirDurably(path string) error {
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("creating dir %s: %w", path, err)
+	}
+
 	return nil
 }
