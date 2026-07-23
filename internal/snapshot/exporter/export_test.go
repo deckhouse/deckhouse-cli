@@ -174,6 +174,7 @@ func newTLSServer(t *testing.T) *httptest.Server {
 		Certificates: []tls.Certificate{certificate},
 		MinVersion:   tls.VersionTLS12,
 	}
+	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
@@ -218,6 +219,10 @@ func requestAndClose(
 
 	if err := resp.Body.Close(); err != nil {
 		t.Fatalf("close %s %s response: %v", method, rawURL, err)
+	}
+
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("%s %s response protocol major = %d, want HTTP/2", method, rawURL, resp.ProtoMajor)
 	}
 }
 
