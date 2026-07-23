@@ -173,7 +173,7 @@ subset you CAN access -- opt in with the --scope flag:
   d8 k get %[1]s -A --scope=accessible       # every namespace your RBAC grants
   d8 k get %[1]s -A --scope=projects         # all namespaces of your projects
   d8 k get %[1]s -A --scope=project:<name>   # a single project's namespaces
-  d8 k get %[1]s -A --scope=system           # non-project (system) namespaces
+  d8 k get %[1]s -A --scope=system           # system namespaces (default, d8-*, kube-*)
 
 (For cluster-scoped resources, e.g. nodes, --scope does not apply.)
 `, resource)
