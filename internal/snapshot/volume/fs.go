@@ -312,7 +312,7 @@ func DownloadFilesystemVolume(
 }
 
 // collectAllFSItems recursively walks the listing at dirURL and accumulates
-// all items (file, dir, link) with their relative paths and metadata.
+// all representable items (file, dir, link) with their relative paths and metadata.
 // filesRootURL is the absolute URL of the volume root used to resolve relative URIs.
 // relPrefix is prepended to item names when building the relative path.
 func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL string, base *url.URL, relPrefix string) ([]fsItem, error) {
@@ -407,7 +407,7 @@ func collectAllFSItems(ctx context.Context, fetcher *exporter.Fetcher, dirURL st
 			})
 
 		default:
-			// Unknown or error items: skip silently (forward-compatible).
+			return nil, fmt.Errorf("filesystem listing item %q has unsupported wire type %q", relPath, item.Type)
 		}
 	}
 
