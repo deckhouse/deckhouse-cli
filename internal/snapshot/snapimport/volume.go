@@ -1122,23 +1122,24 @@ type blockDecodeDependencies struct {
 }
 
 // resolveBlockDecodeReader returns a decode reader positioned at the requested
-// decompressed offset. The discarded count is zero for a fresh upload, at most
-// volume.DefaultChunkSize-1 for a successful zstd frame-skip, and offset for the
-// byte-zero gzip/lz4/zstd fallback.
+// decompressed offset. Production zstd frames use volume.DefaultChunkSize; tests
+// can pass their own geometry to resolveBlockDecodeReaderWith. The discarded count
+// is zero for a fresh upload, at most one frame for a successful zstd frame-skip,
+// and offset for the byte-zero gzip/lz4/zstd fallback.
 func resolveBlockDecodeReader(ctx context.Context, f io.ReadSeeker, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
 	deps := blockDecodeDependencies{
 		skipZstdFrames: compress.SkipZstdFrames,
 		newReader:      compress.NewReader,
 	}
 
-	return resolveBlockDecodeReaderWith(ctx, f, dataFile, ext, offset, log, deps)
+	return resolveBlockDecodeReaderWith(ctx, f, dataFile, ext, offset, volume.DefaultChunkSize, log, deps)
 }
 
 func resolveBlockDecodeReaderWith(
 	ctx context.Context,
 	f io.ReadSeeker,
 	dataFile, ext string,
-	offset int64,
+	offset, chunkSize int64,
 	log *slog.Logger,
 	deps blockDecodeDependencies,
 ) (io.ReadCloser, int64, error) {
@@ -1156,7 +1157,7 @@ func resolveBlockDecodeReaderWith(
 	}
 
 	if ext == ".zst" {
-		decodeReader, skipped, fastErr := resolveZstdFrameDecodeReader(ctx, f, dataFile, offset, deps)
+		decodeReader, skipped, fastErr := resolveZstdFrameDecodeReader(ctx, f, dataFile, offset, chunkSize, deps)
 		if fastErr == nil {
 			return decodeReader, skipped, nil
 		}
@@ -1183,11 +1184,15 @@ func resolveZstdFrameDecodeReader(
 	ctx context.Context,
 	f io.ReadSeeker,
 	dataFile string,
-	offset int64,
+	offset, chunkSize int64,
 	deps blockDecodeDependencies,
 ) (io.ReadCloser, int64, error) {
-	chunkIndex := offset / volume.DefaultChunkSize
-	intra := offset % volume.DefaultChunkSize
+	if chunkSize <= 0 {
+		return nil, 0, fmt.Errorf("zstd frame size must be positive, got %d", chunkSize)
+	}
+
+	chunkIndex := offset / chunkSize
+	intra := offset % chunkSize
 
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
