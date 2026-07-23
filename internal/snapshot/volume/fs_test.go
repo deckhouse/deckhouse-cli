@@ -391,6 +391,77 @@ func TestDownloadFilesystemVolume_SkipsIfTarExists(t *testing.T) {
 	}
 }
 
+func TestDownloadFilesystemVolume_RecoversPublishedTarDurabilityBeforeCleanup(t *testing.T) {
+	srv, _ := fsTestServer(t)
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	initialSyncErr := errors.New("initial parent sync sentinel")
+	retrySyncErr := errors.New("retry parent sync sentinel")
+	syncCalls := 0
+
+	ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		syncCalls++
+		require.Equal(t, nodeDir, path)
+		require.DirExists(t, stagingDir, "staging must survive until directory durability is confirmed")
+
+		switch syncCalls {
+		case 1:
+			return initialSyncErr
+		case 2:
+			return retrySyncErr
+		default:
+			return next()
+		}
+	})
+
+	download := func() error {
+		return volume.DownloadFilesystemVolume(
+			ctx,
+			slog.Default(),
+			tarPath,
+			stagingDir,
+			srv.URL+"/files/",
+			1,
+			0,
+			newFSFetcher(srv),
+			mustCodec(t, "none"),
+			nil,
+			nil,
+		)
+	}
+
+	err := download()
+	require.ErrorIs(t, err, initialSyncErr)
+	require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+	require.FileExists(t, tarPath, "rename must leave the complete tar published")
+	require.NoFileExists(t, tarPath+".tmp")
+	require.DirExists(t, stagingDir, "post-rename sync failure must preserve retryable staging")
+
+	published, err := os.ReadFile(tarPath)
+	require.NoError(t, err)
+
+	err = download()
+	require.ErrorIs(t, err, retrySyncErr)
+	require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+	require.Equal(t, 2, syncCalls)
+	require.DirExists(t, stagingDir, "failed durability retry must preserve staging")
+	require.NoFileExists(t, tarPath+".tmp")
+
+	afterFailedRetry, err := os.ReadFile(tarPath)
+	require.NoError(t, err)
+	require.Equal(t, published, afterFailedRetry, "durability retry must not rewrite published bytes")
+
+	require.NoError(t, download())
+	require.Equal(t, 3, syncCalls)
+	require.NoDirExists(t, stagingDir, "staging cleanup must follow successful parent sync")
+	require.NoFileExists(t, tarPath+".tmp")
+
+	recovered, err := os.ReadFile(tarPath)
+	require.NoError(t, err)
+	require.Equal(t, published, recovered, "recovered tar must remain byte-identical")
+}
+
 func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
 	srv, _ := fsTestServer(t)
 
@@ -1552,16 +1623,21 @@ func newMD5FSServer(t *testing.T, fileName string, served []byte, advertisedMD5 
 }
 
 func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *testing.T) {
-	t.Parallel()
-
-	const (
-		fileName        = "large.bin"
-		ordinaryTimeout = 30 * time.Millisecond
-		hashDelay       = 90 * time.Millisecond
-	)
+	const fileName = "large.bin"
 
 	content := bytes.Repeat([]byte("producer-shaped-source-hash-content-"), 8)
 	wantMD5 := hexMD5(content)
+	errOrdinaryTimeout := errors.New("ordinary response-header timeout sentinel")
+	hashStarted := make(chan struct{})
+	releaseHash := make(chan struct{})
+	var (
+		hashStartedOnce sync.Once
+		releaseHashOnce sync.Once
+	)
+	releaseHashRequest := func() {
+		releaseHashOnce.Do(func() { close(releaseHash) })
+	}
+	defer releaseHashRequest()
 
 	var (
 		mu           sync.Mutex
@@ -1593,7 +1669,9 @@ func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *tes
 				hashRequests++
 				mu.Unlock()
 
-				time.Sleep(hashDelay)
+				hashStartedOnce.Do(func() { close(hashStarted) })
+				<-releaseHash
+
 				w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 				w.Header().Set("X-Attribute-Hash-Md5", wantMD5)
 				w.WriteHeader(http.StatusOK)
@@ -1615,15 +1693,18 @@ func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *tes
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	ordinaryTransport := srv.Client().Transport.(*http.Transport).Clone()
-	ordinaryTransport.ResponseHeaderTimeout = ordinaryTimeout
+	ordinaryDoer := &observedDoer{
+		do: func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodHead {
+				return nil, errOrdinaryTimeout
+			}
 
-	hashTransport := srv.Client().Transport.(*http.Transport).Clone()
-	hashTransport.ResponseHeaderTimeout = time.Second
-
+			return srv.Client().Do(req)
+		},
+	}
 	fetcher := exporter.NewFetcher(
-		&http.Client{Transport: ordinaryTransport},
-		exporter.WithSourceHashDoer(&http.Client{Transport: hashTransport}),
+		ordinaryDoer,
+		exporter.WithSourceHashDoer(srv.Client()),
 	)
 
 	nodeDir := t.TempDir()
@@ -1631,21 +1712,38 @@ func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *tes
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	codec := mustCodec(t, "zstd")
 
-	if err := volume.DownloadFilesystemVolume(
-		context.Background(),
-		slog.Default(),
-		tarPath,
-		stagingDir,
-		srv.URL+"/files/",
-		1,
-		0,
-		fetcher,
-		codec,
-		nil,
-		nil,
-	); err != nil {
-		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	result := make(chan error, 1)
+	go func() {
+		result <- volume.DownloadFilesystemVolume(
+			context.Background(),
+			slog.Default(),
+			tarPath,
+			stagingDir,
+			srv.URL+"/files/",
+			1,
+			0,
+			fetcher,
+			codec,
+			nil,
+			nil,
+		)
+	}()
+
+	select {
+	case <-hashStarted:
+	case err := <-result:
+		t.Fatalf("download returned before dedicated source-hash request was released: %v", err)
 	}
+
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodHead, srv.URL+"/files/"+fileName, nil)
+	require.NoError(t, err)
+	_, err = ordinaryDoer.Do(request)
+	require.ErrorIs(t, err, errOrdinaryTimeout,
+		"the ordinary doer must reject HEAD while the dedicated source-hash request remains active")
+
+	releaseHashRequest()
+	require.NoError(t, <-result)
+	requireObservedDoerQuiescent(t, ordinaryDoer)
 
 	mu.Lock()
 	gotListAttrs := append([]string(nil), listAttrs...)
@@ -3974,26 +4072,26 @@ func TestDownloadFilesystemVolume_StagingCauseOrder(t *testing.T) {
 	})
 }
 
-func TestDownloadFilesystemVolume_StagingFirstWorkerCauseWins(t *testing.T) {
-	errFirst := errors.New("first worker sentinel")
-	errSecond := errors.New("second worker sentinel")
+func TestDownloadFilesystemVolume_StagingIndependentWorkerCauseWins(t *testing.T) {
+	errFirst := errors.New("independent worker one sentinel")
+	errSecond := errors.New("independent worker two sentinel")
 	srv := newLargeFileInventoryServer(t, 100, md5Hex([]byte("x")))
 	firstStarted := make(chan struct{})
 	secondStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
+	releaseErrors := make(chan struct{})
 	var calls atomic.Int64
 
 	sourceDoer := &observedDoer{
-		do: func(req *http.Request) (*http.Response, error) {
+		do: func(*http.Request) (*http.Response, error) {
 			switch calls.Add(1) {
 			case 1:
 				close(firstStarted)
-				<-releaseFirst
+				<-releaseErrors
 
 				return nil, errFirst
 			case 2:
 				close(secondStarted)
-				<-req.Context().Done()
+				<-releaseErrors
 
 				return nil, errSecond
 			default:
@@ -4009,15 +4107,17 @@ func TestDownloadFilesystemVolume_StagingFirstWorkerCauseWins(t *testing.T) {
 
 	<-firstStarted
 	<-secondStarted
-	close(releaseFirst)
+	close(releaseErrors)
 
 	err := <-result
-	if !errors.Is(err, errFirst) {
-		t.Fatalf("DownloadFilesystemVolume error = %v, want first worker cause", err)
+	firstWon := errors.Is(err, errFirst)
+	secondWon := errors.Is(err, errSecond)
+	if firstWon == secondWon {
+		t.Fatalf("DownloadFilesystemVolume error = %v, want exactly one independent worker cause", err)
 	}
 
-	if errors.Is(err, errSecond) {
-		t.Fatalf("second worker error replaced first cause: %v", err)
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("independent worker cause was replaced by derivative cancellation: %v", err)
 	}
 
 	requireObservedDoerQuiescent(t, sourceDoer)

@@ -76,8 +76,10 @@ type TarEntrySource func(yield func(TarEntry) error) error
 // ctx is checked before every entry, around every fixed-size file read, and
 // after temporary-file sync/close at AtomicWriter's pre-publication checkpoint.
 // Cancellation observed before publication aborts the temporary output; after
-// publication begins, rename/durability errors determine the result. The
-// staging directory is always untouched, so assembly can be retried.
+// publication begins, rename/durability errors determine the result. A
+// parent-directory sync error retains archive.PublicationPublished through
+// wrapping. The staging directory is always untouched, so assembly or
+// durability confirmation can be retried.
 func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries TarEntrySource) error {
 	aw, err := archive.NewAtomicWriter(outputPath)
 	if err != nil {
