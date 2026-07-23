@@ -17,6 +17,7 @@ limitations under the License.
 package compress
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -83,42 +84,74 @@ func (e *Encoder) EncodeFrame(src []byte) ([]byte, error) {
 	return e.enc.EncodeAll(src, nil), nil
 }
 
-// EncodeFrameStream reads exactly size bytes from src and delegates to
-// EncodeFrame. zstd's public streaming Write/Close API does NOT reproduce
-// EncodeAll's output byte-for-byte once the input exceeds one zstd block
-// (128 KiB, the format's own hard maximum): EncodeAll's multi-block path and
-// the streaming writer's multi-block path track repeat-offset match history
-// differently internally, so the encoded bytes diverge even for identical
-// input and identical encoder options — proven empirically in
-// codec_test.go, including with a real *os.File source and the encoder's
-// own content-size reset. Since every chunk this package ever encodes is at
-// least 16 MiB (see volume.DefaultChunkSize, which production hardcodes for
-// every block chunk — see block-chunk-size-hardcode-only), the "fits in one
-// 128 KiB block" fast path (which IS byte-for-byte identical to EncodeAll,
-// being the same code path) never applies here.
-//
-// This is the "codec genuinely cannot stream-encode to an identical frame"
-// case documented on the Codec.EncodeFrameStream contract: peak memory for
-// this call is bounded by size, not by a fixed streaming window, so callers
-// MUST keep an upper bound on size (production fixes it at
-// volume.DefaultChunkSize; only low-level unit tests pass a different size).
+// EncodeFrameStream writes one independent frame with content size and CRC.
+// A fresh single-concurrency writer per call keeps concurrent calls race-safe
+// and bounds memory to zstd's fixed window and block buffers, independently of
+// size. The streaming encoder may choose different blocks from EncodeAll, so
+// only decoded bytes and frame metadata are part of this method's contract.
 func (z *zstdCodec) EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error {
-	raw := make([]byte, size)
-
-	if _, err := io.ReadFull(src, raw); err != nil {
-		return fmt.Errorf("zstd: read %d bytes for frame: %w", size, err)
+	if size <= 0 {
+		return fmt.Errorf("zstd: encode frame with non-positive content size %d", size)
 	}
 
-	frame, err := z.EncodeFrame(raw)
+	w, err := zstd.NewWriter(
+		nil,
+		zstd.WithEncoderCRC(true),
+		zstd.WithEncoderLevel(z.enc.level),
+		zstd.WithEncoderConcurrency(1),
+		// The stream path ignores this for multi-block frames, but its final
+		// one-block path uses EncodeAll; forcing single-segment there makes
+		// Frame_Content_Size representable even when size is below 256 bytes.
+		zstd.WithSingleSegment(true),
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("zstd: create frame writer: %w", err)
 	}
 
-	if _, err := dst.Write(frame); err != nil {
-		return fmt.Errorf("zstd: write frame: %w", err)
+	w.ResetContentSize(dst, size)
+
+	_, copyErr := io.CopyN(w, src, size)
+	if copyErr != nil {
+		closeErr := w.Close()
+
+		return errors.Join(
+			fmt.Errorf("zstd: copy exactly %d frame bytes: %w", size, copyErr),
+			wrapZstdFrameCloseError(closeErr),
+		)
+	}
+
+	var probe [1]byte
+
+	extraBytes, probeErr := io.ReadFull(src, probe[:])
+	closeErr := w.Close()
+
+	if extraBytes != 0 {
+		return errors.Join(
+			fmt.Errorf("zstd: source contains bytes beyond declared frame size %d", size),
+			wrapZstdFrameCloseError(closeErr),
+		)
+	}
+
+	if probeErr != nil && !errors.Is(probeErr, io.EOF) {
+		return errors.Join(
+			fmt.Errorf("zstd: verify source ends at declared frame size %d: %w", size, probeErr),
+			wrapZstdFrameCloseError(closeErr),
+		)
+	}
+
+	if closeErr != nil {
+		return wrapZstdFrameCloseError(closeErr)
 	}
 
 	return nil
+}
+
+func wrapZstdFrameCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("zstd: close frame writer: %w", err)
 }
 
 // zstdCodec wraps Encoder to implement the Codec interface.

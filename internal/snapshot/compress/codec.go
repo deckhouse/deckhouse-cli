@@ -38,12 +38,12 @@ import (
 // self-contained compressed stream.  Each call is safe to invoke concurrently.
 // For codec=none, EncodeStream is a byte-identical passthrough.
 //
-// EncodeFrameStream produces the SAME independent frame EncodeFrame would for the
-// raw bytes src yields, but reads them from src rather than requiring the whole
-// chunk as a []byte up front. It is the finalize-time path for a block chunk whose
-// raw bytes already live in a durable file on disk (see volume.downloadChunk):
-// callers pass the open file plus its exact known length so an implementation that
-// cannot avoid buffering can size its allocation once instead of growing it.
+// EncodeFrameStream produces one independent frame from src, but its encoded
+// bytes need not match EncodeFrame for the same input. size supplies the known
+// raw length to codecs with content-size metadata. It is the finalize-time path
+// for a block chunk whose raw bytes already live in a durable file on disk (see
+// volume.downloadChunk), allowing codecs to keep memory bounded independently
+// of the chunk size.
 type Codec interface {
 	// Name returns the codec identifier, e.g. "zstd", "none".
 	Name() string
@@ -60,12 +60,11 @@ type Codec interface {
 	// It is safe to call concurrently from multiple goroutines.
 	EncodeStream(dst io.Writer, src io.Reader) error
 
-	// EncodeFrameStream reads exactly size bytes from src and writes the resulting
-	// independent frame to dst — byte-identical to EncodeFrame(rawBytes) for the
-	// same rawBytes, verified in codec_test.go for every registered codec.
-	// Implementations that can genuinely stream bound their memory to their own
-	// internal buffer, independent of size; see the zstd implementation's doc
-	// comment for the one documented exception.
+	// EncodeFrameStream writes one independent frame from src to dst. size is the
+	// expected raw length used by codecs that encode content-size metadata; its
+	// encoding need not be byte-identical to EncodeFrame. Implementations that
+	// genuinely stream bound memory to codec windows and buffers independent of
+	// size.
 	EncodeFrameStream(dst io.Writer, src io.Reader, size int64) error
 }
 

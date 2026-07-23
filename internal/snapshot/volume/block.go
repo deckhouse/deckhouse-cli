@@ -37,8 +37,8 @@ import (
 )
 
 // DefaultChunkSize is the default raw-byte size of each block-volume chunk.
-// A 256 MiB chunk produces a single zstd frame that fits comfortably in memory
-// and keeps the chunk-file count manageable for large volumes.
+// A 256 MiB chunk keeps the chunk-file count manageable for large volumes;
+// frame encoding streams from disk through codec-bounded windows and buffers.
 const DefaultChunkSize = 256 * 1024 * 1024 // 256 MiB
 
 // partSuffix names the durable, resumable raw-byte partial file for an
@@ -114,20 +114,10 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // Memory note: once a chunk's ".part" file is complete, finalizeChunkFrame
 // streams it through codec.EncodeFrameStream directly into the final chunk's
 // AtomicWriter — the whole raw chunk is never read into memory as a []byte
-// here. For codecs that can genuinely stream (none/gzip/lz4), finalize's
-// peak memory is bounded by the codec's own small internal buffer,
-// independent of chunkSize. zstd's public streaming API cannot reproduce
-// EncodeFrame's output byte-for-byte for chunk-sized input (see
-// compress.zstdCodec.EncodeFrameStream), so its implementation still reads
-// the chunk fully — for that codec (the default), worst-case RSS per
-// in-flight chunk remains chunkSize + compressed frame size. Every
-// production block download/merge hardcodes chunkSize to DefaultChunkSize
-// (256 MiB; see block-chunk-size-hardcode-only) — there is no per-run knob —
-// so this is a fixed, known bound, not a user-configurable maximum. The
-// outer pipeline multiplies this by the number of concurrent nodes
-// (pipeline.Config.Workers); total peak ≈ pipeline.Config.Workers × workers
-// × (DefaultChunkSize + frame) for zstd, and pipeline.Config.Workers ×
-// workers × (small internal buffer) for the genuinely-streaming codecs.
+// here. Finalize memory is bounded by each codec's own fixed windows and
+// buffers, independently of chunkSize; zstd uses a fresh single-concurrency
+// stream writer per frame. The outer pipeline still multiplies that
+// per-frame bound by the concurrent-node and per-volume worker limits.
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,

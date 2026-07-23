@@ -59,19 +59,19 @@ type Config struct {
 	OutputDir string
 
 	// Workers is the maximum number of nodes processed concurrently (default: 4).
-	// For block volumes each worker holds up to PerVolumeConcurrency chunks in
-	// memory simultaneously; worst-case RSS ≈ Workers × PerVolumeConcurrency ×
-	// (volume.DefaultChunkSize + compressed frame overhead). Every production
-	// block download/merge uses the fixed volume.DefaultChunkSize (256 MiB; see
-	// block-chunk-size-hardcode-only) — there is no per-run chunk-size knob —
-	// so with defaults 4×4×256 MiB this is roughly 4–5 GiB. Reduce Workers or
-	// PerVolumeConcurrency on memory-constrained hosts.
+	// For block volumes each worker finalizes up to PerVolumeConcurrency frames
+	// simultaneously. Raw 256 MiB chunks remain on disk; encoding memory is
+	// bounded by codec windows and buffers, independent of chunk size. zstd uses
+	// one encoder worker and at most an 8 MiB window per frame plus fixed block,
+	// history, and output buffers. Worst-case finalize memory therefore scales
+	// with Workers × PerVolumeConcurrency × that per-frame codec bound, not
+	// Workers × PerVolumeConcurrency × volume.DefaultChunkSize.
 	Workers int
 
 	// PerVolumeConcurrency is the maximum number of parallel chunk or file
 	// downloads per volume (default: 4).
-	// Multiplied with Workers and volume.DefaultChunkSize it determines the
-	// worst-case RSS; see Workers for the peak formula.
+	// Multiplied with Workers and the codec's bounded per-frame working set it
+	// determines the worst-case finalize RSS; see Workers for the peak formula.
 	PerVolumeConcurrency int
 
 	// MaxParallelDownloads is the global cap on concurrent whole-volume-stream

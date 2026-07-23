@@ -19,12 +19,17 @@ package compress_test
 import (
 	"bytes"
 	stdgzip "compress/gzip"
+	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
@@ -610,19 +615,13 @@ func TestCodec_NoneEncodeStream_Passthrough(t *testing.T) {
 	}
 }
 
-// TestCodec_EncodeFrameStream_MatchesEncodeFrame is the empirical proof the
-// EncodeFrameStream contract demands: for every registered codec, streaming
-// a chunk's raw bytes from a real on-disk file (the same shape as a
-// downloadChunk ".part" file) through EncodeFrameStream must produce the
-// exact same bytes as EncodeFrame(rawBytes) — including zstd, whose
-// implementation satisfies this by delegating to EncodeFrame internally
-// rather than by matching the library's independent streaming API (see
-// zstd.go's EncodeFrameStream doc comment for why the two diverge).
-func TestCodec_EncodeFrameStream_MatchesEncodeFrame(t *testing.T) {
-	t.Helper()
+func TestCodec_EncodeFrameStream_ProducesEquivalentFrame(t *testing.T) {
+	t.Parallel()
 
 	for _, name := range compress.Names() {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			c, err := compress.New(name, 0)
 			if err != nil {
 				t.Fatalf("New(%s): %v", name, err)
@@ -645,7 +644,11 @@ func TestCodec_EncodeFrameStream_MatchesEncodeFrame(t *testing.T) {
 				t.Fatalf("open part file: %v", err)
 			}
 
-			defer func() { _ = f.Close() }()
+			t.Cleanup(func() {
+				if err := f.Close(); err != nil {
+					t.Errorf("close part file: %v", err)
+				}
+			})
 
 			var buf bytes.Buffer
 
@@ -653,100 +656,398 @@ func TestCodec_EncodeFrameStream_MatchesEncodeFrame(t *testing.T) {
 				t.Fatalf("EncodeFrameStream(%s): %v", name, err)
 			}
 
-			if !bytes.Equal(buf.Bytes(), frame) {
-				t.Errorf("%s: EncodeFrameStream(.part) != EncodeFrame(raw): stream_len=%d frame_len=%d",
-					name, buf.Len(), len(frame))
+			if name != "zstd" {
+				if !bytes.Equal(buf.Bytes(), frame) {
+					t.Errorf("%s: EncodeFrameStream(.part) != EncodeFrame(raw): stream_len=%d frame_len=%d",
+						name, buf.Len(), len(frame))
+				}
+
+				return
+			}
+
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				t.Fatalf("zstd.NewReader: %v", err)
+			}
+
+			t.Cleanup(dec.Close)
+
+			got, err := dec.DecodeAll(buf.Bytes(), nil)
+			if err != nil {
+				t.Fatalf("DecodeAll streamed zstd frame: %v", err)
+			}
+
+			if !bytes.Equal(got, src) {
+				t.Errorf("zstd streamed frame decoded %d bytes, want %d", len(got), len(src))
 			}
 		})
 	}
 }
 
-// maxReadTracker records the largest single buffer length any caller ever
-// requested via Read, hiding whatever io.WriterTo/io.ReaderFrom fast path
-// the wrapped reader might otherwise offer io.Copy — so the recorded
-// maximum reflects the actual buffering strategy of the code under test,
-// not an unrelated stdlib optimization.
-type maxReadTracker struct {
-	r       io.Reader
-	maxRead int
-}
-
-func (m *maxReadTracker) Read(p []byte) (int, error) {
-	if len(p) > m.maxRead {
-		m.maxRead = len(p)
-	}
-
-	// io.EOF must pass through unwrapped and unaltered: io.Copy's loop
-	// compares it with == io.EOF, not errors.Is, so wrapping it here would
-	// turn a normal end-of-stream signal into a hard read error.
-	return m.r.Read(p)
-}
-
-// plainWriter exposes only io.Writer, hiding any io.ReaderFrom the wrapped
-// writer might implement (e.g. *bytes.Buffer), so io.Copy cannot bypass its
-// default fixed-size buffer copy loop when writing into it.
-type plainWriter struct {
-	w io.Writer
-}
-
-func (p *plainWriter) Write(b []byte) (int, error) {
-	n, err := p.w.Write(b)
-	if err != nil {
-		return n, fmt.Errorf("plain write: %w", err)
-	}
-
-	return n, nil
-}
-
-// TestCodec_EncodeFrameStream_MemoryBound proves the actual buffering
-// behavior behind the EncodeFrameStream contract, per the "verified
-// empirically, not from a doc comment" code-style rule: none/gzip/lz4 must
-// never request a single Read() anywhere near the full chunk size (they
-// stream through their own small internal buffer), while zstd is expected
-// to request exactly the full size in one call — the documented, bounded
-// fallback (see zstd.go).
-func TestCodec_EncodeFrameStream_MemoryBound(t *testing.T) {
-	t.Helper()
-
-	const size = 64 * 1024 * 1024 // dwarfs any codec's own internal buffer
-	// smallBufferCeiling sits above lz4's default 4 MiB block size (the
-	// largest internal buffer among the streaming codecs) yet far below
-	// size and the package's 16 MiB chunk-size floor, so it cleanly
-	// separates "streams through its own buffer" from "read the whole
-	// chunk".
-	const smallBufferCeiling = 8 * 1024 * 1024
-
-	src := bytes.Repeat([]byte{0xAB}, size)
+func TestCodec_ZstdEncodeFrameStream_FrameMetadata(t *testing.T) {
+	t.Parallel()
 
 	cases := []struct {
-		name           string
-		wantFullBuffer bool
+		name string
+		size int
 	}{
-		{"none", false},
-		{"gzip", false},
-		{"lz4", false},
-		{"zstd", true},
+		{"small", 123},
+		{"multiple_blocks", 512 * 1024},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := compress.New(tc.name, 0)
+			t.Parallel()
+
+			c, err := compress.New("zstd", int(compress.LevelBetter))
 			if err != nil {
-				t.Fatalf("New(%s): %v", tc.name, err)
+				t.Fatalf("New(zstd): %v", err)
 			}
 
-			tracker := &maxReadTracker{r: bytes.NewReader(src)}
+			src := bytes.Repeat([]byte("zstd-frame-metadata"), tc.size/len("zstd-frame-metadata")+1)
+			src = src[:tc.size]
 
-			var buf bytes.Buffer
+			var frame bytes.Buffer
 
-			if err := c.EncodeFrameStream(&plainWriter{&buf}, tracker, size); err != nil {
-				t.Fatalf("EncodeFrameStream(%s): %v", tc.name, err)
+			if err := c.EncodeFrameStream(&frame, bytes.NewReader(src), int64(len(src))); err != nil {
+				t.Fatalf("EncodeFrameStream: %v", err)
 			}
 
-			gotFullBuffer := tracker.maxRead >= smallBufferCeiling
-			if gotFullBuffer != tc.wantFullBuffer {
-				t.Errorf("%s: max single Read() request was %d bytes (full-buffer=%v); want full-buffer=%v",
-					tc.name, tracker.maxRead, gotFullBuffer, tc.wantFullBuffer)
+			var header zstd.Header
+			if err := header.Decode(frame.Bytes()); err != nil {
+				t.Fatalf("decode frame header: %v", err)
+			}
+
+			if !header.HasFCS {
+				t.Error("streamed frame header has no content size")
+			}
+
+			if header.FrameContentSize != uint64(len(src)) {
+				t.Errorf("frame content size = %d, want %d", header.FrameContentSize, len(src))
+			}
+
+			if !header.HasCheckSum {
+				t.Error("streamed frame header has no checksum")
+			}
+
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				t.Fatalf("zstd.NewReader: %v", err)
+			}
+
+			t.Cleanup(dec.Close)
+
+			got, err := dec.DecodeAll(frame.Bytes(), nil)
+			if err != nil {
+				t.Fatalf("DecodeAll: %v", err)
+			}
+
+			if !bytes.Equal(got, src) {
+				t.Errorf("decoded %d bytes, want %d", len(got), len(src))
+			}
+
+			corrupt := bytes.Clone(frame.Bytes())
+			corrupt[len(corrupt)-1] ^= 0xFF
+
+			if _, err := dec.DecodeAll(corrupt, nil); err == nil {
+				t.Error("DecodeAll accepted a corrupted frame checksum")
+			}
+		})
+	}
+}
+
+var (
+	errOversizedRead = errors.New("read buffer exceeds cap")
+	errSourceRead    = errors.New("source read failed")
+	errDestination   = errors.New("destination write failed")
+)
+
+type generatedReader struct {
+	remaining int64
+	maxRead   int
+}
+
+func (r *generatedReader) Read(p []byte) (int, error) {
+	if r.maxRead > 0 && len(p) > r.maxRead {
+		return 0, errOversizedRead
+	}
+
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := min(int64(len(p)), r.remaining)
+	for i := range int(n) {
+		p[i] = byte(i*31 + 7)
+	}
+
+	r.remaining -= n
+
+	return int(n), nil
+}
+
+type terminalErrorReader struct {
+	err error
+}
+
+func (r terminalErrorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+type failingWriter struct {
+	err error
+}
+
+func (w failingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestCodec_ZstdEncodeFrameStream_ExactInputAndErrors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		dst         io.Writer
+		src         io.Reader
+		size        int64
+		wantIs      error
+		wantContain []string
+	}{
+		{
+			name:        "negative size",
+			dst:         io.Discard,
+			src:         bytes.NewReader(nil),
+			size:        -1,
+			wantContain: []string{"non-positive content size"},
+		},
+		{
+			name:        "zero size",
+			dst:         io.Discard,
+			src:         bytes.NewReader(nil),
+			size:        0,
+			wantContain: []string{"non-positive content size"},
+		},
+		{
+			name:        "short source closes writer",
+			dst:         io.Discard,
+			src:         bytes.NewReader([]byte("short")),
+			size:        10,
+			wantIs:      io.EOF,
+			wantContain: []string{"copy exactly 10 frame bytes", "close frame writer"},
+		},
+		{
+			name:        "extra source byte",
+			dst:         io.Discard,
+			src:         bytes.NewReader([]byte("extra")),
+			size:        4,
+			wantContain: []string{"beyond declared frame size 4"},
+		},
+		{
+			name:        "copy error closes writer",
+			dst:         io.Discard,
+			src:         io.MultiReader(bytes.NewReader([]byte("abc")), terminalErrorReader{err: errSourceRead}),
+			size:        10,
+			wantIs:      errSourceRead,
+			wantContain: []string{"copy exactly 10 frame bytes", "close frame writer"},
+		},
+		{
+			name:        "trailing probe error",
+			dst:         io.Discard,
+			src:         io.MultiReader(bytes.NewReader([]byte("abc")), terminalErrorReader{err: errSourceRead}),
+			size:        3,
+			wantIs:      errSourceRead,
+			wantContain: []string{"verify source ends at declared frame size 3"},
+		},
+		{
+			name:        "close error",
+			dst:         failingWriter{err: errDestination},
+			src:         bytes.NewReader([]byte("abc")),
+			size:        3,
+			wantIs:      errDestination,
+			wantContain: []string{"close frame writer"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := compress.New("zstd", 0)
+			if err != nil {
+				t.Fatalf("New(zstd): %v", err)
+			}
+
+			err = c.EncodeFrameStream(tc.dst, tc.src, tc.size)
+			if err == nil {
+				t.Fatal("EncodeFrameStream returned nil error")
+			}
+
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("EncodeFrameStream error %v does not wrap %v", err, tc.wantIs)
+			}
+
+			for _, text := range tc.wantContain {
+				if !strings.Contains(err.Error(), text) {
+					t.Errorf("EncodeFrameStream error %q does not contain %q", err, text)
+				}
+			}
+		})
+	}
+}
+
+func TestCodec_ZstdEncodeFrameStream_CapsSourceReads(t *testing.T) {
+	t.Parallel()
+
+	const (
+		size       = 16 * 1024 * 1024
+		maxReadCap = 1 * 1024 * 1024
+	)
+
+	c, err := compress.New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	src := &generatedReader{remaining: size, maxRead: maxReadCap}
+
+	if err := c.EncodeFrameStream(io.Discard, src, size); err != nil {
+		t.Fatalf("EncodeFrameStream: %v", err)
+	}
+
+	if src.remaining != 0 {
+		t.Errorf("source has %d bytes remaining, want 0", src.remaining)
+	}
+}
+
+const (
+	zstdAllocSizeEnv = "D8_SNAPSHOT_TEST_ZSTD_ALLOC_SIZE"
+	zstdAllocFileEnv = "D8_SNAPSHOT_TEST_ZSTD_ALLOC_FILE"
+)
+
+func TestCodec_ZstdEncodeFrameStream_AllocationSlope(t *testing.T) {
+	t.Parallel()
+
+	if rawSize := os.Getenv(zstdAllocSizeEnv); rawSize != "" {
+		size, err := strconv.ParseInt(rawSize, 10, 64)
+		if err != nil {
+			t.Fatalf("parse child allocation size: %v", err)
+		}
+
+		c, err := compress.New("zstd", 0)
+		if err != nil {
+			t.Fatalf("New(zstd): %v", err)
+		}
+
+		runtime.GC()
+
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		if err := c.EncodeFrameStream(io.Discard, &generatedReader{remaining: size}, size); err != nil {
+			t.Fatalf("EncodeFrameStream: %v", err)
+		}
+
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+
+		totalAllocated := after.TotalAlloc - before.TotalAlloc
+		resultPath := os.Getenv(zstdAllocFileEnv)
+
+		if err := os.WriteFile(resultPath, []byte(strconv.FormatUint(totalAllocated, 10)), 0o600); err != nil {
+			t.Fatalf("write child allocation result: %v", err)
+		}
+
+		return
+	}
+
+	measure := func(size int64) uint64 {
+		t.Helper()
+
+		resultPath := filepath.Join(t.TempDir(), "total-alloc")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		t.Cleanup(cancel)
+
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCodec_ZstdEncodeFrameStream_AllocationSlope$", "-test.count=1")
+		cmd.Env = append(os.Environ(),
+			zstdAllocSizeEnv+"="+strconv.FormatInt(size, 10),
+			zstdAllocFileEnv+"="+resultPath,
+		)
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("allocation child for %d bytes: %v\n%s", size, err, output)
+		}
+
+		rawResult, err := os.ReadFile(resultPath)
+		if err != nil {
+			t.Fatalf("read allocation child result: %v", err)
+		}
+
+		totalAllocated, err := strconv.ParseUint(string(rawResult), 10, 64)
+		if err != nil {
+			t.Fatalf("parse allocation child result %q: %v", rawResult, err)
+		}
+
+		return totalAllocated
+	}
+
+	const (
+		smallSize       = 2 * 1024 * 1024
+		largeSize       = 32 * 1024 * 1024
+		maxPayloadSlope = 8 * 1024 * 1024
+	)
+
+	smallAllocated := measure(smallSize)
+	largeAllocated := measure(largeSize)
+
+	t.Logf("total allocations: %d-byte frame=%d, %d-byte frame=%d",
+		smallSize, smallAllocated, largeSize, largeAllocated)
+
+	if largeAllocated > smallAllocated+maxPayloadSlope {
+		t.Errorf(
+			"total allocation grew by %d bytes from a %d-byte to %d-byte frame; want <= %d",
+			largeAllocated-smallAllocated,
+			smallSize,
+			largeSize,
+			maxPayloadSlope,
+		)
+	}
+}
+
+func TestCodec_ZstdEncodeFrameStream_ConcurrentCalls(t *testing.T) {
+	t.Parallel()
+
+	c, err := compress.New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	for i := range 8 {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+
+			src := bytes.Repeat([]byte{byte(i + 1)}, 512*1024+i)
+
+			var frame bytes.Buffer
+
+			if err := c.EncodeFrameStream(&frame, bytes.NewReader(src), int64(len(src))); err != nil {
+				t.Fatalf("EncodeFrameStream: %v", err)
+			}
+
+			dec, err := zstd.NewReader(nil)
+			if err != nil {
+				t.Fatalf("zstd.NewReader: %v", err)
+			}
+
+			t.Cleanup(dec.Close)
+
+			got, err := dec.DecodeAll(frame.Bytes(), nil)
+			if err != nil {
+				t.Fatalf("DecodeAll: %v", err)
+			}
+
+			if !bytes.Equal(got, src) {
+				t.Errorf("decoded %d bytes, want %d", len(got), len(src))
 			}
 		})
 	}
