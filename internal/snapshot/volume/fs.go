@@ -2042,16 +2042,9 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 
 	defer func() { _ = f.Close() }()
 
-	dec := json.NewDecoder(f)
-	dec.UseNumber()
-
-	t, err := dec.Token()
-	if err != nil {
+	reader := bufio.NewReaderSize(f, 4<<10)
+	if err := expectFSSizesJSONByte(reader, '{'); err != nil {
 		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: %w", path, err)
-	}
-
-	if t != json.Delim('{') {
-		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: expected object", path)
 	}
 
 	var (
@@ -2061,15 +2054,27 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 		foundTotal bool
 	)
 
-	for dec.More() {
-		keyToken, err := dec.Token()
+	firstField := true
+
+	for {
+		done, err := beforeNextFSSizesJSONValue(reader, firstField, '}')
 		if err != nil {
 			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s field: %w", path, err)
 		}
 
-		key, ok := keyToken.(string)
-		if !ok {
-			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: non-string field name", path)
+		if done {
+			break
+		}
+
+		firstField = false
+
+		key, err := readBoundedFSSizesJSONString(reader, fsInventoryMaxRecordSize)
+		if err != nil {
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s field: %w", path, err)
+		}
+
+		if err := expectFSSizesJSONByte(reader, ':'); err != nil {
+			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s field %q separator: %w", path, key, err)
 		}
 
 		switch key {
@@ -2080,38 +2085,52 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 
 			foundFiles = true
 
-			t, err := dec.Token()
-			if err != nil {
+			if err := expectFSSizesJSONByte(reader, '{'); err != nil {
 				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s files: %w", path, err)
 			}
 
-			if t != json.Delim('{') {
-				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: files is not an object", path)
-			}
+			firstFile := true
 
-			for dec.More() {
-				pathToken, err := dec.Token()
+			for {
+				filesDone, err := beforeNextFSSizesJSONValue(reader, firstFile, '}')
 				if err != nil {
 					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s file path: %w", path, err)
 				}
 
-				relPath, ok := pathToken.(string)
-				if !ok {
-					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: non-string file path", path)
+				if filesDone {
+					break
+				}
+
+				firstFile = false
+
+				relPath, err := readBoundedFSSizesJSONString(reader, fsInventoryMaxRecordSize)
+				if err != nil {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s file path: %w", path, err)
+				}
+
+				if len(relPath) > fsInventoryMaxPathSize {
+					return 0, 0, fmt.Errorf(
+						"parse fs sizes sidecar %s path exceeds %d-byte limit",
+						path,
+						fsInventoryMaxPathSize,
+					)
 				}
 
 				if _, err := sanitizeRelPath(relPath); err != nil {
 					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s path %q: %w", path, relPath, err)
 				}
 
-				var number json.Number
-				if err := dec.Decode(&number); err != nil {
+				if err := expectFSSizesJSONByte(reader, ':'); err != nil {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q separator: %w", path, relPath, err)
+				}
+
+				size, rawSize, err := readBoundedFSSizesJSONInt64(reader, fsInventoryMaxRecordSize)
+				if err != nil {
 					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q: %w", path, relPath, err)
 				}
 
-				size, err := number.Int64()
-				if err != nil || size <= 0 {
-					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q: invalid %q", path, relPath, number)
+				if size <= 0 {
+					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s size for %q: invalid %q", path, relPath, rawSize)
 				}
 
 				destPath := filepath.Join(stagingDir, filepath.FromSlash(relPath+ext))
@@ -2126,10 +2145,6 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 				}
 			}
 
-			if _, err := dec.Token(); err != nil {
-				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s files close: %w", path, err)
-			}
-
 		case "total":
 			if foundTotal {
 				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: duplicate total field", path)
@@ -2137,14 +2152,15 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 
 			foundTotal = true
 
-			var number json.Number
-			if err := dec.Decode(&number); err != nil {
+			var rawTotal string
+
+			total, rawTotal, err = readBoundedFSSizesJSONInt64(reader, fsInventoryMaxRecordSize)
+			if err != nil {
 				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s total: %w", path, err)
 			}
 
-			total, err = number.Int64()
-			if err != nil || total < 0 {
-				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: invalid total %q", path, number)
+			if total < 0 {
+				return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: invalid total %q", path, rawTotal)
 			}
 
 		default:
@@ -2152,23 +2168,197 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 		}
 	}
 
-	if _, err := dec.Token(); err != nil {
-		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s close: %w", path, err)
-	}
-
 	if !foundFiles || !foundTotal || staged > total {
 		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: incomplete or inconsistent metadata", path)
 	}
 
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: trailing JSON value", path)
-		}
-
+	if err := expectFSSizesJSONEOF(reader); err != nil {
 		return 0, 0, fmt.Errorf("parse fs sizes sidecar %s trailer: %w", path, err)
 	}
 
 	return total, staged, nil
+}
+
+// Sidecar limits are per encoded key/value, not per document, so inode count remains
+// unlimited while one corrupt record cannot allocate attacker-controlled heap.
+func readBoundedFSSizesJSONString(reader *bufio.Reader, limit int) (string, error) {
+	if err := expectFSSizesJSONByte(reader, '"'); err != nil {
+		return "", err
+	}
+
+	raw := make([]byte, 1, min(limit, 4<<10))
+	raw[0] = '"'
+	escaped := false
+
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return "", err
+		}
+
+		if len(raw) >= limit {
+			return "", fmt.Errorf("JSON string exceeds %d-byte encoded limit", limit)
+		}
+
+		raw = append(raw, b)
+
+		if escaped {
+			escaped = false
+
+			continue
+		}
+
+		if b == '\\' {
+			escaped = true
+
+			continue
+		}
+
+		if b == '"' {
+			break
+		}
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("decode JSON string: %w", err)
+	}
+
+	return value, nil
+}
+
+func readBoundedFSSizesJSONInt64(reader *bufio.Reader, limit int) (int64, string, error) {
+	first, err := readFSSizesJSONNonSpace(reader)
+	if err != nil {
+		return 0, "", err
+	}
+
+	if first == ',' || first == '}' || first == ']' || first == ':' {
+		return 0, "", fmt.Errorf("unexpected %q at start of JSON number", first)
+	}
+
+	raw := make([]byte, 1, min(limit, 64))
+	raw[0] = first
+
+	for {
+		next, err := reader.Peek(1)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return 0, "", err
+		}
+
+		if isFSSizesJSONBoundary(next[0]) {
+			break
+		}
+
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0, "", err
+		}
+
+		if len(raw) >= limit {
+			return 0, "", fmt.Errorf("JSON number exceeds %d-byte encoded limit", limit)
+		}
+
+		raw = append(raw, b)
+	}
+
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return 0, string(raw), fmt.Errorf("invalid JSON number %q: %w", raw, err)
+	}
+
+	value, err := number.Int64()
+	if err != nil {
+		return 0, number.String(), fmt.Errorf("invalid integer %q: %w", number, err)
+	}
+
+	return value, number.String(), nil
+}
+
+func beforeNextFSSizesJSONValue(reader *bufio.Reader, first bool, end byte) (bool, error) {
+	next, err := peekFSSizesJSONNonSpace(reader)
+	if err != nil {
+		return false, err
+	}
+
+	if next == end {
+		_, _ = reader.ReadByte()
+
+		return true, nil
+	}
+
+	if !first {
+		if err := expectFSSizesJSONByte(reader, ','); err != nil {
+			return false, err
+		}
+	}
+
+	return false, nil
+}
+
+func expectFSSizesJSONByte(reader *bufio.Reader, want byte) error {
+	got, err := readFSSizesJSONNonSpace(reader)
+	if err != nil {
+		return err
+	}
+
+	if got != want {
+		return fmt.Errorf("expected %q, got %q", want, got)
+	}
+
+	return nil
+}
+
+func expectFSSizesJSONEOF(reader *bufio.Reader) error {
+	if _, err := readFSSizesJSONNonSpace(reader); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON value")
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func readFSSizesJSONNonSpace(reader *bufio.Reader) (byte, error) {
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+
+		if !isFSSizesJSONSpace(b) {
+			return b, nil
+		}
+	}
+}
+
+func peekFSSizesJSONNonSpace(reader *bufio.Reader) (byte, error) {
+	for {
+		next, err := reader.Peek(1)
+		if err != nil {
+			return 0, err
+		}
+
+		if !isFSSizesJSONSpace(next[0]) {
+			return next[0], nil
+		}
+
+		_, _ = reader.ReadByte()
+	}
+}
+
+func isFSSizesJSONBoundary(b byte) bool {
+	return isFSSizesJSONSpace(b) || b == ',' || b == '}' || b == ']'
+}
+
+func isFSSizesJSONSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 // parseItemSize extracts the "size" attribute from a data-exporter listing item.

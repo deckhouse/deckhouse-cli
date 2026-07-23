@@ -2074,6 +2074,88 @@ func TestScanFSStagingSizes_NoSidecar_ReportsNotFound(t *testing.T) {
 	})
 }
 
+func TestScanFSStagingSizes_RejectsOversizedTokensBeforeMaterialization(t *testing.T) {
+	const (
+		oversizedBytes = 20 << 20
+		maxAllocated   = 4 << 20
+	)
+
+	tests := []struct {
+		name   string
+		prefix string
+		fill   byte
+		suffix string
+	}{
+		{
+			name:   "FilePath",
+			prefix: `{"files":{"`,
+			fill:   'a',
+			suffix: `":1},"total":1}`,
+		},
+		{
+			name:   "FileSize",
+			prefix: `{"files":{"safe":`,
+			fill:   '1',
+			suffix: `},"total":1}`,
+		},
+		{
+			name:   "TopLevelKey",
+			prefix: `{"`,
+			fill:   'x',
+			suffix: `":0,"files":{},"total":0}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stagingDir := t.TempDir()
+			metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+			if err := os.MkdirAll(metaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			sidecarPath := filepath.Join(metaDir, volume.FSSizesSidecarName)
+			sidecar, err := os.Create(sidecarPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := io.WriteString(sidecar, tt.prefix); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := io.CopyN(sidecar, repeatedByteReader(tt.fill), oversizedBytes); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := io.WriteString(sidecar, tt.suffix); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := sidecar.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			runtime.GC()
+
+			var baseline runtime.MemStats
+			runtime.ReadMemStats(&baseline)
+
+			_, _, _, err = volume.ScanFSStagingSizes(stagingDir, "")
+			if err == nil || !strings.Contains(err.Error(), "encoded limit") {
+				t.Fatalf("ScanFSStagingSizes error = %v, want encoded-limit rejection", err)
+			}
+
+			var current runtime.MemStats
+			runtime.ReadMemStats(&current)
+
+			if allocated := current.TotalAlloc - baseline.TotalAlloc; allocated > maxAllocated {
+				t.Fatalf("sidecar scan allocated %d bytes, want <= %d before rejecting oversized token", allocated, maxAllocated)
+			}
+		})
+	}
+}
+
 // TestDownloadFilesystemVolume_SizesSidecar_FromScratchUnchanged verifies that
 // a completed, from-scratch download (no interruption, no prior sidecar) is
 // unaffected by the sidecar feature: the sidecar is written and then removed
@@ -3428,7 +3510,29 @@ func TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs(t *testing.T)
 }
 
 func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
-	const entries = 30_000
+	const (
+		smallEntries = 500
+		largeEntries = 30_000
+		deltaLimit   = 4 << 20
+	)
+
+	smallPeak := measureLargeFlatInventoryHeap(t, smallEntries)
+	largePeak := measureLargeFlatInventoryHeap(t, largeEntries)
+	if largePeak > smallPeak+deltaLimit {
+		t.Fatalf(
+			"peak additional heap grew from %d to %d bytes for %d versus %d entries; count-dependent delta %d exceeds %d",
+			smallPeak,
+			largePeak,
+			smallEntries,
+			largeEntries,
+			largePeak-smallPeak,
+			deltaLimit,
+		)
+	}
+}
+
+func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
+	t.Helper()
 
 	srv := newLargeLinkInventoryServer(t, entries, false)
 	nodeDir := t.TempDir()
@@ -3481,16 +3585,6 @@ func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
 		additional = maxHeap - baseline.HeapAlloc
 	}
 
-	// The old five-slice/map inventory retained several hundred bytes per item
-	// and exceeds this count-scaled ceiling. The spool implementation stays
-	// below it because only a 256-item sort batch and bounded merge cursors are
-	// live. The exporter decoder test independently forces GC at its final
-	// callback, making a restored whole-directory slice fail deterministically.
-	limit := uint64(entries * 384)
-	if additional > limit {
-		t.Fatalf("peak additional heap = %d bytes for %d entries, want <= %d", additional, entries, limit)
-	}
-
 	f, err := os.Open(tarPath)
 	if err != nil {
 		t.Fatal(err)
@@ -3514,6 +3608,8 @@ func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
 	if count != entries {
 		t.Fatalf("tar entries = %d, want %d", count, entries)
 	}
+
+	return additional
 }
 
 func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *testing.T) {
@@ -3635,6 +3731,16 @@ func newLargeLinkInventoryServer(t *testing.T, entries int, reverse bool) *httpt
 	t.Cleanup(srv.Close)
 
 	return srv
+}
+
+type repeatedByteReader byte
+
+func (r repeatedByteReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = byte(r)
+	}
+
+	return len(p), nil
 }
 
 func TestDownloadFilesystemVolume_DeepInventoryUsesDiskQueue(t *testing.T) {
