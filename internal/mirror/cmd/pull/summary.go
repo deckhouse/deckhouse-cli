@@ -18,62 +18,45 @@ package pull
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	"time"
-	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/fatih/color"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/summaryui"
 )
 
+// Framed-summary primitives live in summaryui so the pull and push summaries
+// share one look. Alias them here to keep the renderer and its callers unchanged.
 const (
-	// frameWidth is the inner width of the summary box, in runes.
-	frameWidth = 56
-	// labelWidth aligns the category labels in the summary body.
-	labelWidth = 11
-	// nameWidth left-aligns module names and bundle artifact names.
-	nameWidth = 30
-	// sizeWidth right-aligns bundle artifact sizes.
-	sizeWidth = 10
+	frameWidth = summaryui.FrameWidth
+	nameWidth  = summaryui.NameWidth
+	sizeWidth  = summaryui.SizeWidth
 )
 
-// Semantic accent colours for the summary. fatih/color disables them when
-// stdout is not a TTY or NO_COLOR is set (the summary is logged to stdout), so
-// escape codes never reach pipes or files.
-//
-// Apply every colour AFTER width padding (padLabel, %-30s, %10s): the codes are
-// zero-width on screen but count toward fmt's field widths and break columns.
 var (
-	cFrame   = color.New(color.FgHiBlack).SprintFunc()            // box borders - recede
-	cTitle   = color.New(color.FgCyan, color.Bold).SprintFunc()   // block title
-	cLabel   = color.New(color.FgCyan).SprintFunc()               // category labels (scan anchors)
-	cCount   = color.New(color.Bold).SprintFunc()                 // primary numbers
-	cDim     = color.New(color.FgHiBlack).SprintFunc()            // units and secondary text
-	cGood    = color.New(color.FgGreen).SprintFunc()              // complete (e.g. 4/4 databases)
-	cWarn    = color.New(color.FgYellow).SprintFunc()             // attention (partial, not-available, dry-run)
-	cBad     = color.New(color.FgRed).SprintFunc()                // failure (cancelled)
-	cVEX     = color.New(color.FgMagenta).SprintFunc()            // VEX attestations (a distinct class)
-	cVersion = color.New(color.FgGreen).SprintFunc()              // resolved versions (the headline)
-	cSize    = color.New(color.FgCyan).SprintFunc()               // bundle artifact sizes
-	cTotalSz = color.New(color.FgYellow, color.Bold).SprintFunc() // the bundle TOTAL - the action number
+	cFrame   = summaryui.Frame
+	cLabel   = summaryui.Label
+	cCount   = summaryui.Count
+	cDim     = summaryui.Dim
+	cGood    = summaryui.Good
+	cWarn    = summaryui.Warn
+	cBad     = summaryui.Bad
+	cVEX     = summaryui.VEX
+	cVersion = summaryui.Version
+	cSize    = summaryui.Size
+	cTotalSz = summaryui.TotalSz
 )
 
-// bar returns the coloured left border of a body line.
-func bar() string { return cFrame("║") }
-
-// configureSummaryColor re-enables colour when FORCE_COLOR / CLICOLOR_FORCE is
-// set (e.g. piping to `less -R` or capturing a coloured log). NO_COLOR wins;
-// otherwise fatih/color's stdout-TTY check decides.
-func configureSummaryColor() {
-	if os.Getenv("NO_COLOR") == "" &&
-		(os.Getenv("FORCE_COLOR") != "" || os.Getenv("CLICOLOR_FORCE") != "") {
-		color.NoColor = false
-	}
-}
+var (
+	bar                   = summaryui.Bar
+	configureSummaryColor = summaryui.ConfigureColor
+	writeTopBorder        = summaryui.WriteTopBorder
+	padLabel              = summaryui.PadLabel
+	formatDuration        = summaryui.FormatDuration
+	humanSize             = summaryui.HumanSize
+)
 
 // renderPullSummary formats a PullSummary as a single multi-line, framed block.
 // It is emitted through a single logger call so the structured-logging handler
@@ -82,6 +65,31 @@ func configureSummaryColor() {
 // When verbose is true, the modules and packages sections list every entry with
 // its resolved versions (and VEX count, when present); otherwise they print only
 // the aggregate count (the category label already names what is counted).
+//
+// Example output (verbose pull, colour stripped):
+//
+//	╔══ Pull summary ═══════════════════════════════════════
+//	║ Edition:    EE
+//	║ Platform:   v1.69.1 (5 channels)
+//	║ Installer:  v1.69.1
+//	║ Security:   4/4 databases
+//	║ Modules:    2  ·  3 VEXes
+//	║     console                         [v1.40.0]
+//	║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]
+//	║ Packages:   1
+//	║     deckhouse                       [v1.69.1]
+//	║
+//	║ Bundle artifacts (3 files)
+//	║   platform.tar                      2.9 GiB
+//	║   modules.tar                       1.1 GiB  (2 chunks)
+//	║   TOTAL                             4.0 GiB
+//	║
+//	║ Elapsed: 3m12s
+//	╚═══════════════════════════════════════════════════════
+//
+// The Elapsed line is preceded by a state line on a non-success outcome:
+// "Pull failed; ...", "Pull was cancelled; ...", or "No images were downloaded
+// (dry-run).".
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 
@@ -136,16 +144,9 @@ func summaryTitle(s *mirror.PullSummary) string {
 	}
 }
 
-func writeTopBorder(b *strings.Builder, title string) {
-	prefix := "╔══ "
-	suffix := " "
-	used := utf8.RuneCountInString(prefix) + utf8.RuneCountInString(title) + utf8.RuneCountInString(suffix)
-
-	pad := max(0, frameWidth-used)
-
-	b.WriteString(cFrame(prefix) + cTitle(title) + suffix + cFrame(strings.Repeat("═", pad)) + "\n")
-}
-
+// writeComponent renders one platform-like category (Platform, Installer).
+// e.g. `║ Platform:   v1.69.1 (5 channels)`; "included" when no version is
+// known; "skipped" / "not pulled" when the phase did not run.
 func writeComponent(b *strings.Builder, name string, c mirror.ComponentStats) {
 	label := cLabel(padLabel(name))
 
@@ -208,6 +209,9 @@ func compareSemverDesc(a, b string) bool {
 	}
 }
 
+// writeSecurity renders the trivy databases line.
+// e.g. `║ Security:   4/4 databases` (green; yellow on a partial "3/4
+// databases"); also "not available in this edition" / "skipped" / "not pulled".
 func writeSecurity(b *strings.Builder, s mirror.SecurityStats) {
 	label := cLabel(padLabel("Security"))
 
@@ -231,6 +235,9 @@ func writeSecurity(b *strings.Builder, s mirror.SecurityStats) {
 	}
 }
 
+// writeModules renders the modules line, and per-module detail when verbose.
+// e.g. `║ Modules:    2  ·  3 VEXes`, then per module (verbose)
+// `║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]`.
 func writeModules(b *strings.Builder, m mirror.ModulesStats, verbose bool) {
 	label := cLabel(padLabel("Modules"))
 
@@ -284,6 +291,9 @@ func writeModules(b *strings.Builder, m mirror.ModulesStats, verbose bool) {
 	}
 }
 
+// writePackages mirrors writeModules for packages.
+// e.g. `║ Packages:   1`, then per package (verbose)
+// `║     deckhouse                       [v1.69.1]`.
 func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 	label := cLabel(padLabel("Packages"))
 
@@ -337,6 +347,13 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 	}
 }
 
+// writeBundle renders the on-disk bundle artifact block (real pull only).
+// e.g.:
+//
+//	║ Bundle artifacts (3 files)
+//	║   platform.tar                      2.9 GiB
+//	║   modules.tar                       1.1 GiB  (2 chunks)
+//	║   TOTAL                             4.0 GiB
 func writeBundle(b *strings.Builder, bundle mirror.BundleStats) {
 	fmt.Fprintf(b, "%s %s\n", bar(), cLabel(fmt.Sprintf("Bundle artifacts (%d files)", physicalFileCount(bundle))))
 
@@ -367,41 +384,4 @@ func physicalFileCount(bundle mirror.BundleStats) int {
 	}
 
 	return count
-}
-
-func padLabel(name string) string {
-	return fmt.Sprintf("%-*s", labelWidth, name+":")
-}
-
-// formatDuration renders an elapsed duration compactly, keeping millisecond
-// precision for sub-second runs (so a fast dry-run does not report "0s").
-func formatDuration(d time.Duration) string {
-	if d < time.Second {
-		return d.Round(time.Millisecond).String()
-	}
-
-	return d.Round(time.Second).String()
-}
-
-// humanSize returns a compact human-readable size using binary (IEC) units
-// (e.g. "789 B", "12.3 KiB", "2.9 GiB"). The divisor is 1024, so the labels are
-// KiB/MiB/GiB rather than the decimal KB/MB/GB - this keeps the printed unit
-// honest with the math, which matters when an operator sizes transfer media off
-// this number. Adapted from internal/cr/internal/output.HumanSize, which is not
-// importable here because it lives behind the internal/cr/internal/ barrier.
-func humanSize(n int64) string {
-	const unit = int64(1024)
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-
-	div, exp := unit, 0
-	for v := n / unit; v >= unit; v /= unit {
-		div *= unit
-		exp++
-	}
-
-	units := "KMGTPE"
-
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), units[exp])
 }
