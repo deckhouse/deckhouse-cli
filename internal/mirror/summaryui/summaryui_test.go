@@ -56,6 +56,7 @@ func TestWriteRegistryLayout_Default(t *testing.T) {
 	}
 	require.Contains(t, out, layoutRoot+"/modules")
 	require.NotContains(t, out, "default:", "no default hint without an override")
+	require.NotContains(t, out, "Warning", "no warning header without an override")
 }
 
 func TestWriteRegistryLayout_OverrideHint(t *testing.T) {
@@ -66,6 +67,7 @@ func TestWriteRegistryLayout_OverrideHint(t *testing.T) {
 	// "/" places modules at the repo root; the hint points at the standard path.
 	out := renderLayout(t, mirror.BuildRegistryLayout(layoutRoot, "/", ""), true)
 
+	require.Contains(t, out, "Warning: modules use a non-default path (--modules-path-suffix)")
 	require.Contains(t, out, "default: "+layoutRoot+"/modules")
 }
 

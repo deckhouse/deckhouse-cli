@@ -29,10 +29,12 @@ import (
 // telling the operator where each component landed is the point of the push
 // summary, and it highlights a moved modules path (--modules-path-suffix).
 //
-// Example output for --modules-path-suffix / (colour stripped; the moved Modules
-// registry path is yellow):
+// Example output for --modules-path-suffix / (colour stripped; the warning
+// header and the moved Modules path are yellow):
 //
 //	╔══ Push summary ═══════════════════════════════════════
+//	║
+//	║ Warning: modules use a non-default path (--modules-path-suffix)
 //	║ Registry:   registry.example.com/deckhouse/ee
 //	║   Platform   registry.example.com/deckhouse/ee
 //	║   Modules    registry.example.com/deckhouse/ee
@@ -40,6 +42,7 @@ import (
 //	║   Security   registry.example.com/deckhouse/ee/security
 //	║   Packages   registry.example.com/deckhouse/ee/packages
 //	║   Installer  registry.example.com/deckhouse/ee/installer
+//	║
 //	║ Platform:   pushed
 //	║ Installer:  not present
 //	║ Security:   4 databases

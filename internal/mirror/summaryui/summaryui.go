@@ -132,9 +132,14 @@ func HumanSize(n int64) string {
 // in yellow plus a dimmed hint of the standard path. Writes nothing when show is
 // false.
 //
-// Example output for --modules-path-suffix mymods (colour stripped; the Modules
-// path is yellow):
+// The block is wrapped in blank lines to set it apart. A moved modules path adds
+// a plain-text warning header and highlights the Modules line.
 //
+// Example output for --modules-path-suffix mymods (colour stripped; the warning
+// header and the Modules path are yellow):
+//
+//	║
+//	║ Warning: modules use a non-default path (--modules-path-suffix)
 //	║ Registry:   registry.deckhouse.io/deckhouse/ee
 //	║   Platform   registry.deckhouse.io/deckhouse/ee
 //	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
@@ -142,13 +147,23 @@ func HumanSize(n int64) string {
 //	║   Security   registry.deckhouse.io/deckhouse/ee/security
 //	║   Packages   registry.deckhouse.io/deckhouse/ee/packages
 //	║   Installer  registry.deckhouse.io/deckhouse/installer
+//	║
 //
-// With a default modules path the Modules line is plain and the "default:" hint
-// is omitted.
+// With a default modules path the warning header is omitted and the Modules line
+// is plain.
 func WriteRegistryLayout(b *strings.Builder, layout mirror.RegistryLayout, show bool) {
 	// No rows means an unpopulated layout; never emit a bare header.
 	if !show || len(layout.Rows) == 0 {
 		return
+	}
+
+	// Blank lines above and below set the block apart from the summary stats.
+	b.WriteString(Bar() + "\n")
+
+	// A moved modules path is unusual; call it out in plain text, not by colour
+	// alone (colour is lost in piped logs and to colour-blind readers).
+	if layout.HasOverride {
+		fmt.Fprintf(b, "%s %s\n", Bar(), Warn("Warning: modules use a non-default path (--modules-path-suffix)"))
 	}
 
 	fmt.Fprintf(b, "%s %s %s\n", Bar(), Label(PadLabel("Registry")), layout.Root)
@@ -165,4 +180,6 @@ func WriteRegistryLayout(b *strings.Builder, layout mirror.RegistryLayout, show 
 
 		fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), row.Path)
 	}
+
+	b.WriteString(Bar() + "\n")
 }

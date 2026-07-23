@@ -67,10 +67,12 @@ var (
 // the aggregate count (the category label already names what is counted).
 //
 // Example output (verbose pull with --modules-path-suffix mymods, colour
-// stripped; the moved Modules registry path is yellow):
+// stripped; the warning header and the moved Modules path are yellow):
 //
 //	╔══ Pull summary ═══════════════════════════════════════
 //	║ Edition:    EE
+//	║
+//	║ Warning: modules use a non-default path (--modules-path-suffix)
 //	║ Registry:   registry.deckhouse.io/deckhouse/ee
 //	║   Platform   registry.deckhouse.io/deckhouse/ee
 //	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
@@ -78,6 +80,7 @@ var (
 //	║   Security   registry.deckhouse.io/deckhouse/ee/security
 //	║   Packages   registry.deckhouse.io/deckhouse/ee/packages
 //	║   Installer  registry.deckhouse.io/deckhouse/installer
+//	║
 //	║ Platform:   v1.69.1 (5 channels)
 //	║ Installer:  v1.69.1
 //	║ Security:   4/4 databases
@@ -96,9 +99,9 @@ var (
 //	╚═══════════════════════════════════════════════════════
 //
 // The Registry section appears only under --verbose-summary or when the modules
-// path was moved. The Elapsed line is preceded by a state line on a non-success
-// outcome: "Pull failed; ...", "Pull was cancelled; ...", or "No images were
-// downloaded (dry-run).".
+// path was moved; its Warning header only when the path was moved. The Elapsed
+// line is preceded by a state line on a non-success outcome: "Pull failed; ...",
+// "Pull was cancelled; ...", or "No images were downloaded (dry-run).".
 func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	var b strings.Builder
 

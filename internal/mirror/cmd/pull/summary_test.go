@@ -431,6 +431,7 @@ func TestRenderPullSummary(t *testing.T) {
 			verbose: false,
 			contains: []string{
 				"Registry:",
+				"Warning: modules use a non-default path (--modules-path-suffix)",
 				"registry.deckhouse.io/deckhouse/ee/security",
 				"default: registry.deckhouse.io/deckhouse/ee/modules",
 			},
@@ -446,7 +447,7 @@ func TestRenderPullSummary(t *testing.T) {
 			},
 			verbose:      true,
 			contains:     []string{"Registry:", "registry.deckhouse.io/deckhouse/ee/modules"},
-			notContains:  []string{"default:"},
+			notContains:  []string{"default:", "Warning"},
 			skippedCount: -1,
 		},
 		{

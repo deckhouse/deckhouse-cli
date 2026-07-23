@@ -57,7 +57,7 @@ func TestRenderPushSummary(t *testing.T) {
 				"Packages:", "3",
 				"Elapsed: 2m4s",
 			},
-			notContains: []string{"default:", "failed", "cancelled", "not present"},
+			notContains: []string{"default:", "Warning", "failed", "cancelled", "not present"},
 		},
 		{
 			name: "moved modules path is highlighted with a default hint",
@@ -68,6 +68,7 @@ func TestRenderPushSummary(t *testing.T) {
 			},
 			contains: []string{
 				"Registry:",
+				"Warning: modules use a non-default path (--modules-path-suffix)",
 				"default: " + root + "/modules",
 				"Installer:", "not present", // no installer.tar in this push
 				"Modules:", "5",
