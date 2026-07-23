@@ -26,8 +26,12 @@ import (
 )
 
 const (
+	// snapshotAPIVersion is the exact core structural Snapshot API.
+	snapshotAPIVersion = snapshotapi.StorageGroup + "/" + snapshotapi.Version
 	// snapshotKind is the core structural snapshot CR.
 	snapshotKind = "Snapshot"
+	// volumeSnapshotAPIVersion is the exact supported CSI VolumeSnapshot API.
+	volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 	// volumeSnapshotKind is the CSI VolumeSnapshot data leaf (extended connector fork).
 	volumeSnapshotKind = aggapi.VolumeSnapshotKind
 )
@@ -35,12 +39,12 @@ const (
 // isStructural reports whether the node is a core Snapshot (no own volume data; carries
 // child refs).
 func (n PlannedNode) isStructural() bool {
-	return n.Kind == snapshotKind
+	return n.APIVersion == snapshotAPIVersion && n.Kind == snapshotKind
 }
 
 // isVolumeSnapshotLeaf reports whether the node is a CSI VolumeSnapshot data leaf.
 func (n PlannedNode) isVolumeSnapshotLeaf() bool {
-	return n.Ref("").IsVolumeSnapshotLeaf()
+	return n.APIVersion == volumeSnapshotAPIVersion && n.Kind == volumeSnapshotKind
 }
 
 // hasChildren reports whether the node carries any direct child snapshot refs.

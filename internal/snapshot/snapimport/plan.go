@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -110,6 +111,11 @@ type PlannedNode struct {
 	DataImportIdentity string
 }
 
+type planTopology struct {
+	nodes   map[string]int
+	parents map[string]int
+}
+
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
 func (n PlannedNode) Ref(namespace string) aggapi.NodeRef {
 	return aggapi.NodeRef{
@@ -148,7 +154,144 @@ func BuildPlan(rootDir string) ([]PlannedNode, error) {
 		return nil, err
 	}
 
+	if _, err := indexPlanTopology(plan); err != nil {
+		return nil, err
+	}
+
 	return plan, nil
+}
+
+// indexPlanTopology validates canonical node identities and physical parent-child
+// relationships before any caller indexes or filters the plan.
+func indexPlanTopology(plan []PlannedNode) (planTopology, error) {
+	nodeOccurrences := make(map[string][]int, len(plan))
+	childParents := make(map[string][]int)
+	childRefs := make(map[string]ChildRef)
+	duplicateChildren := make(map[string]map[string]int)
+
+	for i := range plan {
+		key := nodeKey(plan[i])
+		nodeOccurrences[key] = append(nodeOccurrences[key], i)
+
+		childCounts := make(map[string]int, len(plan[i].Children))
+		for _, child := range plan[i].Children {
+			childKey := refKey(child.APIVersion, child.Kind, child.Name)
+
+			childCounts[childKey]++
+			if _, known := childRefs[childKey]; !known {
+				childRefs[childKey] = child
+			}
+		}
+
+		for childKey, count := range childCounts {
+			childParents[childKey] = append(childParents[childKey], i)
+
+			if count > 1 {
+				if duplicateChildren[key] == nil {
+					duplicateChildren[key] = make(map[string]int)
+				}
+
+				duplicateChildren[key][childKey] = count
+			}
+		}
+	}
+
+	issues := make([]string, 0)
+
+	nodeKeys := sortedMapKeys(nodeOccurrences)
+	for _, key := range nodeKeys {
+		indices := nodeOccurrences[key]
+		if len(indices) < 2 {
+			continue
+		}
+
+		paths := make([]string, 0, len(indices))
+		for _, index := range indices {
+			paths = append(paths, plan[index].Dir)
+		}
+
+		sort.Strings(paths)
+
+		issues = append(issues, fmt.Sprintf(
+			"canonical identity %s appears in multiple directories: %s",
+			nodeIdentity(plan[indices[0]]), strings.Join(paths, ", ")))
+	}
+
+	parentKeys := sortedMapKeys(duplicateChildren)
+	for _, parentKey := range parentKeys {
+		childKeys := sortedMapKeys(duplicateChildren[parentKey])
+		parentIndex := nodeOccurrences[parentKey][0]
+
+		for _, childKey := range childKeys {
+			child := childRefs[childKey]
+			issues = append(issues, fmt.Sprintf(
+				"parent %s at %s references child %s %d times",
+				nodeIdentity(plan[parentIndex]), plan[parentIndex].Dir,
+				refIdentity(child), duplicateChildren[parentKey][childKey]))
+		}
+	}
+
+	childKeys := sortedMapKeys(childParents)
+	for _, childKey := range childKeys {
+		parentIndices := childParents[childKey]
+		if len(parentIndices) > 1 {
+			parents := make([]string, 0, len(parentIndices))
+			for _, parentIndex := range parentIndices {
+				parents = append(parents, fmt.Sprintf(
+					"%s at %s", nodeIdentity(plan[parentIndex]), plan[parentIndex].Dir))
+			}
+
+			sort.Strings(parents)
+
+			issues = append(issues, fmt.Sprintf(
+				"child %s has multiple physical parents: %s",
+				refIdentity(childRefs[childKey]), strings.Join(parents, ", ")))
+		}
+
+		if _, ok := nodeOccurrences[childKey]; !ok {
+			issues = append(issues, fmt.Sprintf(
+				"child %s is referenced but has no node directory",
+				refIdentity(childRefs[childKey])))
+		}
+	}
+
+	if len(issues) > 0 {
+		return planTopology{}, fmt.Errorf("invalid archive plan topology: %s", strings.Join(issues, "; "))
+	}
+
+	topology := planTopology{
+		nodes:   make(map[string]int, len(nodeOccurrences)),
+		parents: make(map[string]int, len(childParents)),
+	}
+
+	for key, indices := range nodeOccurrences {
+		topology.nodes[key] = indices[0]
+	}
+
+	for key, indices := range childParents {
+		topology.parents[key] = indices[0]
+	}
+
+	return topology, nil
+}
+
+func sortedMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	return keys
+}
+
+func nodeIdentity(node PlannedNode) string {
+	return fmt.Sprintf("%s %s/%s", node.APIVersion, node.Kind, node.Name)
+}
+
+func refIdentity(ref ChildRef) string {
+	return fmt.Sprintf("%s %s/%s", ref.APIVersion, ref.Kind, ref.Name)
 }
 
 // appendPostOrder visits children first (sorted for determinism), then the node itself.

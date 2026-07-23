@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,6 +151,11 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	parents, err := buildParentIndex(plan)
+	if err != nil {
+		return fmt.Errorf("index import plan parents: %w", err)
+	}
+
 	root := plan[len(plan)-1]
 
 	if cfg.SelectedNodeKind == "" {
@@ -197,8 +203,6 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.String("input", cfg.InputDir),
 		slog.String("root", root.Name),
 		slog.Int("nodes", len(plan)))
-
-	parents := buildParentIndex(plan)
 
 	// Pass 1 (top-down): create import-mode markers so child->parent ownerRefs can carry
 	// the parent UID.
@@ -579,18 +583,15 @@ func importNodeData(ctx context.Context, cfg Config, node PlannedNode) error {
 	return nil
 }
 
-// buildParentIndex maps each child node key to the plan index of its parent node, derived
-// from each node's recorded direct child refs.
-func buildParentIndex(plan []PlannedNode) map[string]int {
-	idx := make(map[string]int)
-
-	for i := range plan {
-		for _, c := range plan[i].Children {
-			idx[refKey(c.APIVersion, c.Kind, c.Name)] = i
-		}
+// buildParentIndex maps each child node key to the plan index of its validated physical
+// parent. Invalid identities or topology fail instead of selecting a map-overwrite winner.
+func buildParentIndex(plan []PlannedNode) (map[string]int, error) {
+	topology, err := indexPlanTopology(plan)
+	if err != nil {
+		return nil, err
 	}
 
-	return idx
+	return topology.parents, nil
 }
 
 // nodeKey is the stable identity (apiVersion/kind/name) of a planned node.
@@ -974,30 +975,47 @@ func (cfg Config) volumeSnapshotResource() (schema.GroupVersionResource, error) 
 // post-ordered subtree rooted at that node (selected node + all descendants). The plan's
 // relative order is preserved so the result remains in bottom-up (post-order) order.
 func filterPlanToSubtree(plan []PlannedNode, kind, name string) ([]PlannedNode, error) {
-	// Index nodes by their identity key for O(1) child lookup.
-	byKey := make(map[string]PlannedNode, len(plan))
-
-	for _, n := range plan {
-		byKey[nodeKey(n)] = n
+	topology, err := indexPlanTopology(plan)
+	if err != nil {
+		return nil, err
 	}
 
-	// Find the selected node (match by kind+name; apiVersion may vary across domains).
-	var selected PlannedNode
+	matches := make([]int, 0)
 
-	found := false
-
-	for _, n := range plan {
+	for i, n := range plan {
 		if n.Kind == kind && n.Name == name {
-			selected = n
-			found = true
-
-			break
+			matches = append(matches, i)
 		}
 	}
 
-	if !found {
+	if len(matches) == 0 {
 		return nil, fmt.Errorf("node %s/%s not found in archive", kind, name)
 	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		left := plan[matches[i]]
+		right := plan[matches[j]]
+
+		if left.APIVersion != right.APIVersion {
+			return left.APIVersion < right.APIVersion
+		}
+
+		return left.Dir < right.Dir
+	})
+
+	if len(matches) > 1 {
+		candidates := make([]string, 0, len(matches))
+		for _, index := range matches {
+			candidates = append(candidates, fmt.Sprintf(
+				"%s at %s", plan[index].APIVersion, plan[index].Dir))
+		}
+
+		return nil, fmt.Errorf(
+			"node %s/%s is ambiguous across apiVersions; candidates: %s",
+			kind, name, strings.Join(candidates, ", "))
+	}
+
+	selected := plan[matches[0]]
 
 	// BFS from the selected node to collect all descendant keys.
 	inSubtree := make(map[string]struct{})
@@ -1011,8 +1029,8 @@ func filterPlanToSubtree(plan []PlannedNode, kind, name string) ([]PlannedNode, 
 		for _, c := range cur.Children {
 			key := refKey(c.APIVersion, c.Kind, c.Name)
 			if _, visited := inSubtree[key]; !visited {
-				if child, ok := byKey[key]; ok {
-					queue = append(queue, child)
+				if childIndex, ok := topology.nodes[key]; ok {
+					queue = append(queue, plan[childIndex])
 				}
 			}
 		}

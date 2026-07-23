@@ -213,6 +213,100 @@ func TestBuildPlan_PostOrder(t *testing.T) {
 	}
 }
 
+func TestBuildPlan_RejectsDuplicateCanonicalIdentities(t *testing.T) {
+	const duplicateAPIVersion = "domain.example.io/v1"
+
+	tests := []struct {
+		name      string
+		build     func(t *testing.T) string
+		wantIssue string
+	}{
+		{
+			name: "siblings_duplicate_one_parent_child",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+				})
+
+				for _, physicalName := range []string{"z-physical", "a-physical"} {
+					writeArchiveNode(t, filepath.Join(root, archive.SnapshotsDirName, physicalName), archiveNode{
+						apiVersion: duplicateAPIVersion,
+						kind:       "DemoSnapshot",
+						name:       "same",
+					})
+				}
+
+				return root
+			},
+			wantIssue: "references child domain.example.io/v1 DemoSnapshot/same 2 times",
+		},
+		{
+			name: "separate_branches_multiple_parents",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+				})
+
+				for _, branchName := range []string{"branch-b", "branch-a"} {
+					branch := filepath.Join(root, archive.SnapshotsDirName, branchName)
+					writeArchiveNode(t, branch, archiveNode{
+						apiVersion: duplicateAPIVersion,
+						kind:       "BranchSnapshot",
+						name:       branchName,
+					})
+					writeArchiveNode(t, filepath.Join(branch, archive.SnapshotsDirName, "leaf"), archiveNode{
+						apiVersion: duplicateAPIVersion,
+						kind:       "DemoSnapshot",
+						name:       "same",
+					})
+				}
+
+				return root
+			},
+			wantIssue: "child domain.example.io/v1 DemoSnapshot/same has multiple physical parents",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.build(t)
+
+			_, err := BuildPlan(root)
+			if err == nil {
+				t.Fatal("BuildPlan() error = nil, want duplicate identity rejection")
+			}
+
+			errorText := err.Error()
+			for _, want := range []string{
+				"invalid archive plan topology",
+				"canonical identity domain.example.io/v1 DemoSnapshot/same appears in multiple directories",
+				test.wantIssue,
+			} {
+				if !strings.Contains(errorText, want) {
+					t.Errorf("BuildPlan() error = %q, want substring %q", errorText, want)
+				}
+			}
+
+			firstPath := filepath.Join(root, archive.SnapshotsDirName, "a-physical")
+			secondPath := filepath.Join(root, archive.SnapshotsDirName, "z-physical")
+			if test.name == "siblings_duplicate_one_parent_child" &&
+				strings.Index(errorText, firstPath) > strings.Index(errorText, secondPath) {
+				t.Errorf("duplicate paths are not deterministic: %q", errorText)
+			}
+		})
+	}
+}
+
 // TestBuildPlan_BlockExtCarriedExplicitly verifies that PlannedNode.Ext is
 // resolved by archive.ClassifyBlockPayload for every recognized codec name,
 // and in particular that the raw "data.bin" case resolves Ext to "" — NOT
