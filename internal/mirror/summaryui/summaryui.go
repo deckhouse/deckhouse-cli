@@ -159,6 +159,7 @@ func WriteRegistryLayout(b *strings.Builder, layout mirror.RegistryLayout, show 
 		if row.NonDefault {
 			fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), Warn(row.Path))
 			fmt.Fprintf(b, "%s   %s %s\n", Bar(), strings.Repeat(" ", layoutNameWidth), Dim("default: "+row.DefaultPath))
+
 			continue
 		}
 
