@@ -28,6 +28,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+type windowsFileAttributeTagInfo struct {
+	fileAttributes uint32
+	reparseTag     uint32
+}
+
 func openArchiveRoot(path string) (*os.File, error) {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -52,6 +57,12 @@ func openArchiveRoot(path string) (*os.File, error) {
 		_ = windows.CloseHandle(handle)
 
 		return nil, fmt.Errorf("open archive root %s: invalid directory handle", path)
+	}
+
+	if err := rejectWindowsArchiveReparsePoint(dir, path); err != nil {
+		_ = dir.Close()
+
+		return nil, err
 	}
 
 	info, err := dir.Stat()
@@ -126,6 +137,12 @@ func openArchiveAt(parent *os.File, name, path string, wantDir bool) (*os.File, 
 		return nil, fmt.Errorf("open archive path %s: invalid handle", path)
 	}
 
+	if err := rejectWindowsArchiveReparsePoint(file, path); err != nil {
+		_ = file.Close()
+
+		return nil, err
+	}
+
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -140,6 +157,27 @@ func openArchiveAt(parent *os.File, name, path string, wantDir bool) (*os.File, 
 	}
 
 	return file, nil
+}
+
+func rejectWindowsArchiveReparsePoint(file *os.File, path string) error {
+	var info windowsFileAttributeTagInfo
+
+	err := windows.GetFileInformationByHandleEx(
+		windows.Handle(file.Fd()),
+		windows.FileAttributeTagInfo,
+		(*byte)(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	)
+	if err != nil {
+		return fmt.Errorf("inspect reparse attributes for archive path %s: %w", path, err)
+	}
+
+	if info.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("%s is a Windows reparse point (tag %#x): %w",
+			path, info.reparseTag, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
 }
 
 func classifyWindowsArchiveOpenError(path string, wantDir bool, openErr error) error {

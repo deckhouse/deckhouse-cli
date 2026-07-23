@@ -776,6 +776,61 @@ func TestRunRejectsNonRegularArchiveArtifactsBeforeExternalCalls(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMountedArchiveDescendantsBeforeExternalCalls(t *testing.T) {
+	for _, scenario := range []string{"run-directory", "run-regular-file"} {
+		t.Run(scenario, func(t *testing.T) {
+			runSnapimportMountHelper(t, "^TestLinuxMountedRunEscapeHelper$", scenario)
+		})
+	}
+}
+
+func TestLinuxMountedRunEscapeHelper(t *testing.T) {
+	scenario := os.Getenv(snapimportMountHelperScenario)
+	if scenario == "" {
+		return
+	}
+
+	root := buildTwoLevelArchive(t)
+	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
+
+	if err := bindMountForTest(sourcePath, targetPath); err != nil {
+		fmt.Printf("mount namespace unavailable: %v\n", err)
+
+		return
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	mapper := &countingRESTMapper{RESTMapper: testMapper()}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = mapper
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := Run(ctx, cfg)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if calls := mapper.calls.Load(); calls != 0 {
+		t.Errorf("RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic client actions = %v, want none", actions)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+}
+
 func TestRun_LeafManifestsArrayShape(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 

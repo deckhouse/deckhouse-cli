@@ -21,6 +21,7 @@ package archive_test
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -79,4 +80,95 @@ func TestRootedSourceRejectsWindowsLinksAndParentReplacement(t *testing.T) {
 	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
 		t.Fatalf("OpenRegularFile error = %v, want ErrNonRegularArchiveArtifact", err)
 	}
+}
+
+func TestRootedSourceRejectsWindowsJunctionBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T) error
+	}{
+		{
+			name: "archive root",
+			run: func(t *testing.T) error {
+				t.Helper()
+
+				parent := t.TempDir()
+				root := filepath.Join(parent, "archive")
+				createWindowsJunction(t, root, t.TempDir())
+
+				source, err := archive.OpenRootedSource(root)
+				if source != nil {
+					_ = source.Close()
+				}
+
+				return err
+			},
+		},
+		{
+			name: "intermediate directory",
+			run: func(t *testing.T) error {
+				t.Helper()
+
+				root := t.TempDir()
+				source, err := archive.OpenRootedSource(root)
+				if err != nil {
+					t.Fatalf("OpenRootedSource: %v", err)
+				}
+				defer func() { _ = source.Close() }()
+
+				createWindowsJunction(t, filepath.Join(root, archive.ManifestsDirName), t.TempDir())
+
+				child, err := source.OpenDirectory(archive.ManifestsDirName)
+				if child != nil {
+					_ = child.Close()
+				}
+
+				return err
+			},
+		},
+		{
+			name: "final file",
+			run: func(t *testing.T) error {
+				t.Helper()
+
+				root := t.TempDir()
+				source, err := archive.OpenRootedSource(root)
+				if err != nil {
+					t.Fatalf("OpenRootedSource: %v", err)
+				}
+				defer func() { _ = source.Close() }()
+
+				createWindowsJunction(t, filepath.Join(root, archive.SnapshotYAMLName), t.TempDir())
+
+				file, err := source.OpenRegularFile(archive.SnapshotYAMLName)
+				if file != nil {
+					_ = file.Close()
+				}
+
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(t)
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("junction open error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+		})
+	}
+}
+
+func createWindowsJunction(t *testing.T, link, target string) {
+	t.Helper()
+
+	output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link, target).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create junction %s -> %s: %v: %s", link, target, err, output)
+	}
+
+	t.Cleanup(func() {
+		_ = os.Remove(link)
+	})
 }
