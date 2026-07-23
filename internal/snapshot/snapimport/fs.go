@@ -27,7 +27,10 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -48,71 +51,162 @@ type fileAttrs struct {
 	ModTime time.Time
 }
 
-// putFile PUTs body — already positioned at offset in the file's original (decompressed)
-// byte stream, with totalSize its exact total length — to the FS importer at baseURL under
-// relPath, preserving the given file attributes. putFile performs no HEAD probing of its
-// own: the caller (importFSFromTar) already made the single HEAD call that determines both
-// whether the file is done and, when not, its resume offset, and is responsible for
-// positioning body accordingly (e.g. via discard-and-fast-forward). Responses:
-//   - 201 Created: file is complete.
-//   - 204 No Content + X-Next-Offset: partial; the next chunk starts at that offset.
-//   - 409 Conflict + X-Expected-Offset: offset mismatch; the loop retries from the
-//     server-reported position.
-//
-// Callers are responsible for calling postFinished after all files are uploaded.
-func putFile(ctx context.Context, client httpDoer, baseURL, relPath string, body io.Reader, totalSize, offset int64, attrs fileAttrs) error {
-	fileURL, err := neturl.JoinPath(baseURL, uploadFilesSubpath, relPath)
+type fileBodyFactory func(ctx context.Context, offset, size int64) (io.ReadCloser, error)
+
+type fileUploadProgress struct {
+	onProgress func(int)
+	credited   int64
+}
+
+func (p *fileUploadProgress) creditTo(offset int64) {
+	if offset <= p.credited {
+		return
+	}
+
+	if p.onProgress != nil {
+		p.onProgress(int(offset - p.credited))
+	}
+
+	p.credited = offset
+}
+
+// putFile sends bounded requests using a fresh body positioned at every server-selected
+// raw offset. Callers probe HEAD first and supply the validated durable offset.
+func putFile(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, relPath string,
+	totalSize, offset int64,
+	attrs fileAttrs,
+	newBody fileBodyFactory,
+	progress *fileUploadProgress,
+	activate func(),
+) error {
+	fileURL, err := fileUploadURL(baseURL, relPath)
 	if err != nil {
-		return fmt.Errorf("build file URL for %s: %w", relPath, err)
+		return err
 	}
 
-	if totalSize == 0 {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fileURL, http.NoBody)
+	if err := validateBlockOffset(offset, totalSize); err != nil {
+		return fmt.Errorf("invalid initial file offset: %w", err)
+	}
+
+	conflicts := make(map[[2]int64]struct{})
+
+	for {
+		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		requestSize := requestEnd - offset
+
+		body := io.ReadCloser(http.NoBody)
+		if requestSize > 0 {
+			body, err = newBody(ctx, offset, requestSize)
+			if err != nil {
+				return fmt.Errorf("open body for %s at offset %d: %w", relPath, offset, err)
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fileURL, body)
 		if err != nil {
-			return err
+			return errors.Join(
+				fmt.Errorf("build PUT for %s at offset %d: %w", relPath, offset, err),
+				closeFileBody(body, relPath, offset),
+			)
 		}
 
-		setFileHeaders(req, 0, 0, attrs)
-
-		if _, err = doFileChunk(client, req, 0, 0); err != nil {
-			return fmt.Errorf("upload %s at offset 0: %w", relPath, err)
-		}
-
-		return nil
-	}
-
-	// A resume offset already equal to the total means a prior call already durably
-	// transferred every byte (the finalize step just never confirmed it); nothing remains
-	// to stream, so skip the loop entirely rather than issuing a spurious zero-length PUT.
-	if offset >= totalSize {
-		return nil
-	}
-
-	for offset < totalSize {
-		remain := totalSize - offset
-		limited := io.LimitReader(body, remain)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fileURL, io.NopCloser(limited))
-		if err != nil {
-			return err
-		}
-
-		// net/http only auto-detects Content-Length for *bytes.Buffer/*bytes.Reader/
-		// *strings.Reader bodies; an io.LimitReader-wrapped stream needs it set
-		// explicitly, or the request silently falls back to chunked transfer encoding.
-		req.ContentLength = remain
+		req.ContentLength = requestSize
 
 		setFileHeaders(req, totalSize, offset, attrs)
 
-		next, err := doFileChunk(client, req, offset, totalSize)
-		if err != nil {
-			return fmt.Errorf("upload %s at offset %d: %w", relPath, offset, err)
+		if activate != nil {
+			activate()
+		}
+
+		next, reposition, requestErr := doFileChunk(client, req, offset, requestEnd, totalSize)
+		closeErr := closeFileBody(body, relPath, offset)
+
+		if requestErr != nil || closeErr != nil {
+			return fmt.Errorf("upload %s at offset %d: %w", relPath, offset, errors.Join(requestErr, closeErr))
+		}
+
+		if reposition {
+			transition := [2]int64{offset, next}
+			if _, repeated := conflicts[transition]; repeated {
+				return fmt.Errorf("server-directed file upload offset loop from %d to %d", offset, next)
+			}
+
+			conflicts[transition] = struct{}{}
+		}
+
+		if progress != nil {
+			progress.creditTo(next)
 		}
 
 		offset = next
+
+		if !reposition && offset == totalSize {
+			return nil
+		}
+	}
+}
+
+func closeFileBody(body io.Closer, relPath string, offset int64) error {
+	if err := body.Close(); err != nil {
+		return fmt.Errorf("close body for %s at offset %d: %w", relPath, offset, err)
 	}
 
 	return nil
+}
+
+func fileUploadURL(baseURL, relPath string) (string, error) {
+	if err := validateFSUploadPath(relPath); err != nil {
+		return "", err
+	}
+
+	fileURL, err := neturl.JoinPath(baseURL, uploadFilesSubpath, relPath)
+	if err != nil {
+		return "", fmt.Errorf("build file URL for %s: %w", relPath, err)
+	}
+
+	return fileURL, nil
+}
+
+func validateFSUploadPath(originalPath string) error {
+	if originalPath == "" || originalPath == "." {
+		return fmt.Errorf("%w: original path %q is empty or dot", archive.ErrInvalidFSMetadata, originalPath)
+	}
+
+	if path.IsAbs(originalPath) || strings.HasPrefix(originalPath, "/") || strings.ContainsRune(originalPath, '\\') {
+		return fmt.Errorf("%w: original path %q is not a portable slash-relative path",
+			archive.ErrInvalidFSMetadata, originalPath)
+	}
+
+	if len(originalPath) >= 2 && isASCIILetter(originalPath[0]) && originalPath[1] == ':' {
+		return fmt.Errorf("%w: original path %q is drive-like", archive.ErrInvalidFSMetadata, originalPath)
+	}
+
+	for _, r := range originalPath {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: original path %q contains a control byte", archive.ErrInvalidFSMetadata, originalPath)
+		}
+	}
+
+	for _, element := range strings.Split(originalPath, "/") {
+		if element == ".." {
+			return fmt.Errorf("%w: original path %q contains '..'", archive.ErrInvalidFSMetadata, originalPath)
+		}
+	}
+
+	cleaned := path.Clean(originalPath)
+	if cleaned != originalPath {
+		return fmt.Errorf("%w: original path %q changes under path.Clean to %q",
+			archive.ErrInvalidFSMetadata, originalPath, cleaned)
+	}
+
+	return nil
+}
+
+func isASCIILetter(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }
 
 // setFileHeaders sets the headers the FS importer's CheckRequiredHeaders middleware
@@ -123,7 +217,10 @@ func setFileHeaders(req *http.Request, totalSize, offset int64, attrs fileAttrs)
 	req.Header.Set("X-Attribute-Permissions", fmt.Sprintf("%04o", attrs.Perm))
 	req.Header.Set("X-Attribute-Uid", strconv.Itoa(attrs.UID))
 	req.Header.Set("X-Attribute-Gid", strconv.Itoa(attrs.GID))
-	req.Header.Set("X-Attribute-ModTime", attrs.ModTime.UTC().Format(time.RFC3339))
+
+	if !attrs.ModTime.IsZero() {
+		req.Header.Set("X-Attribute-ModTime", attrs.ModTime.UTC().Format(time.RFC3339))
+	}
 }
 
 // headFileOffset probes the file endpoint to determine the current upload state.
@@ -133,7 +230,7 @@ func setFileHeaders(req *http.Request, totalSize, offset int64, attrs fileAttrs)
 // meaningful when done is true — it lets a caller credit progress for a skipped file
 // without decompressing it. offset is the number of bytes already written to the
 // server's temp file when done is false; 0 if no partial upload exists.
-func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64, bool, int64, error) {
+func headFileOffset(ctx context.Context, client httpDoer, fileURL string, totalSize int64) (int64, bool, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
 	if err != nil {
 		return 0, false, 0, err
@@ -154,8 +251,12 @@ func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64
 		// X-Next-Offset present → temp file exists with that many bytes (partial upload).
 		if next := resp.Header.Get("X-Next-Offset"); next != "" {
 			off, parseErr := strconv.ParseInt(next, 10, 64)
-			if parseErr != nil || off < 0 {
-				return 0, false, 0, fmt.Errorf("invalid X-Next-Offset %q from HEAD %s", next, fileURL)
+			if parseErr != nil {
+				return 0, false, 0, fmt.Errorf("invalid X-Next-Offset %q from HEAD %s: %w", next, fileURL, parseErr)
+			}
+
+			if err := validateBlockOffset(off, totalSize); err != nil {
+				return 0, false, 0, fmt.Errorf("invalid X-Next-Offset %q from HEAD %s: %w", next, fileURL, err)
 			}
 
 			return off, false, 0, nil
@@ -179,13 +280,24 @@ func headFileOffset(ctx context.Context, client httpDoer, fileURL string) (int64
 	}
 }
 
-// doFileChunk performs one PUT to the FS importer and returns the next offset to resume
-// from. On 201 it returns totalSize (upload complete). On 204 it advances to X-Next-Offset.
-// On 409 it returns X-Expected-Offset so the caller can retry from the correct position.
-func doFileChunk(client httpDoer, req *http.Request, offset, totalSize int64) (int64, error) {
+// doFileChunk performs one bounded PUT and validates the producer's exact status/header
+// contract. A conflict returns a validated server-selected reposition offset.
+func doFileChunk(client httpDoer, req *http.Request, offset, requestEnd, totalSize int64) (int64, bool, error) {
+	if err := validateBlockOffset(offset, totalSize); err != nil {
+		return 0, false, fmt.Errorf("invalid PUT start offset: %w", err)
+	}
+
+	if err := validateBlockOffset(requestEnd, totalSize); err != nil {
+		return 0, false, fmt.Errorf("invalid PUT end offset: %w", err)
+	}
+
+	if requestEnd < offset || requestEnd == offset && requestEnd != totalSize {
+		return 0, false, fmt.Errorf("invalid PUT range [%d,%d)", offset, requestEnd)
+	}
+
 	resp, err := client.HTTPDo(req)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	defer func() {
@@ -193,39 +305,56 @@ func doFileChunk(client httpDoer, req *http.Request, offset, totalSize int64) (i
 		_ = resp.Body.Close()
 	}()
 
-	switch resp.StatusCode {
-	case http.StatusCreated:
-		return totalSize, nil
-
-	case http.StatusNoContent:
-		next, parseErr := parseOffsetHeader(resp.Header, "X-Next-Offset")
+	if resp.StatusCode == http.StatusConflict {
+		expected, parseErr := parseOffsetHeader(resp.Header, "X-Expected-Offset")
 		if parseErr != nil {
-			return 0, fmt.Errorf("204 missing valid X-Next-Offset: %w", parseErr)
+			return 0, false, fmt.Errorf("409 missing valid X-Expected-Offset: %w", parseErr)
 		}
 
-		if next <= offset {
-			return 0, fmt.Errorf("server returned non-advancing X-Next-Offset (%d <= %d)", next, offset)
+		if err := validateBlockOffset(expected, totalSize); err != nil {
+			return 0, false, fmt.Errorf("invalid X-Expected-Offset %d: %w", expected, err)
 		}
 
-		return next, nil
-
-	case http.StatusConflict:
-		exp, parseErr := parseOffsetHeader(resp.Header, "X-Expected-Offset")
-		if parseErr != nil {
-			return 0, fmt.Errorf("409 missing valid X-Expected-Offset: %w", parseErr)
+		if expected == offset {
+			return 0, false, fmt.Errorf("server returned non-progressing X-Expected-Offset %d for PUT at offset %d",
+				expected, offset)
 		}
 
-		// Prevent tight loop: if the expected offset equals the one we sent, the mismatch
-		// is permanent and retrying would spin forever.
-		if exp == offset {
-			return 0, fmt.Errorf("server 409: X-Expected-Offset %d equals sent offset — offset mismatch is unrecoverable", exp)
-		}
-
-		return exp, nil
-
-	default:
-		return 0, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+		return expected, true, nil
 	}
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+	}
+
+	if resp.StatusCode == http.StatusCreated && requestEnd != totalSize {
+		return 0, false, fmt.Errorf("server returned 201 Created for intermediate request end %d of %d",
+			requestEnd, totalSize)
+	}
+
+	if resp.StatusCode == http.StatusNoContent && requestEnd == totalSize {
+		return 0, false, fmt.Errorf("server returned 204 No Content for final request end %d", requestEnd)
+	}
+
+	nextValue := resp.Header.Get("X-Next-Offset")
+	if resp.StatusCode == http.StatusCreated && nextValue == "" {
+		return requestEnd, false, nil
+	}
+
+	next, parseErr := parseOffsetHeader(resp.Header, "X-Next-Offset")
+	if parseErr != nil {
+		return 0, false, fmt.Errorf("successful PUT missing valid X-Next-Offset: %w", parseErr)
+	}
+
+	if err := validateBlockOffset(next, totalSize); err != nil {
+		return 0, false, fmt.Errorf("invalid X-Next-Offset %d: %w", next, err)
+	}
+
+	if next != requestEnd {
+		return 0, false, fmt.Errorf("server returned X-Next-Offset %d, want exact request end %d", next, requestEnd)
+	}
+
+	return next, false, nil
 }
 
 // parseOffsetHeader parses a non-negative int64 from a named HTTP response header.
@@ -237,11 +366,25 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 	}
 
 	n, err := strconv.ParseInt(val, 10, 64)
-	if err != nil || n < 0 {
+	if err != nil {
+		return 0, fmt.Errorf("invalid %q value %q: %w", name, val, err)
+	}
+
+	if n < 0 {
 		return 0, fmt.Errorf("invalid %q value %q", name, val)
 	}
 
 	return n, nil
+}
+
+type fsTarNonRegularEntry struct {
+	Typeflag   byte
+	HeaderPath string
+}
+
+type fsTarScan struct {
+	RegularPaths []string
+	NonRegular   []fsTarNonRegularEntry
 }
 
 // importFSFromTar uploads regular data.tar entries without materializing plaintext
@@ -267,7 +410,8 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 //
 // TODO(follow-up): reproduce empty-directory and symlink entries when needed.
 func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
-	if err := validateFSTarMetadata(tarPath); err != nil {
+	scan, err := scanFSTar(tarPath)
+	if err != nil {
 		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
 	}
 
@@ -278,8 +422,8 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 	defer func() { _ = f.Close() }()
 
-	skipped := 0
 	tr := tar.NewReader(f)
+	regularIndex := 0
 
 	var runningTotal int64
 
@@ -294,8 +438,6 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 		}
 
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
-			skipped++
-
 			continue
 		}
 
@@ -304,6 +446,17 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			return fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err)
 		}
 
+		if err := validateFSUploadPath(metadata.OriginalPath); err != nil {
+			return fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err)
+		}
+
+		if regularIndex >= len(scan.RegularPaths) || scan.RegularPaths[regularIndex] != metadata.OriginalPath {
+			return fmt.Errorf("%w: tar regular-entry order changed after preflight at entry %q",
+				archive.ErrInvalidFSMetadata, hdr.Name)
+		}
+
+		regularIndex++
+
 		ext, err := archive.FSCodecExtension(metadata.Codec)
 		if err != nil {
 			return fmt.Errorf("resolve codec for tar entry %q: %w", hdr.Name, err)
@@ -311,52 +464,9 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 		relPath := metadata.OriginalPath
 
-		fileURL, err := neturl.JoinPath(baseURL, uploadFilesSubpath, relPath)
+		payloadStart, err := f.Seek(0, io.SeekCurrent)
 		if err != nil {
-			return fmt.Errorf("build file URL for %s: %w", relPath, err)
-		}
-
-		offset, done, doneSize, err := headFileOffset(ctx, client, fileURL)
-		if err != nil {
-			return fmt.Errorf("probe upload state for %s: %w", relPath, err)
-		}
-
-		if offset > metadata.RawSize {
-			return fmt.Errorf("probe upload state for %s: offset %d exceeds PAX raw size %d",
-				relPath, offset, metadata.RawSize)
-		}
-
-		if done {
-			if doneSize != metadata.RawSize {
-				return fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
-					relPath, doneSize, metadata.RawSize)
-			}
-
-			runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
-			if err != nil {
-				return fmt.Errorf("account tar entry %s: %w", relPath, err)
-			}
-
-			if setTotal != nil {
-				setTotal(runningTotal)
-			}
-
-			if onProgress != nil && metadata.RawSize > 0 {
-				onProgress(int(metadata.RawSize))
-			}
-
-			continue
-		}
-
-		if activate != nil {
-			activate()
-		}
-
-		attrs := fileAttrs{
-			Perm:    os.FileMode(hdr.Mode & 0o777),
-			UID:     hdr.Uid,
-			GID:     hdr.Gid,
-			ModTime: hdr.ModTime,
+			return fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, err)
 		}
 
 		runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
@@ -368,86 +478,129 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			setTotal(runningTotal)
 		}
 
-		if metadata.Codec == "none" {
-			counted := &rawCountingReader{r: tr}
-			if offset > 0 {
-				if _, ffErr := io.CopyN(io.Discard, counted, offset); ffErr != nil {
-					return fmt.Errorf("fast-forwarding %s to resume offset %d: %w", relPath, offset, ffErr)
-				}
-			}
-
-			if err := putFile(ctx, client, baseURL, relPath, counted, metadata.RawSize, offset, attrs); err != nil {
-				return fmt.Errorf("upload %s: %w", relPath, err)
-			}
-
-			if err := verifyRawStreamSize(counted, metadata.RawSize); err != nil {
-				return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
-			}
-		} else {
-			payloadStart, seekErr := f.Seek(0, io.SeekCurrent)
-			if seekErr != nil {
-				return fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, seekErr)
-			}
-
-			if err := streamCompressedEntry(ctx, client, baseURL, tarPath, relPath, ext, payloadStart,
-				hdr.Size, offset, metadata.RawSize, attrs); err != nil {
-				return fmt.Errorf("upload %s: %w", relPath, err)
-			}
+		fileURL, err := fileUploadURL(baseURL, relPath)
+		if err != nil {
+			return err
 		}
 
-		if onProgress != nil && metadata.RawSize > 0 {
-			onProgress(int(metadata.RawSize))
+		offset, done, doneSize, err := headFileOffset(ctx, client, fileURL, metadata.RawSize)
+		if err != nil {
+			return fmt.Errorf("probe upload state for %s: %w", relPath, err)
+		}
+
+		progress := &fileUploadProgress{onProgress: onProgress}
+
+		if done {
+			if doneSize != metadata.RawSize {
+				return fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
+					relPath, doneSize, metadata.RawSize)
+			}
+
+			progress.creditTo(metadata.RawSize)
+
+			continue
+		}
+
+		progress.creditTo(offset)
+
+		attrs := fileAttrs{
+			Perm:    os.FileMode(hdr.Mode & 0o777),
+			UID:     hdr.Uid,
+			GID:     hdr.Gid,
+			ModTime: hdr.ModTime,
+		}
+
+		newBody := tarEntryBodyFactory(tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
+		if err := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
+			newBody, progress, activate); err != nil {
+			return fmt.Errorf("upload %s: %w", relPath, err)
+		}
+
+		if err := verifyTarEntryRawSize(ctx, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
+			return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
 		}
 	}
 
-	if skipped > 0 {
+	if regularIndex != len(scan.RegularPaths) {
+		return fmt.Errorf("%w: tar regular-entry count changed after preflight (got %d, want %d)",
+			archive.ErrInvalidFSMetadata, regularIndex, len(scan.RegularPaths))
+	}
+
+	if len(scan.NonRegular) > 0 {
 		log.Info("skipped non-regular tar entries (directories and symlinks are not reproduced)",
-			slog.Int("count", skipped),
+			slog.Int("count", len(scan.NonRegular)),
 			slog.String("tar", tarPath))
 	}
 
 	return nil
 }
 
-func validateFSTarMetadata(tarPath string) (retErr error) {
+func scanFSTar(tarPath string) (fsTarScan, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", tarPath, err)
+		return fsTarScan{}, fmt.Errorf("open %s: %w", tarPath, err)
 	}
 
-	defer func() {
-		if err := f.Close(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close %s: %w", tarPath, err)
-		}
-	}()
+	scan, scanErr := scanFSTarReader(tar.NewReader(f), tarPath)
 
-	tr := tar.NewReader(f)
+	closeErr := f.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close %s: %w", tarPath, closeErr)
+	}
+
+	if err := errors.Join(scanErr, closeErr); err != nil {
+		return fsTarScan{}, err
+	}
+
+	return scan, nil
+}
+
+func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
+	scan := fsTarScan{}
 	originalPaths := make(map[string]struct{})
 
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return scan, nil
 		}
 
 		if err != nil {
-			return fmt.Errorf("read tar entry from %s: %w", tarPath, err)
+			return fsTarScan{}, fmt.Errorf("read tar entry from %s: %w", tarPath, err)
 		}
 
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
+			scan.NonRegular = append(scan.NonRegular, fsTarNonRegularEntry{
+				Typeflag:   hdr.Typeflag,
+				HeaderPath: hdr.Name,
+			})
+
 			continue
+		}
+
+		if originalPath, ok := hdr.PAXRecords[archive.PAXFSOriginalPath]; ok {
+			if err := validateFSUploadPath(originalPath); err != nil {
+				return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
+			}
 		}
 
 		metadata, err := archive.ParseFSMetadata(hdr)
 		if err != nil {
-			return fmt.Errorf("entry %q: %w", hdr.Name, err)
+			return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
 		}
 
-		if _, exists := originalPaths[metadata.OriginalPath]; exists {
-			return fmt.Errorf("%w: duplicate original path %q", archive.ErrInvalidFSMetadata, metadata.OriginalPath)
+		if err := validateFSUploadPath(metadata.OriginalPath); err != nil {
+			return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
 		}
 
-		originalPaths[metadata.OriginalPath] = struct{}{}
+		normalized := path.Clean(metadata.OriginalPath)
+		if _, exists := originalPaths[normalized]; exists {
+			return fsTarScan{}, fmt.Errorf("%w: duplicate normalized original path %q",
+				archive.ErrInvalidFSMetadata, normalized)
+		}
+
+		originalPaths[normalized] = struct{}{}
+		scan.RegularPaths = append(scan.RegularPaths, normalized)
 	}
 }
 
@@ -459,74 +612,153 @@ func addRawSize(total, size int64) (int64, error) {
 	return total + size, nil
 }
 
-type rawCountingReader struct {
-	r io.Reader
-	n int64
+type fsUploadBody struct {
+	reader    io.Reader
+	closers   []io.Closer
+	closeOnce sync.Once
+	closeErr  error
 }
 
-func (r *rawCountingReader) Read(p []byte) (int, error) {
-	n, err := r.r.Read(p)
-	r.n += int64(n)
-
-	return n, err
+func (b *fsUploadBody) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
 }
 
-func verifyRawStreamSize(r *rawCountingReader, expected int64) error {
+func (b *fsUploadBody) Close() error {
+	b.closeOnce.Do(func() {
+		closeErrs := make([]error, 0, len(b.closers))
+		for _, closer := range b.closers {
+			if err := closer.Close(); err != nil {
+				closeErrs = append(closeErrs, err)
+			}
+		}
+
+		b.closeErr = errors.Join(closeErrs...)
+	})
+
+	return b.closeErr
+}
+
+func tarEntryBodyFactory(tarPath, ext string, payloadStart, storedSize, rawSize int64) fileBodyFactory {
+	return func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+		if err := validateBlockOffset(offset, rawSize); err != nil {
+			return nil, fmt.Errorf("validate body offset: %w", err)
+		}
+
+		if size < 0 || size > rawSize-offset {
+			return nil, fmt.Errorf("body size %d at offset %d exceeds raw size %d", size, offset, rawSize)
+		}
+
+		if payloadStart > math.MaxInt64-offset {
+			return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", payloadStart, offset)
+		}
+
+		file, err := os.Open(tarPath)
+		if err != nil {
+			return nil, fmt.Errorf("reopen %s: %w", tarPath, err)
+		}
+
+		if ext == "" {
+			section := io.NewSectionReader(file, payloadStart+offset, size)
+
+			return &fsUploadBody{reader: section, closers: []io.Closer{file}}, nil
+		}
+
+		stored := io.NewSectionReader(file, payloadStart, storedSize)
+
+		decoder, err := compress.NewReader(ext, stored)
+		if err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("open decompressor: %w", err),
+				closeTarFile(file),
+			)
+		}
+
+		discarded, err := discardDecoded(ctx, decoder, offset)
+		if err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, offset, err),
+				closeTarEntryReaders(decoder, file),
+			)
+		}
+
+		return &fsUploadBody{
+			reader:  io.LimitReader(decoder, size),
+			closers: []io.Closer{decoder, file},
+		}, nil
+	}
+}
+
+func verifyTarEntryRawSize(ctx context.Context, tarPath, ext string, payloadStart, storedSize, rawSize int64) error {
+	if ext == "" {
+		if storedSize != rawSize {
+			return fmt.Errorf("stored size %d differs from declared raw size %d", storedSize, rawSize)
+		}
+
+		return nil
+	}
+
+	file, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("reopen %s: %w", tarPath, err)
+	}
+
+	stored := io.NewSectionReader(file, payloadStart, storedSize)
+
+	decoder, err := compress.NewReader(ext, stored)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("open decompressor: %w", err),
+			closeTarFile(file),
+		)
+	}
+
+	discarded, err := discardDecoded(ctx, decoder, rawSize)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("discard decoded payload (got %d of %d bytes): %w", discarded, rawSize, err),
+			closeTarEntryReaders(decoder, file),
+		)
+	}
+
 	var probe [1]byte
 
-	n, err := r.Read(probe[:])
-	if n > 0 {
-		return fmt.Errorf("decoded stream exceeds declared PAX raw size %d", expected)
+	n, readErr := decoder.Read(probe[:])
+
+	switch {
+	case n > 0:
+		readErr = fmt.Errorf("decoded stream exceeds declared PAX raw size %d", rawSize)
+	case errors.Is(readErr, io.EOF):
+		readErr = nil
+	case readErr != nil:
+		readErr = fmt.Errorf("probe decoded stream end: %w", readErr)
 	}
 
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("probe decoded stream end: %w", err)
-	}
+	closeErr := closeTarEntryReaders(decoder, file)
 
-	if r.n != expected {
-		return fmt.Errorf("decoded stream size %d differs from declared PAX raw size %d", r.n, expected)
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
 	}
 
 	return nil
 }
 
-// streamCompressedEntry reopens one stored payload and streams its decoded bytes
-// exactly once. PAX rawSize supplies the request length, avoiding a measure pass.
-func streamCompressedEntry(ctx context.Context, client httpDoer, baseURL, tarPath, relPath, ext string, payloadStart, storedSize, offset, exactSize int64, attrs fileAttrs) error {
-	f2, err := os.Open(tarPath)
-	if err != nil {
-		return fmt.Errorf("reopen %s for streaming upload: %w", tarPath, err)
+func closeTarEntryReaders(decoder io.Closer, file *os.File) error {
+	var errs []error
+
+	if err := decoder.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close decoder: %w", err))
 	}
 
-	defer func() { _ = f2.Close() }()
-
-	if _, err := f2.Seek(payloadStart, io.SeekStart); err != nil {
-		return fmt.Errorf("seek to payload offset for %s: %w", relPath, err)
+	if err := file.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("close tar: %w", err))
 	}
 
-	limited := io.LimitReader(f2, storedSize)
+	return errors.Join(errs...)
+}
 
-	decodeReader, err := compress.NewReader(ext, limited)
-	if err != nil {
-		return fmt.Errorf("open decompressor for %s: %w", relPath, err)
-	}
-
-	defer func() { _ = decodeReader.Close() }()
-
-	counted := &rawCountingReader{r: decodeReader}
-
-	if offset > 0 {
-		if _, err := io.CopyN(io.Discard, counted, offset); err != nil {
-			return fmt.Errorf("fast-forwarding %s to resume offset %d: %w", relPath, offset, err)
-		}
-	}
-
-	if err := putFile(ctx, client, baseURL, relPath, counted, exactSize, offset, attrs); err != nil {
-		return err
-	}
-
-	if err := verifyRawStreamSize(counted, exactSize); err != nil {
-		return err
+func closeTarFile(file *os.File) error {
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close tar: %w", err)
 	}
 
 	return nil
