@@ -94,7 +94,7 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 // same chunks on the next run.
 func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
 	if totalSize == 0 {
-		return commitEmptyBlock(chunkDir, outPath)
+		return commitEmptyBlock(ctx, chunkDir, outPath)
 	}
 
 	if chunkSize <= 0 {
@@ -128,7 +128,7 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		return fmt.Errorf("verify merged %s: %w", outPath, err)
 	}
 
-	if err := aw.Commit(); err != nil {
+	if err := aw.CommitContext(ctx); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("commit verified %s: %w", outPath, err)
@@ -183,13 +183,13 @@ func mergeByConcatenation(
 // function's doc comment for the "zero frames == zero bytes" contract and why
 // verification is skipped here. Idempotent on re-run — os.RemoveAll tolerates a
 // missing chunkDir and the AtomicWriter rename replaces any prior empty file.
-func commitEmptyBlock(chunkDir, outPath string) error {
+func commitEmptyBlock(ctx context.Context, chunkDir, outPath string) error {
 	aw, err := archive.NewAtomicWriter(outPath)
 	if err != nil {
 		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
 
-	if err := aw.Commit(); err != nil {
+	if err := aw.CommitContext(ctx); err != nil {
 		aw.Abort()
 
 		return fmt.Errorf("commit empty %s: %w", outPath, err)

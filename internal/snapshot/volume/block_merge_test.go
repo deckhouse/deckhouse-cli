@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -591,6 +592,99 @@ func TestMergeBlockChunks_CommitErrorPreservesChunksAndAbortsTemp(t *testing.T) 
 	if _, statErr := os.Stat(filepath.Join(chunkDir, archive.ChunkFileName(0, ""))); statErr != nil {
 		t.Fatalf("chunk must survive a commit error: %v", statErr)
 	}
+}
+
+func TestMergeBlockChunks_RecoversPublishedDurabilityBeforeChunkCleanup(t *testing.T) {
+	tests := []struct {
+		name      string
+		totalSize int64
+		seed      func(*testing.T, string)
+		want      []byte
+	}{
+		{
+			name:      "ChunkedMerge",
+			totalSize: int64(len("verified merged bytes")),
+			seed: func(t *testing.T, chunkDir string) {
+				t.Helper()
+
+				makeChunkFramesWithCodec(t, chunkDir, [][]byte{[]byte("verified merged bytes")}, "none")
+			},
+			want: []byte("verified merged bytes"),
+		},
+		{
+			name:      "ZeroSize",
+			totalSize: 0,
+			seed: func(*testing.T, string) {
+			},
+			want: []byte{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+			outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+			syncErr := errors.New("block parent sync sentinel")
+
+			require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+			tt.seed(t, chunkDir)
+
+			baseCtx, cancel := context.WithCancel(context.Background())
+			ctx := archive.WithDirectorySyncHook(baseCtx, func(path string, _ func() error) error {
+				require.Equal(t, nodeDir, path)
+				require.DirExists(t, chunkDir, "chunks must remain until directory durability is confirmed")
+
+				cancel()
+
+				return syncErr
+			})
+
+			err := volume.MergeBlockChunks(ctx, chunkDir, outPath, tt.totalSize, tt.totalSize, "")
+			require.ErrorIs(t, err, syncErr)
+			require.NotErrorIs(t, err, context.Canceled)
+			require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+			require.FileExists(t, outPath, "rename must leave the verified block published")
+			require.NoFileExists(t, outPath+".tmp")
+			require.DirExists(t, chunkDir, "post-rename sync failure must preserve recovery chunks")
+
+			published, err := os.ReadFile(outPath)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, published)
+
+			require.NoError(t, archive.ConfirmFileDurability(context.Background(), outPath))
+			require.DirExists(t, chunkDir, "durability confirmation alone must not consume recovery chunks")
+			require.NoError(t, os.RemoveAll(chunkDir))
+			require.NoDirExists(t, chunkDir)
+
+			recovered, err := os.ReadFile(outPath)
+			require.NoError(t, err)
+			require.Equal(t, published, recovered, "durability retry must not rewrite published bytes")
+		})
+	}
+}
+
+func TestMergeBlockChunks_ZeroSizeCancellationPreservesOldFinal(t *testing.T) {
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(""))
+	oldFinal := []byte("old final")
+
+	require.NoError(t, os.MkdirAll(chunkDir, 0o755))
+	require.NoError(t, os.WriteFile(outPath, oldFinal, 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := volume.MergeBlockChunks(ctx, chunkDir, outPath, 0, 0, "")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, archive.PublicationUnpublished, archive.CommitPublicationState(err))
+	require.DirExists(t, chunkDir)
+	require.NoFileExists(t, outPath+".tmp")
+
+	got, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+	require.Equal(t, oldFinal, got)
 }
 
 func TestMergeBlockChunks_RemoveErrorOccursAfterVerifiedCommit(t *testing.T) {

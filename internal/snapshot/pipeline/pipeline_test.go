@@ -1162,6 +1162,155 @@ func TestPipeline_FSResumeAfterTarConfirmsDurabilityBeforeCompletion(t *testing.
 	}
 }
 
+func TestPipeline_BlockResumeAfterMergeConfirmsDurabilityBeforeCompletion(t *testing.T) {
+	tests := []struct {
+		name         string
+		newClient    func(*testing.T) client.Client
+		namespace    string
+		rootSnapshot string
+		nodeDir      func(string) string
+	}{
+		{
+			name:         "OwnData",
+			newClient:    buildFakeClient,
+			namespace:    testNS,
+			rootSnapshot: rootSnapshot,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(childKind, diskSnapName))
+			},
+		},
+		{
+			name:         "VolumeLeaf",
+			newClient:    buildOrphanLeafFakeClient,
+			namespace:    e2eNS,
+			rootSnapshot: e2eAggRootSnap,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(e2eDiskKind, "agg-snap"),
+					archive.SnapshotsDirName,
+					archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawBlock := bytes.Repeat([]byte("durable-block-payload-"), 40)
+			blockSrv := makeBlockServer(t, rawBlock)
+			defer blockSrv.Close()
+
+			c := tt.newClient(t)
+			outputDir := t.TempDir()
+			firstCfg := pipeline.Config{
+				Namespace:            tt.namespace,
+				RootSnapshot:         tt.rootSnapshot,
+				OutputDir:            outputDir,
+				Workers:              1,
+				PerVolumeConcurrency: 1,
+				KubeClient:           c,
+				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+					return exporter.NewExport(
+						namespace,
+						"de-block-durability",
+						"Block",
+						blockSrv.URL,
+						exporter.NewFetcher(blockSrv.Client()),
+					), nil
+				},
+			}
+
+			require.NoError(t, runPipeline(context.Background(), firstCfg))
+
+			nodeDir := tt.nodeDir(outputDir)
+			blockPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+			snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			identityPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
+
+			blockBytes, err := os.ReadFile(blockPath)
+			require.NoError(t, err)
+
+			reseedResumeMarkerFromSnapshotYAML(t, nodeDir)
+			require.NoError(t, os.Remove(snapshotPath))
+			chunkDir := seedLeftoverBlockChunkDir(t, nodeDir)
+			chunkPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst"))
+
+			confirmationErr := errors.New("block durability confirmation sentinel")
+			var confirmationCalls atomic.Int64
+			ctx := archive.WithDirectorySyncHook(
+				context.Background(),
+				func(path string, next func() error) error {
+					if filepath.Clean(path) != filepath.Clean(nodeDir) {
+						return next()
+					}
+
+					call := confirmationCalls.Add(1)
+					if call <= 2 {
+						if _, err := os.Stat(chunkPath); err != nil {
+							return fmt.Errorf("chunks missing before durability confirmation: %w", err)
+						}
+
+						if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+							return fmt.Errorf("snapshot finalized before durability confirmation: %w", err)
+						}
+					}
+
+					if call == 1 {
+						return confirmationErr
+					}
+
+					return next()
+				},
+			)
+
+			var openExportCalls atomic.Int64
+			failureProgress := &recordingSink{}
+			retryCfg := firstCfg
+			retryCfg.Progress = failureProgress
+			retryCfg.OpenExport = func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+				openExportCalls.Add(1)
+
+				return nil, errors.New("unexpected OpenExport call")
+			}
+
+			err = runPipeline(ctx, retryCfg)
+			require.ErrorIs(t, err, confirmationErr)
+			require.FileExists(t, blockPath)
+			require.FileExists(t, chunkPath)
+			require.FileExists(t, identityPath)
+			require.NoFileExists(t, snapshotPath)
+			require.Zero(t, openExportCalls.Load())
+
+			gotBlockBytes, err := os.ReadFile(blockPath)
+			require.NoError(t, err)
+			require.Equal(t, blockBytes, gotBlockBytes)
+
+			failedStreams := failureProgress.snapshot()
+			require.Len(t, failedStreams, 1)
+			require.Zero(t, failedStreams[0].doneCnt)
+
+			successProgress := &recordingSink{}
+			retryCfg.Progress = successProgress
+			require.NoError(t, runPipeline(ctx, retryCfg))
+
+			require.GreaterOrEqual(t, confirmationCalls.Load(), int64(2))
+			require.NoDirExists(t, chunkDir)
+			require.FileExists(t, snapshotPath)
+			require.NoFileExists(t, identityPath)
+			require.Zero(t, openExportCalls.Load())
+
+			gotBlockBytes, err = os.ReadFile(blockPath)
+			require.NoError(t, err)
+			require.Equal(t, blockBytes, gotBlockBytes)
+
+			successStreams := successProgress.snapshot()
+			require.Len(t, successStreams, 1)
+			require.Equal(t, 1, successStreams[0].doneCnt)
+			require.Zero(t, successStreams[0].failCnt)
+		})
+	}
+}
+
 // TestPipeline_ForeignMergedBlock_NotLaunderedByResume is the scenario-B
 // regression test for partial-node-dir-identity-marker: a node's PRIMARY dir
 // already holds a merged data.bin* left by a DIFFERENT snapshot (a mismatched
