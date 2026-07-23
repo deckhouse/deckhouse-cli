@@ -346,6 +346,69 @@ func TestFinalizeNode_RemovesIdentityMarker(t *testing.T) {
 	}
 }
 
+func TestFinalizeNodeContext_PublishedSnapshotRetainsIdentityMarker(t *testing.T) {
+	nodeDir := setupNodeDir(t)
+	node := &source.Node{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-durability",
+		Namespace:  "ns",
+		UID:        "uid-snap-durability",
+	}
+	id := archive.NodeIdentity{
+		APIVersion: node.APIVersion,
+		Kind:       node.Kind,
+		Name:       node.Name,
+		Namespace:  node.Namespace,
+		UID:        string(node.UID),
+	}
+
+	if err := archive.WriteManifest(nodeDir, makeObj("v1", "ConfigMap", "cm-durability")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(nodeDir, id); err != nil {
+		t.Fatalf("WriteNodeIdentityMarker: %v", err)
+	}
+
+	syncErr := errors.New("snapshot parent sync sentinel")
+	ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, _ func() error) error {
+		if path != nodeDir {
+			t.Fatalf("directory sync path = %q, want %q", path, nodeDir)
+		}
+
+		return syncErr
+	})
+
+	err := volume.FinalizeNodeContext(ctx, nodeDir, node)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("FinalizeNodeContext error = %v, want parent sync sentinel", err)
+	}
+
+	if got := archive.CommitPublicationState(err); got != archive.PublicationPublished {
+		t.Fatalf("publication state = %v, want published", got)
+	}
+
+	if _, found, readErr := archive.ReadNodeIdentityMarker(nodeDir); readErr != nil {
+		t.Fatalf("ReadNodeIdentityMarker: %v", readErr)
+	} else if !found {
+		t.Fatal("identity marker must survive unconfirmed snapshot publication")
+	}
+
+	snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+	if _, statErr := os.Stat(snapshotPath); statErr != nil {
+		t.Fatalf("published snapshot.yaml missing: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(snapshotPath + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("temporary snapshot.yaml must be absent, Stat error: %v", statErr)
+	}
+
+	if verifyErr := archive.VerifyNode(nodeDir); verifyErr != nil {
+		t.Fatalf("published snapshot.yaml must contain valid metadata: %v", verifyErr)
+	}
+}
+
 func TestWriteNodeManifests_FetchError(t *testing.T) {
 	nodeDir := setupNodeDir(t)
 

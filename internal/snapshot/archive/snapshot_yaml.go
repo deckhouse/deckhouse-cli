@@ -18,6 +18,7 @@ package archive
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -163,9 +164,14 @@ type NodeChecksum struct {
 	Short string `json:"short"`
 }
 
-// WriteSnapshotYAML serialises sy to YAML and writes it atomically to
-// <nodeDir>/snapshot.yaml. An existing file at that path is replaced.
+// WriteSnapshotYAML is WriteSnapshotYAMLContext with a non-cancellable context.
 func WriteSnapshotYAML(nodeDir string, sy SnapshotYAML) error {
+	return WriteSnapshotYAMLContext(context.Background(), nodeDir, sy)
+}
+
+// WriteSnapshotYAMLContext serialises sy to YAML and writes it atomically to
+// <nodeDir>/snapshot.yaml. An existing file at that path is replaced.
+func WriteSnapshotYAMLContext(ctx context.Context, nodeDir string, sy SnapshotYAML) error {
 	data, err := sigsyaml.Marshal(sy)
 	if err != nil {
 		return fmt.Errorf("marshal snapshot.yaml: %w", err)
@@ -173,7 +179,7 @@ func WriteSnapshotYAML(nodeDir string, sy SnapshotYAML) error {
 
 	path := filepath.Join(nodeDir, SnapshotYAMLName)
 
-	return WriteFileAtomic(path, bytes.NewReader(data))
+	return WriteFileAtomicContext(ctx, path, bytes.NewReader(data))
 }
 
 // RootedSource pins one verified archive directory and opens descendants relative to its

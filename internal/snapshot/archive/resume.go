@@ -18,6 +18,7 @@ package archive
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -60,8 +61,8 @@ const (
 	// with no volume-staging artifact and no snapshot.yaml.
 	ObservedManifestsOnly ObservedState = "manifests_only"
 
-	// ObservedDone: snapshot.yaml is present and VerifyNode passed for the planned
-	// identity — the node is complete.
+	// ObservedDone: snapshot.yaml is present, VerifyNode passed for the planned
+	// identity, and its directory durability was confirmed — the node is complete.
 	ObservedDone ObservedState = "done"
 )
 
@@ -96,11 +97,11 @@ type NodeResumePlan struct {
 	TargetDir string
 
 	// Done is the ONLY resume decision the pipeline consumes: true means the node
-	// directory already holds a complete, identity-verified download (snapshot.yaml
-	// present and VerifyNode passes for the planned identity), so the pipeline
-	// skips it entirely. Every not-done node is (re)driven through the normal
-	// download path, which re-proves what to (re)fetch from disk probes — those
-	// probes, NOT this plan, are the single source of truth for resume.
+	// directory already holds a complete, identity-verified download whose
+	// snapshot.yaml directory durability was confirmed, so the pipeline skips it
+	// entirely. Every not-done node is (re)driven through the normal download path,
+	// which re-proves what to (re)fetch from disk probes — those probes, NOT this
+	// plan, are the single source of truth for resume.
 	Done bool
 
 	// Observed is a NON-AUTHORITATIVE label of what the scan saw on disk (see
@@ -119,7 +120,12 @@ func nodeDirComponent(id NodeIdentity) string {
 	return id.Name
 }
 
-// ScanNode inspects parentDir for an existing node directory whose name is
+// ScanNode is ScanNodeContext with a non-cancellable context.
+func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
+	return ScanNodeContext(context.Background(), parentDir, id)
+}
+
+// ScanNodeContext inspects parentDir for an existing node directory whose name is
 // NodeDirName(id.Kind, nodeDirComponent(id)), removes any stale *.tmp files,
 // and returns a NodeResumePlan describing the on-disk state for the planned node.
 //
@@ -134,7 +140,7 @@ func nodeDirComponent(id NodeIdentity) string {
 // CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), short), where short
 // is derived from the existing complete node's checksum.  This prevents the
 // pipeline from overwriting unrelated completed data.
-func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
+func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 	primaryDir := filepath.Join(parentDir, NodeDirName(id.Kind, nodeDirComponent(id)))
 
 	_, statErr := os.Stat(primaryDir)
@@ -152,7 +158,7 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 
 	verifyErr := VerifyNode(primaryDir)
 	if verifyErr == nil {
-		return classifyCompleteDir(parentDir, primaryDir, id)
+		return classifyCompleteDir(ctx, parentDir, primaryDir, id)
 	}
 
 	// A PRESENT snapshot.yaml whose recorded checksum no longer matches the
@@ -229,13 +235,17 @@ func classifyChecksumMismatchDir(nodeDir string, id NodeIdentity, onForeign func
 
 // classifyCompleteDir handles the case where the primary directory passes
 // VerifyNode.  It checks identity and may redirect to a collision path.
-func classifyCompleteDir(parentDir, primaryDir string, id NodeIdentity) (NodeResumePlan, error) {
+func classifyCompleteDir(ctx context.Context, parentDir, primaryDir string, id NodeIdentity) (NodeResumePlan, error) {
 	sy, err := ReadSnapshotYAML(primaryDir)
 	if err != nil {
 		return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", primaryDir, err)
 	}
 
 	if matchesIdentity(sy, id) {
+		if err := confirmSnapshotYAMLDurability(ctx, primaryDir); err != nil {
+			return NodeResumePlan{}, err
+		}
+
 		if err := healNodeIdentityMarker(primaryDir); err != nil {
 			return NodeResumePlan{}, err
 		}
@@ -390,14 +400,19 @@ func matchesIdentity(sy SnapshotYAML, id NodeIdentity) bool {
 // The caller must choose a different output path rather than overwriting the data.
 var ErrIdentityMismatch = errors.New("output directory belongs to a different snapshot")
 
-// ScanAbsolute classifies the on-disk state of an absolute node directory path,
+// ScanAbsolute is ScanAbsoluteContext with a non-cancellable context.
+func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
+	return ScanAbsoluteContext(context.Background(), nodeDir, id)
+}
+
+// ScanAbsoluteContext classifies the on-disk state of an absolute node directory path,
 // removing stale *.tmp files.  Unlike ScanNode it does not derive the path from
 // a parent directory + NodeDirName convention, and it does not redirect to a
 // collision-suffixed path on identity mismatch.  Instead it returns ErrIdentityMismatch
 // so the caller can abort and ask the user to choose a different output path.
 //
 // Suitable for the root output directory where the path name is user-controlled.
-func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
+func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 	_, statErr := os.Stat(nodeDir)
 
 	if errors.Is(statErr, os.ErrNotExist) {
@@ -422,6 +437,10 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 		if !matchesIdentity(sy, id) {
 			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
+		}
+
+		if err := confirmSnapshotYAMLDurability(ctx, nodeDir); err != nil {
+			return NodeResumePlan{}, err
 		}
 
 		if err := healNodeIdentityMarker(nodeDir); err != nil {
@@ -452,6 +471,15 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 		return NodeResumePlan{}, fmt.Errorf("%w: %s %s, expected %s/%s",
 			ErrIdentityMismatch, nodeDir, mm.detail, id.Kind, id.Name)
 	})
+}
+
+func confirmSnapshotYAMLDurability(ctx context.Context, nodeDir string) error {
+	path := filepath.Join(nodeDir, SnapshotYAMLName)
+	if err := ConfirmFileDurability(ctx, path); err != nil {
+		return fmt.Errorf("confirm snapshot.yaml durability in %s: %w", nodeDir, err)
+	}
+
+	return nil
 }
 
 // NodeIdentityMarker is the on-disk identity sidecar (NodeIdentityMarkerName)

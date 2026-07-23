@@ -1311,6 +1311,162 @@ func TestPipeline_BlockResumeAfterMergeConfirmsDurabilityBeforeCompletion(t *tes
 	}
 }
 
+func TestPipeline_SnapshotYAMLRecoversDurabilityBeforeDone(t *testing.T) {
+	tests := []struct {
+		name            string
+		newClient       func(*testing.T) client.Client
+		namespace       string
+		rootSnapshot    string
+		selectedKind    string
+		selectedName    string
+		nodeDir         func(string) string
+		initialFailCall int64
+	}{
+		{
+			name:         "Root",
+			newClient:    buildFakeClient,
+			namespace:    testNS,
+			rootSnapshot: rootSnapshot,
+			nodeDir: func(outputDir string) string {
+				return outputDir
+			},
+			initialFailCall: 1,
+		},
+		{
+			name:         "OrdinaryChildWithData",
+			newClient:    buildFakeClient,
+			namespace:    testNS,
+			rootSnapshot: rootSnapshot,
+			selectedKind: childKind,
+			selectedName: diskSnapName,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(childKind, diskSnapName))
+			},
+			initialFailCall: 2,
+		},
+		{
+			name:         "VolumeLeaf",
+			newClient:    buildOrphanLeafFakeClient,
+			namespace:    e2eNS,
+			rootSnapshot: e2eAggRootSnap,
+			nodeDir: func(outputDir string) string {
+				return filepath.Join(outputDir, archive.SnapshotsDirName,
+					archive.NodeDirName(e2eDiskKind, "agg-snap"),
+					archive.SnapshotsDirName,
+					archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
+			},
+			initialFailCall: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawBlock := bytes.Repeat([]byte("snapshot-durability-payload-"), 40)
+			blockSrv := makeBlockServer(t, rawBlock)
+			defer blockSrv.Close()
+
+			outputDir := t.TempDir()
+			nodeDir := tt.nodeDir(outputDir)
+			initialSyncErr := errors.New("initial snapshot sync sentinel")
+			retrySyncErr := errors.New("retry snapshot sync sentinel")
+			var syncCalls atomic.Int64
+
+			ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+				if filepath.Clean(path) != filepath.Clean(nodeDir) {
+					return next()
+				}
+
+				call := syncCalls.Add(1)
+				if call == tt.initialFailCall {
+					if _, err := os.Stat(filepath.Join(nodeDir, archive.SnapshotYAMLName)); err != nil {
+						return fmt.Errorf("snapshot.yaml missing after publication: %w", err)
+					}
+
+					if _, err := os.Stat(filepath.Join(nodeDir, archive.NodeIdentityMarkerName)); err != nil {
+						return fmt.Errorf("identity marker missing after publication: %w", err)
+					}
+
+					return initialSyncErr
+				}
+
+				if call == tt.initialFailCall+1 {
+					if _, err := os.Stat(filepath.Join(nodeDir, archive.SnapshotYAMLName)); err != nil {
+						return fmt.Errorf("snapshot.yaml missing before durability retry: %w", err)
+					}
+
+					if _, err := os.Stat(filepath.Join(nodeDir, archive.NodeIdentityMarkerName)); err != nil {
+						return fmt.Errorf("identity marker missing before durability retry: %w", err)
+					}
+
+					return retrySyncErr
+				}
+
+				return next()
+			})
+
+			cfg := pipeline.Config{
+				Namespace:            tt.namespace,
+				RootSnapshot:         tt.rootSnapshot,
+				OutputDir:            outputDir,
+				Workers:              1,
+				PerVolumeConcurrency: 1,
+				SelectedNodeKind:     tt.selectedKind,
+				SelectedNodeName:     tt.selectedName,
+				KubeClient:           tt.newClient(t),
+				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+					return exporter.NewExport(
+						namespace,
+						"de-snapshot-durability",
+						"Block",
+						blockSrv.URL,
+						exporter.NewFetcher(blockSrv.Client()),
+					), nil
+				},
+			}
+
+			err := runPipeline(ctx, cfg)
+			require.ErrorIs(t, err, initialSyncErr)
+			require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+
+			snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			identityPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
+			require.FileExists(t, snapshotPath)
+			require.FileExists(t, identityPath)
+			require.NoFileExists(t, snapshotPath+".tmp")
+
+			published, err := os.ReadFile(snapshotPath)
+			require.NoError(t, err)
+
+			var openExportCalls atomic.Int64
+			retryCfg := cfg
+			retryCfg.OpenExport = func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+				openExportCalls.Add(1)
+
+				return nil, errors.New("unexpected OpenExport call")
+			}
+
+			err = runPipeline(ctx, retryCfg)
+			require.ErrorIs(t, err, retrySyncErr)
+			require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+			require.FileExists(t, identityPath)
+			require.Zero(t, openExportCalls.Load())
+
+			afterFailedRetry, err := os.ReadFile(snapshotPath)
+			require.NoError(t, err)
+			require.Equal(t, published, afterFailedRetry)
+
+			require.NoError(t, runPipeline(ctx, retryCfg))
+			require.NoFileExists(t, identityPath)
+			require.Zero(t, openExportCalls.Load())
+
+			recovered, err := os.ReadFile(snapshotPath)
+			require.NoError(t, err)
+			require.Equal(t, published, recovered)
+		})
+	}
+}
+
 // TestPipeline_ForeignMergedBlock_NotLaunderedByResume is the scenario-B
 // regression test for partial-node-dir-identity-marker: a node's PRIMARY dir
 // already holds a merged data.bin* left by a DIFFERENT snapshot (a mismatched

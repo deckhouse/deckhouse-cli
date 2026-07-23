@@ -110,7 +110,12 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 		targetName, targetUID, scopeRef.Kind, scopeRef.Name)
 }
 
-// FinalizeNode computes the node integrity checksum over all current files in
+// FinalizeNode is FinalizeNodeContext with a non-cancellable context.
+func FinalizeNode(nodeDir string, node *source.Node) error {
+	return FinalizeNodeContext(context.Background(), nodeDir, node)
+}
+
+// FinalizeNodeContext computes the node integrity checksum over all current files in
 // nodeDir (manifests/*.yaml, data.bin[.<ext>], data.tar, data/<pvc>.*) and atomically writes
 // <nodeDir>/snapshot.yaml. It must be called after all manifests and volume data
 // for the node are fully written.
@@ -124,11 +129,11 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // The Volumes field does not affect ComputeNodeChecksum because snapshot.yaml is
 // excluded from the integrity digest.
 //
-// FinalizeNode is idempotent: each call recomputes the checksum and overwrites
+// FinalizeNodeContext is idempotent: each call recomputes the checksum and overwrites
 // snapshot.yaml with the fresh value. The pipeline calls it once per node after
 // both WriteNodeManifests and any volume download have completed.
 //
-// After snapshot.yaml is durably written, FinalizeNode removes the resume
+// After snapshot.yaml is durably written, FinalizeNodeContext removes the resume
 // identity marker (archive.NodeIdentityMarkerName). The marker exists only to
 // prove a PARTIAL (snapshot.yaml-less) dir belongs to this snapshot (inv. #9);
 // once snapshot.yaml — the authoritative identity record VerifyNode/ScanNode
@@ -140,7 +145,7 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 // Removal is checksum-neutral (ComputeNodeChecksum/collectNodeFiles never read
 // the marker), so it cannot perturb the checksum just written or any later
 // VerifyNode.
-func FinalizeNode(nodeDir string, node *source.Node) error {
+func FinalizeNodeContext(ctx context.Context, nodeDir string, node *source.Node) error {
 	checksum, err := archive.ComputeNodeChecksum(nodeDir)
 	if err != nil {
 		return fmt.Errorf("compute checksum for %s/%s: %w", node.Kind, node.Name, err)
@@ -158,7 +163,7 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 		Volumes:         buildVolumesList(node),
 	}
 
-	if err := archive.WriteSnapshotYAML(nodeDir, sy); err != nil {
+	if err := archive.WriteSnapshotYAMLContext(ctx, nodeDir, sy); err != nil {
 		return fmt.Errorf("write snapshot.yaml for %s/%s: %w", node.Kind, node.Name, err)
 	}
 

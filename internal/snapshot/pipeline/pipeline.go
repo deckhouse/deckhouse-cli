@@ -121,7 +121,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	tasks, err := collectNodeTasks(processRoot, startDir)
+	tasks, err := collectNodeTasksContext(ctx, processRoot, startDir)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
 	}
@@ -133,7 +133,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// errgroup would run them concurrently — two writers over one chunk/staging
 	// dir and snapshot.yaml, the single-writer violation the cross-process flock
 	// cannot catch inside one process (inv. #10b).
-	tasks, err = dedupeSiblingTargetDirs(tasks, cfg.Log)
+	tasks, err = dedupeSiblingTargetDirsContext(ctx, tasks, cfg.Log)
 	if err != nil {
 		return fmt.Errorf("dedupe sibling target directories: %w", err)
 	}
@@ -421,14 +421,18 @@ func lookupStream(streams map[streamKey]streamHandle, node *source.Node) streamH
 // The root node uses ScanAbsolute (user-controlled path, no collision redirect).
 // Child nodes use ScanNode (naming-convention path, collision-aware).
 func collectNodeTasks(root *source.Node, outputDir string) ([]nodeTask, error) {
-	rootPlan, err := archive.ScanAbsolute(outputDir, nodeIdentity(root))
+	return collectNodeTasksContext(context.Background(), root, outputDir)
+}
+
+func collectNodeTasksContext(ctx context.Context, root *source.Node, outputDir string) ([]nodeTask, error) {
+	rootPlan, err := archive.ScanAbsoluteContext(ctx, outputDir, nodeIdentity(root))
 	if err != nil {
 		return nil, fmt.Errorf("scan root directory %s: %w", outputDir, err)
 	}
 
 	var tasks []nodeTask
 
-	if err := collectDFS(root, rootPlan, &tasks); err != nil {
+	if err := collectDFS(ctx, root, rootPlan, &tasks); err != nil {
 		return nil, err
 	}
 
@@ -437,7 +441,7 @@ func collectNodeTasks(root *source.Node, outputDir string) ([]nodeTask, error) {
 
 // collectDFS appends a nodeTask for node and recursively visits its children.
 // plan carries the already-computed resume state and target directory for node.
-func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTask) error {
+func collectDFS(ctx context.Context, node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTask) error {
 	*tasks = append(*tasks, nodeTask{
 		node:     node,
 		nodeDir:  plan.TargetDir,
@@ -453,12 +457,12 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 	snapshotsDir := filepath.Join(plan.TargetDir, archive.SnapshotsDirName)
 
 	for _, child := range node.Children {
-		childPlan, err := archive.ScanNode(snapshotsDir, nodeIdentity(child))
+		childPlan, err := archive.ScanNodeContext(ctx, snapshotsDir, nodeIdentity(child))
 		if err != nil {
 			return fmt.Errorf("scan child %s/%s: %w", child.Kind, child.Name, err)
 		}
 
-		if err := collectDFS(child, childPlan, tasks); err != nil {
+		if err := collectDFS(ctx, child, childPlan, tasks); err != nil {
 			return err
 		}
 	}
@@ -495,6 +499,10 @@ func collectDFS(node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTas
 // When no two siblings share a convention dir every group has one member and the
 // list is returned unchanged (zero behavior change).
 func dedupeSiblingTargetDirs(tasks []nodeTask, log *slog.Logger) ([]nodeTask, error) {
+	return dedupeSiblingTargetDirsContext(context.Background(), tasks, log)
+}
+
+func dedupeSiblingTargetDirsContext(ctx context.Context, tasks []nodeTask, log *slog.Logger) ([]nodeTask, error) {
 	firstAt := make(map[string]*source.Node, len(tasks))
 	out := make([]nodeTask, 0, len(tasks))
 
@@ -507,7 +515,7 @@ func dedupeSiblingTargetDirs(tasks []nodeTask, log *slog.Logger) ([]nodeTask, er
 			// it with the re-scanned subtree rooted at the collision path.
 			end := subtreeEnd(tasks, i)
 
-			redirected, err := redirectDuplicateSubtree(task, first, log)
+			redirected, err := redirectDuplicateSubtree(ctx, task, first, log)
 			if err != nil {
 				return nil, err
 			}
@@ -571,7 +579,7 @@ func subtreeEnd(tasks []nodeTask, i int) int {
 // identity-derived suffix); collectDFS then re-scans descendants via ScanNode so
 // the whole subtree moves WITH the redirected node instead of being stranded
 // under the first occupant's directory.
-func redirectDuplicateSubtree(task nodeTask, first *source.Node, log *slog.Logger) ([]nodeTask, error) {
+func redirectDuplicateSubtree(ctx context.Context, task nodeTask, first *source.Node, log *slog.Logger) ([]nodeTask, error) {
 	node := task.node
 	parentDir := filepath.Dir(task.nodeDir)
 	sourceName := nodeDirOf(node)
@@ -586,13 +594,13 @@ func redirectDuplicateSubtree(task nodeTask, first *source.Node, log *slog.Logge
 		slog.String("duplicate_name", node.Name),
 		slog.String("collision_dir", collisionDir))
 
-	plan, err := archive.ScanAbsolute(collisionDir, nodeIdentity(node))
+	plan, err := archive.ScanAbsoluteContext(ctx, collisionDir, nodeIdentity(node))
 	if err != nil {
 		return nil, fmt.Errorf("scan collision dir %s for %s/%s: %w", collisionDir, node.Kind, node.Name, err)
 	}
 
 	var redirected []nodeTask
-	if err := collectDFS(node, plan, &redirected); err != nil {
+	if err := collectDFS(ctx, node, plan, &redirected); err != nil {
 		return nil, err
 	}
 
@@ -729,7 +737,7 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 		}
 	}
 
-	if err := volume.FinalizeNode(task.nodeDir, task.node); err != nil {
+	if err := volume.FinalizeNodeContext(ctx, task.nodeDir, task.node); err != nil {
 		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
@@ -797,7 +805,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		}
 	}
 
-	if err := volume.FinalizeNode(task.nodeDir, task.node); err != nil {
+	if err := volume.FinalizeNodeContext(ctx, task.nodeDir, task.node); err != nil {
 		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
