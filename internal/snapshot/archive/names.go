@@ -218,13 +218,25 @@ type BlockPayload struct {
 // at all (not an error: the normal shape for a filesystem-volume or purely
 // structural node, and for a nodeDir that does not exist yet).
 func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
-	entries, err := ReadDirectory(nodeDir)
+	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return BlockPayload{}, false, nil
 		}
 
 		return BlockPayload{}, false, fmt.Errorf("read %s: %w", nodeDir, err)
+	}
+
+	defer func() { _ = source.Close() }()
+
+	return ClassifyBlockPayloadIn(source)
+}
+
+// ClassifyBlockPayloadIn resolves a block payload relative to a pinned node source.
+func ClassifyBlockPayloadIn(source *RootedSource) (BlockPayload, bool, error) {
+	entries, err := source.ReadDirectory()
+	if err != nil {
+		return BlockPayload{}, false, fmt.Errorf("read %s: %w", source.Path(), err)
 	}
 
 	var found []BlockPayload
@@ -235,10 +247,10 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 		name := e.Name()
 
 		if name == FsTarName {
-			file, openErr := OpenRegularFile(filepath.Join(nodeDir, name))
+			file, openErr := source.OpenRegularFile(name)
 			if openErr != nil {
 				return BlockPayload{}, false, fmt.Errorf("inspect filesystem payload %s: %w",
-					filepath.Join(nodeDir, name), openErr)
+					filepath.Join(source.Path(), name), openErr)
 			}
 
 			_ = file.Close()
@@ -252,10 +264,13 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 		}
 
 		if name == BlockChunksDirName {
-			if _, readErr := ReadDirectory(filepath.Join(nodeDir, name)); readErr != nil {
+			staging, openErr := source.OpenDirectory(name)
+			if openErr != nil {
 				return BlockPayload{}, false, fmt.Errorf("%s: %q must be the staging directory: %w",
-					nodeDir, name, errors.Join(ErrInvalidBlockPayload, readErr))
+					source.Path(), name, errors.Join(ErrInvalidBlockPayload, openErr))
 			}
+
+			_ = staging.Close()
 
 			continue
 		}
@@ -263,18 +278,18 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 		ext, recognized := blockPayloadExts[name]
 		if !recognized {
 			return BlockPayload{}, false, fmt.Errorf("%s: unrecognized block payload entry %q: %w",
-				nodeDir, name, ErrInvalidBlockPayload)
+				source.Path(), name, ErrInvalidBlockPayload)
 		}
 
-		file, openErr := OpenRegularFile(filepath.Join(nodeDir, name))
+		file, openErr := source.OpenRegularFile(name)
 		if openErr != nil {
 			return BlockPayload{}, false, fmt.Errorf("inspect block payload %s: %w",
-				filepath.Join(nodeDir, name), errors.Join(ErrInvalidBlockPayload, openErr))
+				filepath.Join(source.Path(), name), errors.Join(ErrInvalidBlockPayload, openErr))
 		}
 
 		_ = file.Close()
 
-		found = append(found, BlockPayload{Path: filepath.Join(nodeDir, name), Ext: ext})
+		found = append(found, BlockPayload{Path: filepath.Join(source.Path(), name), Ext: ext})
 	}
 
 	if len(found) == 0 {
@@ -289,12 +304,13 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 
 		sort.Strings(names)
 
-		return BlockPayload{}, false, fmt.Errorf("%s: multiple block payload files %v: %w", nodeDir, names, ErrInvalidBlockPayload)
+		return BlockPayload{}, false, fmt.Errorf("%s: multiple block payload files %v: %w",
+			source.Path(), names, ErrInvalidBlockPayload)
 	}
 
 	if hasTar {
 		return BlockPayload{}, false, fmt.Errorf("%s: block payload %s coexists with %s: %w",
-			nodeDir, filepath.Base(found[0].Path), FsTarName, ErrInvalidBlockPayload)
+			source.Path(), filepath.Base(found[0].Path), FsTarName, ErrInvalidBlockPayload)
 	}
 
 	return found[0], true, nil

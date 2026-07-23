@@ -975,6 +975,200 @@ func TestBuildPlan_RejectsFilesystemMetadataBeforeIdentity(t *testing.T) {
 	}
 }
 
+func TestBuildPlanParentReplacementCannotEscapePinnedArchive(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (root, trigger, target, outside string)
+	}{
+		{
+			name: "archive root",
+			setup: func(t *testing.T) (string, string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+
+				return root, filepath.Join(root, archive.SnapshotYAMLName), root, buildTwoLevelArchive(t)
+			},
+		},
+		{
+			name: "node directory",
+			setup: func(t *testing.T) (string, string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				node := childDir(root, "VolumeSnapshot", "pvc-1")
+				outside := childDir(buildTwoLevelArchive(t), "VolumeSnapshot", "pvc-1")
+
+				return root, filepath.Join(node, archive.SnapshotYAMLName), node, outside
+			},
+		},
+		{
+			name: "manifests directory",
+			setup: func(t *testing.T) (string, string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				manifests := filepath.Join(root, archive.ManifestsDirName)
+				entries, err := os.ReadDir(manifests)
+				if err != nil || len(entries) == 0 {
+					t.Fatalf("read manifests: entries=%d err=%v", len(entries), err)
+				}
+
+				outside := filepath.Join(buildTwoLevelArchive(t), archive.ManifestsDirName)
+
+				return root, filepath.Join(manifests, entries[0].Name()), manifests, outside
+			},
+		},
+		{
+			name: "snapshots directory",
+			setup: func(t *testing.T) (string, string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				snapshots := filepath.Join(root, archive.SnapshotsDirName)
+
+				return root, childDir(root, "VolumeSnapshot", "pvc-1"), snapshots,
+					filepath.Join(buildTwoLevelArchive(t), archive.SnapshotsDirName)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, trigger, target, outside := tc.setup(t)
+			replaced := false
+
+			_, err := buildPlan(root, func(path string) {
+				if replaced || path != trigger {
+					return
+				}
+
+				replaced = true
+				replacePathWithSymlink(t, target, outside)
+			})
+			if !replaced {
+				t.Fatalf("boundary hook for %s was not reached", trigger)
+			}
+
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("BuildPlan error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+		})
+	}
+}
+
+func TestBuildPlanFinalReplacementCannotReadOutsideBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (root, target, outside string)
+	}{
+		{
+			name: "snapshot yaml",
+			setup: func(t *testing.T) (string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				outside := filepath.Join(t.TempDir(), "outside.yaml")
+				if err := os.WriteFile(outside, []byte("apiVersion: escaped/v1\nkind: Escaped\nname: escaped\n"), 0o600); err != nil {
+					t.Fatalf("write outside snapshot: %v", err)
+				}
+
+				return root, filepath.Join(root, archive.SnapshotYAMLName), outside
+			},
+		},
+		{
+			name: "manifest",
+			setup: func(t *testing.T) (string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				manifests := filepath.Join(root, archive.ManifestsDirName)
+				entries, err := os.ReadDir(manifests)
+				if err != nil || len(entries) == 0 {
+					t.Fatalf("read manifests: entries=%d err=%v", len(entries), err)
+				}
+
+				outside := filepath.Join(t.TempDir(), "outside.yaml")
+				if err := os.WriteFile(outside, []byte("apiVersion: v1\nkind: Secret\nmetadata:\n  name: escaped\n"), 0o600); err != nil {
+					t.Fatalf("write outside manifest: %v", err)
+				}
+
+				return root, filepath.Join(manifests, entries[0].Name()), outside
+			},
+		},
+		{
+			name: "block payload",
+			setup: func(t *testing.T) (string, string, string) {
+				t.Helper()
+				root := buildTwoLevelArchive(t)
+				target := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				outside := filepath.Join(t.TempDir(), "outside.bin")
+				if err := os.WriteFile(outside, []byte("escaped block bytes"), 0o600); err != nil {
+					t.Fatalf("write outside block: %v", err)
+				}
+
+				return root, target, outside
+			},
+		},
+		{
+			name: "filesystem payload",
+			setup: func(t *testing.T) (string, string, string) {
+				t.Helper()
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+					tarData:    []byte("original tar bytes"),
+				})
+
+				target := filepath.Join(root, archive.FsTarName)
+				outside := filepath.Join(t.TempDir(), "outside.tar")
+				if err := os.WriteFile(outside, []byte("escaped tar bytes"), 0o600); err != nil {
+					t.Fatalf("write outside tar: %v", err)
+				}
+
+				return root, target, outside
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, target, outside := tc.setup(t)
+			replaced := false
+
+			_, err := buildPlan(root, func(path string) {
+				if replaced || path != target {
+					return
+				}
+
+				replaced = true
+				replacePathWithSymlink(t, target, outside)
+			})
+			if !replaced {
+				t.Fatalf("boundary hook for %s was not reached", target)
+			}
+
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("BuildPlan error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+		})
+	}
+}
+
+func replacePathWithSymlink(t *testing.T, path, target string) {
+	t.Helper()
+
+	original := path + ".pinned-original"
+	if err := os.Rename(path, original); err != nil {
+		t.Fatalf("rename %s: %v", path, err)
+	}
+
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("symlink %s: %v", path, err)
+	}
+
+	t.Cleanup(func() {
+		_ = os.Remove(path)
+		_ = os.Rename(original, path)
+	})
+}
+
 func writePlanFSTar(t *testing.T, header *gotar.Header) []byte {
 	t.Helper()
 

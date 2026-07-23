@@ -48,7 +48,18 @@ var ErrSnapshotYAMLMissing = errors.New("snapshot.yaml not found")
 // raw content to an independent per-file SHA-256. All per-file digests are
 // then fed in sorted order into a final SHA-256 to produce the node checksum.
 func ComputeNodeChecksum(nodeDir string) (NodeChecksum, error) {
-	paths, err := collectNodeFiles(nodeDir)
+	source, err := OpenRootedSource(nodeDir)
+	if err != nil {
+		return NodeChecksum{}, err
+	}
+
+	defer func() { _ = source.Close() }()
+
+	return computeNodeChecksum(source)
+}
+
+func computeNodeChecksum(source *RootedSource) (NodeChecksum, error) {
+	paths, err := collectNodeFiles(source)
 	if err != nil {
 		return NodeChecksum{}, err
 	}
@@ -58,9 +69,7 @@ func ComputeNodeChecksum(nodeDir string) (NodeChecksum, error) {
 	final := sha256.New()
 
 	for _, relPath := range paths {
-		absPath := filepath.Join(nodeDir, relPath)
-
-		fh, err := computeFileHash(relPath, absPath)
+		fh, err := computeFileHash(source, relPath)
 		if err != nil {
 			return NodeChecksum{}, fmt.Errorf("hash file %s: %w", relPath, err)
 		}
@@ -93,7 +102,14 @@ func ShortChecksum(hex string) string {
 // stored in snapshot.yaml. Returns ErrSnapshotYAMLMissing if snapshot.yaml is absent,
 // ErrChecksumMismatch if the digests differ.
 func VerifyNode(nodeDir string) error {
-	sy, err := ReadSnapshotYAML(nodeDir)
+	source, err := OpenRootedSource(nodeDir)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = source.Close() }()
+
+	sy, err := readSnapshotYAML(source)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
@@ -102,7 +118,7 @@ func VerifyNode(nodeDir string) error {
 		return err
 	}
 
-	got, err := ComputeNodeChecksum(nodeDir)
+	got, err := computeNodeChecksum(source)
 	if err != nil {
 		return err
 	}
@@ -122,7 +138,14 @@ func VerifyNode(nodeDir string) error {
 // from that digest — is validated here. Returns ErrSnapshotYAMLMissing when snapshot.yaml is
 // absent, and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
 func ValidateNodeMetadata(nodeDir string) error {
-	sy, err := ReadSnapshotYAML(nodeDir)
+	source, err := OpenRootedSource(nodeDir)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = source.Close() }()
+
+	sy, err := readSnapshotYAML(source)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
@@ -131,16 +154,14 @@ func ValidateNodeMetadata(nodeDir string) error {
 		return err
 	}
 
-	_, hasBlock, err := ClassifyBlockPayload(nodeDir)
+	_, hasBlock, err := ClassifyBlockPayloadIn(source)
 	if err != nil {
 		return fmt.Errorf("%s: %w", nodeDir, err)
 	}
 
 	hasFS := false
 
-	tarPath := filepath.Join(nodeDir, FsTarName)
-
-	tarFile, statErr := OpenRegularFile(tarPath)
+	tarFile, statErr := source.OpenRegularFile(FsTarName)
 	if statErr == nil {
 		_ = tarFile.Close()
 		hasFS = true
@@ -158,14 +179,24 @@ func ValidateNodeMetadata(nodeDir string) error {
 // collectNodeFiles returns the relative paths of all files in nodeDir that
 // contribute to the node checksum. The returned paths are not sorted; callers
 // must sort them before computing the digest.
-func collectNodeFiles(nodeDir string) ([]string, error) {
+func collectNodeFiles(source *RootedSource) ([]string, error) {
 	var paths []string
 
-	manifestsDir := filepath.Join(nodeDir, ManifestsDirName)
-	entries, err := ReadDirectory(manifestsDir)
+	manifests, err := source.OpenDirectory(ManifestsDirName)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
+		}
+	} else {
+		defer func() { _ = manifests.Close() }()
+	}
 
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
+	var entries []os.DirEntry
+	if manifests != nil {
+		entries, err = manifests.ReadDirectory()
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
+		}
 	}
 
 	for _, e := range entries {
@@ -175,7 +206,7 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 
 		relPath := filepath.Join(ManifestsDirName, e.Name())
 
-		file, openErr := OpenRegularFile(filepath.Join(nodeDir, relPath))
+		file, openErr := source.OpenRegularPath(relPath)
 		if openErr != nil {
 			return nil, fmt.Errorf("inspect manifest %s: %w", relPath, openErr)
 		}
@@ -185,13 +216,13 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 		paths = append(paths, relPath)
 	}
 
-	blockPayload, blockFound, findErr := ClassifyBlockPayload(nodeDir)
+	blockPayload, blockFound, findErr := ClassifyBlockPayloadIn(source)
 	if findErr != nil {
-		return nil, fmt.Errorf("classify block payload in %s: %w", nodeDir, findErr)
+		return nil, fmt.Errorf("classify block payload in %s: %w", source.Path(), findErr)
 	}
 
 	if blockFound {
-		rel, relErr := filepath.Rel(nodeDir, blockPayload.Path)
+		rel, relErr := filepath.Rel(source.Path(), blockPayload.Path)
 		if relErr != nil {
 			return nil, relErr
 		}
@@ -200,20 +231,16 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 	}
 
 	// Single-volume filesystem tar (data.tar).
-	tarPath := filepath.Join(nodeDir, FsTarName)
-
-	tarFile, statErr := OpenRegularFile(tarPath)
+	tarFile, statErr := source.OpenRegularFile(FsTarName)
 	if statErr == nil {
 		_ = tarFile.Close()
 
 		paths = append(paths, FsTarName)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect %s: %w", tarPath, statErr)
+		return nil, fmt.Errorf("inspect %s: %w", filepath.Join(source.Path(), FsTarName), statErr)
 	}
 
-	dataDir := filepath.Join(nodeDir, DataDirName)
-
-	dataPaths, err := collectLegacyDataFiles(nodeDir, dataDir)
+	dataDir, err := source.OpenDirectory(DataDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return paths, nil
@@ -222,13 +249,20 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 		return nil, fmt.Errorf("walk %s: %w", DataDirName, err)
 	}
 
+	defer func() { _ = dataDir.Close() }()
+
+	dataPaths, err := collectLegacyDataFiles(dataDir, DataDirName)
+	if err != nil {
+		return nil, fmt.Errorf("walk %s: %w", DataDirName, err)
+	}
+
 	paths = append(paths, dataPaths...)
 
 	return paths, nil
 }
 
-func collectLegacyDataFiles(nodeDir, dir string) ([]string, error) {
-	entries, err := ReadDirectory(dir)
+func collectLegacyDataFiles(dir *RootedSource, relDir string) ([]string, error) {
+	entries, err := dir.ReadDirectory()
 	if err != nil {
 		return nil, err
 	}
@@ -236,15 +270,25 @@ func collectLegacyDataFiles(nodeDir, dir string) ([]string, error) {
 	paths := make([]string, 0, len(entries))
 
 	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
 			if strings.HasSuffix(entry.Name(), ".d") {
 				continue
 			}
 
-			childPaths, collectErr := collectLegacyDataFiles(nodeDir, path)
+			child, openErr := dir.OpenDirectory(entry.Name())
+			if openErr != nil {
+				return nil, openErr
+			}
+
+			childPaths, collectErr := collectLegacyDataFiles(child, filepath.Join(relDir, entry.Name()))
+			closeErr := child.Close()
+
 			if collectErr != nil {
 				return nil, collectErr
+			}
+
+			if closeErr != nil {
+				return nil, fmt.Errorf("close archive directory %s: %w", child.Path(), closeErr)
 			}
 
 			paths = append(paths, childPaths...)
@@ -252,19 +296,14 @@ func collectLegacyDataFiles(nodeDir, dir string) ([]string, error) {
 			continue
 		}
 
-		file, openErr := OpenRegularFile(path)
+		file, openErr := dir.OpenRegularFile(entry.Name())
 		if openErr != nil {
 			return nil, openErr
 		}
 
 		_ = file.Close()
 
-		rel, relErr := filepath.Rel(nodeDir, path)
-		if relErr != nil {
-			return nil, fmt.Errorf("resolve archive path %s: %w", path, relErr)
-		}
-
-		paths = append(paths, rel)
+		paths = append(paths, filepath.Join(relDir, entry.Name()))
 	}
 
 	return paths, nil
@@ -273,20 +312,20 @@ func collectLegacyDataFiles(nodeDir, dir string) ([]string, error) {
 // computeFileHash computes a SHA-256 digest over relPath (null-terminated) followed
 // by the raw content of absPath.  Using a per-file hash before folding into the
 // final digest prevents length-extension and path/content confusion.
-func computeFileHash(relPath, absPath string) ([]byte, error) {
+func computeFileHash(source *RootedSource, relPath string) ([]byte, error) {
 	h := sha256.New()
 	h.Write([]byte(relPath))
 	h.Write([]byte{0})
 
-	f, err := OpenRegularFile(absPath)
+	f, err := source.OpenRegularPath(relPath)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", absPath, err)
+		return nil, fmt.Errorf("open %s: %w", filepath.Join(source.Path(), relPath), err)
 	}
 
 	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(h, f); err != nil {
-		return nil, fmt.Errorf("read %s: %w", absPath, err)
+		return nil, fmt.Errorf("read %s: %w", filepath.Join(source.Path(), relPath), err)
 	}
 
 	return h.Sum(nil), nil

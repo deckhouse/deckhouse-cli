@@ -145,13 +145,24 @@ func (n PlannedNode) isDomainDataLeaf() bool {
 // (leaves first, root last). Each node's own manifests, direct child refs, and volume
 // data file (if any) are resolved.
 func BuildPlan(rootDir string) ([]PlannedNode, error) {
+	return buildPlan(rootDir, nil)
+}
+
+func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, error) {
 	rootDir, err := filepath.Abs(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve archive path: %w", err)
 	}
 
+	source, err := archive.OpenRootedSourceWithHook(rootDir, hook)
+	if err != nil {
+		return nil, fmt.Errorf("inspect archive root %s: %w", rootDir, err)
+	}
+
+	defer func() { _ = source.Close() }()
+
 	var plan []PlannedNode
-	if err := appendPostOrder(rootDir, &plan); err != nil {
+	if _, err := appendPostOrder(source, &plan); err != nil {
 		return nil, err
 	}
 
@@ -296,29 +307,37 @@ func refIdentity(ref ChildRef) string {
 }
 
 // appendPostOrder visits children first (sorted for determinism), then the node itself.
-func appendPostOrder(dir string, plan *[]PlannedNode) error {
-	if _, err := archive.ReadDirectory(dir); err != nil {
-		return fmt.Errorf("inspect node directory %s: %w", dir, err)
-	}
-
-	node, err := readNode(dir)
+func appendPostOrder(source *archive.RootedSource, plan *[]PlannedNode) (PlannedNode, error) {
+	node, err := readNode(source)
 	if err != nil {
-		return err
+		return PlannedNode{}, err
 	}
 
-	childDirs, err := childNodeDirs(dir)
+	childNames, snapshotsDir, err := childNodeNames(source)
 	if err != nil {
-		return err
+		return PlannedNode{}, err
 	}
 
-	for _, childDir := range childDirs {
-		if err := appendPostOrder(childDir, plan); err != nil {
-			return err
+	if snapshotsDir != nil {
+		defer func() { _ = snapshotsDir.Close() }()
+	}
+
+	for _, childName := range childNames {
+		child, openErr := snapshotsDir.OpenDirectory(childName)
+		if openErr != nil {
+			return PlannedNode{}, fmt.Errorf("inspect child node directory %s: %w",
+				filepath.Join(snapshotsDir.Path(), childName), openErr)
 		}
 
-		childNode, err := readNode(childDir)
-		if err != nil {
-			return err
+		childNode, appendErr := appendPostOrder(child, plan)
+		closeErr := child.Close()
+
+		if appendErr != nil {
+			return PlannedNode{}, appendErr
+		}
+
+		if closeErr != nil {
+			return PlannedNode{}, fmt.Errorf("close child node directory %s: %w", child.Path(), closeErr)
 		}
 
 		node.Children = append(node.Children, ChildRef{
@@ -330,28 +349,48 @@ func appendPostOrder(dir string, plan *[]PlannedNode) error {
 
 	*plan = append(*plan, node)
 
-	return nil
+	return node, nil
 }
 
 // readNode reads a single node directory's snapshot.yaml, own manifests and data file.
-func readNode(dir string) (PlannedNode, error) {
-	sy, err := archive.ReadSnapshotYAML(dir)
+func readNode(source *archive.RootedSource) (PlannedNode, error) {
+	dir := source.Path()
+
+	snapshotFile, err := source.OpenRegularFile(archive.SnapshotYAMLName)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("read node %s: %w", dir, err)
+	}
+
+	snapshotData, readErr := io.ReadAll(snapshotFile)
+	closeErr := snapshotFile.Close()
+
+	if readErr != nil {
+		return PlannedNode{}, fmt.Errorf("read node %s snapshot.yaml: %w", dir, readErr)
+	}
+
+	if closeErr != nil {
+		return PlannedNode{}, fmt.Errorf("close node %s snapshot.yaml: %w", dir, closeErr)
+	}
+
+	var sy archive.SnapshotYAML
+	if err := sigsyaml.Unmarshal(snapshotData, &sy); err != nil {
+		return PlannedNode{}, fmt.Errorf("unmarshal node %s snapshot.yaml: %w", dir, err)
 	}
 
 	if sy.Kind == "" || sy.Name == "" || sy.APIVersion == "" {
 		return PlannedNode{}, fmt.Errorf("node %s: snapshot.yaml missing apiVersion/kind/name", dir)
 	}
 
-	manifests, err := readManifests(dir)
+	manifests, err := readManifests(source)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
 
-	legacyDataDir := filepath.Join(dir, archive.DataDirName)
-	if _, err := archive.ReadDirectory(legacyDataDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return PlannedNode{}, fmt.Errorf("node %s: inspect legacy data directory: %w", dir, err)
+	legacyData, openErr := source.OpenDirectory(archive.DataDirName)
+	if openErr == nil {
+		_ = legacyData.Close()
+	} else if !errors.Is(openErr, os.ErrNotExist) {
+		return PlannedNode{}, fmt.Errorf("node %s: inspect legacy data directory: %w", dir, openErr)
 	}
 
 	node := PlannedNode{
@@ -375,7 +414,7 @@ func readNode(dir string) (PlannedNode, error) {
 		node.VolumeMode = v.VolumeMode
 	}
 
-	blockPayload, found, err := archive.ClassifyBlockPayload(dir)
+	blockPayload, found, err := archive.ClassifyBlockPayloadIn(source)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
@@ -389,7 +428,7 @@ func readNode(dir string) (PlannedNode, error) {
 
 	tarPath := filepath.Join(dir, archive.FsTarName)
 
-	tarFile, statErr := archive.OpenRegularFile(tarPath)
+	tarFile, statErr := source.OpenRegularFile(archive.FsTarName)
 	if statErr == nil {
 		_ = tarFile.Close()
 		node.FilesystemData = true
@@ -402,7 +441,7 @@ func readNode(dir string) (PlannedNode, error) {
 	if (node.HasBlockData() || node.FilesystemData) &&
 		node.NodeChecksum != "" && node.VolumeMode != "" && node.StorageClassName != "" && node.Size != "" {
 		if node.FilesystemData {
-			codec, codecErr := classifyTarCodec(tarPath)
+			codec, codecErr := classifyTarCodec(source)
 			if codecErr != nil {
 				return PlannedNode{}, fmt.Errorf("node %s: %w", dir, codecErr)
 			}
@@ -437,8 +476,8 @@ func codecName(ext string) string {
 	}
 }
 
-func classifyTarCodec(path string) (string, error) {
-	file, err := archive.OpenRegularFile(path)
+func classifyTarCodec(source *archive.RootedSource) (string, error) {
+	file, err := source.OpenRegularFile(archive.FsTarName)
 	if err != nil {
 		return "", fmt.Errorf("open filesystem payload: %w", err)
 	}
@@ -514,15 +553,20 @@ func dataImportIdentity(node PlannedNode) string {
 }
 
 // readManifests parses every <dir>/manifests/*.yaml file into an unstructured object.
-func readManifests(dir string) ([]unstructured.Unstructured, error) {
-	manifestsDir := filepath.Join(dir, archive.ManifestsDirName)
-
-	entries, err := archive.ReadDirectory(manifestsDir)
+func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, error) {
+	manifestsDir, err := source.OpenDirectory(archive.ManifestsDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 
+		return nil, fmt.Errorf("read manifests dir: %w", err)
+	}
+
+	defer func() { _ = manifestsDir.Close() }()
+
+	entries, err := manifestsDir.ReadDirectory()
+	if err != nil {
 		return nil, fmt.Errorf("read manifests dir: %w", err)
 	}
 
@@ -539,9 +583,7 @@ func readManifests(dir string) ([]unstructured.Unstructured, error) {
 
 	manifests := make([]unstructured.Unstructured, 0, len(names))
 	for _, name := range names {
-		path := filepath.Join(manifestsDir, name)
-
-		file, openErr := archive.OpenRegularFile(path)
+		file, openErr := manifestsDir.OpenRegularFile(name)
 		if openErr != nil {
 			return nil, fmt.Errorf("open manifest %s: %w", name, openErr)
 		}
@@ -568,32 +610,31 @@ func readManifests(dir string) ([]unstructured.Unstructured, error) {
 	return manifests, nil
 }
 
-// childNodeDirs returns the sorted absolute paths of direct child node directories under
-// <dir>/snapshots/. Returns nil when the node has no children.
-func childNodeDirs(dir string) ([]string, error) {
-	snapshotsDir := filepath.Join(dir, archive.SnapshotsDirName)
-
-	entries, err := archive.ReadDirectory(snapshotsDir)
+// childNodeNames returns sorted direct child names and a pinned snapshots directory.
+func childNodeNames(source *archive.RootedSource) ([]string, *archive.RootedSource, error) {
+	snapshotsDir, err := source.OpenDirectory(archive.SnapshotsDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
 
-		return nil, fmt.Errorf("read snapshots dir %s: %w", snapshotsDir, err)
+		return nil, nil, fmt.Errorf("read snapshots dir %s: %w",
+			filepath.Join(source.Path(), archive.SnapshotsDirName), err)
 	}
 
-	var dirs []string
+	entries, err := snapshotsDir.ReadDirectory()
+	if err != nil {
+		_ = snapshotsDir.Close()
 
+		return nil, nil, fmt.Errorf("read snapshots dir %s: %w", snapshotsDir.Path(), err)
+	}
+
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		childDir := filepath.Join(snapshotsDir, e.Name())
-		if _, readErr := archive.ReadDirectory(childDir); readErr != nil {
-			return nil, fmt.Errorf("inspect child node directory %s: %w", childDir, readErr)
-		}
-
-		dirs = append(dirs, childDir)
+		names = append(names, e.Name())
 	}
 
-	sort.Strings(dirs)
+	sort.Strings(names)
 
-	return dirs, nil
+	return names, snapshotsDir, nil
 }

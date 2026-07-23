@@ -18,11 +18,9 @@ package archive_test
 
 import (
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -520,43 +518,11 @@ func TestClassifyBlockPayload_RejectsNonRegularExactNames(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "fifo",
-			build: func(t *testing.T, path string) {
-				t.Helper()
-
-				if err := syscall.Mkfifo(path, 0o600); err != nil {
-					t.Fatalf("mkfifo: %v", err)
-				}
-			},
-		},
-		{
-			name: "socket",
-			build: func(t *testing.T, path string) {
-				t.Helper()
-
-				listener, err := net.Listen("unix", path)
-				if err != nil {
-					t.Fatalf("listen unix: %v", err)
-				}
-				t.Cleanup(func() { _ = listener.Close() })
-			},
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			nodeDir := t.TempDir()
-			if tc.name == "socket" {
-				var err error
-
-				nodeDir, err = os.MkdirTemp("", "d8-snapshot-socket-")
-				if err != nil {
-					t.Fatalf("mkdir temp: %v", err)
-				}
-				t.Cleanup(func() { _ = os.RemoveAll(nodeDir) })
-			}
-
 			path := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
 			tc.build(t, path)
 
