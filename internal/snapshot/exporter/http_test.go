@@ -448,7 +448,7 @@ func TestDecodeItems_StopsAtCallbackWithoutReadingFlatDirectory(t *testing.T) {
 	}
 	body.WriteString(`]}`)
 
-	reader := &countingStringReader{reader: strings.NewReader(body.String())}
+	reader := &countingReader{reader: strings.NewReader(body.String())}
 	stop := errors.New("stop after first item")
 
 	err := decodeItems(reader, func(Item) error { return stop })
@@ -462,7 +462,29 @@ func TestDecodeItems_StopsAtCallbackWithoutReadingFlatDirectory(t *testing.T) {
 }
 
 func TestDecodeItems_LargeFlatDirectoryRetainsConstantHeap(t *testing.T) {
-	const entries = 50_000
+	const (
+		smallEntries = 500
+		largeEntries = 50_000
+		deltaLimit   = 2 << 20
+	)
+
+	smallRetained := measureDecodeItemsRetained(t, smallEntries)
+	largeRetained := measureDecodeItemsRetained(t, largeEntries)
+	if largeRetained > smallRetained+deltaLimit {
+		t.Fatalf(
+			"retained heap grew from %d to %d bytes for %d versus %d items; count-dependent delta %d exceeds %d",
+			smallRetained,
+			largeRetained,
+			smallEntries,
+			largeEntries,
+			largeRetained-smallRetained,
+			deltaLimit,
+		)
+	}
+}
+
+func measureDecodeItemsRetained(t *testing.T, entries int) uint64 {
+	t.Helper()
 
 	var body strings.Builder
 	body.Grow(entries * 96)
@@ -515,18 +537,110 @@ func TestDecodeItems_LargeFlatDirectoryRetainsConstantHeap(t *testing.T) {
 	if retained > retainedLimit {
 		t.Fatalf("retained heap at final callback = %d bytes, want <= %d; item count leaked into live memory", retained, retainedLimit)
 	}
+
+	return retained
 }
 
-type countingStringReader struct {
-	reader    *strings.Reader
+func TestDecodeItems_RejectsOversizedValuesBeforeMaterialization(t *testing.T) {
+	const (
+		oversizedBytes = 32 << 20
+		maxBytesRead   = 128 << 10
+		maxAllocated   = 4 << 20
+	)
+
+	tests := []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{
+			name:   "ItemName",
+			prefix: `{"items":[{"name":"`,
+			suffix: `","type":"file","uri":"file","attributes":{}}]}`,
+		},
+		{
+			name:   "ItemTargetPath",
+			prefix: `{"items":[{"name":"link","type":"link","targetPath":"`,
+			suffix: `","attributes":{}}]}`,
+		},
+		{
+			name:   "ItemURI",
+			prefix: `{"items":[{"name":"file","type":"file","uri":"`,
+			suffix: `","attributes":{}}]}`,
+		},
+		{
+			name:   "IgnoredNestedAttribute",
+			prefix: `{"items":[{"name":"file","type":"file","uri":"file","attributes":{"ignored":{"nested":"`,
+			suffix: `"}}}]}`,
+		},
+		{
+			name:   "UnknownTopLevelValue",
+			prefix: `{"unknown":{"nested":"`,
+			suffix: `"},"items":[]}`,
+		},
+		{
+			name:   "UnknownTopLevelFieldName",
+			prefix: `{"`,
+			suffix: `":0,"items":[]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &countingReader{reader: io.MultiReader(
+				strings.NewReader(tt.prefix),
+				io.LimitReader(repeatByteReader('a'), oversizedBytes),
+				strings.NewReader(tt.suffix),
+			)}
+
+			runtime.GC()
+
+			var baseline runtime.MemStats
+			runtime.ReadMemStats(&baseline)
+
+			err := decodeItems(reader, func(Item) error {
+				t.Fatal("oversized listing item reached callback")
+
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "encoded limit") {
+				t.Fatalf("decodeItems error = %v, want encoded-limit rejection", err)
+			}
+
+			var current runtime.MemStats
+			runtime.ReadMemStats(&current)
+
+			if reader.bytesRead > maxBytesRead {
+				t.Fatalf("decoder read %d bytes, want <= %d before rejecting oversized value", reader.bytesRead, maxBytesRead)
+			}
+
+			if allocated := current.TotalAlloc - baseline.TotalAlloc; allocated > maxAllocated {
+				t.Fatalf("decoder allocated %d bytes, want <= %d before rejecting oversized value", allocated, maxAllocated)
+			}
+		})
+	}
+}
+
+type countingReader struct {
+	reader    io.Reader
 	bytesRead int64
 }
 
-func (r *countingStringReader) Read(p []byte) (int, error) {
+func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	r.bytesRead += int64(n)
 
 	return n, err
+}
+
+type repeatByteReader byte
+
+func (r repeatByteReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = byte(r)
+	}
+
+	return len(p), nil
 }
 
 func TestSourceMD5_ProducerHeaderContract(t *testing.T) {

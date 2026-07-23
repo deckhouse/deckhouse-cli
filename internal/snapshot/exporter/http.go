@@ -21,6 +21,7 @@ limitations under the License.
 package exporter
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -447,32 +448,39 @@ func withAttributes(rawURL string, attrs ...string) (string, error) {
 // {"apiVersion": "...", "items": [{...}, ...]}. The complete outer object is
 // consumed so malformed trailing data fails closed.
 func decodeItems(r io.Reader, yield func(Item) error) error {
-	dec := json.NewDecoder(r)
+	const maxListingJSONValueSize = 64 << 10
 
-	t, err := dec.Token()
-	if err != nil {
+	stream := newBoundedJSONStream(r)
+	if err := stream.expect('{'); err != nil {
 		return fmt.Errorf("read response object: %w", err)
 	}
 
-	if t != json.Delim('{') {
-		return errors.New("listing response is not a JSON object")
-	}
-
 	foundItems := false
+	firstField := true
 
-	for dec.More() {
-		keyToken, tokenErr := dec.Token()
-		if tokenErr != nil {
-			return fmt.Errorf("read listing field: %w", tokenErr)
+	for {
+		done, err := stream.beforeNext(firstField, '}')
+		if err != nil {
+			return fmt.Errorf("read listing field: %w", err)
 		}
 
-		key, ok := keyToken.(string)
-		if !ok {
-			return errors.New("listing object field name is not a string")
+		if done {
+			break
+		}
+
+		firstField = false
+
+		key, err := stream.readString(maxListingJSONValueSize)
+		if err != nil {
+			return fmt.Errorf("read listing field: %w", err)
+		}
+
+		if err := stream.expect(':'); err != nil {
+			return fmt.Errorf("read listing field %q separator: %w", key, err)
 		}
 
 		if key != "items" {
-			if err := skipJSONValue(dec); err != nil {
+			if _, err := stream.readValue(maxListingJSONValueSize); err != nil {
 				return fmt.Errorf("skip listing field %q: %w", key, err)
 			}
 
@@ -485,43 +493,48 @@ func decodeItems(r io.Reader, yield func(Item) error) error {
 
 		foundItems = true
 
-		if err := decodeItemArray(dec, yield); err != nil {
+		if err := decodeItemArray(stream, maxListingJSONValueSize, yield); err != nil {
 			return err
 		}
-	}
-
-	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("close listing object: %w", err)
 	}
 
 	if !foundItems {
 		return errors.New("listing response has no items field")
 	}
 
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("listing response contains trailing JSON value")
-		}
-
+	if err := stream.expectEOF(); err != nil {
 		return fmt.Errorf("read listing trailer: %w", err)
 	}
 
 	return nil
 }
 
-func decodeItemArray(dec *json.Decoder, yield func(Item) error) error {
-	t, err := dec.Token()
-	if err != nil {
+func decodeItemArray(stream *boundedJSONStream, maxRecordSize int, yield func(Item) error) error {
+	if err := stream.expect('['); err != nil {
 		return fmt.Errorf("read items array delimiter: %w", err)
 	}
 
-	if t != json.Delim('[') {
-		return errors.New("items field is not a JSON array")
-	}
+	firstItem := true
 
-	for dec.More() {
+	for {
+		done, err := stream.beforeNext(firstItem, ']')
+		if err != nil {
+			return fmt.Errorf("read item separator: %w", err)
+		}
+
+		if done {
+			break
+		}
+
+		firstItem = false
+
+		record, err := stream.readValue(maxRecordSize)
+		if err != nil {
+			return fmt.Errorf("read item record: %w", err)
+		}
+
 		var item Item
-		if err := dec.Decode(&item); err != nil {
+		if err := json.Unmarshal(record, &item); err != nil {
 			return fmt.Errorf("decode item: %w", err)
 		}
 
@@ -530,39 +543,175 @@ func decodeItemArray(dec *json.Decoder, yield func(Item) error) error {
 		}
 	}
 
-	if _, err := dec.Token(); err != nil {
-		return fmt.Errorf("close items array: %w", err)
+	return nil
+}
+
+// boundedJSONStream isolates each listing value as encoded bytes before json.Unmarshal
+// can materialize its strings, maps, or ignored nested fields. Limits are per value,
+// so a legitimate listing may still contain any number of bounded items.
+type boundedJSONStream struct {
+	reader *bufio.Reader
+}
+
+func newBoundedJSONStream(r io.Reader) *boundedJSONStream {
+	return &boundedJSONStream{reader: bufio.NewReaderSize(r, 4<<10)}
+}
+
+func (s *boundedJSONStream) beforeNext(first bool, end byte) (bool, error) {
+	next, err := s.peekNonSpace()
+	if err != nil {
+		return false, err
+	}
+
+	if next == end {
+		_, _ = s.reader.ReadByte()
+
+		return true, nil
+	}
+
+	if !first {
+		if err := s.expect(','); err != nil {
+			return false, err
+		}
+	}
+
+	return false, nil
+}
+
+func (s *boundedJSONStream) expect(want byte) error {
+	got, err := s.readNonSpace()
+	if err != nil {
+		return err
+	}
+
+	if got != want {
+		return fmt.Errorf("expected %q, got %q", want, got)
 	}
 
 	return nil
 }
 
-// skipJSONValue consumes one arbitrary JSON value without materializing it.
-func skipJSONValue(dec *json.Decoder) error {
-	t, err := dec.Token()
-	if err != nil {
+func (s *boundedJSONStream) expectEOF() error {
+	if _, err := s.readNonSpace(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("listing response contains trailing JSON value")
+		}
+
 		return err
 	}
 
-	delim, ok := t.(json.Delim)
-	if !ok || (delim != '{' && delim != '[') {
-		return nil
+	return nil
+}
+
+func (s *boundedJSONStream) readString(limit int) (string, error) {
+	raw, err := s.readValue(limit)
+	if err != nil {
+		return "", err
 	}
 
-	depth := 1
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("decode JSON string: %w", err)
+	}
 
-	for depth > 0 {
-		t, err = dec.Token()
+	return value, nil
+}
+
+func (s *boundedJSONStream) readValue(limit int) ([]byte, error) {
+	first, err := s.readNonSpace()
+	if err != nil {
+		return nil, err
+	}
+
+	if first == ',' || first == ':' || first == ']' || first == '}' {
+		return nil, fmt.Errorf("unexpected %q at start of JSON value", first)
+	}
+
+	value := make([]byte, 0, min(limit, 4<<10))
+	if err := appendBoundedJSONByte(&value, first, limit); err != nil {
+		return nil, err
+	}
+
+	switch first {
+	case '"':
+		if err := s.readJSONStringRemainder(&value, limit); err != nil {
+			return nil, err
+		}
+	case '{', '[':
+		if err := s.readJSONCompositeRemainder(&value, limit); err != nil {
+			return nil, err
+		}
+	default:
+		if err := s.readJSONPrimitiveRemainder(&value, limit); err != nil {
+			return nil, err
+		}
+	}
+
+	return value, nil
+}
+
+func (s *boundedJSONStream) readJSONStringRemainder(value *[]byte, limit int) error {
+	escaped := false
+
+	for {
+		b, err := s.reader.ReadByte()
 		if err != nil {
 			return err
 		}
 
-		delim, ok = t.(json.Delim)
-		if !ok {
+		if err := appendBoundedJSONByte(value, b, limit); err != nil {
+			return err
+		}
+
+		if escaped {
+			escaped = false
+
 			continue
 		}
 
-		switch delim {
+		if b == '\\' {
+			escaped = true
+
+			continue
+		}
+
+		if b == '"' {
+			return nil
+		}
+	}
+}
+
+func (s *boundedJSONStream) readJSONCompositeRemainder(value *[]byte, limit int) error {
+	depth := 1
+	inString := false
+	escaped := false
+
+	for depth > 0 {
+		b, err := s.reader.ReadByte()
+		if err != nil {
+			return err
+		}
+
+		if err := appendBoundedJSONByte(value, b, limit); err != nil {
+			return err
+		}
+
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\':
+				escaped = true
+			case b == '"':
+				inString = false
+			}
+
+			continue
+		}
+
+		switch b {
+		case '"':
+			inString = true
 		case '{', '[':
 			depth++
 		case '}', ']':
@@ -571,6 +720,78 @@ func skipJSONValue(dec *json.Decoder) error {
 	}
 
 	return nil
+}
+
+func (s *boundedJSONStream) readJSONPrimitiveRemainder(value *[]byte, limit int) error {
+	for {
+		next, err := s.reader.Peek(1)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return err
+		}
+
+		if isJSONValueBoundary(next[0]) {
+			return nil
+		}
+
+		b, err := s.reader.ReadByte()
+		if err != nil {
+			return err
+		}
+
+		if err := appendBoundedJSONByte(value, b, limit); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *boundedJSONStream) readNonSpace() (byte, error) {
+	for {
+		b, err := s.reader.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+
+		if !isJSONSpace(b) {
+			return b, nil
+		}
+	}
+}
+
+func (s *boundedJSONStream) peekNonSpace() (byte, error) {
+	for {
+		next, err := s.reader.Peek(1)
+		if err != nil {
+			return 0, err
+		}
+
+		if !isJSONSpace(next[0]) {
+			return next[0], nil
+		}
+
+		_, _ = s.reader.ReadByte()
+	}
+}
+
+func appendBoundedJSONByte(value *[]byte, b byte, limit int) error {
+	if len(*value) >= limit {
+		return fmt.Errorf("JSON value exceeds %d-byte encoded limit", limit)
+	}
+
+	*value = append(*value, b)
+
+	return nil
+}
+
+func isJSONValueBoundary(b byte) bool {
+	return isJSONSpace(b) || b == ',' || b == ']' || b == '}'
+}
+
+func isJSONSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 
 // idleReadCloser wraps a response body with a per-Read idle watchdog. A single
