@@ -755,9 +755,9 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 
 	dest := flatDest(task.nodeDir, cfg.Compression.Ext())
 
-	_, blockAlreadyMerged, err := archive.ClassifyBlockPayload(task.nodeDir)
+	blockAlreadyMerged, err := confirmCompletedBlock(ctx, task.nodeDir)
 	if err != nil {
-		return fmt.Errorf("classify block data in %s: %w", task.nodeDir, err)
+		return fmt.Errorf("confirm block data in %s: %w", task.nodeDir, err)
 	}
 
 	fsTarDone, err := confirmCompletedFSTar(ctx, dest)
@@ -773,9 +773,9 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 			slog.String("kind", task.node.Kind),
 			slog.String("name", task.node.DisplayLabel()))
 
-		// The final name is published only after decoded-length verification.
-		// The skip branch owns leftover-chunk-dir cleanup for a crash after that
-		// durable commit but before staging removal (inv. #1).
+		// The final name is published only after decoded-length verification,
+		// and confirmCompletedBlock established directory durability before this
+		// branch may clean its retryable staging (inv. #1 and #13).
 		removeMergedBlockChunkDir(cfg, dest.chunkDir)
 
 		if handle.stream != nil {
@@ -829,9 +829,9 @@ func downloadOwnData(
 	dest := flatDest(nodeDir, cfg.Compression.Ext())
 	handle := lookupStream(streams, node)
 
-	_, found, err := archive.ClassifyBlockPayload(nodeDir)
+	found, err := confirmCompletedBlock(ctx, nodeDir)
 	if err != nil {
-		return fmt.Errorf("classify block data in %s: %w", nodeDir, err)
+		return fmt.Errorf("confirm block data in %s: %w", nodeDir, err)
 	}
 
 	if found {
@@ -839,9 +839,9 @@ func downloadOwnData(
 			slog.String("kind", node.Kind),
 			slog.String("name", node.DisplayLabel()))
 
-		// The final name is published only after decoded-length verification.
-		// The skip branch owns leftover-chunk-dir cleanup for a crash after that
-		// durable commit but before staging removal (inv. #1).
+		// The final name is published only after decoded-length verification,
+		// and confirmCompletedBlock established directory durability before this
+		// branch may clean its retryable staging (inv. #1 and #13).
 		removeMergedBlockChunkDir(cfg, dest.chunkDir)
 
 		if handle.stream != nil {
@@ -874,7 +874,7 @@ func downloadOwnData(
 // removeMergedBlockChunkDir deletes a leftover block chunk staging directory
 // (data.bin.d/) found next to an already-merged data.bin* file, compensating the
 // crash window in volume.MergeBlockChunks between committing the already-
-// verified merged file (aw.Commit) and removing the chunk dir (os.RemoveAll).
+// verified merged file and removing the chunk dir (os.RemoveAll).
 // A hard kill in that window leaves BOTH the durable verified file and a full
 // compressed copy of the volume in the chunk dir; every later resume takes the
 // blockAlreadyMerged skip branch and nothing else revisits the chunk dir, so
@@ -884,9 +884,10 @@ func downloadOwnData(
 // branch. os.RemoveAll is a no-op when the chunk dir is absent, so the normal
 // (no-leftover) path is unchanged.
 //
-// A RemoveAll failure is logged as a WARN and swallowed, never returned: the
-// download is already complete (the merged file is durable), so losing
-// best-effort cleanup must not fail an otherwise successful node (code-style §5).
+// Callers confirm the merged file's directory durability before entering this
+// helper. A RemoveAll failure is logged as a WARN and swallowed, never returned:
+// the download is already complete, so losing best-effort cleanup must not fail
+// an otherwise successful node (code-style §5).
 func removeMergedBlockChunkDir(cfg Config, chunkDir string) {
 	if err := os.RemoveAll(chunkDir); err != nil {
 		cfg.Log.Warn("failed to remove leftover block chunk dir after merge",
@@ -1297,6 +1298,23 @@ func fsTarComplete(tarPath string) (bool, error) {
 	}
 
 	return false, err
+}
+
+func confirmCompletedBlock(ctx context.Context, nodeDir string) (bool, error) {
+	payload, complete, err := archive.ClassifyBlockPayload(nodeDir)
+	if err != nil {
+		return false, err
+	}
+
+	if !complete {
+		return false, nil
+	}
+
+	if err := archive.ConfirmFileDurability(ctx, payload.Path); err != nil {
+		return false, fmt.Errorf("confirm durability for %s: %w", payload.Path, err)
+	}
+
+	return true, nil
 }
 
 func confirmCompletedFSTar(ctx context.Context, dest volumeDestPaths) (bool, error) {
