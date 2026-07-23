@@ -218,9 +218,9 @@ type BlockPayload struct {
 // at all (not an error: the normal shape for a filesystem-volume or purely
 // structural node, and for a nodeDir that does not exist yet).
 func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
-	entries, err := os.ReadDir(nodeDir)
+	entries, err := ReadDirectory(nodeDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return BlockPayload{}, false, nil
 		}
 
@@ -234,8 +234,16 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 	for _, e := range entries {
 		name := e.Name()
 
-		if name == FsTarName && !e.IsDir() {
+		if name == FsTarName {
+			file, openErr := OpenRegularFile(filepath.Join(nodeDir, name))
+			if openErr != nil {
+				return BlockPayload{}, false, fmt.Errorf("inspect filesystem payload %s: %w",
+					filepath.Join(nodeDir, name), openErr)
+			}
+
+			_ = file.Close()
 			hasTar = true
+
 			continue
 		}
 
@@ -244,19 +252,27 @@ func ClassifyBlockPayload(nodeDir string) (BlockPayload, bool, error) {
 		}
 
 		if name == BlockChunksDirName {
-			if !e.IsDir() {
-				return BlockPayload{}, false, fmt.Errorf("%s: %q must be the staging directory but is a file: %w",
-					nodeDir, name, ErrInvalidBlockPayload)
+			if _, readErr := ReadDirectory(filepath.Join(nodeDir, name)); readErr != nil {
+				return BlockPayload{}, false, fmt.Errorf("%s: %q must be the staging directory: %w",
+					nodeDir, name, errors.Join(ErrInvalidBlockPayload, readErr))
 			}
 
 			continue
 		}
 
 		ext, recognized := blockPayloadExts[name]
-		if !recognized || e.IsDir() {
+		if !recognized {
 			return BlockPayload{}, false, fmt.Errorf("%s: unrecognized block payload entry %q: %w",
 				nodeDir, name, ErrInvalidBlockPayload)
 		}
+
+		file, openErr := OpenRegularFile(filepath.Join(nodeDir, name))
+		if openErr != nil {
+			return BlockPayload{}, false, fmt.Errorf("inspect block payload %s: %w",
+				filepath.Join(nodeDir, name), errors.Join(ErrInvalidBlockPayload, openErr))
+		}
+
+		_ = file.Close()
 
 		found = append(found, BlockPayload{Path: filepath.Join(nodeDir, name), Ext: ext})
 	}

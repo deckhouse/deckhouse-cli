@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -118,7 +117,7 @@ func VerifyNode(nodeDir string) error {
 
 // ValidateNodeMetadata reads nodeDir's snapshot.yaml and strictly validates its metadata via
 // ValidateSnapshotYAML, deriving the node's data-payload flags from the directory itself
-// (ClassifyBlockPayload for data.bin[.<ext>], os.Stat for data.tar). It complements VerifyNode:
+// (ClassifyBlockPayload for data.bin[.<ext>], OpenRegularFile for data.tar). It complements VerifyNode:
 // VerifyNode checks the integrity digest over the node's files, while snapshot.yaml — excluded
 // from that digest — is validated here. Returns ErrSnapshotYAMLMissing when snapshot.yaml is
 // absent, and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
@@ -139,10 +138,14 @@ func ValidateNodeMetadata(nodeDir string) error {
 
 	hasFS := false
 
-	if _, statErr := os.Stat(filepath.Join(nodeDir, FsTarName)); statErr == nil {
+	tarPath := filepath.Join(nodeDir, FsTarName)
+
+	tarFile, statErr := OpenRegularFile(tarPath)
+	if statErr == nil {
+		_ = tarFile.Close()
 		hasFS = true
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("stat %s in %s: %w", FsTarName, nodeDir, statErr)
+		return fmt.Errorf("inspect %s in %s: %w", FsTarName, nodeDir, statErr)
 	}
 
 	if err := ValidateSnapshotYAML(sy, hasBlock, hasFS); err != nil {
@@ -159,16 +162,27 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 	var paths []string
 
 	manifestsDir := filepath.Join(nodeDir, ManifestsDirName)
-	entries, err := os.ReadDir(manifestsDir)
+	entries, err := ReadDirectory(manifestsDir)
 
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".yaml") {
-			paths = append(paths, filepath.Join(ManifestsDirName, e.Name()))
+		if !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
 		}
+
+		relPath := filepath.Join(ManifestsDirName, e.Name())
+
+		file, openErr := OpenRegularFile(filepath.Join(nodeDir, relPath))
+		if openErr != nil {
+			return nil, fmt.Errorf("inspect manifest %s: %w", relPath, openErr)
+		}
+
+		_ = file.Close()
+
+		paths = append(paths, relPath)
 	}
 
 	blockPayload, blockFound, findErr := ClassifyBlockPayload(nodeDir)
@@ -186,41 +200,71 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 	}
 
 	// Single-volume filesystem tar (data.tar).
-	if _, statErr := os.Stat(filepath.Join(nodeDir, FsTarName)); statErr == nil {
+	tarPath := filepath.Join(nodeDir, FsTarName)
+
+	tarFile, statErr := OpenRegularFile(tarPath)
+	if statErr == nil {
+		_ = tarFile.Close()
+
 		paths = append(paths, FsTarName)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect %s: %w", tarPath, statErr)
 	}
 
 	dataDir := filepath.Join(nodeDir, DataDirName)
-	info, err := os.Stat(dataDir)
 
-	if err == nil && info.IsDir() {
-		walkErr := filepath.WalkDir(dataDir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if d.IsDir() {
-				// Skip staging directories (names ending in ".d"):
-				// data/<pvc>.bin.d/ (block chunks) and data/<pvc>.tar.d/ (FS raw files).
-				if strings.HasSuffix(d.Name(), ".d") {
-					return filepath.SkipDir
-				}
-
-				return nil
-			}
-
-			rel, relErr := filepath.Rel(nodeDir, path)
-			if relErr != nil {
-				return relErr
-			}
-
-			paths = append(paths, rel)
-
-			return nil
-		})
-		if walkErr != nil {
-			return nil, fmt.Errorf("walk %s: %w", DataDirName, walkErr)
+	dataPaths, err := collectLegacyDataFiles(nodeDir, dataDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return paths, nil
 		}
+
+		return nil, fmt.Errorf("walk %s: %w", DataDirName, err)
+	}
+
+	paths = append(paths, dataPaths...)
+
+	return paths, nil
+}
+
+func collectLegacyDataFiles(nodeDir, dir string) ([]string, error) {
+	entries, err := ReadDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(entries))
+
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			if strings.HasSuffix(entry.Name(), ".d") {
+				continue
+			}
+
+			childPaths, collectErr := collectLegacyDataFiles(nodeDir, path)
+			if collectErr != nil {
+				return nil, collectErr
+			}
+
+			paths = append(paths, childPaths...)
+
+			continue
+		}
+
+		file, openErr := OpenRegularFile(path)
+		if openErr != nil {
+			return nil, openErr
+		}
+
+		_ = file.Close()
+
+		rel, relErr := filepath.Rel(nodeDir, path)
+		if relErr != nil {
+			return nil, fmt.Errorf("resolve archive path %s: %w", path, relErr)
+		}
+
+		paths = append(paths, rel)
 	}
 
 	return paths, nil
@@ -234,7 +278,7 @@ func computeFileHash(relPath, absPath string) ([]byte, error) {
 	h.Write([]byte(relPath))
 	h.Write([]byte{0})
 
-	f, err := os.Open(absPath)
+	f, err := OpenRegularFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", absPath, err)
 	}

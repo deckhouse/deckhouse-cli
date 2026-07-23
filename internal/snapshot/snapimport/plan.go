@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -296,6 +297,10 @@ func refIdentity(ref ChildRef) string {
 
 // appendPostOrder visits children first (sorted for determinism), then the node itself.
 func appendPostOrder(dir string, plan *[]PlannedNode) error {
+	if _, err := archive.ReadDirectory(dir); err != nil {
+		return fmt.Errorf("inspect node directory %s: %w", dir, err)
+	}
+
 	node, err := readNode(dir)
 	if err != nil {
 		return err
@@ -344,6 +349,11 @@ func readNode(dir string) (PlannedNode, error) {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
 
+	legacyDataDir := filepath.Join(dir, archive.DataDirName)
+	if _, err := archive.ReadDirectory(legacyDataDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return PlannedNode{}, fmt.Errorf("node %s: inspect legacy data directory: %w", dir, err)
+	}
+
 	node := PlannedNode{
 		Dir:             dir,
 		APIVersion:      sy.APIVersion,
@@ -378,10 +388,15 @@ func readNode(dir string) (PlannedNode, error) {
 	}
 
 	tarPath := filepath.Join(dir, archive.FsTarName)
-	if _, statErr := os.Stat(tarPath); statErr == nil {
+
+	tarFile, statErr := archive.OpenRegularFile(tarPath)
+	if statErr == nil {
+		_ = tarFile.Close()
 		node.FilesystemData = true
 		node.TarFile = tarPath
 		node.PayloadKind = dataImportPayloadFilesystem
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return PlannedNode{}, fmt.Errorf("node %s: inspect filesystem payload: %w", dir, statErr)
 	}
 
 	if (node.HasBlockData() || node.FilesystemData) &&
@@ -423,7 +438,7 @@ func codecName(ext string) string {
 }
 
 func classifyTarCodec(path string) (string, error) {
-	file, err := os.Open(path)
+	file, err := archive.OpenRegularFile(path)
 	if err != nil {
 		return "", fmt.Errorf("open filesystem payload: %w", err)
 	}
@@ -502,9 +517,9 @@ func dataImportIdentity(node PlannedNode) string {
 func readManifests(dir string) ([]unstructured.Unstructured, error) {
 	manifestsDir := filepath.Join(dir, archive.ManifestsDirName)
 
-	entries, err := os.ReadDir(manifestsDir)
+	entries, err := archive.ReadDirectory(manifestsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 
@@ -513,7 +528,7 @@ func readManifests(dir string) ([]unstructured.Unstructured, error) {
 
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+		if filepath.Ext(e.Name()) != ".yaml" {
 			continue
 		}
 
@@ -524,9 +539,22 @@ func readManifests(dir string) ([]unstructured.Unstructured, error) {
 
 	manifests := make([]unstructured.Unstructured, 0, len(names))
 	for _, name := range names {
-		data, readErr := os.ReadFile(filepath.Join(manifestsDir, name))
+		path := filepath.Join(manifestsDir, name)
+
+		file, openErr := archive.OpenRegularFile(path)
+		if openErr != nil {
+			return nil, fmt.Errorf("open manifest %s: %w", name, openErr)
+		}
+
+		data, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+
 		if readErr != nil {
 			return nil, fmt.Errorf("read manifest %s: %w", name, readErr)
+		}
+
+		if closeErr != nil {
+			return nil, fmt.Errorf("close manifest %s: %w", name, closeErr)
 		}
 
 		var obj map[string]interface{}
@@ -545,9 +573,9 @@ func readManifests(dir string) ([]unstructured.Unstructured, error) {
 func childNodeDirs(dir string) ([]string, error) {
 	snapshotsDir := filepath.Join(dir, archive.SnapshotsDirName)
 
-	entries, err := os.ReadDir(snapshotsDir)
+	entries, err := archive.ReadDirectory(snapshotsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 
@@ -557,9 +585,12 @@ func childNodeDirs(dir string) ([]string, error) {
 	var dirs []string
 
 	for _, e := range entries {
-		if e.IsDir() {
-			dirs = append(dirs, filepath.Join(snapshotsDir, e.Name()))
+		childDir := filepath.Join(snapshotsDir, e.Name())
+		if _, readErr := archive.ReadDirectory(childDir); readErr != nil {
+			return nil, fmt.Errorf("inspect child node directory %s: %w", childDir, readErr)
 		}
+
+		dirs = append(dirs, childDir)
 	}
 
 	sort.Strings(dirs)

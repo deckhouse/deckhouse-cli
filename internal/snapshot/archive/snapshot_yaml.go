@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	sigsyaml "sigs.k8s.io/yaml"
@@ -42,6 +44,9 @@ const (
 	VolumeModeBlock      = "Block"
 	VolumeModeFilesystem = "Filesystem"
 )
+
+// ErrNonRegularArchiveArtifact marks an archive path whose host-filesystem type is unsafe.
+var ErrNonRegularArchiveArtifact = errors.New("non-regular archive artifact")
 
 // ErrInvalidSnapshotYAML is returned by ValidateSnapshotYAML/ValidateNodeMetadata when a
 // node's snapshot.yaml violates a structural metadata invariant. snapshot.yaml is EXCLUDED
@@ -167,12 +172,106 @@ func WriteSnapshotYAML(nodeDir string, sy SnapshotYAML) error {
 	return WriteFileAtomic(path, bytes.NewReader(data))
 }
 
+// OpenRegularFile rejects a final-component symlink and verifies the opened descriptor still
+// identifies the same regular file observed before and after open. O_NONBLOCK keeps a malicious
+// FIFO or device replacement from hanging the open-and-verify boundary check.
+func OpenRegularFile(path string) (*os.File, error) {
+	return openArchiveEntry(path, false)
+}
+
+// ReadDirectory returns entries from a descriptor opened and verified as a real directory.
+func ReadDirectory(path string) ([]os.DirEntry, error) {
+	dir, err := openArchiveEntry(path, true)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = dir.Close() }()
+
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return nil, fmt.Errorf("read directory %s: %w", path, err)
+	}
+
+	return entries, nil
+}
+
+func openArchiveEntry(path string, wantDir bool) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect archive path %s: %w", path, err)
+	}
+
+	if !archiveModeMatches(before.Mode(), wantDir) {
+		return nil, archiveModeError(path, before.Mode(), wantDir)
+	}
+
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		current, statErr := os.Lstat(path)
+		if statErr == nil && !archiveModeMatches(current.Mode(), wantDir) {
+			return nil, archiveModeError(path, current.Mode(), wantDir)
+		}
+
+		return nil, fmt.Errorf("open archive path %s: %w", path, err)
+	}
+
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("inspect opened archive path %s: %w", path, err)
+	}
+
+	after, err := os.Lstat(path)
+	if err != nil {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("reinspect archive path %s: %w", path, err)
+	}
+
+	if !archiveModeMatches(opened.Mode(), wantDir) ||
+		!archiveModeMatches(after.Mode(), wantDir) ||
+		!os.SameFile(before, opened) ||
+		!os.SameFile(opened, after) {
+		_ = file.Close()
+
+		return nil, fmt.Errorf("%s changed while opening: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	return file, nil
+}
+
+func archiveModeMatches(mode os.FileMode, wantDir bool) bool {
+	if wantDir {
+		return mode.IsDir()
+	}
+
+	return mode.IsRegular()
+}
+
+func archiveModeError(path string, mode os.FileMode, wantDir bool) error {
+	want := "regular file"
+	if wantDir {
+		want = "directory"
+	}
+
+	return fmt.Errorf("%s has mode %s, want %s: %w", path, mode, want, ErrNonRegularArchiveArtifact)
+}
+
 // ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml.
 // Returns an error wrapping os.ErrNotExist when the file is absent.
 func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
 	path := filepath.Join(nodeDir, SnapshotYAMLName)
 
-	data, err := os.ReadFile(path)
+	file, err := OpenRegularFile(path)
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
 	}
