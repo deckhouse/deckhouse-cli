@@ -585,3 +585,80 @@ func TestComputeNodeChecksum_MultiVolumeLayout(t *testing.T) {
 		t.Error("staging directory data/<pvc>.tar.d/ was unexpectedly included in the checksum")
 	}
 }
+
+// writeValidBlockNode writes a valid block-data node dir (manifest + data.bin[.<ext>] plus a
+// snapshot.yaml with a computed checksum and one well-formed Block VolumeInfo whose volumeMode
+// is volumeMode) and returns its path.
+func writeValidBlockNode(t *testing.T, ext, volumeMode string) string {
+	t.Helper()
+
+	dir := makeNodeDir(t)
+	writeFile(t, filepath.Join(dir, ManifestsDirName, "configmap_app.yaml"), "kind: ConfigMap\n")
+	writeFile(t, filepath.Join(dir, DataBlockName(ext)), "block-bytes")
+
+	sum, err := ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	sy := SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc-1",
+		Checksum:   sum,
+		Volumes: []VolumeInfo{{
+			Target:           VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-1"},
+			Artifact:         VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "c1"},
+			VolumeMode:       volumeMode,
+			StorageClassName: "sc",
+			Size:             "1Gi",
+		}},
+	}
+
+	if err := WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	return dir
+}
+
+// TestValidateNodeMetadata_ValidBlockNode confirms a well-formed block node passes.
+func TestValidateNodeMetadata_ValidBlockNode(t *testing.T) {
+	dir := writeValidBlockNode(t, ".zst", VolumeModeBlock)
+
+	if err := ValidateNodeMetadata(dir); err != nil {
+		t.Errorf("ValidateNodeMetadata: %v", err)
+	}
+}
+
+// TestValidateNodeMetadata_MissingSnapshotYAML confirms an absent snapshot.yaml is reported
+// as ErrSnapshotYAMLMissing.
+func TestValidateNodeMetadata_MissingSnapshotYAML(t *testing.T) {
+	dir := makeNodeDir(t)
+
+	if err := ValidateNodeMetadata(dir); !errors.Is(err, ErrSnapshotYAMLMissing) {
+		t.Errorf("expected ErrSnapshotYAMLMissing, got: %v", err)
+	}
+}
+
+// TestValidateNodeMetadata_VolumeModeDisagreesWithPayload confirms a block payload whose
+// recorded volumeMode is Filesystem is rejected — the payload kind is derived from disk, not
+// trusted from the metadata.
+func TestValidateNodeMetadata_VolumeModeDisagreesWithPayload(t *testing.T) {
+	dir := writeValidBlockNode(t, ".zst", VolumeModeFilesystem)
+
+	if err := ValidateNodeMetadata(dir); !errors.Is(err, ErrInvalidSnapshotYAML) {
+		t.Errorf("expected ErrInvalidSnapshotYAML, got: %v", err)
+	}
+}
+
+// TestValidateNodeMetadata_InvalidBlockPayload confirms an ambiguous on-disk block payload
+// (two recognized block files) surfaces ErrInvalidBlockPayload through ValidateNodeMetadata.
+func TestValidateNodeMetadata_InvalidBlockPayload(t *testing.T) {
+	dir := writeValidBlockNode(t, ".zst", VolumeModeBlock)
+	writeFile(t, filepath.Join(dir, DataBlockName(".gz")), "second")
+
+	if err := ValidateNodeMetadata(dir); !errors.Is(err, ErrInvalidBlockPayload) {
+		t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+	}
+}

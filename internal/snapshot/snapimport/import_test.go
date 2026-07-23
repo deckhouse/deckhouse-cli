@@ -19,6 +19,7 @@ package snapimport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -353,11 +354,8 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 		apiVersion: "snapshot.storage.k8s.io/v1",
 		kind:       "VolumeSnapshot",
 		name:       "pvc-1",
+		tarData:    []byte("tar"),
 	})
-
-	if err := os.WriteFile(filepath.Join(leaf, archive.FsTarName), []byte("tar"), 0o600); err != nil {
-		t.Fatalf("write data.tar: %v", err)
-	}
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
@@ -408,6 +406,86 @@ func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
 
 	if len(up.calls) != 0 || len(vol.ensure) != 0 {
 		t.Errorf("no cluster mutations should happen on missing-block-data preflight failure: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+}
+
+// corruptFirstByte flips every bit of the first byte of the file at path, in place, without
+// touching any recorded checksum — simulating on-disk rot of an already-committed payload.
+func corruptFirstByte(t *testing.T, path string) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	if len(data) == 0 {
+		t.Fatalf("payload %s is empty; nothing to corrupt", path)
+	}
+
+	data[0] ^= 0xff
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestRun_CorruptSkippedBlockPayload_NoMutation proves the archive integrity preflight
+// (verifyArchiveIntegrity) catches a corrupted block payload BEFORE any cluster mutation —
+// even a payload the upload-side resume would SKIP (offset==totalSize) and therefore never
+// re-read. The leaf's snapshot.yaml records the checksum of the ORIGINAL bytes, so flipping a
+// byte in the already-committed data.bin.zst makes VerifyNode's recomputed digest diverge.
+// Run must abort with ErrChecksumMismatch and leave EVERY mutation surface untouched: zero
+// manifest uploads, zero DataImport ensures, zero volume uploads (PUT/finished POST), and zero
+// dynamic-client actions at all (the preflight precedes even the read-only namespace check).
+func TestRun_CorruptSkippedBlockPayload_NoMutation(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("original-compressed-zstd-frame-bytes"),
+		blockExt:   ".zst",
+	})
+
+	corruptFirstByte(t, filepath.Join(leaf, archive.DataBlockName(".zst")))
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("expected archive integrity preflight to reject the corrupt payload, got nil")
+	}
+
+	if !errors.Is(err, archive.ErrChecksumMismatch) {
+		t.Errorf("expected ErrChecksumMismatch, got: %v", err)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 {
+		t.Errorf("DataImport ensures = %v, want none", vol.ensure)
+	}
+
+	if len(vol.upload) != 0 {
+		t.Errorf("volume uploads (PUT/finished POST) = %v, want none", vol.upload)
+	}
+
+	if acts := dyn.Actions(); len(acts) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0 (no cluster reads or writes before preflight): %v", len(acts), acts)
 	}
 }
 

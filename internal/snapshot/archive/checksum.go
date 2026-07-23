@@ -73,7 +73,7 @@ func ComputeNodeChecksum(nodeDir string) (NodeChecksum, error) {
 	hexStr := fmt.Sprintf("%x", sum)
 
 	return NodeChecksum{
-		Algorithm: "sha256",
+		Algorithm: ChecksumAlgorithmSHA256,
 		Hex:       hexStr,
 		Short:     ShortChecksum(hexStr),
 	}, nil
@@ -111,6 +111,42 @@ func VerifyNode(nodeDir string) error {
 	if got.Hex != sy.Checksum.Hex {
 		return fmt.Errorf("node %s: stored %q computed %q: %w",
 			nodeDir, sy.Checksum.Hex, got.Hex, ErrChecksumMismatch)
+	}
+
+	return nil
+}
+
+// ValidateNodeMetadata reads nodeDir's snapshot.yaml and strictly validates its metadata via
+// ValidateSnapshotYAML, deriving the node's data-payload flags from the directory itself
+// (ClassifyBlockPayload for data.bin[.<ext>], os.Stat for data.tar). It complements VerifyNode:
+// VerifyNode checks the integrity digest over the node's files, while snapshot.yaml — excluded
+// from that digest — is validated here. Returns ErrSnapshotYAMLMissing when snapshot.yaml is
+// absent, and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
+func ValidateNodeMetadata(nodeDir string) error {
+	sy, err := ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
+		}
+
+		return err
+	}
+
+	_, hasBlock, err := ClassifyBlockPayload(nodeDir)
+	if err != nil {
+		return fmt.Errorf("%s: %w", nodeDir, err)
+	}
+
+	hasFS := false
+
+	if _, statErr := os.Stat(filepath.Join(nodeDir, FsTarName)); statErr == nil {
+		hasFS = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat %s in %s: %w", FsTarName, nodeDir, statErr)
+	}
+
+	if err := ValidateSnapshotYAML(sy, hasBlock, hasFS); err != nil {
+		return fmt.Errorf("%s: %w", nodeDir, err)
 	}
 
 	return nil

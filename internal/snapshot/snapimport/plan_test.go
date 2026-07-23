@@ -29,33 +29,32 @@ import (
 
 // archiveNode describes one node to materialise in a test archive.
 type archiveNode struct {
-	apiVersion      string
-	kind            string
-	name            string
-	namespace       string
-	manifests       []map[string]interface{}
-	blockData       []byte
+	apiVersion string
+	kind       string
+	name       string
+	namespace  string
+	manifests  []map[string]interface{}
+	blockData  []byte
+	// blockExt is the codec extension of the block payload filename: "" writes data.bin,
+	// ".zst" writes data.bin.zst, etc. Ignored when blockData is nil.
+	blockExt string
+	// tarData, when non-nil, is written as data.tar (a filesystem-volume payload).
+	tarData         []byte
 	sourceObjectRef *archive.SourceObjectRef
 	volumes         []archive.VolumeInfo
 }
 
-// writeArchiveNode writes snapshot.yaml, manifests/ and optional data.bin into dir.
+// writeArchiveNode writes a VALID node directory: manifests/, an optional block or filesystem
+// payload, and a snapshot.yaml whose checksum is computed over the node's files (so
+// archive.VerifyNode passes) and whose Volumes satisfy the import integrity preflight
+// (archive.ValidateNodeMetadata). A data node with no explicit volumes gets a synthesized,
+// well-formed VolumeInfo whose volumeMode agrees with the payload kind. snapshot.yaml is
+// written LAST, after payloads exist, because the checksum is computed over them.
 func writeArchiveNode(t *testing.T, dir string, n archiveNode) {
 	t.Helper()
 
 	if err := os.MkdirAll(filepath.Join(dir, archive.ManifestsDirName), 0o755); err != nil {
 		t.Fatalf("mkdir node: %v", err)
-	}
-
-	if err := archive.WriteSnapshotYAML(dir, archive.SnapshotYAML{
-		APIVersion:      n.apiVersion,
-		Kind:            n.kind,
-		Name:            n.name,
-		Namespace:       n.namespace,
-		SourceObjectRef: n.sourceObjectRef,
-		Volumes:         n.volumes,
-	}); err != nil {
-		t.Fatalf("write snapshot.yaml: %v", err)
 	}
 
 	for i, m := range n.manifests {
@@ -71,10 +70,71 @@ func writeArchiveNode(t *testing.T, dir string, n archiveNode) {
 	}
 
 	if n.blockData != nil {
-		if err := os.WriteFile(filepath.Join(dir, archive.DataBlockBase), n.blockData, 0o600); err != nil {
-			t.Fatalf("write data.bin: %v", err)
+		if err := os.WriteFile(filepath.Join(dir, archive.DataBlockName(n.blockExt)), n.blockData, 0o600); err != nil {
+			t.Fatalf("write block data: %v", err)
 		}
 	}
+
+	if n.tarData != nil {
+		if err := os.WriteFile(filepath.Join(dir, archive.FsTarName), n.tarData, 0o600); err != nil {
+			t.Fatalf("write data.tar: %v", err)
+		}
+	}
+
+	volumes := n.volumes
+	if volumes == nil {
+		volumes = synthVolumeInfo(n)
+	}
+
+	sum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("compute node checksum: %v", err)
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, archive.SnapshotYAML{
+		APIVersion:      n.apiVersion,
+		Kind:            n.kind,
+		Name:            n.name,
+		Namespace:       n.namespace,
+		SourceObjectRef: n.sourceObjectRef,
+		Checksum:        sum,
+		Volumes:         volumes,
+	}); err != nil {
+		t.Fatalf("write snapshot.yaml: %v", err)
+	}
+}
+
+// synthVolumeInfo returns a single well-formed VolumeInfo for a data node (block or filesystem
+// payload present), or nil for a non-data node. The volumeMode agrees with the payload kind so
+// the archive integrity preflight (archive.ValidateSnapshotYAML) accepts it.
+func synthVolumeInfo(n archiveNode) []archive.VolumeInfo {
+	var mode string
+
+	switch {
+	case n.blockData != nil:
+		mode = archive.VolumeModeBlock
+	case n.tarData != nil:
+		mode = archive.VolumeModeFilesystem
+	default:
+		return nil
+	}
+
+	return []archive.VolumeInfo{{
+		Target: archive.VolumeObjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       n.name,
+			Namespace:  n.namespace,
+		},
+		Artifact: archive.VolumeObjectRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       n.name + "-content",
+		},
+		VolumeMode:       mode,
+		StorageClassName: "sc-test",
+		Size:             "1Gi",
+	}}
 }
 
 // childDir returns the directory a child node lives in under parent.
