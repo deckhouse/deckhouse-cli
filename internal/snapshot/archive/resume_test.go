@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1227,6 +1228,143 @@ func TestScanAbsolute_CompleteMatchingMarker_RemovesMarker(t *testing.T) {
 
 	if found {
 		t.Error("identity marker must be removed on the Done scan path")
+	}
+}
+
+func TestCompletedNodeScanConfirmsSnapshotDurabilityBeforeDone(t *testing.T) {
+	type scanFunc func(context.Context) (archive.NodeResumePlan, error)
+
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (string, archive.NodeIdentity, scanFunc)
+	}{
+		{
+			name: "ScanNode",
+			setup: func(t *testing.T) (string, archive.NodeIdentity, scanFunc) {
+				t.Helper()
+
+				parent := t.TempDir()
+				id := archive.NodeIdentity{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "VirtualDiskSnapshot",
+					Name:       "disk-durability",
+					Namespace:  "default",
+					UID:        "vd/disk-durability",
+				}
+				nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+
+				return nodeDir, id, func(ctx context.Context) (archive.NodeResumePlan, error) {
+					return archive.ScanNodeContext(ctx, parent, id)
+				}
+			},
+		},
+		{
+			name: "ScanAbsolute",
+			setup: func(t *testing.T) (string, archive.NodeIdentity, scanFunc) {
+				t.Helper()
+
+				parent := t.TempDir()
+				id := archive.NodeIdentity{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root-durability",
+					Namespace:  "default",
+					UID:        "snapshot/root-durability",
+				}
+				nodeDir := makeCompleteNode(t, parent, id.Kind, id.Name, id)
+
+				return nodeDir, id, func(ctx context.Context) (archive.NodeResumePlan, error) {
+					return archive.ScanAbsoluteContext(ctx, nodeDir, id)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir, id, scan := tt.setup(t)
+			writeMarker(t, nodeDir, id)
+
+			snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			published, err := os.ReadFile(snapshotPath)
+			if err != nil {
+				t.Fatalf("read snapshot.yaml: %v", err)
+			}
+
+			firstSyncErr := errors.New("first snapshot confirmation sentinel")
+			secondSyncErr := errors.New("second snapshot confirmation sentinel")
+			syncCalls := 0
+			ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+				if path != nodeDir {
+					t.Fatalf("directory sync path = %q, want %q", path, nodeDir)
+				}
+
+				syncCalls++
+
+				switch syncCalls {
+				case 1:
+					return firstSyncErr
+				case 2:
+					return secondSyncErr
+				default:
+					return next()
+				}
+			})
+
+			for _, wantErr := range []error{firstSyncErr, secondSyncErr} {
+				plan, scanErr := scan(ctx)
+				if !errors.Is(scanErr, wantErr) {
+					t.Fatalf("scan error = %v, want %v", scanErr, wantErr)
+				}
+
+				if got := archive.CommitPublicationState(scanErr); got != archive.PublicationPublished {
+					t.Fatalf("publication state = %v, want published", got)
+				}
+
+				if plan.Done {
+					t.Fatal("unconfirmed snapshot.yaml must not classify Done")
+				}
+
+				if _, found, readErr := archive.ReadNodeIdentityMarker(nodeDir); readErr != nil {
+					t.Fatalf("ReadNodeIdentityMarker: %v", readErr)
+				} else if !found {
+					t.Fatal("identity marker must survive failed durability confirmation")
+				}
+
+				current, readErr := os.ReadFile(snapshotPath)
+				if readErr != nil {
+					t.Fatalf("read snapshot.yaml after failed confirmation: %v", readErr)
+				}
+
+				if string(current) != string(published) {
+					t.Fatal("durability confirmation must not rewrite snapshot.yaml")
+				}
+			}
+
+			plan, err := scan(ctx)
+			if err != nil {
+				t.Fatalf("successful durability retry: %v", err)
+			}
+
+			if !plan.Done || plan.Observed != archive.ObservedDone {
+				t.Fatalf("plan after successful confirmation = %+v, want Done", plan)
+			}
+
+			if _, found, readErr := archive.ReadNodeIdentityMarker(nodeDir); readErr != nil {
+				t.Fatalf("ReadNodeIdentityMarker: %v", readErr)
+			} else if found {
+				t.Fatal("identity marker must be removed after successful confirmation")
+			}
+
+			recovered, err := os.ReadFile(snapshotPath)
+			if err != nil {
+				t.Fatalf("read recovered snapshot.yaml: %v", err)
+			}
+
+			if string(recovered) != string(published) {
+				t.Fatal("successful durability retry rewrote snapshot.yaml")
+			}
+		})
 	}
 }
 

@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -26,6 +27,99 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
+
+func TestWriteSnapshotYAMLContextCancellationBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       func(error) context.Context
+		wantState archive.PublicationState
+		wantCause func(error) bool
+		wantOld   bool
+	}{
+		{
+			name: "BeforePublication",
+			ctx: func(error) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+
+				return ctx
+			},
+			wantState: archive.PublicationUnpublished,
+			wantCause: func(err error) bool {
+				return errors.Is(err, context.Canceled)
+			},
+			wantOld: true,
+		},
+		{
+			name: "AfterPublication",
+			ctx: func(sentinel error) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+
+				return archive.WithDirectorySyncHook(ctx, func(string, func() error) error {
+					cancel()
+
+					return sentinel
+				})
+			},
+			wantState: archive.PublicationPublished,
+			wantCause: func(err error) bool {
+				return !errors.Is(err, context.Canceled)
+			},
+			wantOld: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			path := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			old := []byte("old snapshot metadata")
+			sentinel := errors.New("snapshot parent sync sentinel")
+
+			if err := os.WriteFile(path, old, 0o644); err != nil {
+				t.Fatalf("write old snapshot.yaml: %v", err)
+			}
+
+			err := archive.WriteSnapshotYAMLContext(tt.ctx(sentinel), nodeDir, archive.SnapshotYAML{
+				APIVersion: "storage.example.io/v1",
+				Kind:       "Snapshot",
+				Name:       "new",
+			})
+			if err == nil {
+				t.Fatal("WriteSnapshotYAMLContext error = nil")
+			}
+
+			if tt.name == "AfterPublication" && !errors.Is(err, sentinel) {
+				t.Fatalf("WriteSnapshotYAMLContext error = %v, want parent sync sentinel", err)
+			}
+
+			if !tt.wantCause(err) {
+				t.Fatalf("WriteSnapshotYAMLContext error has wrong cause: %v", err)
+			}
+
+			if got := archive.CommitPublicationState(err); got != tt.wantState {
+				t.Fatalf("publication state = %v, want %v", got, tt.wantState)
+			}
+
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read snapshot.yaml: %v", readErr)
+			}
+
+			if tt.wantOld && string(got) != string(old) {
+				t.Fatalf("snapshot.yaml = %q, want old bytes %q", got, old)
+			}
+
+			if !tt.wantOld && string(got) == string(old) {
+				t.Fatal("published snapshot.yaml still contains old bytes")
+			}
+
+			if _, statErr := os.Stat(path + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("temporary snapshot.yaml must be absent, Stat error: %v", statErr)
+			}
+		})
+	}
+}
 
 func TestReadSnapshotYAMLRejectsSymlinkBeforeReadingTarget(t *testing.T) {
 	nodeDir := t.TempDir()

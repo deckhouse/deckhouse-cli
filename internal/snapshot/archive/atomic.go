@@ -252,11 +252,16 @@ func (w *AtomicWriter) Abort() {
 	_ = os.Remove(w.tmpPath)
 }
 
-// WriteFileAtomic copies r into path using an AtomicWriter. Pre-publication
-// errors remove the temporary file and leave the old final unchanged. A
-// PublicationPublished error means the complete final file is visible but its
-// parent-directory durability remains unconfirmed.
+// WriteFileAtomic is WriteFileAtomicContext with a non-cancellable context.
 func WriteFileAtomic(path string, r io.Reader) error {
+	return WriteFileAtomicContext(context.Background(), path, r)
+}
+
+// WriteFileAtomicContext copies r into path using an AtomicWriter.
+// Pre-publication errors remove the temporary file and leave the old final
+// unchanged. A PublicationPublished error means the complete final file is
+// visible but its parent-directory durability remains unconfirmed.
+func WriteFileAtomicContext(ctx context.Context, path string, r io.Reader) error {
 	aw, err := NewAtomicWriter(path)
 	if err != nil {
 		return err
@@ -267,7 +272,7 @@ func WriteFileAtomic(path string, r io.Reader) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 
-	return aw.Commit()
+	return aw.CommitContext(ctx)
 }
 
 // EnsureDir creates path and all parents. Unix then syncs the directory.
