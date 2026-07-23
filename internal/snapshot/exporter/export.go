@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,11 +46,17 @@ const dataPlaneResponseHeaderTimeout = 2 * time.Minute
 // releasing by deterministic name also covers the case where OpenExport never
 // returned an Export at all (e.g. cancelled while still waiting for Ready).
 type Export struct {
-	deName     string
-	namespace  string
-	volumeMode string
-	baseURL    string
-	fetcher    *Fetcher
+	deName      string
+	namespace   string
+	volumeMode  string
+	baseURL     string
+	fetcher     *Fetcher
+	httpClients []IdleConnectionCloser
+}
+
+// IdleConnectionCloser owns an HTTP connection pool used by an Export.
+type IdleConnectionCloser interface {
+	CloseIdleConnections()
 }
 
 // VolumeMode returns the volume mode reported by the DataExport controller
@@ -70,16 +75,32 @@ func (e *Export) Fetcher() *Fetcher {
 	return e.fetcher
 }
 
-// NewExport constructs an Export from pre-built components.
-// Intended for testing and alternative transport implementations that bypass
-// the production DataExport lifecycle.
-func NewExport(namespace, deName, volumeMode, baseURL string, fetcher *Fetcher) *Export {
+// CloseIdleConnections releases every HTTP connection pool owned by the Export.
+func (e *Export) CloseIdleConnections() {
+	for _, httpClient := range e.httpClients {
+		httpClient.CloseIdleConnections()
+	}
+}
+
+// NewExport constructs an Export from pre-built components. Any supplied HTTP
+// clients become owned by the Export and are released by CloseIdleConnections.
+// It is intended for testing and alternative transport implementations that
+// bypass the production DataExport lifecycle.
+func NewExport(
+	namespace,
+	deName,
+	volumeMode,
+	baseURL string,
+	fetcher *Fetcher,
+	httpClients ...IdleConnectionCloser,
+) *Export {
 	return &Export{
-		deName:     deName,
-		namespace:  namespace,
-		volumeMode: volumeMode,
-		baseURL:    baseURL,
-		fetcher:    fetcher,
+		deName:      deName,
+		namespace:   namespace,
+		volumeMode:  volumeMode,
+		baseURL:     baseURL,
+		fetcher:     fetcher,
+		httpClients: httpClients,
 	}
 }
 
@@ -118,33 +139,33 @@ func OpenExport(
 		return nil, fmt.Errorf("wait DataExport %q ready: %w", de.Name, err)
 	}
 
-	sub, sourceHashSub, err := buildSubClients(sc, ready)
+	dataHTTPClient, sourceHashHTTPClient, err := buildSubClients(sc, ready)
 	if err != nil {
 		return nil, fmt.Errorf("build sub-clients for DataExport %q: %w", de.Name, err)
 	}
 
-	return &Export{
-		deName:     de.Name,
-		namespace:  namespace,
-		volumeMode: ready.Status.VolumeMode,
-		baseURL:    ready.Status.URL,
-		fetcher: NewFetcher(
-			safeDoer{sub},
-			WithSourceHashDoer(safeDoer{sourceHashSub}),
-		),
-	}, nil
+	return NewExport(
+		namespace,
+		de.Name,
+		ready.Status.VolumeMode,
+		ready.Status.URL,
+		NewFetcher(dataHTTPClient, WithSourceHashDoer(sourceHashHTTPClient)),
+		dataHTTPClient,
+		sourceHashHTTPClient,
+	), nil
 }
 
-// buildSubClients creates isolated SafeClient copies and merges the DataExport's
-// internal CA (base64-encoded PEM) into their trust pools. Ordinary data calls
-// retain the short response-header timeout and progress-based body watchdog.
-// Source-hash HEAD requests get a separate transport ceiling because the
-// producer computes their response header by synchronously reading the complete
-// file; SourceMD5 applies the tighter size-derived request deadline.
+// buildSubClients creates exactly two persistent, isolated HTTP clients and
+// merges the DataExport's internal CA (base64-encoded PEM) into their trust
+// pools. Ordinary data calls retain the short response-header timeout and
+// progress-based body watchdog. Source-hash HEAD requests get a separate
+// transport ceiling because the producer computes their response header by
+// synchronously reading the complete file; SourceMD5 applies the tighter
+// size-derived request deadline.
 func buildSubClients(
 	sc *safeClient.SafeClient,
 	de *deapi.DataExport,
-) (*safeClient.SafeClient, *safeClient.SafeClient, error) {
+) (*safeClient.PersistentHTTPClient, *safeClient.PersistentHTTPClient, error) {
 	var caBytes []byte
 
 	if de.Status.CA != "" {
@@ -162,19 +183,21 @@ func buildSubClients(
 	// CA-injecting WrapTransport rather than replacing it (both must apply).
 	sub.SetResponseHeaderTimeout(dataPlaneResponseHeaderTimeout)
 
+	dataHTTPClient, err := sub.NewPersistentHTTPClient()
+	if err != nil {
+		return nil, nil, fmt.Errorf("build ordinary data HTTP client: %w", err)
+	}
+
 	sourceHashSub := sc.Copy()
 	sourceHashSub.SetTLSCAData(caBytes)
 	sourceHashSub.SetResponseHeaderTimeout(sourceHashTimeoutCeiling)
 
-	return sub, sourceHashSub, nil
-}
+	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPClient()
+	if err != nil {
+		dataHTTPClient.CloseIdleConnections()
 
-// safeDoer adapts *safeClient.SafeClient to the Doer interface expected by Fetcher.
-// SafeClient exposes HTTPDo rather than Do, so a thin wrapper is needed.
-type safeDoer struct {
-	c *safeClient.SafeClient
-}
+		return nil, nil, fmt.Errorf("build source-hash HTTP client: %w", err)
+	}
 
-func (d safeDoer) Do(req *http.Request) (*http.Response, error) {
-	return d.c.HTTPDo(req)
+	return dataHTTPClient, sourceHashHTTPClient, nil
 }

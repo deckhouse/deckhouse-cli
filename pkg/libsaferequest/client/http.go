@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package client
 
 import (
@@ -10,6 +26,7 @@ import (
 
 	"github.com/spf13/pflag"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
@@ -53,6 +70,15 @@ type SafeClient struct {
 	restConfig *rest.Config
 }
 
+// PersistentHTTPClient owns one materialized client-go HTTP transport stack.
+// It is safe for concurrent use. Call CloseIdleConnections when the caller's
+// lifecycle ends so this client's private connection pool is released.
+type PersistentHTTPClient struct {
+	client            *http.Client
+	ownedTransport    http.RoundTripper
+	hasConfiguredAuth bool
+}
+
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	restConfig, err := newRestConfig(flags...)
 	if err != nil {
@@ -60,6 +86,92 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	}
 
 	return &SafeClient{restConfig}, nil
+}
+
+// NewPersistentHTTPClient materializes the current rest.Config exactly once,
+// retaining client-go's TLS, proxy, dial, certificate, exec, auth-provider,
+// bearer, and basic-auth behavior for every request made through the result.
+//
+// The standard client-go base *http.Transport is cloned before caller-installed
+// WrapTransport functions run. This gives each returned client a private idle
+// pool even when client-go's TLS cache supplied the base transport. Cleanup
+// retains the pre-auth wrapper stack directly, so opaque auth-provider wrappers
+// cannot hide the owned transport from CloseIdleConnections.
+func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
+	if c == nil || c.restConfig == nil {
+		return nil, errors.New("build persistent HTTP client: no rest config")
+	}
+
+	config := rest.CopyConfig(c.restConfig)
+	prev := config.WrapTransport
+
+	var ownedTransport http.RoundTripper
+
+	config.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if transport, ok := rt.(*http.Transport); ok {
+			rt = transport.Clone()
+		}
+
+		if prev != nil {
+			rt = prev(rt)
+		}
+
+		ownedTransport = rt
+
+		return rt
+	}
+
+	httpClient, err := rest.HTTPClientFor(config)
+	if err != nil {
+		return nil, fmt.Errorf("build persistent HTTP client: %w", err)
+	}
+
+	return &PersistentHTTPClient{
+		client:            httpClient,
+		ownedTransport:    ownedTransport,
+		hasConfiguredAuth: hasConfiguredAuth(config),
+	}, nil
+}
+
+// Do sends req through the persistent authenticated transport.
+func (c *PersistentHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	return c.HTTPDo(req)
+}
+
+// HTTPDo sends req through the persistent authenticated transport.
+func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Authorization") == "" && !c.hasConfiguredAuth && !SupportNoAuth {
+		return nil, errors.New("No auth")
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("persistent HTTP client do request: %w", err)
+	}
+
+	return resp, nil
+}
+
+// CloseIdleConnections closes this client's privately owned idle pool.
+func (c *PersistentHTTPClient) CloseIdleConnections() {
+	if c == nil {
+		return
+	}
+
+	utilnet.CloseIdleConnectionsFor(c.ownedTransport)
+}
+
+func hasConfiguredAuth(config *rest.Config) bool {
+	hasBasicAuth := config.Username != "" || config.Password != ""
+	hasCertificateAuth := (config.CertData != nil || config.CertFile != "") &&
+		(config.KeyData != nil || config.KeyFile != "")
+
+	return hasBasicAuth ||
+		config.BearerToken != "" ||
+		config.BearerTokenFile != "" ||
+		hasCertificateAuth ||
+		config.ExecProvider != nil ||
+		config.AuthProvider != nil
 }
 
 // SetProbeEndpoint configures host, TLS ServerName and timeout for probe requests.

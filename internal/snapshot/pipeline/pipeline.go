@@ -1040,6 +1040,11 @@ func downloadVolumeBinding(
 		return downloadErr
 	}
 
+	// Export owns the two persistent HTTP transports materialized by the
+	// production OpenExport path. Release both pools before the DataExport CR
+	// cleanup defer runs, on success, transfer failure, and cancellation.
+	defer exp.CloseIdleConnections()
+
 	// Flip the bar from "waiting for export…" to the live byte-counter display
 	// now that the DataExport is ready and bytes are about to flow.
 	if stream != nil {
