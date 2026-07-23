@@ -39,6 +39,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -932,6 +934,79 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 	}
 
 	return extraImages
+}
+
+// Retry policy for reading extra_images.json during discovery, mirroring the
+// puller's image-pull retry. Package vars so tests can shrink the delay.
+var (
+	extraImagesFetchRetries    = uint(5)
+	extraImagesFetchRetryDelay = 10 * time.Second
+)
+
+// getExtraImagesJSON reads and parses extra_images.json from a module version image.
+//
+// A version without extra images is not an error: returns (nil, nil) when the
+// version image is absent or has no extra_images.json. Transient registry
+// errors are retried; a persistent error is returned so the caller fails the
+// pull rather than silently dropping extra images.
+func (svc *Service) getExtraImagesJSON(ctx context.Context, moduleName, tag string) (map[string]interface{}, error) {
+	var extraImagesJSON map[string]interface{}
+
+	// Set when the version legitimately has no extra images. Signaled out of
+	// band because the retry payload returns only an error: on a clean skip it
+	// returns nil so RunTask stops instead of retrying.
+	noExtraImages := false
+
+	err := retry.RunTask(
+		ctx,
+		svc.userLogger,
+		fmt.Sprintf("Reading extra_images.json of %s:%s", moduleName, tag),
+		task.WithConstantRetries(extraImagesFetchRetries, extraImagesFetchRetryDelay, func(ctx context.Context) error {
+			// Fetch the module version image
+			img, err := svc.modulesService.Module(moduleName).GetImage(ctx, tag)
+			if err != nil {
+				// Image tag absent: nothing to read, skip without retrying
+				if errors.Is(err, client.ErrImageNotFound) {
+					noExtraImages = true
+
+					return nil
+				}
+
+				// Transient error: let RunTask retry
+				return err
+			}
+
+			// Read extra_images.json out of the image
+			data, err := extractExtraImagesJSON(img)
+			if err != nil {
+				// This version declares no extra images, skip without retrying
+				if errors.Is(err, errExtraImagesJSONNotFound) {
+					noExtraImages = true
+
+					return nil
+				}
+
+				// Transient error: let RunTask retry
+				return err
+			}
+
+			extraImagesJSON = data
+
+			return nil
+		}))
+
+	// If retry failed
+	if err != nil {
+		return nil, err
+	}
+
+	// Version has no extra images
+	if noExtraImages {
+		return nil, nil
+	}
+
+	// extra_images.json found and parsed
+	return extraImagesJSON, nil
 }
 
 // errExtraImagesJSONNotFound marks that the image has no extra_images.json.
