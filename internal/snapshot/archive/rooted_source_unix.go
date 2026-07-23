@@ -1,4 +1,4 @@
-//go:build freebsd || openbsd || dragonfly
+//go:build freebsd || openbsd
 
 /*
 Copyright 2026 Flant JSC
