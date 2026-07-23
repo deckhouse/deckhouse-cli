@@ -616,22 +616,121 @@ func TestBuildPlan_FilesystemDataFlag(t *testing.T) {
 	}
 }
 
-func TestBuildPlan_ClassifiesFilesystemCodec(t *testing.T) {
+func TestBuildPlan_ClassifiesFilesystemCodecFromPAX(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		codec        string
+		originalPath string
+		storedPath   string
+	}{
+		{name: "none ignores zstd-looking source suffix", codec: "none", originalPath: "report.zst", storedPath: "report.zst"},
+		{name: "zstd ignores gzip-looking source suffix", codec: "zstd", originalPath: "report.gz", storedPath: "report.gz.zst"},
+		{name: "gzip ignores lz4-looking source suffix", codec: "gzip", originalPath: "report.lz4", storedPath: "report.lz4.gz"},
+		{name: "lz4 ignores gzip-looking source suffix", codec: "lz4", originalPath: "report.gz", storedPath: "report.gz.lz4"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			metadata, err := archive.NewFSMetadata(tc.codec, tc.originalPath, 4)
+			if err != nil {
+				t.Fatalf("NewFSMetadata: %v", err)
+			}
+
+			dir := t.TempDir()
+			writeArchiveNode(t, dir, archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				tarData: writePlanFSTar(t, &gotar.Header{
+					Format:     gotar.FormatPAX,
+					Name:       tc.storedPath,
+					Mode:       0o600,
+					Size:       4,
+					Typeflag:   gotar.TypeReg,
+					PAXRecords: metadata.PAXRecords(),
+				}),
+			})
+
+			plan, err := BuildPlan(dir)
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			node := plan[0]
+			if node.PayloadKind != dataImportPayloadFilesystem || node.Codec != tc.codec {
+				t.Errorf("payload metadata = {kind:%q codec:%q}, want {filesystem %s}",
+					node.PayloadKind, node.Codec, tc.codec)
+			}
+
+			if node.DataImportIdentity == "" {
+				t.Error("filesystem node has no DataImport identity")
+			}
+		})
+	}
+}
+
+func TestBuildPlan_RejectsFilesystemMetadataBeforeIdentity(t *testing.T) {
+	t.Parallel()
+
+	valid, err := archive.NewFSMetadata("zstd", "file.txt", 4)
+	if err != nil {
+		t.Fatalf("NewFSMetadata: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		header  *gotar.Header
+		records map[string]string
+	}{
+		{
+			name:   "missing PAX cannot fall back to suffix",
+			header: &gotar.Header{Name: "file.txt.zst", Mode: 0o600, Size: 4, Typeflag: gotar.TypeReg},
+		},
+		{
+			name:    "stored path inconsistent with PAX",
+			header:  &gotar.Header{Name: "file.txt.gz", Mode: 0o600, Size: 4, Typeflag: gotar.TypeReg},
+			records: valid.PAXRecords(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tc.header.Format = gotar.FormatPAX
+			tc.header.PAXRecords = tc.records
+
+			dir := t.TempDir()
+			writeArchiveNode(t, dir, archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				tarData:    writePlanFSTar(t, tc.header),
+			})
+
+			_, err := BuildPlan(dir)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+				t.Fatalf("BuildPlan error = %v, want ErrInvalidFSMetadata", err)
+			}
+		})
+	}
+}
+
+func writePlanFSTar(t *testing.T, header *gotar.Header) []byte {
+	t.Helper()
+
 	var payload bytes.Buffer
 
 	writer := gotar.NewWriter(&payload)
-	header := &gotar.Header{
-		Name:     "file.txt.zst",
-		Mode:     0o600,
-		Size:     4,
-		Typeflag: gotar.TypeReg,
-	}
-
 	if err := writer.WriteHeader(header); err != nil {
 		t.Fatalf("write tar header: %v", err)
 	}
 
-	if _, err := writer.Write([]byte("data")); err != nil {
+	if _, err := writer.Write(make([]byte, header.Size)); err != nil {
 		t.Fatalf("write tar payload: %v", err)
 	}
 
@@ -639,26 +738,5 @@ func TestBuildPlan_ClassifiesFilesystemCodec(t *testing.T) {
 		t.Fatalf("close tar: %v", err)
 	}
 
-	dir := t.TempDir()
-	writeArchiveNode(t, dir, archiveNode{
-		apiVersion: "snapshot.storage.k8s.io/v1",
-		kind:       "VolumeSnapshot",
-		name:       "pvc-1",
-		tarData:    payload.Bytes(),
-	})
-
-	plan, err := BuildPlan(dir)
-	if err != nil {
-		t.Fatalf("BuildPlan: %v", err)
-	}
-
-	node := plan[0]
-	if node.PayloadKind != dataImportPayloadFilesystem || node.Codec != "zstd" {
-		t.Errorf("payload metadata = {kind:%q codec:%q}, want {filesystem zstd}",
-			node.PayloadKind, node.Codec)
-	}
-
-	if node.DataImportIdentity == "" {
-		t.Error("filesystem node has no DataImport identity")
-	}
+	return payload.Bytes()
 }

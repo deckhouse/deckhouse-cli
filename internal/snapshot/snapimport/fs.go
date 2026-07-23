@@ -23,14 +23,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
@@ -244,23 +244,10 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 	return n, nil
 }
 
-// importFSFromTar reads the uncompressed data.tar archive at tarPath and uploads each
-// NOT-yet-done regular file entry to the FS importer at baseURL via putFile, streaming the
-// decompressed bytes directly into the upload — no decompressed copy is ever written to
-// disk. The tar format (decision #6): file entries are individually compressed and named
-// <relpath><ext> (ext .zst/.gz/.lz4 or empty for none); the codec is stripped to recover
-// the original relPath before uploading.
-//
-// A tar header only records an entry's COMPRESSED stored length (hdr.Size); the FS
-// importer will only finalize a file when X-Content-Length exactly equals its true
-// decompressed size, so a compressed entry's exact size must be learned before it can be
-// streamed. For ext=="" hdr.Size already IS that exact size. For a compressed entry this
-// uses a per-file two-pass read of the SAME entry's compressed bytes: PASS 1
-// (measureEntrySize) decodes the entry through tr itself to learn its exact size, keeping
-// tar.Reader's own bookkeeping correct for the next Next() call; PASS 2
-// (streamCompressedEntry) reopens an independent handle on tarPath, seeks back to this
-// entry's payload, and streams the decoded remainder (discard-and-fast-forwarding past any
-// already-uploaded prefix) into putFile.
+// importFSFromTar uploads regular data.tar entries without materializing plaintext
+// on disk. A header-only preflight validates every regular entry before the first
+// HEAD or PUT. Upload path, decoder, and exact X-Content-Length then come only from
+// checksum-covered PAX metadata; Header.Name is never interpreted by suffix.
 //
 // Directory and symlink entries are skipped — the importer creates parent directories
 // implicitly on the first child file write. onProgress, when non-nil, is called with the
@@ -268,11 +255,7 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 // already-fully-uploaded entry, credited without any decompression at all).
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
-// called with a running sum of exact decompressed file sizes each time a new file's size
-// becomes known — at the done-skip credit point (from HEAD's Content-Length) and at the
-// not-done measure point (PASS 1's measured size, or hdr.Size directly for ext=="") — so
-// the reported total grows progressively as entries are walked instead of being knowable
-// only once the whole tar has been processed.
+// called with a running sum of exact PAX raw sizes as entries are walked.
 //
 // activate, when non-nil, is called once per entry that actually needs a real PUT (the
 // NOT-done branch), never inside the `if done` server-side-skip branch above it. This is
@@ -284,6 +267,10 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 //
 // TODO(follow-up): reproduce empty-directory and symlink entries when needed.
 func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
+	if err := validateFSTarMetadata(tarPath); err != nil {
+		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
+	}
+
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
@@ -306,14 +293,23 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			return fmt.Errorf("read tar entry from %s: %w", tarPath, err)
 		}
 
-		if hdr.Typeflag != tar.TypeReg {
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
 			skipped++
 
 			continue
 		}
 
-		ext := codecExt(hdr.Name)
-		relPath := strings.TrimSuffix(hdr.Name, ext)
+		metadata, err := archive.ParseFSMetadata(hdr)
+		if err != nil {
+			return fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err)
+		}
+
+		ext, err := archive.FSCodecExtension(metadata.Codec)
+		if err != nil {
+			return fmt.Errorf("resolve codec for tar entry %q: %w", hdr.Name, err)
+		}
+
+		relPath := metadata.OriginalPath
 
 		fileURL, err := neturl.JoinPath(baseURL, uploadFilesSubpath, relPath)
 		if err != nil {
@@ -325,17 +321,28 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			return fmt.Errorf("probe upload state for %s: %w", relPath, err)
 		}
 
+		if offset > metadata.RawSize {
+			return fmt.Errorf("probe upload state for %s: offset %d exceeds PAX raw size %d",
+				relPath, offset, metadata.RawSize)
+		}
+
 		if done {
-			// The server already has the complete, final file: skip decompression and
-			// the PUT attempt entirely. Do NOT read from tr for this entry — tar.Reader
-			// auto-skips its remaining unread bytes on the next tr.Next() call.
-			runningTotal += doneSize
+			if doneSize != metadata.RawSize {
+				return fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
+					relPath, doneSize, metadata.RawSize)
+			}
+
+			runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
+			if err != nil {
+				return fmt.Errorf("account tar entry %s: %w", relPath, err)
+			}
+
 			if setTotal != nil {
 				setTotal(runningTotal)
 			}
 
-			if onProgress != nil && doneSize > 0 {
-				onProgress(int(doneSize))
+			if onProgress != nil && metadata.RawSize > 0 {
+				onProgress(int(metadata.RawSize))
 			}
 
 			continue
@@ -352,54 +359,44 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			ModTime: hdr.ModTime,
 		}
 
-		var exactSize int64
+		runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
+		if err != nil {
+			return fmt.Errorf("account tar entry %s: %w", relPath, err)
+		}
 
-		if ext == "" {
-			// No codec: hdr.Size already is the exact size, and nothing has read this
-			// entry yet, so PASS 2 can stream directly from tr — no measure pass, no
-			// second file handle.
-			exactSize = hdr.Size
+		if setTotal != nil {
+			setTotal(runningTotal)
+		}
 
-			runningTotal += exactSize
-			if setTotal != nil {
-				setTotal(runningTotal)
-			}
-
+		if metadata.Codec == "none" {
+			counted := &rawCountingReader{r: tr}
 			if offset > 0 {
-				if _, ffErr := io.CopyN(io.Discard, tr, offset); ffErr != nil {
+				if _, ffErr := io.CopyN(io.Discard, counted, offset); ffErr != nil {
 					return fmt.Errorf("fast-forwarding %s to resume offset %d: %w", relPath, offset, ffErr)
 				}
 			}
 
-			if err := putFile(ctx, client, baseURL, relPath, tr, exactSize, offset, attrs); err != nil {
+			if err := putFile(ctx, client, baseURL, relPath, counted, metadata.RawSize, offset, attrs); err != nil {
 				return fmt.Errorf("upload %s: %w", relPath, err)
 			}
+
+			if err := verifyRawStreamSize(counted, metadata.RawSize); err != nil {
+				return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
+			}
 		} else {
-			// Recorded now, before this entry's bytes are read through tr for the first
-			// time (tr.Next() already positioned the reader at the payload start), so
-			// PASS 2 can re-read the same compressed bytes independently of PASS 1.
 			payloadStart, seekErr := f.Seek(0, io.SeekCurrent)
 			if seekErr != nil {
 				return fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, seekErr)
 			}
 
-			exactSize, err = measureEntrySize(tr, ext)
-			if err != nil {
-				return fmt.Errorf("measure decompressed size of %s: %w", hdr.Name, err)
-			}
-
-			runningTotal += exactSize
-			if setTotal != nil {
-				setTotal(runningTotal)
-			}
-
-			if err := streamCompressedEntry(ctx, client, baseURL, tarPath, relPath, ext, payloadStart, hdr.Size, offset, exactSize, attrs); err != nil {
+			if err := streamCompressedEntry(ctx, client, baseURL, tarPath, relPath, ext, payloadStart,
+				hdr.Size, offset, metadata.RawSize, attrs); err != nil {
 				return fmt.Errorf("upload %s: %w", relPath, err)
 			}
 		}
 
-		if onProgress != nil && exactSize > 0 {
-			onProgress(int(exactSize))
+		if onProgress != nil && metadata.RawSize > 0 {
+			onProgress(int(metadata.RawSize))
 		}
 	}
 
@@ -412,38 +409,89 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 	return nil
 }
 
-// measureEntrySize decodes the current tar entry (already positioned in tr; ext must be a
-// recognized codec extension, never "") fully, discarding the output, to learn its exact
-// decompressed size. This is PASS 1 of the two-pass streaming upload: a tar header only
-// records an entry's COMPRESSED stored length, never its original size, so decoding once
-// through tr is the only way to learn the exact value X-Content-Length requires before the
-// FS importer will finalize the file. Consuming the entry through tr (rather than a second
-// handle) keeps tar.Reader's own bookkeeping correct for its next Next() call.
-func measureEntrySize(tr *tar.Reader, ext string) (int64, error) {
-	decodeReader, err := compress.NewReader(ext, tr)
+func validateFSTarMetadata(tarPath string) (retErr error) {
+	f, err := os.Open(tarPath)
 	if err != nil {
-		return 0, fmt.Errorf("open measure decompressor: %w", err)
+		return fmt.Errorf("open %s: %w", tarPath, err)
 	}
 
-	defer func() { _ = decodeReader.Close() }()
+	defer func() {
+		if err := f.Close(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close %s: %w", tarPath, err)
+		}
+	}()
 
-	n, err := io.Copy(io.Discard, decodeReader)
-	if err != nil {
-		return 0, fmt.Errorf("measure decompressed size: %w", err)
+	tr := tar.NewReader(f)
+	originalPaths := make(map[string]struct{})
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("read tar entry from %s: %w", tarPath, err)
+		}
+
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
+			continue
+		}
+
+		metadata, err := archive.ParseFSMetadata(hdr)
+		if err != nil {
+			return fmt.Errorf("entry %q: %w", hdr.Name, err)
+		}
+
+		if _, exists := originalPaths[metadata.OriginalPath]; exists {
+			return fmt.Errorf("%w: duplicate original path %q", archive.ErrInvalidFSMetadata, metadata.OriginalPath)
+		}
+
+		originalPaths[metadata.OriginalPath] = struct{}{}
 	}
-
-	return n, nil
 }
 
-// streamCompressedEntry is PASS 2 of the two-pass streaming upload: it reopens an
-// independent handle on tarPath (PASS 1 already consumed this entry's bytes through the
-// shared tar.Reader to learn exactSize), seeks to payloadStart, and decodes exactly
-// storedSize compressed bytes (this entry's stored length — the io.LimitReader bound
-// prevents decoding from ever running into the next tar header). Resuming a partial
-// upload discards the first offset decoded bytes (the same discard-and-fast-forward
-// approach used for block volumes: FS entries are one self-contained compressed stream
-// per file, so there is no sub-file frame boundary to seek to instead), then streams the
-// remainder into putFile.
+func addRawSize(total, size int64) (int64, error) {
+	if size > math.MaxInt64-total {
+		return 0, fmt.Errorf("raw-size total overflows int64")
+	}
+
+	return total + size, nil
+}
+
+type rawCountingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (r *rawCountingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.n += int64(n)
+
+	return n, err
+}
+
+func verifyRawStreamSize(r *rawCountingReader, expected int64) error {
+	var probe [1]byte
+
+	n, err := r.Read(probe[:])
+	if n > 0 {
+		return fmt.Errorf("decoded stream exceeds declared PAX raw size %d", expected)
+	}
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("probe decoded stream end: %w", err)
+	}
+
+	if r.n != expected {
+		return fmt.Errorf("decoded stream size %d differs from declared PAX raw size %d", r.n, expected)
+	}
+
+	return nil
+}
+
+// streamCompressedEntry reopens one stored payload and streams its decoded bytes
+// exactly once. PAX rawSize supplies the request length, avoiding a measure pass.
 func streamCompressedEntry(ctx context.Context, client httpDoer, baseURL, tarPath, relPath, ext string, payloadStart, storedSize, offset, exactSize int64, attrs fileAttrs) error {
 	f2, err := os.Open(tarPath)
 	if err != nil {
@@ -465,24 +513,21 @@ func streamCompressedEntry(ctx context.Context, client httpDoer, baseURL, tarPat
 
 	defer func() { _ = decodeReader.Close() }()
 
+	counted := &rawCountingReader{r: decodeReader}
+
 	if offset > 0 {
-		if _, err := io.CopyN(io.Discard, decodeReader, offset); err != nil {
+		if _, err := io.CopyN(io.Discard, counted, offset); err != nil {
 			return fmt.Errorf("fast-forwarding %s to resume offset %d: %w", relPath, offset, err)
 		}
 	}
 
-	return putFile(ctx, client, baseURL, relPath, decodeReader, exactSize, offset, attrs)
-}
-
-// codecExt returns the codec extension for a tar entry name (.zst, .gz, .lz4) or
-// an empty string when the entry carries no compression.
-func codecExt(name string) string {
-	ext := filepath.Ext(name)
-
-	switch ext {
-	case ".zst", ".gz", ".lz4":
-		return ext
-	default:
-		return ""
+	if err := putFile(ctx, client, baseURL, relPath, counted, exactSize, offset, attrs); err != nil {
+		return err
 	}
+
+	if err := verifyRawStreamSize(counted, exactSize); err != nil {
+		return err
+	}
+
+	return nil
 }

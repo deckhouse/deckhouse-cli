@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -91,9 +92,9 @@ func TestWriteTar_Basic(t *testing.T) {
 	mtime := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	entries := []volume.TarEntry{
-		{RelPath: "hello.txt", Type: "file", Mode: 0o644, Mtime: mtime},
+		{RelPath: "hello.txt", Type: "file", Codec: "none", OriginalPath: "hello.txt", RawSize: 11, Mode: 0o644, Mtime: mtime},
 		{RelPath: "sub/", Type: "dir", Mode: 0o755, Mtime: mtime},
-		{RelPath: "sub/file.txt", Type: "file", Mode: 0o600, Mtime: mtime},
+		{RelPath: "sub/file.txt", Type: "file", Codec: "none", OriginalPath: "sub/file.txt", RawSize: 11, Mode: 0o600, Mtime: mtime},
 		{RelPath: "link.txt", Type: "link", Linkname: "hello.txt", Mode: 0o777, Mtime: mtime},
 	}
 
@@ -142,9 +143,9 @@ func TestWriteTar_Sorted(t *testing.T) {
 
 	// Provide entries in reverse alphabetical order; output must be sorted.
 	entries := []volume.TarEntry{
-		{RelPath: "z_last.txt", Type: "file"},
-		{RelPath: "m_middle.txt", Type: "file"},
-		{RelPath: "a_first.txt", Type: "file"},
+		{RelPath: "z_last.txt", Type: "file", Codec: "none", OriginalPath: "z_last.txt", RawSize: 1},
+		{RelPath: "m_middle.txt", Type: "file", Codec: "none", OriginalPath: "m_middle.txt", RawSize: 1},
+		{RelPath: "a_first.txt", Type: "file", Codec: "none", OriginalPath: "a_first.txt", RawSize: 1},
 	}
 
 	outPath := filepath.Join(outputDir, "data.tar")
@@ -170,7 +171,7 @@ func TestWriteTar_Defaults(t *testing.T) {
 	writeStagingFile(t, stagingDir, "file.txt", []byte("data"))
 
 	entries := []volume.TarEntry{
-		{RelPath: "file.txt", Type: "file"},
+		{RelPath: "file.txt", Type: "file", Codec: "none", OriginalPath: "file.txt", RawSize: 4},
 		{RelPath: "mydir", Type: "dir"},
 		{RelPath: "sym", Type: "link", Linkname: "file.txt"},
 	}
@@ -210,7 +211,7 @@ func TestWriteTar_CancelledContext(t *testing.T) {
 	writeStagingFile(t, stagingDir, "hello.txt", []byte("hello world"))
 
 	entries := []volume.TarEntry{
-		{RelPath: "hello.txt", Type: "file"},
+		{RelPath: "hello.txt", Type: "file", Codec: "none", OriginalPath: "hello.txt", RawSize: 11},
 	}
 
 	outPath := filepath.Join(outputDir, "data.tar")
@@ -239,7 +240,7 @@ func TestWriteTar_Atomic(t *testing.T) {
 
 	// Request a file entry whose staging file does not exist — WriteTar must fail.
 	entries := []volume.TarEntry{
-		{RelPath: "missing.txt", Type: "file"},
+		{RelPath: "missing.txt", Type: "file", Codec: "none", OriginalPath: "missing.txt"},
 	}
 
 	err := volume.WriteTar(context.Background(), outPath, stagingDir, entries)
@@ -275,7 +276,7 @@ func TestWriteTar_ZeroMtime(t *testing.T) {
 	writeStagingFile(t, stagingDir, "file.txt", []byte("data"))
 
 	entries := []volume.TarEntry{
-		{RelPath: "file.txt", Type: "file"},
+		{RelPath: "file.txt", Type: "file", Codec: "none", OriginalPath: "file.txt", RawSize: 4},
 		{RelPath: "mydir", Type: "dir"},
 		{RelPath: "sym", Type: "link", Linkname: "file.txt"},
 	}
@@ -308,7 +309,7 @@ func TestWriteTar_PAXFormat(t *testing.T) {
 	writeStagingFile(t, stagingDir, longName, []byte("x"))
 
 	entries := []volume.TarEntry{
-		{RelPath: longName, Type: "file"},
+		{RelPath: longName, Type: "file", Codec: "none", OriginalPath: longName, RawSize: 1},
 	}
 
 	outPath := filepath.Join(outputDir, "data.tar")
@@ -320,6 +321,27 @@ func TestWriteTar_PAXFormat(t *testing.T) {
 	require.Len(t, headers, 1)
 
 	assert.Equal(t, tar.FormatPAX, headers[0].Format, "tar format must be PAX")
+	assert.Equal(t, "none", headers[0].PAXRecords[archive.PAXFSCodec])
+	assert.Equal(t, longName, headers[0].PAXRecords[archive.PAXFSOriginalPath])
+	assert.Equal(t, "1", headers[0].PAXRecords[archive.PAXFSRawSize])
+}
+
+func TestWriteTar_RejectsMissingFileMetadata(t *testing.T) {
+	t.Parallel()
+
+	stagingDir := t.TempDir()
+	outputPath := filepath.Join(t.TempDir(), "data.tar")
+	writeStagingFile(t, stagingDir, "file.txt", []byte("data"))
+
+	err := volume.WriteTar(context.Background(), outputPath, stagingDir, []volume.TarEntry{{
+		RelPath: "file.txt",
+		Type:    "file",
+	}})
+
+	require.ErrorIs(t, err, archive.ErrInvalidFSMetadata)
+
+	_, statErr := os.Stat(outputPath)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
 // TestWriteTar_CompressedFileEntries verifies that when file TarEntries carry
@@ -350,9 +372,9 @@ func TestWriteTar_CompressedFileEntries(t *testing.T) {
 	writeStagingFile(t, stagingDir, "sub/beta.txt"+ext, betaBuf.Bytes())
 
 	entries := []volume.TarEntry{
-		{RelPath: "alpha.txt" + ext, Type: "file"},
+		{RelPath: "alpha.txt" + ext, Type: "file", Codec: "zstd", OriginalPath: "alpha.txt", RawSize: int64(len(alphaOrig))},
 		{RelPath: "sub/", Type: "dir"},
-		{RelPath: "sub/beta.txt" + ext, Type: "file"},
+		{RelPath: "sub/beta.txt" + ext, Type: "file", Codec: "zstd", OriginalPath: "sub/beta.txt", RawSize: int64(len(betaOrig))},
 		{RelPath: "link.txt", Type: "link", Linkname: "alpha.txt" + ext},
 	}
 

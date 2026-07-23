@@ -126,10 +126,13 @@ func sanitizeRelPath(p string) (string, error) {
 type countingReader struct {
 	r          io.Reader
 	onProgress func(n int)
+	n          int64
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
+	c.n += int64(n)
+
 	if c.onProgress != nil && n > 0 {
 		c.onProgress(n)
 	}
@@ -144,7 +147,8 @@ type fsItem struct {
 	relPath  string
 	itemType string // "file", "dir", or "link"
 	uri      string // download URL; non-empty only for itemType == "file"
-	size     int64  // declared content size from the listing; meaningful only for itemType == "file"
+	size     int64  // declared content size from the listing; -1 means absent or invalid
+	rawSize  int64  // exact plaintext size carried into the final tar PAX metadata
 	mode     fs.FileMode
 	uid      int
 	gid      int
@@ -172,9 +176,8 @@ type fsItem struct {
 // chunk when size <= chunkSize, multiple chunks otherwise — so an interrupted
 // download of ANY known-size file resumes from its last durably-persisted
 // offset instead of restarting from byte zero. chunkSize <= 0 falls back to
-// DefaultChunkSize. A file whose declared size is unknown (item.size <= 0 —
-// either genuinely empty or the listing omitted the "size" attribute, which
-// parseItemSize cannot tell apart) keeps the original single-shot GET +
+// DefaultChunkSize. A file whose declared size is unknown (item.size < 0) or
+// exactly zero keeps the original single-shot GET +
 // codec.EncodeStream path: chunk geometry needs a trustworthy total size up
 // front, and there is no meaningful partial to resume for zero declared bytes.
 //
@@ -243,15 +246,23 @@ func DownloadFilesystemVolume(
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
-	for _, it := range items {
-		if it.itemType != "file" {
+	for i := range items {
+		if items[i].itemType != "file" {
 			continue
 		}
 
-		item := it
+		itemIndex := i
+		item := items[itemIndex]
 
 		g.Go(func() error {
-			return stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress)
+			rawSize, stageErr := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress)
+			if stageErr != nil {
+				return stageErr
+			}
+
+			items[itemIndex].rawSize = rawSize
+
+			return nil
 		})
 	}
 
@@ -272,13 +283,16 @@ func DownloadFilesystemVolume(
 		}
 
 		entries = append(entries, TarEntry{
-			RelPath:  relPath,
-			Type:     it.itemType,
-			Mode:     it.mode,
-			UID:      it.uid,
-			GID:      it.gid,
-			Mtime:    it.mtime,
-			Linkname: it.linkname,
+			RelPath:      relPath,
+			Type:         it.itemType,
+			Codec:        codec.Name(),
+			OriginalPath: it.relPath,
+			RawSize:      it.rawSize,
+			Mode:         it.mode,
+			UID:          it.uid,
+			GID:          it.gid,
+			Mtime:        it.mtime,
+			Linkname:     it.linkname,
 		})
 	}
 
@@ -449,12 +463,10 @@ func defaultPortForScheme(scheme string) string {
 //     resumes from its last durably-persisted offset instead of restarting the
 //     whole file — this applies regardless of chunkSize, so even a file well
 //     below the chunk-size threshold gets a durable single-chunk partial.
-//   - item.size <= 0 (declared size unknown — a genuinely empty file and a
-//     listing that omitted "size" are indistinguishable, see parseItemSize):
-//     the file is staged via stageWholeFile, the original single-shot GET +
-//     codec.EncodeStream path, since chunk geometry requires a trustworthy
-//     total size up front and there is no meaningful partial to resume for
-//     zero declared bytes.
+//   - item.size <= 0: an unknown-size or empty file is staged via
+//     stageWholeFile, the original single-shot GET + codec.EncodeStream path,
+//     since chunk geometry requires a trustworthy positive total size and
+//     there is no meaningful partial to resume for zero declared bytes.
 //
 // A destination file left by a prior run is reused (resume) only after its
 // content is re-verified, never on os.Stat success alone: existence is not
@@ -483,17 +495,30 @@ func stageCompressedFile(
 	codec compress.Codec,
 	fetcher *exporter.Fetcher,
 	onProgress func(n int),
-) error {
+) (int64, error) {
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
 	if _, err := os.Stat(destPath); err == nil {
-		var verifyErr error
+		var (
+			verifyErr error
+			rawSize   int64
+		)
 
 		if item.md5 == "" {
 			log.Warn("no source MD5 available for file, skipping integrity verification",
 				slog.String("path", item.relPath))
+
+			if item.size >= 0 {
+				rawSize = item.size
+			} else {
+				rawSize, verifyErr = stagedFileRawSize(destPath, codec.Ext())
+			}
 		} else {
-			verifyErr = verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
+			rawSize, verifyErr = verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
+		}
+
+		if verifyErr == nil && item.size >= 0 && rawSize != item.size {
+			verifyErr = fmt.Errorf("staged plaintext size %d differs from listing size %d", rawSize, item.size)
 		}
 
 		if verifyErr == nil {
@@ -503,7 +528,7 @@ func stageCompressedFile(
 				onProgress(int(item.size))
 			}
 
-			return nil
+			return rawSize, nil
 		}
 
 		// The staged bytes do not match the source digest: a stale, foreign, or
@@ -514,20 +539,20 @@ func stageCompressedFile(
 			slog.String("error", verifyErr.Error()))
 
 		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			return fmt.Errorf("remove mismatched staged file %s: %w", destPath, removeErr)
+			return 0, fmt.Errorf("remove mismatched staged file %s: %w", destPath, removeErr)
 		}
 	}
 
 	tmpPath := destPath + ".tmp"
 
 	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
+		return 0, fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
 
 	parentDir := filepath.Dir(destPath)
 
 	if err := archive.EnsureDir(parentDir); err != nil {
-		return fmt.Errorf("create parent dir %s: %w", parentDir, err)
+		return 0, fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
 
 	if item.size > 0 {
@@ -571,36 +596,42 @@ func stageChunkedFile(
 	codec compress.Codec,
 	fetcher *exporter.Fetcher,
 	onProgress func(n int),
-) error {
+) (int64, error) {
 	chunkDirName := archive.FsFileChunksDirName(item.relPath, codec.Ext())
 	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(chunkDirName))
 
 	if err := DownloadBlockChunks(ctx, log, chunkDir, item.uri, item.size, chunkSize, 1, fetcher, codec, onProgress); err != nil {
-		return fmt.Errorf("download chunks for %s: %w", item.relPath, err)
+		return 0, fmt.Errorf("download chunks for %s: %w", item.relPath, err)
 	}
 
 	if err := MergeBlockChunks(ctx, chunkDir, destPath, item.size, chunkSize, codec.Ext()); err != nil {
-		return fmt.Errorf("merge chunks for %s: %w", item.relPath, err)
+		return 0, fmt.Errorf("merge chunks for %s: %w", item.relPath, err)
 	}
 
 	if item.md5 == "" {
 		log.Warn("no source MD5 available for file, skipping integrity verification",
 			slog.String("path", item.relPath))
 
-		return nil
+		return item.size, nil
 	}
 
-	if err := verifyStagedFileMD5(destPath, codec.Ext(), item.md5); err != nil {
+	rawSize, err := verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
+	if err != nil {
 		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
 			log.Warn("failed to remove corrupt staged file after MD5 mismatch",
 				slog.String("path", destPath),
 				slog.String("error", removeErr.Error()))
 		}
 
-		return fmt.Errorf("verify %s: %w", item.relPath, err)
+		return 0, fmt.Errorf("verify %s: %w", item.relPath, err)
 	}
 
-	return nil
+	if rawSize != item.size {
+		return 0, fmt.Errorf("verify %s: staged plaintext size %d differs from listing size %d",
+			item.relPath, rawSize, item.size)
+	}
+
+	return rawSize, nil
 }
 
 // verifyStagedFileMD5 decodes the codec-compressed file at destPath (ext is
@@ -608,26 +639,58 @@ func stageChunkedFile(
 // compares the plaintext's MD5 against wantHex, the exporter-provided source
 // digest. Comparison is case-insensitive since both sides are lowercase hex
 // in practice but neither format is a hard contract.
-func verifyStagedFileMD5(destPath, ext, wantHex string) error {
+func verifyStagedFileMD5(destPath, ext, wantHex string) (int64, error) {
 	f, err := os.Open(destPath)
 	if err != nil {
-		return fmt.Errorf("open staged file %s: %w", destPath, err)
+		return 0, fmt.Errorf("open staged file %s: %w", destPath, err)
 	}
 
 	defer func() { _ = f.Close() }()
 
 	hasher := md5.New() //nolint:gosec // matches the exporter's own hash.md5 attribute, not a security control
+	counter := &countingWriter{}
 
-	if err := decodeVolumeStream(hasher, f, ext); err != nil {
-		return fmt.Errorf("decode staged file %s: %w", destPath, err)
+	if err := decodeVolumeStream(io.MultiWriter(hasher, counter), f, ext); err != nil {
+		return 0, fmt.Errorf("decode staged file %s: %w", destPath, err)
 	}
 
 	got := hex.EncodeToString(hasher.Sum(nil))
 	if !strings.EqualFold(got, wantHex) {
-		return fmt.Errorf("got md5 %s, source reports %s: %w", got, wantHex, ErrSourceHashMismatch)
+		return 0, fmt.Errorf("got md5 %s, source reports %s: %w", got, wantHex, ErrSourceHashMismatch)
 	}
 
-	return nil
+	return counter.n, nil
+}
+
+type countingWriter struct {
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+
+	return len(p), nil
+}
+
+func stagedFileRawSize(destPath, ext string) (int64, error) {
+	f, err := os.Open(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("open staged file %s: %w", destPath, err)
+	}
+
+	counter := &countingWriter{}
+	decodeErr := decodeVolumeStream(counter, f, ext)
+	closeErr := f.Close()
+
+	if decodeErr != nil {
+		return 0, fmt.Errorf("decode staged file %s: %w", destPath, decodeErr)
+	}
+
+	if closeErr != nil {
+		return 0, fmt.Errorf("close staged file %s: %w", destPath, closeErr)
+	}
+
+	return counter.n, nil
 }
 
 // decodeVolumeStream streams the decompressed bytes of src into dst. ext identifies the
@@ -692,11 +755,11 @@ func decodeLZ4Frames(dst io.Writer, src io.Reader) error {
 // writes the result atomically to destPath. Compression is streaming: the HTTP
 // body is piped through codec.EncodeStream so no whole-file buffering occurs.
 //
-// This is the fallback path for items whose declared size is unknown
+// This is the fallback path for items whose declared size is unknown or zero
 // (item.size <= 0): stageChunkedFile's durable Range-based resume needs a
-// trustworthy total size up front to compute chunk geometry, which an unknown
-// size cannot provide, and there is no meaningful partial-download story for
-// zero declared bytes anyway. Every item with a known size (item.size > 0)
+// trustworthy positive total size up front to compute chunk geometry, and
+// there is no meaningful partial-download story for zero declared bytes.
+// Every item with a known positive size (item.size > 0)
 // uses stageChunkedFile instead, regardless of its relation to chunkSize, so
 // that a resumable ".part" exists for it even when it is only a single chunk.
 //
@@ -714,12 +777,12 @@ func stageWholeFile(
 	codec compress.Codec,
 	fetcher *exporter.Fetcher,
 	onProgress func(n int),
-) error {
+) (int64, error) {
 	log.Debug("staging fs file", slog.String("path", item.relPath))
 
 	body, err := fetcher.GetFile(ctx, item.uri)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", item.uri, err)
+		return 0, fmt.Errorf("GET %s: %w", item.uri, err)
 	}
 
 	defer func() { _ = body.Close() }()
@@ -735,30 +798,37 @@ func stageWholeFile(
 
 	aw, err := archive.NewAtomicWriter(destPath)
 	if err != nil {
-		return fmt.Errorf("open atomic writer for %s: %w", destPath, err)
+		return 0, fmt.Errorf("open atomic writer for %s: %w", destPath, err)
 	}
 
 	if err := codec.EncodeStream(aw, src); err != nil {
 		aw.Abort()
 
-		return fmt.Errorf("stage %s: %w", item.relPath, err)
+		return 0, fmt.Errorf("stage %s: %w", item.relPath, err)
+	}
+
+	if item.size >= 0 && cr.n != item.size {
+		aw.Abort()
+
+		return 0, fmt.Errorf("stage %s: observed plaintext size %d differs from listing size %d",
+			item.relPath, cr.n, item.size)
 	}
 
 	if item.md5 != "" {
 		if got := hex.EncodeToString(hasher.Sum(nil)); !strings.EqualFold(got, item.md5) {
 			aw.Abort()
 
-			return fmt.Errorf("stage %s: got md5 %s, source reports %s: %w", item.relPath, got, item.md5, ErrSourceHashMismatch)
+			return 0, fmt.Errorf("stage %s: got md5 %s, source reports %s: %w", item.relPath, got, item.md5, ErrSourceHashMismatch)
 		}
 	}
 
 	if err := aw.Commit(); err != nil {
-		return fmt.Errorf("commit staging %s: %w", destPath, err)
+		return 0, fmt.Errorf("commit staging %s: %w", destPath, err)
 	}
 
 	log.Debug("staging file written", slog.String("path", item.relPath))
 
-	return nil
+	return cr.n, nil
 }
 
 // ScanFSStagingProgress computes durably-committed raw bytes across every
@@ -873,7 +943,7 @@ type FSSizesSidecar struct {
 // writeFSSizesSidecar persists items' declared sizes under stagingDir's
 // reserved metadata dir (stagingDir/.d8-meta/sizes.json), fsynced via
 // archive.WriteFileAtomic. Only "file" items with a known positive size are
-// recorded — an unknown/zero declared size (see parseItemSize) already
+// recorded — an unknown or zero declared size (see parseItemSize) already
 // contributes nothing to sumFileSizes, so recording it would only bloat the
 // sidecar without ever being credited. Writing under FSMetaDirName (never the
 // staging root) guarantees the sidecar cannot shadow a user file named
@@ -1013,12 +1083,12 @@ func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
 }
 
 // sumFileSizes returns the total declared content size across all "file" items in
-// the collected listing. Items whose size is missing or zero contribute nothing.
+// the collected listing. Items whose size is unknown or zero contribute nothing.
 func sumFileSizes(items []fsItem) int64 {
 	var total int64
 
 	for _, it := range items {
-		if it.itemType == "file" {
+		if it.itemType == "file" && it.size > 0 {
 			total += it.size
 		}
 	}
@@ -1029,41 +1099,42 @@ func sumFileSizes(items []fsItem) int64 {
 // parseItemSize extracts the "size" attribute from a data-exporter listing item.
 // The real exporter emits it as a JSON number (decoded as float64 by encoding/json);
 // json.Number is also handled in case a decoder is configured with UseNumber.
-// Missing, negative, or non-numeric values yield 0 so the total degrades gracefully.
+// Missing, negative, fractional, or non-numeric values yield -1. Zero is
+// preserved because it is the exact size of an empty regular file.
 func parseItemSize(attrs map[string]any) int64 {
 	v, ok := attrs["size"]
 	if !ok {
-		return 0
+		return -1
 	}
 
 	switch n := v.(type) {
 	case float64:
-		if n <= 0 {
-			return 0
+		if n < 0 || n != float64(int64(n)) {
+			return -1
 		}
 
 		return int64(n)
 	case json.Number:
 		i, err := n.Int64()
 		if err != nil || i < 0 {
-			return 0
+			return -1
 		}
 
 		return i
 	case int64:
 		if n < 0 {
-			return 0
+			return -1
 		}
 
 		return n
 	case int:
 		if n < 0 {
-			return 0
+			return -1
 		}
 
 		return int64(n)
 	default:
-		return 0
+		return -1
 	}
 }
 

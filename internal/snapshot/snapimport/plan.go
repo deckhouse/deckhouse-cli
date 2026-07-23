@@ -304,7 +304,12 @@ func classifyTarCodec(path string) (string, error) {
 			continue
 		}
 
-		entryCodec := codecName(codecExt(header.Name))
+		metadata, metadataErr := archive.ParseFSMetadata(header)
+		if metadataErr != nil {
+			return "", fmt.Errorf("parse filesystem payload entry %q: %w", header.Name, metadataErr)
+		}
+
+		entryCodec := metadata.Codec
 		if codec == "" {
 			codec = entryCodec
 

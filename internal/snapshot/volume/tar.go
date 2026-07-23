@@ -34,10 +34,18 @@ import (
 
 // TarEntry describes one entry to include in the output data.tar.
 type TarEntry struct {
-	// RelPath is the path relative to the volume root, using forward slashes.
+	// RelPath is the stored path relative to the volume root, using forward
+	// slashes. For files it is OriginalPath plus the codec extension.
 	RelPath string
 	// Type is one of "file", "dir", or "link".
 	Type string
+	// Codec identifies the per-file codec. It is required for file entries.
+	Codec string
+	// OriginalPath is the source path before the codec extension is appended.
+	// It is required for file entries.
+	OriginalPath string
+	// RawSize is the exact plaintext byte count before compression.
+	RawSize int64
 	// Mode is the Unix permission bits. Zero applies a sensible default
 	// (0644 for files, 0755 for dirs, 0777 for links).
 	Mode fs.FileMode
@@ -133,6 +141,21 @@ func normalizeMtime(t time.Time) time.Time {
 }
 
 func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
+	metadata, err := archive.NewFSMetadata(e.Codec, e.OriginalPath, e.RawSize)
+	if err != nil {
+		return fmt.Errorf("validate metadata for tar entry %s: %w", e.RelPath, err)
+	}
+
+	storedPath, err := metadata.StoredPath()
+	if err != nil {
+		return fmt.Errorf("derive stored path for tar entry %s: %w", e.RelPath, err)
+	}
+
+	if e.RelPath != storedPath {
+		return fmt.Errorf("tar entry path %q does not match metadata path %q: %w",
+			e.RelPath, storedPath, archive.ErrInvalidFSMetadata)
+	}
+
 	mode := e.Mode
 	if mode == 0 {
 		mode = 0o644
@@ -153,14 +176,15 @@ func writeFileEntry(tw *tar.Writer, stagingDir string, e TarEntry) error {
 	}
 
 	hdr := &tar.Header{
-		Format:   tar.FormatPAX,
-		Typeflag: tar.TypeReg,
-		Name:     e.RelPath,
-		Mode:     int64(mode.Perm()),
-		Uid:      e.UID,
-		Gid:      e.GID,
-		ModTime:  normalizeMtime(e.Mtime),
-		Size:     info.Size(),
+		Format:     tar.FormatPAX,
+		Typeflag:   tar.TypeReg,
+		Name:       e.RelPath,
+		Mode:       int64(mode.Perm()),
+		Uid:        e.UID,
+		Gid:        e.GID,
+		ModTime:    normalizeMtime(e.Mtime),
+		Size:       info.Size(),
+		PAXRecords: metadata.PAXRecords(),
 	}
 
 	if err := tw.WriteHeader(hdr); err != nil {

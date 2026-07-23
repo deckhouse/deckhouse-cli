@@ -269,6 +269,9 @@ func readTarEntry(t *testing.T, tarPath, entryName string) ([]byte, error) {
 		require.NoError(t, err, "read tar header in %s", tarPath)
 
 		if hdr.Name == entryName {
+			_, metadataErr := archive.ParseFSMetadata(hdr)
+			require.NoError(t, metadataErr, "entry %q must carry strict FS PAX metadata", entryName)
+
 			return io.ReadAll(tr)
 		}
 	}

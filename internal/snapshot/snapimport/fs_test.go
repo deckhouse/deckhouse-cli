@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
@@ -41,6 +43,16 @@ type plainHTTPDoer struct{}
 
 func (plainHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
 	return http.DefaultClient.Do(req)
+}
+
+type failOnHTTPDoer struct {
+	called bool
+}
+
+func (d *failOnHTTPDoer) HTTPDo(*http.Request) (*http.Response, error) {
+	d.called = true
+
+	return nil, errors.New("unexpected HTTP call")
 }
 
 func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
@@ -312,18 +324,76 @@ func encodeEntry(t *testing.T, codecName string, content []byte) (string, []byte
 	return codec.Ext(), buf.Bytes()
 }
 
-// addTarEntry writes a regular file entry to tw with the given attributes and body.
-func addTarEntry(t *testing.T, tw *tar.Writer, name string, body []byte, mode int64, uid, gid int, modTime time.Time) {
+// addTarEntry writes a format-current regular entry. rawSizes can avoid decoding
+// large or deliberately corrupt test payloads while constructing the fixture.
+func addTarEntry(t *testing.T, tw *tar.Writer, name string, body []byte, mode int64, uid, gid int, modTime time.Time, rawSizes ...int64) {
 	t.Helper()
 
+	ext := fixtureCodecExt(name)
+	rawSize := int64(0)
+
+	if len(rawSizes) > 0 {
+		rawSize = rawSizes[0]
+	} else {
+		reader, err := compress.NewReader(ext, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("open fixture decoder for %s: %v", name, err)
+		}
+
+		rawSize, err = io.Copy(io.Discard, reader)
+		if err != nil {
+			t.Fatalf("decode fixture %s: %v", name, err)
+		}
+
+		if err := reader.Close(); err != nil {
+			t.Fatalf("close fixture decoder for %s: %v", name, err)
+		}
+	}
+
+	originalPath := strings.TrimSuffix(name, ext)
+	addTarEntryMetadata(t, tw, name, originalPath, codecName(ext), rawSize, body, mode, uid, gid, modTime)
+}
+
+func fixtureCodecExt(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".zst"):
+		return ".zst"
+	case strings.HasSuffix(name, ".gz"):
+		return ".gz"
+	case strings.HasSuffix(name, ".lz4"):
+		return ".lz4"
+	default:
+		return ""
+	}
+}
+
+func addTarEntryMetadata(
+	t *testing.T,
+	tw *tar.Writer,
+	name, originalPath, codec string,
+	rawSize int64,
+	body []byte,
+	mode int64,
+	uid, gid int,
+	modTime time.Time,
+) {
+	t.Helper()
+
+	metadata, err := archive.NewFSMetadata(codec, originalPath, rawSize)
+	if err != nil {
+		t.Fatalf("build tar metadata for %s: %v", name, err)
+	}
+
 	hdr := &tar.Header{
-		Typeflag: tar.TypeReg,
-		Name:     name,
-		Mode:     mode,
-		Uid:      uid,
-		Gid:      gid,
-		ModTime:  modTime,
-		Size:     int64(len(body)),
+		Format:     tar.FormatPAX,
+		Typeflag:   tar.TypeReg,
+		Name:       name,
+		Mode:       mode,
+		Uid:        uid,
+		Gid:        gid,
+		ModTime:    modTime,
+		Size:       int64(len(body)),
+		PAXRecords: metadata.PAXRecords(),
 	}
 
 	if err := tw.WriteHeader(hdr); err != nil {
@@ -469,6 +539,154 @@ func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
 
 	if total != 3 {
 		t.Errorf("expected 3 uploads, got %d", total)
+	}
+}
+
+func TestImportFSFromTar_UsesPAXForCodecSuffixedSourceNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		codec        string
+		originalPath string
+		storedPath   string
+	}{
+		{name: "none keeps zstd-looking source name", codec: "none", originalPath: "report.zst", storedPath: "report.zst"},
+		{name: "zstd keeps gzip-looking source name", codec: "zstd", originalPath: "report.gz", storedPath: "report.gz.zst"},
+		{name: "gzip keeps lz4-looking source name", codec: "gzip", originalPath: "report.lz4", storedPath: "report.lz4.gz"},
+		{name: "lz4 keeps gzip-looking source name", codec: "lz4", originalPath: "report.gz", storedPath: "report.gz.lz4"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			content := []byte("source name and codec are independent")
+			_, encoded := encodeEntry(t, tc.codec, content)
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			addTarEntryMetadata(
+				t,
+				tw,
+				tc.storedPath,
+				tc.originalPath,
+				tc.codec,
+				int64(len(content)),
+				encoded,
+				0o640,
+				12,
+				34,
+				time.Unix(10, 0).UTC(),
+			)
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write tar: %v", err)
+			}
+
+			importer := newFakeFileImporter()
+			server := httptest.NewServer(importer)
+			t.Cleanup(server.Close)
+
+			if err := importFSFromTar(
+				context.Background(),
+				plainHTTPDoer{},
+				server.URL,
+				tarPath,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			); err != nil {
+				t.Fatalf("importFSFromTar: %v", err)
+			}
+
+			if got := importer.received(tc.originalPath); !bytes.Equal(got, content) {
+				t.Fatalf("uploaded %q = %q, want %q", tc.originalPath, got, content)
+			}
+
+			if got := importer.headers[tc.originalPath].Get("X-Content-Length"); got != strconv.Itoa(len(content)) {
+				t.Fatalf("X-Content-Length = %q, want %d", got, len(content))
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_MetadataPreflightBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		second *tar.Header
+	}{
+		{
+			name: "missing metadata",
+			second: &tar.Header{
+				Typeflag: tar.TypeReg,
+				Name:     "missing.txt",
+				Mode:     0o600,
+				Size:     1,
+			},
+		},
+		{
+			name: "malformed raw size",
+			second: &tar.Header{
+				Format:   tar.FormatPAX,
+				Typeflag: tar.TypeReg,
+				Name:     "bad.txt.zst",
+				Mode:     0o600,
+				Size:     1,
+				PAXRecords: map[string]string{
+					archive.PAXFSCodec:        "zstd",
+					archive.PAXFSOriginalPath: "bad.txt",
+					archive.PAXFSRawSize:      "not-a-size",
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			addTarEntryMetadata(t, tw, "valid.txt", "valid.txt", "none", 1, []byte("v"), 0o600, 0, 0, time.Time{})
+
+			if err := tw.WriteHeader(tc.second); err != nil {
+				t.Fatalf("write malformed header: %v", err)
+			}
+
+			if _, err := tw.Write([]byte("x")); err != nil {
+				t.Fatalf("write malformed body: %v", err)
+			}
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write tar: %v", err)
+			}
+
+			doer := &failOnHTTPDoer{}
+			err := importFSFromTar(context.Background(), doer, "https://import.invalid", tarPath, discardLogger(), nil, nil, nil)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+				t.Fatalf("importFSFromTar error = %v, want ErrInvalidFSMetadata", err)
+			}
+
+			if doer.called {
+				t.Fatal("metadata preflight must reject the whole tar before the first HEAD or PUT")
+			}
+		})
 	}
 }
 
@@ -685,7 +903,7 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntry_NeverAttemptsDecompression(t 
 			var tarBuf bytes.Buffer
 
 			tw := tar.NewWriter(&tarBuf)
-			addTarEntry(t, tw, "done"+tc.ext, corrupted, 0o644, 10, 20, modTime)
+			addTarEntry(t, tw, "done"+tc.ext, corrupted, 0o644, 10, 20, modTime, int64(len(plain)))
 
 			if err := tw.Close(); err != nil {
 				t.Fatalf("close tar writer: %v", err)
@@ -1256,7 +1474,7 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 	var tarBuf bytes.Buffer
 
 	tw := tar.NewWriter(&tarBuf)
-	addTarEntry(t, tw, "bigfile.bin"+ext, encoded, 0o644, 10, 20, modTime)
+	addTarEntry(t, tw, "bigfile.bin"+ext, encoded, 0o644, 10, 20, modTime, int64(len(content)))
 
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar writer: %v", err)
