@@ -26,10 +26,12 @@ import (
 	"path/filepath"
 )
 
-// AtomicWriter writes data to "<finalPath>.tmp" and, on Commit, fsyncs the
-// data, renames to the final path, then fsyncs the parent directory.
-// A parent-directory sync failure can leave the final file published but with
-// durability unconfirmed; CommitError exposes that state to callers.
+// AtomicWriter writes data to "<finalPath>.tmp" and, on Commit, syncs the
+// data before using the platform's durable replacement operation.
+// On Unix, a parent-directory sync failure can leave the final file published
+// but with durability unconfirmed; CommitError exposes that state to callers.
+// Windows uses a write-through move, so successful publication is already
+// durable and does not require an unsupported directory-handle flush.
 // Call Abort to remove the temporary file when an error occurs.
 type AtomicWriter struct {
 	finalPath string
@@ -93,13 +95,14 @@ func CommitPublicationState(err error) PublicationState {
 
 type directorySyncHookKey struct{}
 
-// DirectorySyncHook wraps a parent-directory sync operation. Calling next
-// performs the real sync. The hook is scoped to a context so deterministic
-// operation injection does not affect concurrent writers.
+// DirectorySyncHook wraps a platform durability confirmation. Calling next
+// performs the real confirmation: a parent-directory sync on Unix and the
+// post-write-through no-op on Windows. The hook is scoped to a context so
+// deterministic operation injection does not affect concurrent writers.
 type DirectorySyncHook func(path string, next func() error) error
 
 // WithDirectorySyncHook returns a context that applies hook to
-// AtomicWriter.CommitContext and ConfirmFileDurability parent-directory syncs.
+// AtomicWriter.CommitContext and ConfirmFileDurability confirmations.
 func WithDirectorySyncHook(ctx context.Context, hook DirectorySyncHook) context.Context {
 	if hook == nil {
 		return ctx
@@ -125,7 +128,7 @@ func NewAtomicWriter(path string) (*AtomicWriter, error) {
 		ops: atomicCommitOps{
 			syncTemp:  (*os.File).Sync,
 			closeTemp: (*os.File).Close,
-			rename:    os.Rename,
+			rename:    renameDurably,
 			syncDir:   syncDir,
 		},
 	}, nil
@@ -153,15 +156,15 @@ func (w *AtomicWriter) Commit() error {
 	return w.CommitContext(context.Background())
 }
 
-// CommitContext fsyncs and closes the temporary file, checks cancellation,
-// atomically renames it to the final path, then fsyncs the parent directory.
+// CommitContext syncs and closes the temporary file, checks cancellation,
+// atomically replaces the final path with the platform's durability contract.
 //
 // Publication begins at the cancellation checkpoint immediately before Rename.
 // Cancellation observed before that point removes the temporary file and leaves
 // the final path unchanged. Once the checkpoint succeeds, cancellation no
-// longer changes the result: Rename and parent-directory sync determine the
-// return value, so CommitContext never reports pre-publication cancellation
-// after publishing.
+// longer changes the result: publication and its platform-specific durability
+// confirmation determine the return value, so CommitContext never reports
+// pre-publication cancellation after publishing.
 func (w *AtomicWriter) CommitContext(ctx context.Context) error {
 	if err := w.ops.syncTemp(w.f); err != nil {
 		w.Abort()
@@ -218,9 +221,11 @@ func runDirectorySync(ctx context.Context, path string, syncFn func(string) erro
 	})
 }
 
-// ConfirmFileDurability fsyncs path's parent directory before an already
-// published final file is trusted. Cancellation observed before the sync
-// prevents it from starting; once it starts, the sync result takes precedence.
+// ConfirmFileDurability applies the platform durability confirmation before an
+// already published final file is trusted. Unix syncs the parent directory.
+// Windows AtomicWriter publication is write-through, so no separate supported
+// directory operation exists or is required. Cancellation observed before
+// confirmation prevents it from starting; once it starts, its result wins.
 func ConfirmFileDurability(ctx context.Context, path string) error {
 	if err := ctx.Err(); err != nil {
 		return newCommitError(
@@ -265,28 +270,13 @@ func WriteFileAtomic(path string, r io.Reader) error {
 	return aw.Commit()
 }
 
-// EnsureDir creates path and all parents (MkdirAll) and then fsyncs the
-// directory so the creation is durable before any files are written into it.
+// EnsureDir creates path and all parents. Unix then syncs the directory.
+// Windows has no documented unprivileged directory-flush API, so directory
+// creation cannot be given the same explicit POSIX durability guarantee.
 func EnsureDir(path string) error {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return fmt.Errorf("creating dir %s: %w", path, err)
 	}
 
 	return syncDir(path)
-}
-
-// syncDir opens path as a directory and calls Sync to flush the entry to stable
-// storage. This makes preceding renames and creates visible after a power loss.
-func syncDir(path string) error {
-	d, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("opening dir %s for sync: %w", path, err)
-	}
-
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		return fmt.Errorf("syncing dir %s: %w", path, err)
-	}
-
-	return d.Close()
 }
