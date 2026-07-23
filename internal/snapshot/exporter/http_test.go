@@ -621,6 +621,84 @@ func TestDecodeItems_RejectsOversizedValuesBeforeMaterialization(t *testing.T) {
 	}
 }
 
+func TestDecodeItems_RejectsMalformedIgnoredValuesBeforeCallback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "InvalidEscape", value: `"bad\q"`},
+		{name: "TruncatedLiteral", value: `tru`},
+		{name: "InvalidNumber", value: `01`},
+		{name: "ObjectMissingValue", value: `{"nested":}`},
+		{name: "ArrayTrailingComma", value: `[1,]`},
+		{name: "ObjectClosedByBracket", value: `{"nested":]`},
+		{name: "ArrayClosedByBrace", value: `[{"nested":1}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := `{"unknown":` + tt.value +
+				`,"items":[{"name":"later","type":"file","uri":"later","attributes":{"size":1}}]}`
+			callbacks := 0
+
+			err := decodeItems(&oneByteReader{reader: strings.NewReader(payload)}, func(Item) error {
+				callbacks++
+
+				return nil
+			})
+			if err == nil {
+				t.Fatal("decodeItems error = nil, want malformed ignored-value rejection")
+			}
+
+			if callbacks != 0 {
+				t.Fatalf("callbacks = %d, want zero before malformed ignored value is rejected", callbacks)
+			}
+		})
+	}
+}
+
+func TestDecodeItems_AcceptsBoundedIgnoredValuesWithFragmentedReads(t *testing.T) {
+	t.Parallel()
+
+	const depth = 1_000
+
+	var nested strings.Builder
+	nested.Grow(depth*2 + 32)
+	for range depth {
+		nested.WriteByte('[')
+	}
+
+	nested.WriteString(`"escaped\\\"\nvalue"`)
+	for range depth {
+		nested.WriteByte(']')
+	}
+
+	payload := `{"apiVersion":"v1","unknown":` + nested.String() +
+		`,"flag":true,"nothing":null,"number":-1.25e+2,` +
+		`"items":[{"name":"file","type":"file","uri":"file","attributes":{"size":1}}]}`
+	callbacks := 0
+
+	err := decodeItems(&oneByteReader{reader: strings.NewReader(payload)}, func(item Item) error {
+		callbacks++
+		if item.Name != "file" {
+			t.Fatalf("item name = %q, want file", item.Name)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("decodeItems: %v", err)
+	}
+
+	if callbacks != 1 {
+		t.Fatalf("callbacks = %d, want 1", callbacks)
+	}
+}
+
 type countingReader struct {
 	reader    io.Reader
 	bytesRead int64
@@ -631,6 +709,14 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	r.bytesRead += int64(n)
 
 	return n, err
+}
+
+type oneByteReader struct {
+	reader io.Reader
+}
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	return r.reader.Read(p[:min(len(p), 1)])
 }
 
 type repeatByteReader byte

@@ -647,6 +647,10 @@ func (s *boundedJSONStream) readValue(limit int) ([]byte, error) {
 		}
 	}
 
+	if !json.Valid(value) {
+		return nil, errors.New("invalid JSON value")
+	}
+
 	return value, nil
 }
 
