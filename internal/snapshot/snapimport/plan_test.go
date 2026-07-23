@@ -20,8 +20,11 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1148,6 +1151,164 @@ func TestBuildPlanFinalReplacementCannotReadOutsideBytes(t *testing.T) {
 				t.Fatalf("BuildPlan error = %v, want ErrNonRegularArchiveArtifact", err)
 			}
 		})
+	}
+}
+
+const snapimportMountHelperScenario = "D8_SNAPSHOT_UPLOAD_MOUNT_HELPER"
+
+func TestBuildPlanAndVerifyNodeRejectMountedDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux bind-mount integration test")
+	}
+
+	for _, scenario := range []string{
+		"build-plan-directory",
+		"build-plan-regular-file",
+		"verify-node-directory",
+		"verify-node-regular-file",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			runSnapimportMountHelper(t, "^TestLinuxMountedPlanEscapeHelper$", scenario)
+		})
+	}
+}
+
+func TestLinuxMountedPlanEscapeHelper(t *testing.T) {
+	scenario := os.Getenv(snapimportMountHelperScenario)
+	if scenario == "" {
+		return
+	}
+
+	root := buildTwoLevelArchive(t)
+	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
+
+	mount := func() error {
+		return bindMountForTest(sourcePath, targetPath)
+	}
+
+	var err error
+
+	switch scenario {
+	case "build-plan-directory", "build-plan-regular-file":
+		mounted := false
+		var mountErr error
+
+		_, err = buildPlan(root, func(path string) {
+			if mounted || mountErr != nil || path != targetPath {
+				return
+			}
+
+			mountErr = mount()
+			mounted = mountErr == nil
+		})
+		if mountErr != nil {
+			fmt.Printf("mount namespace unavailable: %v\n", mountErr)
+
+			return
+		}
+
+		if !mounted {
+			t.Fatalf("boundary hook for %s was not reached", targetPath)
+		}
+	case "verify-node-directory", "verify-node-regular-file":
+		if mountErr := mount(); mountErr != nil {
+			fmt.Printf("mount namespace unavailable: %v\n", mountErr)
+
+			return
+		}
+
+		err = archive.VerifyNode(root)
+	default:
+		t.Fatalf("unknown scenario %q", scenario)
+	}
+
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("%s error = %v, want ErrNonRegularArchiveArtifact", scenario, err)
+	}
+}
+
+func matchingOutsideMountFixture(t *testing.T, root string, regularFile bool) (string, string) {
+	t.Helper()
+
+	if regularFile {
+		target := filepath.Join(root, archive.SnapshotYAMLName)
+		data, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read mounted file target: %v", err)
+		}
+
+		source := filepath.Join(t.TempDir(), archive.SnapshotYAMLName)
+		if err := os.WriteFile(source, data, 0o600); err != nil {
+			t.Fatalf("write mounted file source: %v", err)
+		}
+
+		return source, target
+	}
+
+	target := filepath.Join(root, archive.ManifestsDirName)
+	source := filepath.Join(t.TempDir(), archive.ManifestsDirName)
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatalf("mkdir mounted directory source: %v", err)
+	}
+
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read mounted directory target: %v", err)
+	}
+
+	for _, entry := range entries {
+		data, readErr := os.ReadFile(filepath.Join(target, entry.Name()))
+		if readErr != nil {
+			t.Fatalf("read mounted directory entry: %v", readErr)
+		}
+
+		if writeErr := os.WriteFile(filepath.Join(source, entry.Name()), data, 0o600); writeErr != nil {
+			t.Fatalf("write mounted directory entry: %v", writeErr)
+		}
+	}
+
+	return source, target
+}
+
+func bindMountForTest(source, target string) error {
+	output, err := exec.Command("mount", "--bind", source, target).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mount --bind: %w: %s", err, output)
+	}
+
+	return nil
+}
+
+func runSnapimportMountHelper(t *testing.T, testName, scenario string) {
+	t.Helper()
+
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux bind-mount integration test")
+	}
+
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skipf("unshare is unavailable: %v", err)
+	}
+
+	cmd := exec.Command(unshare,
+		"--user", "--map-root-user", "--mount", "--fork",
+		os.Args[0], "-test.v", "-test.run="+testName,
+	)
+	cmd.Env = append(os.Environ(), snapimportMountHelperScenario+"="+scenario)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		text := string(output)
+		if strings.Contains(text, "unshare failed") || strings.Contains(text, "Operation not permitted") {
+			t.Skipf("isolated mount namespace is unavailable:\n%s", text)
+		}
+
+		t.Fatalf("mount helper failed: %v\n%s", err, text)
+	}
+
+	if strings.Contains(string(output), "mount namespace unavailable:") {
+		t.Skipf("isolated bind mounts are unavailable:\n%s", output)
 	}
 }
 

@@ -1,4 +1,4 @@
-//go:build unix
+//go:build unix && !linux
 
 /*
 Copyright 2026 Flant JSC
@@ -19,8 +19,10 @@ limitations under the License.
 package archive
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
 
 	"golang.org/x/sys/unix"
 )
@@ -67,6 +69,12 @@ func openArchiveAt(parent *os.File, name, path string, wantDir bool) (*os.File, 
 		return nil, fmt.Errorf("open archive path %s: invalid descriptor", path)
 	}
 
+	if err := verifySameArchiveMount(parent, file, path); err != nil {
+		_ = file.Close()
+
+		return nil, err
+	}
+
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
@@ -81,4 +89,39 @@ func openArchiveAt(parent *os.File, name, path string, wantDir bool) (*os.File, 
 	}
 
 	return file, nil
+}
+
+func verifySameArchiveMount(parent, child *os.File, path string) error {
+	parentIdentity, err := archiveMountIdentity(parent)
+	if err != nil {
+		return fmt.Errorf("identify parent mount for archive path %s: %w", path, err)
+	}
+
+	childIdentity, err := archiveMountIdentity(child)
+	if err != nil {
+		return fmt.Errorf("identify opened mount for archive path %s: %w", path, err)
+	}
+
+	if !reflect.DeepEqual(parentIdentity, childIdentity) {
+		return fmt.Errorf("%s crosses an archive mount boundary: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+func archiveMountIdentity(file *os.File) (any, error) {
+	var stat unix.Statfs_t
+	if err := unix.Fstatfs(int(file.Fd()), &stat); err != nil {
+		return nil, errors.Join(ErrArchiveMountBoundaryUnsupported, err)
+	}
+
+	value := reflect.ValueOf(stat)
+	for _, name := range []string{"Fsid", "F_fsid"} {
+		field := value.FieldByName(name)
+		if field.IsValid() && field.CanInterface() {
+			return field.Interface(), nil
+		}
+	}
+
+	return nil, fmt.Errorf("statfs exposes no filesystem identity: %w", ErrArchiveMountBoundaryUnsupported)
 }

@@ -48,6 +48,10 @@ const (
 // ErrNonRegularArchiveArtifact marks an archive path whose host-filesystem type is unsafe.
 var ErrNonRegularArchiveArtifact = errors.New("non-regular archive artifact")
 
+// ErrArchiveMountBoundaryUnsupported marks a platform or runtime that cannot prove an opened
+// archive descendant remained on its parent's mount. Upload traversal fails closed in this case.
+var ErrArchiveMountBoundaryUnsupported = errors.New("archive mount-boundary verification unsupported")
+
 // ErrInvalidSnapshotYAML is returned by ValidateSnapshotYAML/ValidateNodeMetadata when a
 // node's snapshot.yaml violates a structural metadata invariant. snapshot.yaml is EXCLUDED
 // from the integrity digest (ComputeNodeChecksum/VerifyNode), so these invariants are not
