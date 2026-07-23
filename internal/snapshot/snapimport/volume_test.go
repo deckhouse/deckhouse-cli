@@ -965,6 +965,143 @@ func TestPutBlock_RejectsConflictOffsetLoopWithoutExtraProgress(t *testing.T) {
 	}
 }
 
+func TestPutBlock_ZstdAllowsRollbackAfterSuccessfulChunk(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("restart-rollback-"), blockPutPayloadLimit/len("restart-rollback-")+2)
+	payload = payload[:blockPutPayloadLimit+17]
+	dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+	writeCompressedProofFixture(t, dataFile, "zstd", payload, false, nil)
+
+	var (
+		received []byte
+		offsets  []int64
+		putCount int
+	)
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+
+		if req.Method == http.MethodHead {
+			header.Set("X-Next-Offset", "0")
+
+			return newTestHTTPResponse(http.StatusOK, header), nil
+		}
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+		if err != nil {
+			return nil, err
+		}
+
+		offsets = append(offsets, offset)
+		putCount++
+
+		if putCount == 2 {
+			// The producer restarted after the first successful chunk and lost its
+			// in-memory written offset. Its 409 legitimately rolls back to zero.
+			received = nil
+			header.Set("X-Expected-Offset", "0")
+
+			return newTestHTTPResponse(http.StatusConflict, header), nil
+		}
+
+		received = append(received, body...)
+		next := offset + int64(len(body))
+		header.Set("X-Next-Offset", strconv.FormatInt(next, 10))
+
+		statusCode := http.StatusNoContent
+		if next == int64(len(payload)) {
+			statusCode = http.StatusCreated
+		}
+
+		return newTestHTTPResponse(statusCode, header), nil
+	})
+
+	if err := putBlock(
+		context.Background(),
+		doer,
+		"https://importer.local/block",
+		dataFile,
+		".zst",
+		int64(len(payload)),
+		discardLogger(),
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("putBlock: %v", err)
+	}
+
+	wantOffsets := []int64{0, blockPutPayloadLimit, 0, blockPutPayloadLimit}
+	if !slices.Equal(offsets, wantOffsets) {
+		t.Errorf("PUT offsets = %v, want %v", offsets, wantOffsets)
+	}
+
+	if !bytes.Equal(received, payload) {
+		t.Errorf("re-uploaded suffix differs after producer rollback: got %d bytes, want %d", len(received), len(payload))
+	}
+}
+
+func TestBlockConflictTracker_BoundsOnlyConsecutiveConflicts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("error: consecutive cycle", func(t *testing.T) {
+		t.Parallel()
+
+		var tracker blockConflictTracker
+
+		if err := tracker.observe(0, 1); err != nil {
+			t.Fatalf("first conflict: %v", err)
+		}
+
+		if err := tracker.observe(1, 0); err == nil {
+			t.Fatal("expected consecutive conflict cycle error, got nil")
+		}
+	})
+
+	t.Run("error: bounded acyclic conflicts", func(t *testing.T) {
+		t.Parallel()
+
+		var tracker blockConflictTracker
+
+		for offset := int64(0); offset < maxConsecutiveBlockConflicts; offset++ {
+			if err := tracker.observe(offset, offset+1); err != nil {
+				t.Fatalf("conflict %d: %v", offset, err)
+			}
+		}
+
+		if err := tracker.observe(maxConsecutiveBlockConflicts, maxConsecutiveBlockConflicts+1); err == nil {
+			t.Fatal("expected bounded consecutive-conflict error, got nil")
+		}
+	})
+
+	t.Run("success resets prior offsets", func(t *testing.T) {
+		t.Parallel()
+
+		var tracker blockConflictTracker
+
+		for i := 0; i < 10_000; i++ {
+			if err := tracker.observe(32, 0); err != nil {
+				t.Fatalf("iteration %d conflict: %v", i, err)
+			}
+
+			tracker.reset()
+		}
+
+		if tracker.count != 0 {
+			t.Errorf("tracker count = %d after successes, want 0", tracker.count)
+		}
+
+		if len(tracker.offsets) != maxConsecutiveBlockConflicts+1 {
+			t.Errorf("tracker capacity = %d, want fixed %d", len(tracker.offsets), maxConsecutiveBlockConflicts+1)
+		}
+	})
+}
+
 // TestPutBlockCompressed_ResumesViaFastForward verifies that resuming from a nonzero
 // HEAD-reported offset re-derives the correct decompressed position via
 // io.CopyN(io.Discard, ...) fast-forward and uploads only the remainder, so that the
@@ -1686,8 +1823,8 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 				}
 
 				return &http.Response{
-					StatusCode: http.StatusCreated,
-					Status:     "201 Created",
+					StatusCode: http.StatusNoContent,
+					Status:     "204 No Content",
 					Header:     header,
 					Body:       io.NopCloser(bytes.NewReader(nil)),
 				}, nil
@@ -1713,6 +1850,68 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 
 			if got != tc.want {
 				t.Errorf("next offset = %d, want %d", got, tc.want)
+			}
+
+			if reposition {
+				t.Error("successful PUT unexpectedly requested reposition")
+			}
+		})
+	}
+}
+
+func TestDoBlockChunk_EnforcesProducerSuccessStatusByPosition(t *testing.T) {
+	t.Parallel()
+
+	const totalSize = int64(10)
+
+	tests := []struct {
+		name       string
+		requestEnd int64
+		statusCode int
+		wantErr    bool
+	}{
+		{name: "success: 204 intermediate", requestEnd: 7, statusCode: http.StatusNoContent},
+		{name: "error: 201 intermediate", requestEnd: 7, statusCode: http.StatusCreated, wantErr: true},
+		{name: "success: 201 final", requestEnd: totalSize, statusCode: http.StatusCreated},
+		{name: "error: 204 final", requestEnd: totalSize, statusCode: http.StatusNoContent, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				header.Set("X-Next-Offset", strconv.FormatInt(tc.requestEnd, 10))
+
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     strconv.Itoa(tc.statusCode) + " " + http.StatusText(tc.statusCode),
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.local/block", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			_, reposition, err := doBlockChunk(doer, req, 4, tc.requestEnd, totalSize)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected status-position error, got nil")
+				}
+
+				if reposition {
+					t.Error("impossible success status requested reposition")
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("doBlockChunk: %v", err)
 			}
 
 			if reposition {
@@ -1895,25 +2094,25 @@ func TestSendVolumeData_BlockOffsetsGateProgressAndFinalize(t *testing.T) {
 	}
 }
 
-// TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal verifies that an offset already equal to
-// totalSize (a fully-transferred-but-not-yet-finalized resume) never opens dataFile or
-// builds a decode reader: pointing dataFile at a path that does not exist would fail
-// immediately if putBlock tried to open it, so a nil return proves the short-circuit
-// fired before any file I/O.
-func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
+// TestPutBlock_SkipsRawFileWhenOffsetEqualsTotal verifies that a raw payload needs no
+// second local read once HEAD proves the whole file durable. Compressed payloads are
+// deliberately different: they must reopen the archive to prove exact decoded size.
+func TestPutBlock_SkipsRawFileWhenOffsetEqualsTotal(t *testing.T) {
+	t.Parallel()
+
 	imp := &fakeBlockImporter{}
 	imp.seed(bytes.Repeat([]byte("x"), 100))
 
 	srv := httptest.NewServer(imp)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	missing := filepath.Join(t.TempDir(), "data.bin.zst")
+	missing := filepath.Join(t.TempDir(), "data.bin")
 
 	activated := 0
 	reported := 0
 
-	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, ".zst", 100, discardLogger(), func(n int) { reported += n }, func() { activated++ }); err != nil {
-		t.Fatalf("putBlock with offset==totalSize must skip decoding entirely, got error: %v", err)
+	if err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, missing, "", 100, discardLogger(), func(n int) { reported += n }, func() { activated++ }); err != nil {
+		t.Fatalf("putBlock raw full skip: %v", err)
 	}
 
 	// A fully server-side-skipped block volume (offset==totalSize on HEAD) must never
@@ -1924,6 +2123,392 @@ func TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal(t *testing.T) {
 
 	if reported != 100 {
 		t.Errorf("reported progress = %d, want 100 durable bytes from HEAD", reported)
+	}
+}
+
+func TestSendVolumeData_CompressedFullSkipRequiresExactDecodedSize(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("full-skip-proof-"), 200)
+
+	tests := []struct {
+		name      string
+		codec     string
+		ext       string
+		totalSize int64
+		mutate    func([]byte) []byte
+		noFCS     bool
+		wantErr   bool
+	}{
+		{name: "success: zstd exact", codec: "zstd", ext: ".zst", totalSize: int64(len(payload))},
+		{name: "error: zstd short", codec: "zstd", ext: ".zst", totalSize: int64(len(payload) + 1), wantErr: true},
+		{name: "error: zstd extra", codec: "zstd", ext: ".zst", totalSize: int64(len(payload) - 1), wantErr: true},
+		{name: "error: zstd truncated", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: truncateLastByte, wantErr: true},
+		{name: "error: zstd corrupt", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: mutateFirstByte, wantErr: true},
+		{name: "error: zstd content size less", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), noFCS: true, wantErr: true},
+		{name: "success: gzip exact", codec: "gzip", ext: ".gz", totalSize: int64(len(payload))},
+		{name: "error: gzip short", codec: "gzip", ext: ".gz", totalSize: int64(len(payload) + 1), wantErr: true},
+		{name: "error: gzip extra", codec: "gzip", ext: ".gz", totalSize: int64(len(payload) - 1), wantErr: true},
+		{name: "error: gzip truncated", codec: "gzip", ext: ".gz", totalSize: int64(len(payload)), mutate: truncateLastByte, wantErr: true},
+		{name: "success: lz4 exact", codec: "lz4", ext: ".lz4", totalSize: int64(len(payload))},
+		{name: "error: lz4 short", codec: "lz4", ext: ".lz4", totalSize: int64(len(payload) + 1), wantErr: true},
+		{name: "error: lz4 extra", codec: "lz4", ext: ".lz4", totalSize: int64(len(payload) - 1), wantErr: true},
+		{name: "error: lz4 truncated", codec: "lz4", ext: ".lz4", totalSize: int64(len(payload)), mutate: truncateLastByte, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataFile := filepath.Join(t.TempDir(), "data.bin"+tc.ext)
+			writeCompressedProofFixture(t, dataFile, tc.codec, payload, tc.noFCS, tc.mutate)
+
+			finished := 0
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				header := http.Header{}
+
+				switch req.Method {
+				case http.MethodHead:
+					header.Set("X-Next-Offset", strconv.FormatInt(tc.totalSize, 10))
+				case http.MethodPut:
+					t.Fatal("full compressed skip must not send PUT")
+				case http.MethodPost:
+					finished++
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			leaf := PlannedNode{DataFile: dataFile, Ext: tc.ext, Size: strconv.FormatInt(tc.totalSize, 10)}
+			importer := &clusterVolumeImporter{log: discardLogger()}
+
+			err := importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://importer.local",
+				volumeModeBlock,
+				leaf,
+				"namespace",
+				"data-import",
+				nil,
+				nil,
+				nil,
+			)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected decoded-size proof error, got nil")
+				}
+
+				if finished != 0 {
+					t.Errorf("finished POST count = %d, want 0", finished)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("sendVolumeData: %v", err)
+			}
+
+			if finished != 1 {
+				t.Errorf("finished POST count = %d, want 1", finished)
+			}
+		})
+	}
+}
+
+func truncateLastByte(data []byte) []byte {
+	return append([]byte(nil), data[:len(data)-1]...)
+}
+
+func mutateFirstByte(data []byte) []byte {
+	corrupt := append([]byte(nil), data...)
+	corrupt[0] ^= 0xFF
+
+	return corrupt
+}
+
+func writeCompressedProofFixture(
+	t *testing.T,
+	path, codecName string,
+	payload []byte,
+	noFCS bool,
+	mutate func([]byte) []byte,
+) {
+	t.Helper()
+
+	codec, err := compress.New(codecName, 0)
+	if err != nil {
+		t.Fatalf("compress.New(%q): %v", codecName, err)
+	}
+
+	var encoded []byte
+
+	if codecName == "zstd" {
+		var buf bytes.Buffer
+
+		if err := codec.EncodeFrameStream(&buf, bytes.NewReader(payload), int64(len(payload))); err != nil {
+			t.Fatalf("EncodeFrameStream(%q): %v", codecName, err)
+		}
+
+		encoded = buf.Bytes()
+	} else {
+		encoded, err = codec.EncodeFrame(payload)
+		if err != nil {
+			t.Fatalf("EncodeFrame(%q): %v", codecName, err)
+		}
+	}
+
+	if noFCS {
+		encoded = removeZstdContentSize(t, encoded)
+	}
+
+	if mutate != nil {
+		encoded = mutate(encoded)
+	}
+
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatalf("write compressed proof fixture: %v", err)
+	}
+}
+
+func removeZstdContentSize(t *testing.T, frame []byte) []byte {
+	t.Helper()
+
+	if len(frame) < 6 {
+		t.Fatalf("zstd fixture is too short: %d", len(frame))
+	}
+
+	fhd := frame[4]
+	if fhd&0x03 != 0 {
+		t.Fatalf("zstd fixture unexpectedly carries a dictionary ID: descriptor 0x%02x", fhd)
+	}
+
+	fcsFlag := fhd >> 6
+	singleSegment := fhd&(1<<5) != 0
+
+	fcsSize := 0
+	switch fcsFlag {
+	case 1:
+		fcsSize = 2
+	case 2:
+		fcsSize = 4
+	case 3:
+		fcsSize = 8
+	default:
+		if singleSegment {
+			fcsSize = 1
+		}
+	}
+
+	if fcsSize == 0 || len(frame) < 5+fcsSize {
+		t.Fatalf("zstd fixture has no removable content size: descriptor 0x%02x", fhd)
+	}
+
+	contentSizeLess := make([]byte, 0, len(frame)-fcsSize+1)
+	contentSizeLess = append(contentSizeLess, frame[:4]...)
+	contentSizeLess = append(contentSizeLess, fhd&0x1F)
+	contentSizeLess = append(contentSizeLess, 0x00) // Minimal Window_Descriptor.
+	contentSizeLess = append(contentSizeLess, frame[5+fcsSize:]...)
+
+	return contentSizeLess
+}
+
+func TestSendVolumeData_TwoRunCompressedUndercountNeverFinalizes(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("two-run-undercount-"), 300)
+	totalSize := int64(len(payload) - 7)
+	dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+	writeCompressedProofFixture(t, dataFile, "zstd", payload, false, nil)
+
+	var (
+		written       []byte
+		putCount      int
+		finishedCount int
+	)
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+
+		switch req.Method {
+		case http.MethodHead:
+			header.Set("X-Next-Offset", strconv.Itoa(len(written)))
+
+			return newTestHTTPResponse(http.StatusOK, header), nil
+		case http.MethodPut:
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, err
+			}
+
+			written = append(written, body...)
+			putCount++
+			header.Set("X-Next-Offset", strconv.Itoa(len(written)))
+
+			return newTestHTTPResponse(http.StatusCreated, header), nil
+		case http.MethodPost:
+			finishedCount++
+
+			return newTestHTTPResponse(http.StatusNoContent, header), nil
+		default:
+			return newTestHTTPResponse(http.StatusMethodNotAllowed, header), nil
+		}
+	})
+
+	leaf := PlannedNode{DataFile: dataFile, Ext: ".zst", Size: strconv.FormatInt(totalSize, 10)}
+	importer := &clusterVolumeImporter{log: discardLogger()}
+
+	for run := 1; run <= 2; run++ {
+		err := importer.sendVolumeData(
+			context.Background(),
+			doer,
+			"https://importer.local",
+			volumeModeBlock,
+			leaf,
+			"namespace",
+			"data-import",
+			nil,
+			nil,
+			nil,
+		)
+		if err == nil {
+			t.Fatalf("run %d: expected undercount error, got nil", run)
+		}
+	}
+
+	if int64(len(written)) != totalSize {
+		t.Errorf("durably written bytes = %d, want declared total %d", len(written), totalSize)
+	}
+
+	if putCount != 1 {
+		t.Errorf("PUT count = %d, want 1 from the first run only", putCount)
+	}
+
+	if finishedCount != 0 {
+		t.Errorf("finished POST count = %d, want 0 across both runs", finishedCount)
+	}
+}
+
+func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("conflict-to-total-"), 200)
+
+	tests := []struct {
+		name      string
+		totalSize int64
+		wantErr   bool
+	}{
+		{name: "success: exact", totalSize: int64(len(payload))},
+		{name: "error: extra decoded byte", totalSize: int64(len(payload) - 1), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+			writeCompressedProofFixture(t, dataFile, "zstd", payload, false, nil)
+
+			putCount := 0
+			finishedCount := 0
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				header := http.Header{}
+
+				switch req.Method {
+				case http.MethodHead:
+					header.Set("X-Next-Offset", "0")
+
+					return newTestHTTPResponse(http.StatusOK, header), nil
+				case http.MethodPut:
+					putCount++
+					header.Set("X-Expected-Offset", strconv.FormatInt(tc.totalSize, 10))
+
+					return newTestHTTPResponse(http.StatusConflict, header), nil
+				case http.MethodPost:
+					finishedCount++
+
+					return newTestHTTPResponse(http.StatusNoContent, header), nil
+				default:
+					return newTestHTTPResponse(http.StatusMethodNotAllowed, header), nil
+				}
+			})
+
+			leaf := PlannedNode{DataFile: dataFile, Ext: ".zst", Size: strconv.FormatInt(tc.totalSize, 10)}
+			importer := &clusterVolumeImporter{log: discardLogger()}
+
+			err := importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://importer.local",
+				volumeModeBlock,
+				leaf,
+				"namespace",
+				"data-import",
+				nil,
+				nil,
+				nil,
+			)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected decoded-size proof error, got nil")
+				}
+
+				if finishedCount != 0 {
+					t.Errorf("finished POST count = %d, want 0", finishedCount)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("sendVolumeData: %v", err)
+				}
+
+				if finishedCount != 1 {
+					t.Errorf("finished POST count = %d, want 1", finishedCount)
+				}
+			}
+
+			if putCount != 1 {
+				t.Errorf("PUT count = %d, want one producer conflict", putCount)
+			}
+		})
+	}
+}
+
+func TestCountDecodedBlock_HonorsContextAndBoundsReads(t *testing.T) {
+	t.Parallel()
+
+	const maxProofRead = 32 * 1024
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	reader := &cancelAfterRead{cancel: cancel}
+	decoded, err := countDecodedBlock(ctx, reader, maxProofRead*2)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+
+	if decoded != maxProofRead {
+		t.Errorf("decoded bytes = %d, want one bounded buffer %d", decoded, maxProofRead)
+	}
+
+	if reader.maxRead > maxProofRead {
+		t.Errorf("largest decode-count Read buffer = %d, want <= %d", reader.maxRead, maxProofRead)
+	}
+}
+
+func newTestHTTPResponse(statusCode int, header http.Header) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Status:     strconv.Itoa(statusCode) + " " + http.StatusText(statusCode),
+		Header:     header,
+		Body:       io.NopCloser(bytes.NewReader(nil)),
 	}
 }
 

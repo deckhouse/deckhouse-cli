@@ -105,7 +105,7 @@ func SkipZstdFrames(rs io.ReadSeeker, n int) (int64, error) {
 	w := &frameWalker{rs: rs, end: end, pos: start}
 
 	for i := range n {
-		if err := w.walkFrame(); err != nil {
+		if _, err := w.walkFrame(); err != nil {
 			return 0, fmt.Errorf("skip zstd frames: walking frame %d: %w", i, err)
 		}
 	}
@@ -125,6 +125,88 @@ func SkipZstdFrames(rs io.ReadSeeker, n int) (int64, error) {
 	return target, nil
 }
 
+// ZstdDecodedSize returns the sum of the mandatory Frame_Content_Size fields
+// in every frame from the ReadSeeker's current position through EOF.
+//
+// The proof reads only fixed-size frame and block metadata. Compressed block
+// payloads are skipped with Seek, so memory and bytes read are independent of
+// the decoded volume size. Every frame must declare its content size; a
+// content-size-less, malformed, truncated, empty, or overflowing stream wraps
+// ErrCorruptZstdFrame. The reader position is restored before return.
+func ZstdDecodedSize(rs io.ReadSeeker) (int64, error) {
+	start, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("sum zstd frame content sizes: querying current offset: %w", err)
+	}
+
+	end, err := rs.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, fmt.Errorf("sum zstd frame content sizes: querying end offset: %w", err)
+	}
+
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("sum zstd frame content sizes: restoring offset: %w", err)
+	}
+
+	w := &frameWalker{rs: rs, end: end, pos: start}
+
+	var total int64
+
+	frameCount := 0
+
+	for w.pos < w.end {
+		hdr, walkErr := w.walkFrame()
+		if walkErr != nil {
+			return 0, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("sum zstd frame content sizes: walking frame %d: %w", frameCount, walkErr),
+			)
+		}
+
+		if !hdr.hasContentSize {
+			return 0, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("%w: frame %d has no Frame_Content_Size", ErrCorruptZstdFrame, frameCount),
+			)
+		}
+
+		total, err = addChecked(total, hdr.contentSize)
+		if err != nil {
+			return 0, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("sum zstd frame content sizes: frame %d: %w", frameCount, err),
+			)
+		}
+
+		frameCount++
+	}
+
+	if frameCount == 0 {
+		return 0, restoreZstdPosition(
+			rs,
+			start,
+			fmt.Errorf("%w: stream contains no frames", ErrCorruptZstdFrame),
+		)
+	}
+
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("sum zstd frame content sizes: restoring offset after validation: %w", err)
+	}
+
+	return total, nil
+}
+
+func restoreZstdPosition(rs io.ReadSeeker, start int64, cause error) error {
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return errors.Join(cause, fmt.Errorf("restoring zstd reader offset: %w", err))
+	}
+
+	return cause
+}
+
 // frameWalker carries the shared state for a single SkipZstdFrames call: the
 // reader, the real end bound (EOF), the running position, and a fixed 8-byte
 // scratch buffer large enough for the widest field read (an 8-byte Frame_Content_Size).
@@ -135,10 +217,11 @@ type frameWalker struct {
 	buf [8]byte
 }
 
-// frameHeader holds the only per-frame header fact the walker needs after the
-// header is consumed: whether a 4-byte content checksum trails the last block.
+// frameHeader holds the per-frame facts needed after the header is consumed.
 type frameHeader struct {
-	hasChecksum bool
+	hasChecksum    bool
+	hasContentSize bool
+	contentSize    int64
 }
 
 // ensure reports whether need bytes are available from the current position
@@ -254,27 +337,40 @@ func (w *frameWalker) parseHeaderFields(fhd byte) (frameHeader, error) {
 		}
 	}
 
-	if fcsSize := fcsFieldSize(fcsFlag, singleSegment); fcsSize > 0 {
-		if _, err := w.read(fcsSize); err != nil {
-			return frameHeader{}, err
-		}
+	fcsSize := fcsFieldSize(fcsFlag, singleSegment)
+	if fcsSize == 0 {
+		return frameHeader{hasChecksum: hasChecksum}, nil
 	}
 
-	return frameHeader{hasChecksum: hasChecksum}, nil
+	fcsBytes, err := w.read(fcsSize)
+	if err != nil {
+		return frameHeader{}, err
+	}
+
+	contentSize, err := decodeFrameContentSize(fcsBytes)
+	if err != nil {
+		return frameHeader{}, err
+	}
+
+	return frameHeader{
+		hasChecksum:    hasChecksum,
+		hasContentSize: true,
+		contentSize:    contentSize,
+	}, nil
 }
 
 // walkFrame advances the walker past one whole frame: magic, header, every data
 // block, and the optional trailing content checksum.
-func (w *frameWalker) walkFrame() error {
+func (w *frameWalker) walkFrame() (frameHeader, error) {
 	hdr, err := w.readMagicAndHeader()
 	if err != nil {
-		return err
+		return frameHeader{}, err
 	}
 
 	for {
 		last, err := w.walkBlock()
 		if err != nil {
-			return err
+			return frameHeader{}, err
 		}
 
 		if last {
@@ -284,11 +380,11 @@ func (w *frameWalker) walkFrame() error {
 
 	if hdr.hasChecksum {
 		if _, err := w.read(checksumLen); err != nil {
-			return err
+			return frameHeader{}, err
 		}
 	}
 
-	return nil
+	return hdr, nil
 }
 
 // walkBlock consumes one block header and its physical payload, returning
@@ -357,6 +453,28 @@ func fcsFieldSize(flag byte, singleSegment bool) int {
 		}
 
 		return 0
+	}
+}
+
+// decodeFrameContentSize decodes an RFC 8878 Frame_Content_Size field. The
+// two-byte representation carries an implicit 256-byte offset.
+func decodeFrameContentSize(field []byte) (int64, error) {
+	switch len(field) {
+	case 1:
+		return int64(field[0]), nil
+	case 2:
+		return int64(binary.LittleEndian.Uint16(field)) + 256, nil
+	case 4:
+		return int64(binary.LittleEndian.Uint32(field)), nil
+	case 8:
+		size := binary.LittleEndian.Uint64(field)
+		if size > math.MaxInt64 {
+			return 0, fmt.Errorf("%w: Frame_Content_Size %d exceeds int64", ErrCorruptZstdFrame, size)
+		}
+
+		return int64(size), nil
+	default:
+		return 0, fmt.Errorf("%w: invalid Frame_Content_Size width %d", ErrCorruptZstdFrame, len(field))
 	}
 }
 
