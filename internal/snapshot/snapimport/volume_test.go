@@ -20,6 +20,7 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -1374,5 +1375,202 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 	// with that entry's exact decompressed size.
 	if want := []int64{int64(len(content))}; len(totals) != len(want) || totals[0] != want[0] {
 		t.Errorf("setTotal calls = %v, want %v (FS branch must thread setTotal through to importFSFromTar)", totals, want)
+	}
+}
+
+// TestBlockTotalSize covers every codec and every invalid-size shape
+// blockTotalSize must handle: the raw (ext=="") on-disk size is cross-checked
+// against the captured VolumeInfo.Size for BOTH a short and a long mismatch,
+// while a compressed file's on-disk (compressed) size is never compared to
+// the captured (decompressed) size at all. A missing or unparsable captured
+// size fails regardless of codec.
+func TestBlockTotalSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		ext         string
+		size        string
+		fileContent []byte // nil => no on-disk file at all
+		wantTotal   int64
+		wantErr     error // nil => any non-nil error is acceptable
+		wantErrNil  bool
+	}{
+		{
+			name:        "raw exact match",
+			ext:         "",
+			size:        "10",
+			fileContent: []byte("0123456789"),
+			wantTotal:   10,
+			wantErrNil:  true,
+		},
+		{
+			name:        "raw short mismatch (on-disk smaller than captured)",
+			ext:         "",
+			size:        "10",
+			fileContent: []byte("12345"),
+			wantErr:     ErrRawBlockSizeMismatch,
+		},
+		{
+			name:        "raw long mismatch (on-disk larger than captured)",
+			ext:         "",
+			size:        "10",
+			fileContent: []byte("012345678901234567890123456789"),
+			wantErr:     ErrRawBlockSizeMismatch,
+		},
+		{
+			name:        "zstd: on-disk (compressed) size never compared to captured size",
+			ext:         ".zst",
+			size:        "10Gi",
+			fileContent: []byte("short-compressed-stand-in"),
+			wantTotal:   10 * 1024 * 1024 * 1024,
+			wantErrNil:  true,
+		},
+		{
+			name:        "gzip: captured size is authoritative",
+			ext:         ".gz",
+			size:        "5Mi",
+			fileContent: []byte("x"),
+			wantTotal:   5 * 1024 * 1024,
+			wantErrNil:  true,
+		},
+		{
+			name:        "lz4: captured size is authoritative",
+			ext:         ".lz4",
+			size:        "1Ki",
+			fileContent: []byte("x"),
+			wantTotal:   1024,
+			wantErrNil:  true,
+		},
+		{
+			name:        "missing captured size",
+			ext:         "",
+			size:        "",
+			fileContent: []byte("12345"),
+			wantErrNil:  false,
+		},
+		{
+			name:        "invalid captured size",
+			ext:         "",
+			size:        "not-a-quantity",
+			fileContent: []byte("12345"),
+			wantErrNil:  false,
+		},
+		{
+			name:       "raw file missing on disk",
+			ext:        "",
+			size:       "10",
+			wantErrNil: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			if tc.fileContent != nil {
+				if err := os.WriteFile(dataFile, tc.fileContent, 0o600); err != nil {
+					t.Fatalf("write %s: %v", dataFile, err)
+				}
+			}
+
+			got, err := blockTotalSize(dataFile, tc.size, tc.ext)
+
+			if tc.wantErrNil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				if got != tc.wantTotal {
+					t.Errorf("total = %d, want %d", got, tc.wantTotal)
+				}
+
+				return
+			}
+
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("expected error wrapping %v, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// noHTTPDoer fails the test immediately if HTTPDo is ever called. It is used
+// to prove that a preflight failure (invalid/mismatched captured size) sends
+// zero HTTP requests -- the check must run strictly before any HEAD/PUT.
+type noHTTPDoer struct{ t *testing.T }
+
+func (d noHTTPDoer) HTTPDo(_ *http.Request) (*http.Response, error) {
+	d.t.Helper()
+	d.t.Fatal("unexpected HTTP call: the size preflight must fail before any HEAD/PUT is attempted")
+
+	return nil, nil
+}
+
+// TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP verifies that a raw
+// (codec none) block leaf whose on-disk data.bin size disagrees with its
+// captured VolumeInfo.Size fails deterministically via blockTotalSize and
+// never issues a single HTTP request (no HEAD, no PUT).
+func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin")
+
+	if err := os.WriteFile(dataFile, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("write data.bin: %v", err)
+	}
+
+	leaf := PlannedNode{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc-1",
+		DataFile:   dataFile,
+		Ext:        "",
+		Size:       "10", // disagrees with the 5-byte file actually on disk
+	}
+
+	imp := &clusterVolumeImporter{log: discardLogger()}
+
+	err := imp.sendVolumeData(context.Background(), noHTTPDoer{t: t}, "https://importer.local", volumeModeBlock, leaf, targetNS, "pvc-1", nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for raw size mismatch, got nil")
+	}
+
+	if !errors.Is(err, ErrRawBlockSizeMismatch) {
+		t.Errorf("expected ErrRawBlockSizeMismatch, got: %v", err)
+	}
+}
+
+// TestSendVolumeData_Block_InvalidSize_SendsNoHTTP verifies that a block leaf
+// with a missing/unparsable captured size fails before any HTTP request,
+// for every codec (raw and compressed alike).
+func TestSendVolumeData_Block_InvalidSize_SendsNoHTTP(t *testing.T) {
+	for _, tc := range blockCodecCases {
+		t.Run(tc.codec, func(t *testing.T) {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+
+			if err := os.WriteFile(dataFile, []byte("irrelevant"), 0o600); err != nil {
+				t.Fatalf("write %s: %v", dataFile, err)
+			}
+
+			leaf := PlannedNode{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Name:       "pvc-1",
+				DataFile:   dataFile,
+				Ext:        tc.ext,
+				Size:       "", // missing captured size
+			}
+
+			imp := &clusterVolumeImporter{log: discardLogger()}
+
+			err := imp.sendVolumeData(context.Background(), noHTTPDoer{t: t}, "https://importer.local", volumeModeBlock, leaf, targetNS, "pvc-1", nil, nil, nil)
+			if err == nil {
+				t.Fatal("expected error for missing captured size, got nil")
+			}
+		})
 	}
 }

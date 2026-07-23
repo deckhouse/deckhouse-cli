@@ -17,6 +17,7 @@ limitations under the License.
 package archive_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -295,6 +296,247 @@ func TestFindBlockData(t *testing.T) {
 		}
 	})
 
+}
+
+// writeEntry creates a file (content non-nil) or an empty directory (content nil)
+// named name inside dir.
+func writeEntry(t *testing.T, dir, name string, content []byte) {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+
+	if content == nil {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+
+		return
+	}
+
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestClassifyBlockPayload_Valid covers every recognized codec name and the
+// "no payload at all" shape, table-driven, per the task's acceptance criteria
+// ("data.bin maps to codec none/raw; supported compressed names map exactly").
+func TestClassifyBlockPayload_Valid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		entries   map[string][]byte // filename -> content (nil content => directory)
+		wantFound bool
+		wantName  string
+		wantExt   string
+	}{
+		{
+			name:      "no payload",
+			entries:   nil,
+			wantFound: false,
+		},
+		{
+			name:      "raw data.bin maps to codec none",
+			entries:   map[string][]byte{"data.bin": []byte("x")},
+			wantFound: true,
+			wantName:  "data.bin",
+			wantExt:   "",
+		},
+		{
+			name:      "data.bin.zst",
+			entries:   map[string][]byte{"data.bin.zst": []byte("x")},
+			wantFound: true,
+			wantName:  "data.bin.zst",
+			wantExt:   ".zst",
+		},
+		{
+			name:      "data.bin.gz",
+			entries:   map[string][]byte{"data.bin.gz": []byte("x")},
+			wantFound: true,
+			wantName:  "data.bin.gz",
+			wantExt:   ".gz",
+		},
+		{
+			name:      "data.bin.lz4",
+			entries:   map[string][]byte{"data.bin.lz4": []byte("x")},
+			wantFound: true,
+			wantName:  "data.bin.lz4",
+			wantExt:   ".lz4",
+		},
+		{
+			name: "staging dir alone is ignored, not a payload",
+			entries: map[string][]byte{
+				"data.bin.d": nil,
+			},
+			wantFound: false,
+		},
+		{
+			name: "staging dir beside a real payload is ignored",
+			entries: map[string][]byte{
+				"data.bin.zst": []byte("x"),
+				"data.bin.d":   nil,
+			},
+			wantFound: true,
+			wantName:  "data.bin.zst",
+			wantExt:   ".zst",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+
+			for name, content := range tc.entries {
+				writeEntry(t, dir, name, content)
+			}
+
+			payload, found, err := archive.ClassifyBlockPayload(dir)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if found != tc.wantFound {
+				t.Fatalf("found = %v, want %v", found, tc.wantFound)
+			}
+
+			if !tc.wantFound {
+				return
+			}
+
+			if want := filepath.Join(dir, tc.wantName); payload.Path != want {
+				t.Errorf("path = %q, want %q", payload.Path, want)
+			}
+
+			if payload.Ext != tc.wantExt {
+				t.Errorf("ext = %q, want %q", payload.Ext, tc.wantExt)
+			}
+		})
+	}
+}
+
+// TestClassifyBlockPayload_Invalid covers every rejected shape: unknown/chained
+// suffixes, multiple block files, a block file coexisting with data.tar, and a
+// non-directory occupying the staging-dir name. Every case must fail
+// deterministically with ErrInvalidBlockPayload, not silently pick one file.
+func TestClassifyBlockPayload_Invalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		entries map[string][]byte
+	}{
+		{
+			name:    "unknown codec suffix",
+			entries: map[string][]byte{"data.bin.foo": []byte("x")},
+		},
+		{
+			name:    "chained suffix",
+			entries: map[string][]byte{"data.bin.zst.bak": []byte("x")},
+		},
+		{
+			name:    "double chained suffix",
+			entries: map[string][]byte{"data.bin.zst.gz": []byte("x")},
+		},
+		{
+			name: "multiple recognized block files",
+			entries: map[string][]byte{
+				"data.bin.zst": []byte("x"),
+				"data.bin.gz":  []byte("y"),
+			},
+		},
+		{
+			name: "raw and compressed both present",
+			entries: map[string][]byte{
+				"data.bin":     []byte("x"),
+				"data.bin.zst": []byte("y"),
+			},
+		},
+		{
+			name: "block payload coexists with data.tar",
+			entries: map[string][]byte{
+				"data.bin.zst": []byte("x"),
+				"data.tar":     []byte("y"),
+			},
+		},
+		{
+			name: "staging-dir name occupied by a file",
+			entries: map[string][]byte{
+				"data.bin.d": []byte("not a directory"),
+			},
+		},
+		{
+			name: "an unexpected directory shares the base name",
+			entries: map[string][]byte{
+				"data.bin": nil, // directory named exactly "data.bin"
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+
+			for name, content := range tc.entries {
+				writeEntry(t, dir, name, content)
+			}
+
+			_, found, err := archive.ClassifyBlockPayload(dir)
+			if err == nil {
+				t.Fatalf("expected error, got nil (found=%v)", found)
+			}
+
+			if !errors.Is(err, archive.ErrInvalidBlockPayload) {
+				t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestClassifyBlockPayload_DirectoryOrderIndependent verifies that the result
+// does not depend on os.ReadDir's entry ordering by exercising both possible
+// orderings of the same two-file "multiple block files" shape.
+func TestClassifyBlockPayload_DirectoryOrderIndependent(t *testing.T) {
+	t.Parallel()
+
+	for _, names := range [][2]string{
+		{"data.bin.zst", "data.bin.lz4"},
+		{"data.bin.lz4", "data.bin.zst"},
+	} {
+		dir := t.TempDir()
+
+		for _, n := range names {
+			writeEntry(t, dir, n, []byte("x"))
+		}
+
+		_, _, err := archive.ClassifyBlockPayload(dir)
+		if !errors.Is(err, archive.ErrInvalidBlockPayload) {
+			t.Errorf("order %v: expected ErrInvalidBlockPayload, got: %v", names, err)
+		}
+	}
+}
+
+// TestClassifyBlockPayload_MissingDir verifies that a nonexistent node
+// directory is reported as "no payload" rather than an error — BuildPlan
+// only calls this after confirming the node dir exists via snapshot.yaml, but
+// the classifier itself must not require the caller to pre-check existence.
+func TestClassifyBlockPayload_MissingDir(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	_, found, err := archive.ClassifyBlockPayload(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if found {
+		t.Error("found = true, want false for a missing directory")
+	}
 }
 
 func TestDeterminism(t *testing.T) {

@@ -135,13 +135,13 @@ func collectNodeFiles(nodeDir string) ([]string, error) {
 		}
 	}
 
-	absBlockPath, blockFound, findErr := FindBlockData(nodeDir)
+	blockPayload, blockFound, findErr := ClassifyBlockPayload(nodeDir)
 	if findErr != nil {
-		return nil, fmt.Errorf("find block data in %s: %w", nodeDir, findErr)
+		return nil, fmt.Errorf("classify block payload in %s: %w", nodeDir, findErr)
 	}
 
 	if blockFound {
-		rel, relErr := filepath.Rel(nodeDir, absBlockPath)
+		rel, relErr := filepath.Rel(nodeDir, blockPayload.Path)
 		if relErr != nil {
 			return nil, relErr
 		}

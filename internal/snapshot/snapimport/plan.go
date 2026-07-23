@@ -66,6 +66,14 @@ type PlannedNode struct {
 	// (data.bin[.<ext>]) when present; empty when the node carries no importable
 	// block volume data.
 	DataFile string
+	// Ext is DataFile's codec extension, resolved by
+	// archive.ClassifyBlockPayload alongside DataFile: "" for the raw/none
+	// codec, ".zst", ".gz", or ".lz4" — matching compress.Codec.Ext. Callers
+	// MUST use this field instead of filepath.Ext(DataFile): filepath.Ext on
+	// the raw name "data.bin" returns ".bin", not "" (see
+	// archive.BlockPayload.Ext's doc comment). Empty when HasBlockData() is
+	// false.
+	Ext string
 	// FilesystemData is true when the node carries filesystem-volume data (data.tar).
 	FilesystemData bool
 	// TarFile is the absolute path to the node's filesystem-volume data file (data.tar).
@@ -196,13 +204,14 @@ func readNode(dir string) (PlannedNode, error) {
 		node.VolumeMode = v.VolumeMode
 	}
 
-	blockData, found, err := archive.FindBlockData(dir)
+	blockPayload, found, err := archive.ClassifyBlockPayload(dir)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
 
 	if found {
-		node.DataFile = blockData
+		node.DataFile = blockPayload.Path
+		node.Ext = blockPayload.Ext
 	}
 
 	tarPath := filepath.Join(dir, archive.FsTarName)
