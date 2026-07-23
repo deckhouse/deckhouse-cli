@@ -64,9 +64,9 @@ type Stream interface {
 	// SetCurrent sets the stream's current byte counter to an absolute value.
 	// It exists for the pipeline's resume-seed clamp: when a resume seed
 	// credited from stale on-disk state (a chunk geometry about to be purged,
-	// or a stale sizes sidecar) exceeds the fresh authoritative total — a changed
-	// --chunk-size or a volume shrunk between runs — downloadBlock/downloadFS
-	// call SetCurrent(0) to reset the displayed value to 0 BEFORE lowering the
+	// or a stale sizes sidecar) exceeds the fresh authoritative total — a
+	// volume shrunk between runs — downloadBlock/downloadFS call
+	// SetCurrent(0) to reset the displayed value to 0 BEFORE lowering the
 	// total, so the bar never renders current > total. It is an absolute
 	// DOWNWARD correction only; ordinary forward progress is reported with
 	// IncrBy, never with SetCurrent.

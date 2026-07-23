@@ -61,14 +61,17 @@ type Config struct {
 	// Workers is the maximum number of nodes processed concurrently (default: 4).
 	// For block volumes each worker holds up to PerVolumeConcurrency chunks in
 	// memory simultaneously; worst-case RSS ≈ Workers × PerVolumeConcurrency ×
-	// (ChunkSize + compressed frame overhead).  With defaults 4×4×256 MiB this
-	// is roughly 4–5 GiB.  Reduce Workers or ChunkSize on memory-constrained hosts.
+	// (volume.DefaultChunkSize + compressed frame overhead). Every production
+	// block download/merge uses the fixed volume.DefaultChunkSize (256 MiB; see
+	// block-chunk-size-hardcode-only) — there is no per-run chunk-size knob —
+	// so with defaults 4×4×256 MiB this is roughly 4–5 GiB. Reduce Workers or
+	// PerVolumeConcurrency on memory-constrained hosts.
 	Workers int
 
 	// PerVolumeConcurrency is the maximum number of parallel chunk or file
 	// downloads per volume (default: 4).
-	// Multiplied with Workers and ChunkSize it determines the worst-case RSS;
-	// see Workers for the peak formula.
+	// Multiplied with Workers and volume.DefaultChunkSize it determines the
+	// worst-case RSS; see Workers for the peak formula.
 	PerVolumeConcurrency int
 
 	// MaxParallelDownloads is the global cap on concurrent whole-volume-stream
@@ -83,13 +86,6 @@ type Config struct {
 	// a pointer across value-copied per-node configs, so all node goroutines
 	// acquire from the same semaphore instance.
 	streamSem *semaphore.Weighted
-
-	// ChunkSize is the raw-byte size for block-volume chunks.
-	// Defaults to volume.DefaultChunkSize (256 MiB) when zero.
-	// Each in-flight chunk streams to a durable on-disk .part file (not an
-	// in-memory network buffer), but is read back in full from that .part file
-	// for the single EncodeFrame call once complete; see Workers for the peak formula.
-	ChunkSize int64
 
 	// TTL is the DataExport TTL string (e.g. "2h").  Defaults to "2h".
 	TTL string

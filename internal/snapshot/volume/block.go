@@ -120,13 +120,14 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // EncodeFrame's output byte-for-byte for chunk-sized input (see
 // compress.zstdCodec.EncodeFrameStream), so its implementation still reads
 // the chunk fully — for that codec (the default), worst-case RSS per
-// in-flight chunk remains chunkSize + compressed frame size, which is why
-// --chunk-size carries a documented maximum (see cmd/download's
-// maxChunkSize). The outer pipeline multiplies this by the number of
-// concurrent nodes (pipeline.Config.Workers); total peak ≈
-// pipeline.Config.Workers × workers × (chunkSize + frame) for zstd, and
-// pipeline.Config.Workers × workers × (small internal buffer) for the
-// genuinely-streaming codecs.
+// in-flight chunk remains chunkSize + compressed frame size. Every
+// production block download/merge hardcodes chunkSize to DefaultChunkSize
+// (256 MiB; see block-chunk-size-hardcode-only) — there is no per-run knob —
+// so this is a fixed, known bound, not a user-configurable maximum. The
+// outer pipeline multiplies this by the number of concurrent nodes
+// (pipeline.Config.Workers); total peak ≈ pipeline.Config.Workers × workers
+// × (DefaultChunkSize + frame) for zstd, and pipeline.Config.Workers ×
+// workers × (small internal buffer) for the genuinely-streaming codecs.
 func DownloadBlockChunks(
 	ctx context.Context,
 	log *slog.Logger,
