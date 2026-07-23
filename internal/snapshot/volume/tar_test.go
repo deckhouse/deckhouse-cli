@@ -215,6 +215,32 @@ func TestWriteTar_Defaults(t *testing.T) {
 	assert.Equal(t, int64(0o777), headers[2].Mode, "default link mode")
 }
 
+func TestWriteTar_ReportsPublishedDurabilityFailure(t *testing.T) {
+	stagingDir := t.TempDir()
+	outputPath := filepath.Join(t.TempDir(), "data.tar")
+	writeStagingFile(t, stagingDir, "file.txt", []byte("content"))
+	sentinel := errors.New("parent directory sync sentinel")
+
+	ctx := archive.WithDirectorySyncHook(context.Background(), func(_ string, _ func() error) error {
+		return sentinel
+	})
+	err := volume.WriteTar(ctx, outputPath, stagingDir, sortedTarEntries([]volume.TarEntry{{
+		RelPath:      "file.txt",
+		Type:         "file",
+		Codec:        "none",
+		OriginalPath: "file.txt",
+		RawSize:      7,
+	}}))
+	require.ErrorIs(t, err, sentinel)
+	require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+	require.FileExists(t, outputPath)
+	require.NoFileExists(t, outputPath+".tmp")
+	require.FileExists(t, filepath.Join(stagingDir, "file.txt"))
+
+	_, contents := readTar(t, outputPath)
+	require.Equal(t, []byte("content"), contents["file.txt"])
+}
+
 // TestWriteTar_CancelledContext proves that WriteTar honors an already-
 // cancelled context: it must return promptly with an error wrapping
 // ctx.Err(), and must not leave a partial file at the final (non-.tmp) output

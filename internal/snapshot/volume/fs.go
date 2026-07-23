@@ -213,7 +213,8 @@ type fsDirectoryRecord struct {
 // <relPath><codec.Ext()> under stagingDir, then assembles a single uncompressed
 // PAX tar at tarPath whose file entries carry the compressed names and bytes.
 //
-// If tarPath already exists the whole operation is skipped (resume: tar complete).
+// If tarPath already exists, its parent directory is synced before the tar is
+// trusted or staging is removed (resume: published tar becomes durable).
 // An already-staged compressed file <relPath><ext> is not re-downloaded (partial
 // resume). The stagingDir is removed on successful tar assembly.
 //
@@ -255,8 +256,14 @@ func DownloadFilesystemVolume(
 	setTotal func(total int64),
 	onProgress func(n int),
 ) error {
-	// Resume: completed tar → skip entirely.
+	// Resume: a visible tar may have been published by rename immediately
+	// before a failed parent-directory sync. Re-establish durability before
+	// trusting it or deleting the only retryable staging state.
 	if _, err := os.Stat(tarPath); err == nil {
+		if err := archive.ConfirmFileDurability(ctx, tarPath); err != nil {
+			return fmt.Errorf("confirm completed FS tar durability %s: %w", tarPath, err)
+		}
+
 		log.Info("fs tar already present, skipping", slog.String("path", tarPath))
 
 		if err := os.RemoveAll(stagingDir); err != nil {
@@ -264,6 +271,8 @@ func DownloadFilesystemVolume(
 		}
 
 		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect FS tar %s: %w", tarPath, err)
 	}
 
 	if workers <= 0 {
@@ -303,6 +312,10 @@ func DownloadFilesystemVolume(
 
 	entries := tarEntriesFromInventory(ctx, inventoryPath, stagingDir, codec)
 	if err := WriteTar(ctx, tarPath, stagingDir, entries); err != nil {
+		if archive.CommitPublicationState(err) == archive.PublicationPublished {
+			return fmt.Errorf("assemble tar %s published without confirmed durability: %w", tarPath, err)
+		}
+
 		return fmt.Errorf("assemble tar %s: %w", tarPath, err)
 	}
 

@@ -184,6 +184,10 @@ func TestAtomicWriter_CommitContextCancelsAfterSyncBeforePublication(t *testing.
 		t.Fatalf("CommitContext error = %v, want context.Canceled", err)
 	}
 
+	if got := CommitPublicationState(err); got != PublicationUnpublished {
+		t.Fatalf("publication state = %v, want unpublished", got)
+	}
+
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +206,7 @@ func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*AtomicWriter, context.CancelFunc, error)
-		published bool
+		state     PublicationState
 	}{
 		{
 			name: "SyncErrorDuringCancellation",
@@ -210,6 +214,14 @@ func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
 				aw.ops.syncTemp = func(*os.File) error {
 					cancel()
 
+					return sentinel
+				}
+			},
+		},
+		{
+			name: "CloseError",
+			configure: func(aw *AtomicWriter, _ context.CancelFunc, sentinel error) {
+				aw.ops.closeTemp = func(*os.File) error {
 					return sentinel
 				}
 			},
@@ -231,7 +243,7 @@ func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
 					return sentinel
 				}
 			},
-			published: true,
+			state: PublicationPublished,
 		},
 	}
 
@@ -260,12 +272,16 @@ func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
 				t.Fatalf("operation error was replaced by cancellation: %v", err)
 			}
 
+			if got := CommitPublicationState(err); got != tt.state {
+				t.Fatalf("publication state = %v, want %v", got, tt.state)
+			}
+
 			_, statErr := os.Stat(path)
-			if tt.published && statErr != nil {
+			if tt.state == PublicationPublished && statErr != nil {
 				t.Fatalf("published final file missing: %v", statErr)
 			}
 
-			if !tt.published && !errors.Is(statErr, os.ErrNotExist) {
+			if tt.state == PublicationUnpublished && !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("final file published before failed operation: %v", statErr)
 			}
 
@@ -273,6 +289,125 @@ func TestAtomicWriter_CommitContextPreservesOperationErrors(t *testing.T) {
 				t.Fatalf("temporary file survived failed commit: %v", err)
 			}
 		})
+	}
+}
+
+func TestAtomicWriter_PrePublicationFailuresPreserveOldFinal(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*AtomicWriter, error)
+	}{
+		{
+			name: "Sync",
+			configure: func(aw *AtomicWriter, sentinel error) {
+				aw.ops.syncTemp = func(*os.File) error {
+					return sentinel
+				}
+			},
+		},
+		{
+			name: "Close",
+			configure: func(aw *AtomicWriter, sentinel error) {
+				aw.ops.closeTemp = func(*os.File) error {
+					return sentinel
+				}
+			},
+		},
+		{
+			name: "Rename",
+			configure: func(aw *AtomicWriter, sentinel error) {
+				aw.ops.rename = func(string, string) error {
+					return sentinel
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data.bin")
+			if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			aw, err := NewAtomicWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := aw.Write([]byte("new")); err != nil {
+				t.Fatal(err)
+			}
+
+			sentinel := errors.New("pre-publication operation sentinel")
+			tt.configure(aw, sentinel)
+
+			err = aw.CommitContext(context.Background())
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("CommitContext error = %v, want sentinel", err)
+			}
+
+			if got := CommitPublicationState(err); got != PublicationUnpublished {
+				t.Fatalf("publication state = %v, want unpublished", got)
+			}
+
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !bytes.Equal(got, []byte("old")) {
+				t.Fatalf("final bytes = %q, want unchanged old bytes", got)
+			}
+
+			if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("temporary file survived pre-publication failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfirmFileDurability_RetriesPublishedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(path, []byte("published"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := errors.New("directory sync sentinel")
+	calls := 0
+	ctx := WithDirectorySyncHook(context.Background(), func(_ string, next func() error) error {
+		calls++
+		if calls == 1 {
+			return sentinel
+		}
+
+		return next()
+	})
+
+	err := ConfirmFileDurability(ctx, path)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ConfirmFileDurability error = %v, want sentinel", err)
+	}
+
+	if got := CommitPublicationState(err); got != PublicationPublished {
+		t.Fatalf("publication state = %v, want published", got)
+	}
+
+	if err := ConfirmFileDurability(ctx, path); err != nil {
+		t.Fatalf("ConfirmFileDurability retry: %v", err)
+	}
+
+	if calls != 2 {
+		t.Fatalf("directory sync calls = %d, want 2", calls)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got, []byte("published")) {
+		t.Fatalf("final bytes = %q, want unchanged published bytes", got)
 	}
 }
 
