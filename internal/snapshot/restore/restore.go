@@ -110,10 +110,12 @@ type Config struct {
 	Snapshot string
 
 	// SelectedNodeKind restricts the restore to a single node subtree when non-empty.
-	// RestoreManifestsScoped is called with that node's NodeRef (group/version resolved via
-	// Mapper) instead of the root Snapshot ref. Preflight checks the selected node's
-	// Ready (or readyToUse for VolumeSnapshot), not the root — so a Ready child can be
-	// restored even when the root is Ready=False/ChildSnapshotDeleted.
+	// The selector is resolved within Snapshot's status.childrenSnapshotRefs hierarchy
+	// by either generated snapshot-CR identity or captured status.sourceRef identity.
+	// RestoreManifestsScoped is called with the matched node's real snapshot-CR NodeRef.
+	// Preflight checks the selected node's Ready (or readyToUse for VolumeSnapshot), not
+	// the root — so a Ready child can be restored even when the root is
+	// Ready=False/ChildSnapshotDeleted.
 	SelectedNodeKind string
 	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
 	SelectedNodeName string
@@ -175,22 +177,14 @@ type pvcRef struct {
 	storageClassName string
 }
 
-// Run executes an in-namespace restore: preflight the root Snapshot, fetch the
-// apply-ready manifests for the target namespace, apply every object as-is, and
-// optionally wait for restored PVCs to bind.
+// Run executes an in-namespace restore: anchor selection to the positional Snapshot,
+// preflight the addressed node, fetch apply-ready manifests for the target namespace,
+// apply every object as-is, and optionally wait for restored PVCs to bind.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = applyDefaults(cfg)
 
 	if err := validate(cfg); err != nil {
 		return err
-	}
-
-	if err := preflight(ctx, cfg); err != nil {
-		if cfg.SelectedNodeKind != "" {
-			return fmt.Errorf("preflight %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
-		}
-
-		return fmt.Errorf("preflight %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
 
 	rootRef := aggapi.NodeRef{
@@ -202,10 +196,25 @@ func Run(ctx context.Context, cfg Config) error {
 
 	targetRef := rootRef
 
-	if cfg.SelectedNodeKind != "" {
-		ref, err := cfg.resolveNodeRef()
+	if cfg.SelectedNodeKind == "" {
+		if err := preflightRootSnapshot(ctx, cfg); err != nil {
+			return fmt.Errorf("preflight %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
+		}
+	} else {
+		ref, obj, err := cfg.resolveNodeRef(ctx)
 		if err != nil {
-			return fmt.Errorf("resolve selected node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
+			return fmt.Errorf(
+				"resolve selected node %s/%s within Snapshot %s/%s: %w",
+				cfg.SelectedNodeKind,
+				cfg.SelectedNodeName,
+				cfg.Namespace,
+				cfg.Snapshot,
+				err,
+			)
+		}
+
+		if err := preflightSelectedNode(ref, obj); err != nil {
+			return fmt.Errorf("preflight %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
 		}
 
 		targetRef = ref
@@ -320,18 +329,6 @@ func validate(cfg Config) error {
 	}
 }
 
-// preflight verifies the restore source is Ready. For a full-tree restore that is the
-// root Snapshot (Ready=True + boundSnapshotContentName). For a SelectedNode restore it
-// is the selected node itself — so a Ready child subtree can proceed even when the root
-// is Ready=False (e.g. ChildSnapshotDeleted on a sibling).
-func preflight(ctx context.Context, cfg Config) error {
-	if cfg.SelectedNodeKind != "" {
-		return preflightSelectedNode(ctx, cfg)
-	}
-
-	return preflightRootSnapshot(ctx, cfg)
-}
-
 // preflightRootSnapshot verifies the source Snapshot is Ready and has a bound SnapshotContent.
 func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 	gvr, _, err := cfg.resourceFor(schema.GroupVersionKind{
@@ -348,7 +345,7 @@ func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("get Snapshot: %w", err)
 	}
 
-	if !isConditionTrue(snap, readyConditionType) {
+	if !isConditionTrue(snap) {
 		status, reason, message := readyConditionDetail(snap, readyConditionType)
 		if status == conditionFalse && source.IsDegradedReason(reason) {
 			return fmt.Errorf("snapshot is DEGRADED (reason=%s: %s): a namespaced child was deleted but "+
@@ -369,53 +366,23 @@ func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 
 // preflightSelectedNode verifies the selected subtree root is ready to restore:
 // VolumeSnapshot → status.readyToUse=true; other snapshot CRs → Ready=True + bound content.
-func preflightSelectedNode(ctx context.Context, cfg Config) error {
-	ref, err := cfg.resolveNodeRef()
-	if err != nil {
-		return err
-	}
-
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
-	}
-
-	gvr, namespaced, err := cfg.resourceFor(schema.GroupVersionKind{
-		Group:   gv.Group,
-		Version: gv.Version,
-		Kind:    ref.Kind,
-	})
-	if err != nil {
-		return err
-	}
-
-	var obj *unstructured.Unstructured
-	if namespaced {
-		obj, err = cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-	} else {
-		obj, err = cfg.Dynamic.Resource(gvr).Get(ctx, ref.Name, metav1.GetOptions{})
-	}
-
-	if err != nil {
-		return fmt.Errorf("get %s/%s: %w", ref.Kind, ref.Name, err)
-	}
-
+func preflightSelectedNode(ref aggapi.NodeRef, obj *unstructured.Unstructured) error {
 	if ref.IsVolumeSnapshotLeaf() {
 		ready, found, _ := unstructured.NestedBool(obj.Object, "status", "readyToUse")
 		if !found || !ready {
-			return fmt.Errorf("VolumeSnapshot %s/%s is not readyToUse=true", cfg.Namespace, ref.Name)
+			return fmt.Errorf("VolumeSnapshot %s/%s is not readyToUse=true", ref.Namespace, ref.Name)
 		}
 
 		return nil
 	}
 
-	if !isConditionTrue(obj, readyConditionType) {
-		return fmt.Errorf("%s %s/%s is not Ready=True (cannot restore an incomplete subtree)", ref.Kind, cfg.Namespace, ref.Name)
+	if !isConditionTrue(obj) {
+		return fmt.Errorf("%s %s/%s is not Ready=True (cannot restore an incomplete subtree)", ref.Kind, ref.Namespace, ref.Name)
 	}
 
 	bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
 	if bound == "" {
-		return fmt.Errorf("%s %s/%s has no status.boundSnapshotContentName (not yet bound)", ref.Kind, cfg.Namespace, ref.Name)
+		return fmt.Errorf("%s %s/%s has no status.boundSnapshotContentName (not yet bound)", ref.Kind, ref.Namespace, ref.Name)
 	}
 
 	return nil
@@ -530,7 +497,7 @@ func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
 		return true
 	}
 
-	return isConditionTrue(obj, readyConditionType)
+	return isConditionTrue(obj)
 }
 
 // applyAll upserts every object in order and returns the refs of restored PVCs.
@@ -842,26 +809,221 @@ func (cfg Config) resourceForGroupKind(group, kind string) (schema.GroupVersionR
 	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
 }
 
-// resolveNodeRef builds a NodeRef for cfg.SelectedNodeKind / cfg.SelectedNodeName by
-// resolving the kind's preferred group+version via the RESTMapper (version-less lookup).
-func (cfg Config) resolveNodeRef() (aggapi.NodeRef, error) {
-	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Kind: cfg.SelectedNodeKind})
-	if err != nil {
-		return aggapi.NodeRef{}, fmt.Errorf("resolve kind %q: %w", cfg.SelectedNodeKind, err)
-	}
-
-	gv := mapping.GroupVersionKind.GroupVersion()
-
-	return aggapi.NodeRef{
-		APIVersion: gv.String(),
-		Kind:       cfg.SelectedNodeKind,
-		Name:       cfg.SelectedNodeName,
-		Namespace:  cfg.Namespace,
-	}, nil
+type nodeMatch struct {
+	ref aggapi.NodeRef
+	obj *unstructured.Unstructured
 }
 
-// isConditionTrue reports whether status.conditions[type==condType].status == "True".
-func isConditionTrue(obj *unstructured.Unstructured, condType string) bool {
+type nodeResolver struct {
+	cfg     Config
+	seen    map[string]struct{}
+	matches []nodeMatch
+}
+
+// resolveNodeRef resolves the selector only within the hierarchy rooted at the
+// positional Snapshot. Child refs carry the real snapshot GVK, so no cross-group
+// kind guess is needed.
+func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstructured.Unstructured, error) {
+	rootRef := aggapi.NodeRef{
+		APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
+		Kind:       snapshotKind,
+		Name:       cfg.Snapshot,
+		Namespace:  cfg.Namespace,
+	}
+
+	root, err := cfg.getSnapshotNode(ctx, rootRef)
+	if err != nil {
+		return aggapi.NodeRef{}, nil, fmt.Errorf("get root Snapshot %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
+	}
+
+	resolver := nodeResolver{
+		cfg:  cfg,
+		seen: make(map[string]struct{}),
+	}
+
+	if err := resolver.visit(ctx, rootRef, root); err != nil {
+		return aggapi.NodeRef{}, nil, err
+	}
+
+	switch len(resolver.matches) {
+	case 0:
+		return aggapi.NodeRef{}, nil, fmt.Errorf(
+			"%s/%s does not belong to Snapshot %s/%s",
+			cfg.SelectedNodeKind,
+			cfg.SelectedNodeName,
+			cfg.Namespace,
+			cfg.Snapshot,
+		)
+	case 1:
+		return resolver.matches[0].ref, resolver.matches[0].obj, nil
+	default:
+		candidates := make([]string, 0, len(resolver.matches))
+		for _, match := range resolver.matches {
+			candidates = append(candidates, fmt.Sprintf(
+				"%s %s/%s",
+				match.ref.APIVersion,
+				match.ref.Kind,
+				match.ref.Name,
+			))
+		}
+
+		return aggapi.NodeRef{}, nil, fmt.Errorf(
+			"%s/%s is ambiguous within Snapshot %s/%s; matching snapshot nodes: %s; select one by its generated snapshot-CR Kind/name",
+			cfg.SelectedNodeKind,
+			cfg.SelectedNodeName,
+			cfg.Namespace,
+			cfg.Snapshot,
+			strings.Join(candidates, ", "),
+		)
+	}
+}
+
+func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstructured.Unstructured) error {
+	key := ref.APIVersion + "/" + ref.Kind + "/" + ref.Name
+	if _, ok := r.seen[key]; ok {
+		return fmt.Errorf("snapshot hierarchy contains duplicate or cyclic ref %s %s/%s", ref.APIVersion, ref.Kind, ref.Name)
+	}
+
+	r.seen[key] = struct{}{}
+
+	matches, err := r.matchesSelector(obj, ref)
+	if err != nil {
+		return err
+	}
+
+	if matches {
+		r.matches = append(r.matches, nodeMatch{ref: ref, obj: obj})
+	}
+
+	childRefs, err := snapshotChildRefs(obj)
+	if err != nil {
+		return fmt.Errorf("%s %s/%s: status.childrenSnapshotRefs: %w", ref.APIVersion, ref.Kind, ref.Name, err)
+	}
+
+	for _, childRef := range childRefs {
+		child := aggapi.NodeRef{
+			APIVersion: childRef.APIVersion,
+			Kind:       childRef.Kind,
+			Name:       childRef.Name,
+			Namespace:  r.cfg.Namespace,
+		}
+
+		childObj, getErr := r.cfg.getSnapshotNode(ctx, child)
+		if kubeerrors.IsNotFound(getErr) {
+			continue
+		}
+
+		if getErr != nil {
+			return fmt.Errorf("get snapshot child %s %s/%s: %w", child.APIVersion, child.Kind, child.Name, getErr)
+		}
+
+		if err := r.visit(ctx, child, childObj); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *nodeResolver) matchesSelector(obj *unstructured.Unstructured, ref aggapi.NodeRef) (bool, error) {
+	if ref.Kind == r.cfg.SelectedNodeKind && ref.Name == r.cfg.SelectedNodeName {
+		return true, nil
+	}
+
+	sourceRef, found, err := unstructured.NestedMap(obj.Object, "status", "sourceRef")
+	if err != nil {
+		return false, fmt.Errorf("%s %s/%s: status.sourceRef is not an object: %w", ref.APIVersion, ref.Kind, ref.Name, err)
+	}
+
+	if !found {
+		return false, nil
+	}
+
+	sourceAPIVersion, _ := sourceRef["apiVersion"].(string)
+	sourceKind, _ := sourceRef["kind"].(string)
+	sourceName, _ := sourceRef["name"].(string)
+
+	if sourceAPIVersion == "" || sourceKind == "" || sourceName == "" {
+		return false, fmt.Errorf(
+			"%s %s/%s: status.sourceRef is incomplete (apiVersion/kind/name required)",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+		)
+	}
+
+	return sourceKind == r.cfg.SelectedNodeKind && sourceName == r.cfg.SelectedNodeName, nil
+}
+
+func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+	}
+
+	gvr, namespaced, err := cfg.resourceFor(schema.GroupVersionKind{
+		Group:   gv.Group,
+		Version: gv.Version,
+		Kind:    ref.Kind,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if namespaced {
+		obj, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+
+		return obj, nil
+	}
+
+	obj, err := cfg.Dynamic.Resource(gvr).Get(ctx, ref.Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	return obj, nil
+}
+
+func snapshotChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotChildRef, error) {
+	rawRefs, found, err := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return nil, err
+	}
+
+	if !found {
+		return nil, nil
+	}
+
+	refs := make([]snapshotapi.SnapshotChildRef, 0, len(rawRefs))
+	for i, rawRef := range rawRefs {
+		m, ok := rawRef.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("element %d has unexpected type %T", i, rawRef)
+		}
+
+		apiVersion, _ := m["apiVersion"].(string)
+		kind, _ := m["kind"].(string)
+		name, _ := m["name"].(string)
+
+		if apiVersion == "" || kind == "" || name == "" {
+			return nil, fmt.Errorf("element %d is incomplete (apiVersion/kind/name required)", i)
+		}
+
+		refs = append(refs, snapshotapi.SnapshotChildRef{
+			APIVersion: apiVersion,
+			Kind:       kind,
+			Name:       name,
+		})
+	}
+
+	return refs, nil
+}
+
+// isConditionTrue reports whether status.conditions[type==Ready].status == "True".
+func isConditionTrue(obj *unstructured.Unstructured) bool {
 	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
 		return false
@@ -874,7 +1036,7 @@ func isConditionTrue(obj *unstructured.Unstructured, condType string) bool {
 		}
 
 		t, _, _ := unstructured.NestedString(m, "type")
-		if t != condType {
+		if t != readyConditionType {
 			continue
 		}
 
