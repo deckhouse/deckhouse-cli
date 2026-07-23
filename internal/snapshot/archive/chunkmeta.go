@@ -18,9 +18,11 @@ package archive
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -35,6 +37,9 @@ import (
 // layout, that walk skips every directory whose name ends in ".d" — which
 // every chunk dir does, by construction.
 const ChunkMetaFileName = "chunks.meta"
+
+// ChunkMetaMaxEncodedSize bounds metadata before JSON decoding.
+const ChunkMetaMaxEncodedSize = 4 << 10
 
 // ErrCorruptChunkMeta indicates ChunkMetaFileName exists but its contents
 // could not be parsed as JSON — e.g. a torn write from a crash mid-write (see
@@ -84,7 +89,7 @@ func WriteChunkMeta(dir string, meta ChunkMeta) error {
 func ReadChunkMeta(dir string) (ChunkMeta, bool, error) {
 	path := filepath.Join(dir, ChunkMetaFileName)
 
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ChunkMeta{}, false, nil
@@ -93,11 +98,45 @@ func ReadChunkMeta(dir string) (ChunkMeta, bool, error) {
 		return ChunkMeta{}, false, fmt.Errorf("read chunk metadata %s: %w", path, err)
 	}
 
+	defer func() { _ = f.Close() }()
+
+	return ReadChunkMetaFrom(context.Background(), f, path)
+}
+
+// ReadChunkMetaFrom decodes bounded chunk metadata from an already-secured reader.
+func ReadChunkMetaFrom(ctx context.Context, reader io.Reader, source string) (ChunkMeta, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(&chunkMetaContextReader{ctx: ctx, reader: reader}, ChunkMetaMaxEncodedSize+1))
+	if err != nil {
+		return ChunkMeta{}, false, fmt.Errorf("read chunk metadata %s: %w", source, err)
+	}
+
+	if len(data) > ChunkMetaMaxEncodedSize {
+		return ChunkMeta{}, false, fmt.Errorf(
+			"%w: %s exceeds %d-byte encoded limit",
+			ErrCorruptChunkMeta,
+			source,
+			ChunkMetaMaxEncodedSize,
+		)
+	}
+
 	var meta ChunkMeta
 
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return ChunkMeta{}, false, fmt.Errorf("%w: %s: %w", ErrCorruptChunkMeta, path, err)
+		return ChunkMeta{}, false, fmt.Errorf("%w: %s: %w", ErrCorruptChunkMeta, source, err)
 	}
 
 	return meta, true, nil
+}
+
+type chunkMetaContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *chunkMetaContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return r.reader.Read(p)
 }

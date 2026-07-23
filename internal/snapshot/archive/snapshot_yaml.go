@@ -189,6 +189,15 @@ type RootedSource struct {
 	hook   OpenBoundaryHook
 }
 
+// PinnedDirectory is a descriptor-relative directory beneath a RootedSource.
+// It remains confined to the originally opened root even if path components are
+// replaced after opening.
+type PinnedDirectory struct {
+	dir  *os.File
+	path string
+	hook OpenBoundaryHook
+}
+
 // OpenBoundaryHook runs immediately before a rooted descendant or enumeration open. It exists
 // to make adversarial replacement tests deterministic; production callers pass nil.
 type OpenBoundaryHook func(path string)
@@ -246,6 +255,66 @@ func (s *RootedSource) OpenDirectory(name string) (*RootedSource, error) {
 	}
 
 	return &RootedSource{dir: dir, path: path, parent: s, name: name, hook: s.hook}, nil
+}
+
+// OpenDirectoryPath securely descends through a relative directory path while
+// retaining at most two transient descendant descriptors.
+func (s *RootedSource) OpenDirectoryPath(path string) (*PinnedDirectory, error) {
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if !filepath.IsLocal(clean) {
+		return nil, fmt.Errorf("invalid rooted directory path %q: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	s.runHook(s.path)
+
+	if err := s.verifyCurrent(); err != nil {
+		return nil, err
+	}
+
+	components := []string{"."}
+	if clean != "." {
+		components = strings.Split(clean, string(filepath.Separator))
+	}
+
+	var (
+		owned       *os.File
+		parent      = s.dir
+		currentPath = s.path
+	)
+
+	for _, component := range components {
+		if err := validateArchiveComponent(component); err != nil && component != "." {
+			if owned != nil {
+				_ = owned.Close()
+			}
+
+			return nil, fmt.Errorf("open rooted directory %s: %w", filepath.Join(currentPath, component), err)
+		}
+
+		if component != "." {
+			currentPath = filepath.Join(currentPath, component)
+		}
+
+		s.runHook(currentPath)
+
+		child, err := openArchiveDirectoryAt(parent, component, currentPath)
+		if err != nil {
+			if owned != nil {
+				_ = owned.Close()
+			}
+
+			return nil, err
+		}
+
+		if owned != nil {
+			_ = owned.Close()
+		}
+
+		owned = child
+		parent = child
+	}
+
+	return &PinnedDirectory{dir: owned, path: currentPath, hook: s.hook}, nil
 }
 
 // ReadDirectory reads source through a fresh descriptor so repeated enumeration is stable.
@@ -319,6 +388,63 @@ func (s *RootedSource) OpenRegularPath(path string) (*os.File, error) {
 	}
 
 	return current.OpenRegularFile(components[len(components)-1])
+}
+
+// Close releases the descriptor retained by directory.
+func (d *PinnedDirectory) Close() error {
+	return d.dir.Close()
+}
+
+// Path returns the diagnostic host path represented by directory.
+func (d *PinnedDirectory) Path() string {
+	return d.path
+}
+
+// ReadDirectory reads the next bounded batch from the pinned directory.
+func (d *PinnedDirectory) ReadDirectory(count int) ([]os.DirEntry, error) {
+	d.runHook(d.path)
+
+	entries, err := d.dir.ReadDir(count)
+	if err != nil {
+		return entries, fmt.Errorf("read directory %s: %w", d.path, err)
+	}
+
+	return entries, nil
+}
+
+// OpenDirectory opens one real child directory relative to the pinned descriptor.
+func (d *PinnedDirectory) OpenDirectory(name string) (*PinnedDirectory, error) {
+	if err := validateArchiveComponent(name); err != nil {
+		return nil, fmt.Errorf("open rooted directory %s: %w", filepath.Join(d.path, name), err)
+	}
+
+	path := filepath.Join(d.path, name)
+	d.runHook(path)
+
+	dir, err := openArchiveDirectoryAt(d.dir, name, path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PinnedDirectory{dir: dir, path: path, hook: d.hook}, nil
+}
+
+// OpenRegularFile opens one regular child without following links.
+func (d *PinnedDirectory) OpenRegularFile(name string) (*os.File, error) {
+	if err := validateArchiveComponent(name); err != nil {
+		return nil, fmt.Errorf("open rooted file %s: %w", filepath.Join(d.path, name), err)
+	}
+
+	path := filepath.Join(d.path, name)
+	d.runHook(path)
+
+	return openArchiveRegularAt(d.dir, name, path)
+}
+
+func (d *PinnedDirectory) runHook(path string) {
+	if d.hook != nil {
+		d.hook(path)
+	}
 }
 
 func (s *RootedSource) verifyCurrent() error {
