@@ -27,6 +27,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +57,273 @@ func (d *failOnHTTPDoer) HTTPDo(*http.Request) (*http.Response, error) {
 	return nil, errors.New("unexpected HTTP call")
 }
 
+type fileHTTPDoer func(*http.Request) (*http.Response, error)
+
+func (d fileHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	return d(req)
+}
+
+func fileHTTPResponse(status int, header http.Header) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader("")),
+	}
+}
+
+func bytesBodyFactory(payload []byte) fileBodyFactory {
+	return func(_ context.Context, offset, size int64) (io.ReadCloser, error) {
+		if offset < 0 || size < 0 || offset > int64(len(payload)) || size > int64(len(payload))-offset {
+			return nil, fmt.Errorf("requested byte range [%d,%d) outside payload size %d", offset, offset+size, len(payload))
+		}
+
+		return io.NopCloser(bytes.NewReader(payload[offset : offset+size])), nil
+	}
+}
+
+func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("abcdefghij")
+
+	var gotOffsets []int64
+
+	var gotBodies [][]byte
+
+	responses := []*http.Response{
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"6"}}),
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"0"}}),
+		fileHTTPResponse(http.StatusCreated, http.Header{"X-Next-Offset": []string{"10"}}),
+	}
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse X-Offset: %w", err)
+		}
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read request body: %w", err)
+		}
+
+		gotOffsets = append(gotOffsets, offset)
+		gotBodies = append(gotBodies, body)
+
+		response := responses[0]
+		responses = responses[1:]
+
+		return response, nil
+	})
+
+	var openedOffsets []int64
+
+	newBody := func(_ context.Context, offset, size int64) (io.ReadCloser, error) {
+		openedOffsets = append(openedOffsets, offset)
+
+		return bytesBodyFactory(payload)(context.Background(), offset, size)
+	}
+
+	progressed := 0
+	activated := 0
+	progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
+	attrs := fileAttrs{Perm: 0o600, UID: 1, GID: 2}
+
+	err := putFile(
+		context.Background(),
+		doer,
+		"https://import.example",
+		"file.bin",
+		int64(len(payload)),
+		0,
+		attrs,
+		newBody,
+		progress,
+		func() { activated++ },
+	)
+	if err != nil {
+		t.Fatalf("putFile: %v", err)
+	}
+
+	if want := []int64{0, 6, 0}; !slices.Equal(gotOffsets, want) {
+		t.Errorf("request offsets = %v, want %v", gotOffsets, want)
+	}
+
+	if want := []int64{0, 6, 0}; !slices.Equal(openedOffsets, want) {
+		t.Errorf("opened body offsets = %v, want %v", openedOffsets, want)
+	}
+
+	wantBodies := [][]byte{payload, payload[6:], payload}
+	if !reflect.DeepEqual(gotBodies, wantBodies) {
+		t.Errorf("request bodies = %q, want %q", gotBodies, wantBodies)
+	}
+
+	if progressed != len(payload) {
+		t.Errorf("high-water progress = %d, want %d", progressed, len(payload))
+	}
+
+	if activated != 3 {
+		t.Errorf("activate calls = %d, want 3", activated)
+	}
+}
+
+func TestDoFileChunk_StrictStatusesAndOffsets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		status         int
+		header         http.Header
+		offset         int64
+		requestEnd     int64
+		total          int64
+		wantNext       int64
+		wantReposition bool
+		wantErr        bool
+	}{
+		{
+			name:       "success: 204 acknowledges exact intermediate end",
+			status:     http.StatusNoContent,
+			header:     http.Header{"X-Next-Offset": []string{"5"}},
+			requestEnd: 5,
+			total:      10,
+			wantNext:   5,
+		},
+		{
+			name:       "success: 201 final may omit next header per producer",
+			status:     http.StatusCreated,
+			header:     http.Header{},
+			offset:     5,
+			requestEnd: 10,
+			total:      10,
+			wantNext:   10,
+		},
+		{
+			name:           "success: 409 selects different forward offset",
+			status:         http.StatusConflict,
+			header:         http.Header{"X-Expected-Offset": []string{"7"}},
+			requestEnd:     5,
+			total:          10,
+			wantNext:       7,
+			wantReposition: true,
+		},
+		{
+			name:       "error: 201 is not intermediate",
+			status:     http.StatusCreated,
+			header:     http.Header{"X-Next-Offset": []string{"5"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: 204 is not final",
+			status:     http.StatusNoContent,
+			header:     http.Header{"X-Next-Offset": []string{"10"}},
+			offset:     5,
+			requestEnd: 10,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: 204 requires next header",
+			status:     http.StatusNoContent,
+			header:     http.Header{},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: malformed next header",
+			status:     http.StatusNoContent,
+			header:     http.Header{"X-Next-Offset": []string{"bad"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: next header must equal request end",
+			status:     http.StatusNoContent,
+			header:     http.Header{"X-Next-Offset": []string{"4"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: next header is in range",
+			status:     http.StatusNoContent,
+			header:     http.Header{"X-Next-Offset": []string{"11"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: 409 requires expected header",
+			status:     http.StatusConflict,
+			header:     http.Header{},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: malformed expected header",
+			status:     http.StatusConflict,
+			header:     http.Header{"X-Expected-Offset": []string{"bad"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: expected header is in range",
+			status:     http.StatusConflict,
+			header:     http.Header{"X-Expected-Offset": []string{"11"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+		{
+			name:       "error: expected offset differs",
+			status:     http.StatusConflict,
+			header:     http.Header{"X-Expected-Offset": []string{"0"}},
+			requestEnd: 5,
+			total:      10,
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := fileHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return fileHTTPResponse(tc.status, tc.header), nil
+			})
+			req, err := http.NewRequest(http.MethodPut, "https://import.example/file", http.NoBody)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			next, reposition, err := doFileChunk(doer, req, tc.offset, tc.requestEnd, tc.total)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("doFileChunk error = nil, want failure (next=%d reposition=%v)", next, reposition)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("doFileChunk: %v", err)
+			}
+
+			if next != tc.wantNext || reposition != tc.wantReposition {
+				t.Errorf("doFileChunk = (%d,%v), want (%d,%v)",
+					next, reposition, tc.wantNext, tc.wantReposition)
+			}
+		})
+	}
+}
+
 func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
 	payload := []byte("hello, filesystem import")
 
@@ -71,13 +340,14 @@ func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
 			t.Errorf("PUT body = %q, want %q", body, payload)
 		}
 
+		w.Header().Set("X-Next-Offset", strconv.Itoa(len(payload)))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
 
-	body := bytes.NewReader(payload)
-
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.txt", body, int64(len(payload)), 0, attrs); err != nil {
+	progress := &fileUploadProgress{}
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.txt", int64(len(payload)), 0,
+		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
 
@@ -118,10 +388,8 @@ func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
 	}
 }
 
-// TestPutFile_ResumeFromPartialOffset verifies that putFile, given a body reader already
-// fast-forwarded to a nonzero offset by the caller (its new contract — putFile itself does
-// no HEAD probing or fast-forwarding), sends exactly one PUT carrying only the remaining
-// bytes, with X-Offset set to that offset.
+// TestPutFile_ResumeFromPartialOffset verifies that putFile opens a fresh bounded body
+// at the caller's validated durable offset.
 func TestPutFile_ResumeFromPartialOffset(t *testing.T) {
 	payload := []byte("0123456789abcde") // 15 bytes; caller already sent the first 8
 
@@ -132,14 +400,16 @@ func TestPutFile_ResumeFromPartialOffset(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		putOffsets = append(putOffsets, r.Header.Get("X-Offset"))
 		receivedBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("X-Next-Offset", strconv.Itoa(len(payload)))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
 
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
-	body := bytes.NewReader(payload[8:])
+	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", body, int64(len(payload)), 8, attrs); err != nil {
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 8,
+		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
 
@@ -156,17 +426,8 @@ func TestPutFile_ResumeFromPartialOffset(t *testing.T) {
 	}
 }
 
-// TestPutFile_OffsetMismatchCorrection documents putFile's new, honest behavior around a
-// mid-upload 409 offset conflict now that its body is a one-pass io.Reader rather than a
-// seekable local file. net/http always drains the reader for the request it is currently
-// writing regardless of the eventual response status, so a rejected PUT leaves nothing left
-// in body to resend at a corrected offset within THE SAME call — attempt 1 below must
-// surface an error. The real recovery path is the same one block streaming uses (see
-// TestPutBlock_InterruptAndResume_AllCodecs / TestImportFSFromTar_InterruptAndResume_AllCodecs):
-// a wholly independent, later call (a restarted process) that re-probes headFileOffset and
-// builds a fresh, correctly-positioned reader — attempt 2 below simulates exactly that and
-// must succeed. This deliberately replaces the pre-streaming version of this test (which
-// relied on a seekable local file to resend the corrected tail from the SAME putFile call).
+// TestPutFile_OffsetMismatchCorrection proves a consumed rejected body is never reused:
+// the 409-selected offset gets a newly opened exact suffix in the same call.
 func TestPutFile_OffsetMismatchCorrection(t *testing.T) {
 	payload := []byte("abcdefghij") // 10 bytes
 
@@ -180,53 +441,46 @@ func TestPutFile_OffsetMismatchCorrection(t *testing.T) {
 
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
 
-	// Attempt 1: putFile believes offset 0 (stale). Its single PUT sends the whole 10-byte
-	// body, is rejected 409 (X-Expected-Offset: 4), and the loop's next iteration finds body
-	// already fully drained — net/http itself detects the short body and errors out.
-	err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", bytes.NewReader(payload), int64(len(payload)), 0, attrs)
-	if err == nil {
-		t.Fatal("expected attempt 1 (stale offset, mid-call correction impossible with a one-pass reader) to return an error")
-	}
-
-	if got := imp.received("data.bin"); !bytes.Equal(got, payload[:4]) {
-		t.Fatalf("server state must be unchanged by the rejected attempt 1: got %q, want %q", got, payload[:4])
-	}
-
-	// Attempt 2: a fresh, independent call using the server-reported offset and a freshly
-	// positioned reader — exactly what a caller re-probing headFileOffset would build.
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", bytes.NewReader(payload[4:]), int64(len(payload)), 4, attrs); err != nil {
-		t.Fatalf("putFile (attempt 2, corrected offset): %v", err)
+	progress := &fileUploadProgress{}
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 0,
+		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
+		t.Fatalf("putFile: %v", err)
 	}
 
 	if got := imp.received("data.bin"); !bytes.Equal(got, payload) {
-		t.Errorf("after corrected attempt 2, server holds %q, want %q", got, payload)
+		t.Errorf("after corrected retry, server holds %q, want %q", got, payload)
 	}
 }
 
-// TestPutFile_AlreadyComplete_NoPUT verifies the offset>=totalSize short-circuit: a resume
-// offset already at (or past) the total means a prior call already durably transferred
-// every byte, so putFile must not issue any PUT. This mirrors putBlock's analogous
-// TestPutBlock_SkipsDecodeWhenOffsetEqualsTotal; the pre-streaming version of this test
-// (which asserted putFile's own internal HEAD detected server-side completion) no longer
-// applies, since that check now lives entirely in the caller (importFSFromTar) before
-// putFile is ever invoked.
-func TestPutFile_AlreadyComplete_NoPUT(t *testing.T) {
-	putCalled := false
+func TestPutFile_PartialOffsetAtTotalFinalizesViaEmptyPUT(t *testing.T) {
+	putCount := 0
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		putCalled = true
+		putCount++
+
+		if r.ContentLength != 0 {
+			t.Errorf("Content-Length = %d, want 0", r.ContentLength)
+		}
+
+		if got := r.Header.Get("X-Offset"); got != "4" {
+			t.Errorf("X-Offset = %q, want 4", got)
+		}
+
+		w.Header().Set("X-Next-Offset", "4")
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
 
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
+	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", strings.NewReader(""), 4, 4, attrs); err != nil {
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", 4, 4,
+		attrs, bytesBodyFactory([]byte("data")), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
 
-	if putCalled {
-		t.Error("PUT must not be issued when offset already equals totalSize")
+	if putCount != 1 {
+		t.Errorf("PUT count = %d, want 1 finalization request", putCount)
 	}
 }
 
@@ -241,11 +495,14 @@ func TestPutFile_EmptyFile_CreatesViaSinglePUT(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		putCount++
 		capturedHeaders = r.Header.Clone()
+		w.Header().Set("X-Next-Offset", "0")
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", strings.NewReader(""), 0, 0, attrs); err != nil {
+	progress := &fileUploadProgress{}
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", 0, 0,
+		attrs, bytesBodyFactory(nil), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
 
@@ -272,10 +529,13 @@ func TestPutFile_EmptyFile_CreatesViaSinglePUT(t *testing.T) {
 func TestPutFile_FinishedPostUsesSharedEndpoint(t *testing.T) {
 	var finishedPath string
 
+	payload := []byte("content")
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPut:
 			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("X-Next-Offset", strconv.Itoa(len(payload)))
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodPost:
 			finishedPath = r.URL.Path
@@ -287,9 +547,10 @@ func TestPutFile_FinishedPostUsesSharedEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	attrs := fileAttrs{Perm: 0o644, UID: 0, GID: 0, ModTime: time.Now()}
-	payload := []byte("content")
+	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "file.txt", bytes.NewReader(payload), int64(len(payload)), 0, attrs); err != nil {
+	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "file.txt", int64(len(payload)), 0,
+		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
 
@@ -322,6 +583,40 @@ func encodeEntry(t *testing.T, codecName string, content []byte) (string, []byte
 	}
 
 	return codec.Ext(), buf.Bytes()
+}
+
+func writeSingleEntryFSTar(t *testing.T, codec string, content []byte) string {
+	t.Helper()
+
+	ext, stored := encodeEntry(t, codec, content)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryMetadata(
+		t,
+		tw,
+		"file.bin"+ext,
+		"file.bin",
+		codec,
+		int64(len(content)),
+		stored,
+		0o600,
+		1,
+		2,
+		time.Unix(100, 0).UTC(),
+	)
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	return tarPath
 }
 
 // addTarEntry writes a format-current regular entry. rawSizes can avoid decoding
@@ -405,6 +700,180 @@ func addTarEntryMetadata(
 	}
 }
 
+func addTarEntryRawPAX(
+	t *testing.T,
+	tw *tar.Writer,
+	storedPath, originalPath, codec string,
+	rawSize int64,
+	body []byte,
+) {
+	t.Helper()
+
+	hdr := &tar.Header{
+		Format:   tar.FormatPAX,
+		Typeflag: tar.TypeReg,
+		Name:     storedPath,
+		Mode:     0o600,
+		Size:     int64(len(body)),
+		PAXRecords: map[string]string{
+			archive.PAXFSCodec:        codec,
+			archive.PAXFSOriginalPath: originalPath,
+			archive.PAXFSRawSize:      strconv.FormatInt(rawSize, 10),
+		},
+	}
+
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("write raw-PAX tar header for %s: %v", storedPath, err)
+	}
+
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("write raw-PAX tar body for %s: %v", storedPath, err)
+	}
+}
+
+func TestValidateFSUploadPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "empty", path: ""},
+		{name: "dot", path: "."},
+		{name: "absolute", path: "/etc/passwd"},
+		{name: "backslash", path: `dir\file`},
+		{name: "nul", path: "dir/\x00file"},
+		{name: "control", path: "dir/\nfile"},
+		{name: "drive", path: "C:/file"},
+		{name: "parent", path: "dir/../file"},
+		{name: "double slash clean drift", path: "dir//file"},
+		{name: "dot element clean drift", path: "dir/./file"},
+		{name: "trailing slash clean drift", path: "dir/file/"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if err := validateFSUploadPath(tc.path); !errors.Is(err, archive.ErrInvalidFSMetadata) {
+				t.Fatalf("validateFSUploadPath(%q) error = %v, want ErrInvalidFSMetadata", tc.path, err)
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_UnsafeOrDuplicatePAXBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		build func(*testing.T, *tar.Writer)
+	}{
+		{
+			name: "drive-like PAX wins over benign header",
+			build: func(t *testing.T, tw *tar.Writer) {
+				addTarEntryRawPAX(t, tw, "benign.txt", "C:/escape.txt", "none", 1, []byte("x"))
+			},
+		},
+		{
+			name: "path-clean drift PAX wins over conflicting header",
+			build: func(t *testing.T, tw *tar.Writer) {
+				addTarEntryRawPAX(t, tw, "different.txt", "dir//escape.txt", "none", 1, []byte("x"))
+			},
+		},
+		{
+			name: "duplicate normalized regular path",
+			build: func(t *testing.T, tw *tar.Writer) {
+				addTarEntryMetadata(t, tw, "dup.txt", "dup.txt", "none", 1, []byte("a"), 0o600, 0, 0, time.Time{})
+				addTarEntryMetadata(t, tw, "dup.txt", "dup.txt", "none", 1, []byte("b"), 0o600, 0, 0, time.Time{})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			tc.build(t, tw)
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			doer := &failOnHTTPDoer{}
+			err := importFSFromTar(
+				context.Background(),
+				doer,
+				":// invalid base URL that must never be joined",
+				tarPath,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+				t.Fatalf("importFSFromTar error = %v, want ErrInvalidFSMetadata", err)
+			}
+
+			if doer.called {
+				t.Fatal("unsafe/duplicate full-tar preflight must run before HTTP")
+			}
+		})
+	}
+}
+
+func TestScanFSTar_ClassifiesNonRegularWithoutPAX(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	for _, hdr := range []*tar.Header{
+		{Typeflag: tar.TypeDir, Name: "dir/", Mode: 0o755},
+		{Typeflag: tar.TypeSymlink, Name: "link", Linkname: "target", Mode: 0o777},
+	} {
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write non-regular header %q: %v", hdr.Name, err)
+		}
+	}
+
+	addTarEntryMetadata(t, tw, "dir/file.txt", "dir/file.txt", "none", 1, []byte("x"), 0o600, 0, 0, time.Time{})
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	scan, err := scanFSTar(tarPath)
+	if err != nil {
+		t.Fatalf("scanFSTar: %v", err)
+	}
+
+	if got, want := scan.RegularPaths, []string{"dir/file.txt"}; !slices.Equal(got, want) {
+		t.Errorf("regular paths = %v, want %v", got, want)
+	}
+
+	wantNonRegular := []fsTarNonRegularEntry{
+		{Typeflag: tar.TypeDir, HeaderPath: "dir/"},
+		{Typeflag: tar.TypeSymlink, HeaderPath: "link"},
+	}
+	if !reflect.DeepEqual(scan.NonRegular, wantNonRegular) {
+		t.Errorf("non-regular classifications = %#v, want %#v", scan.NonRegular, wantNonRegular)
+	}
+}
+
 // fsCapture records per-file uploads received by the test FS importer server.
 type fsCapture struct {
 	mu      sync.Mutex
@@ -474,6 +943,7 @@ func TestImportFSFromTar_DecompressesAndUploads(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
 		cap.record(relPath, body, r.Header.Clone())
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(r.ContentLength, 10))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
@@ -725,6 +1195,7 @@ func TestImportFSFromTar_SkipsNonRegularEntries(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
 		cap.record(relPath, body, r.Header.Clone())
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(r.ContentLength, 10))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
@@ -799,6 +1270,7 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutDecompressing(t *testin
 
 		body, _ := io.ReadAll(r.Body)
 		cap.record(relPath, body, r.Header.Clone())
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(r.ContentLength, 10))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
@@ -995,6 +1467,7 @@ func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
 		cap.record(relPath, body, r.Header.Clone())
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(r.ContentLength, 10))
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
@@ -1137,13 +1610,14 @@ func (f *fakeFileImporter) servePut(w http.ResponseWriter, r *http.Request, relP
 	}
 	f.mu.Unlock()
 
+	w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+
 	if next == expectedTotal {
 		w.WriteHeader(http.StatusCreated)
 
 		return
 	}
 
-	w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1246,6 +1720,172 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 				if totals[i] != want {
 					t.Errorf("setTotal call #%d = %d, want %d", i, totals[i], want)
 				}
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_LargeRawAndCompressedUseBoundedExactPUTs(t *testing.T) {
+	t.Parallel()
+
+	const ingressLimit = 64 * 1024 * 1024
+
+	tests := []struct {
+		name  string
+		codec string
+	}{
+		{name: "raw", codec: "none"},
+		{name: "compressed", codec: "zstd"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			payloadSize := 2*blockPutPayloadLimit + 123
+			pattern := []byte("producer-shaped-filesystem-upload.")
+			content := bytes.Repeat(pattern, int(payloadSize)/len(pattern)+1)
+			content = content[:payloadSize]
+
+			ext, stored := encodeEntry(t, tc.codec, content)
+
+			var tarBuf bytes.Buffer
+
+			tw := tar.NewWriter(&tarBuf)
+			addTarEntryMetadata(
+				t,
+				tw,
+				"large.bin"+ext,
+				"large.bin",
+				tc.codec,
+				int64(len(content)),
+				stored,
+				0o640,
+				12,
+				34,
+				time.Unix(100, 0).UTC(),
+			)
+
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			var mu sync.Mutex
+
+			var offsets []int64
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusNotFound)
+
+					return
+				}
+
+				if r.Method != http.MethodPut {
+					http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+
+					return
+				}
+
+				if r.ContentLength > ingressLimit {
+					http.Error(w, "ingress body too large", http.StatusRequestEntityTooLarge)
+
+					return
+				}
+
+				if r.ContentLength <= 0 || r.ContentLength > blockPutPayloadLimit {
+					http.Error(w, "client chunk cap violated", http.StatusBadRequest)
+
+					return
+				}
+
+				for name, want := range map[string]string{
+					"X-Content-Length":        strconv.Itoa(len(content)),
+					"X-Attribute-Permissions": "0640",
+					"X-Attribute-Uid":         "12",
+					"X-Attribute-Gid":         "34",
+				} {
+					if got := r.Header.Get(name); got != want {
+						http.Error(w, fmt.Sprintf("%s=%q want %q", name, got, want), http.StatusBadRequest)
+
+						return
+					}
+				}
+
+				offset, err := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+				if err != nil {
+					http.Error(w, "invalid offset", http.StatusBadRequest)
+
+					return
+				}
+
+				requestEnd := offset + r.ContentLength
+				if offset < 0 || requestEnd > int64(len(content)) {
+					http.Error(w, "invalid request range", http.StatusBadRequest)
+
+					return
+				}
+
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+
+					return
+				}
+
+				if !bytes.Equal(body, content[offset:requestEnd]) {
+					http.Error(w, "body is not the exact raw suffix", http.StatusBadRequest)
+
+					return
+				}
+
+				mu.Lock()
+				offsets = append(offsets, offset)
+				mu.Unlock()
+
+				w.Header().Set("X-Next-Offset", strconv.FormatInt(requestEnd, 10))
+				if requestEnd == int64(len(content)) {
+					w.WriteHeader(http.StatusCreated)
+
+					return
+				}
+
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(server.Close)
+
+			progressed := 0
+			err := importFSFromTar(
+				context.Background(),
+				plainHTTPDoer{},
+				server.URL,
+				tarPath,
+				discardLogger(),
+				nil,
+				func(n int) { progressed += n },
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("importFSFromTar: %v", err)
+			}
+
+			wantOffsets := []int64{0, blockPutPayloadLimit, 2 * blockPutPayloadLimit}
+
+			mu.Lock()
+			gotOffsets := append([]int64(nil), offsets...)
+			mu.Unlock()
+
+			if !slices.Equal(gotOffsets, wantOffsets) {
+				t.Errorf("PUT offsets = %v, want %v", gotOffsets, wantOffsets)
+			}
+
+			if progressed != len(content) {
+				t.Errorf("progress = %d, want %d", progressed, len(content))
 			}
 		})
 	}
@@ -1402,6 +2042,153 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 	}
 }
 
+func TestSendVolumeData_FSProtocolErrorDoesNotFinalizeOrCreditProgress(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("protocol failures must not finalize")
+
+	tests := []struct {
+		name   string
+		status int
+		header http.Header
+	}{
+		{
+			name:   "204 at final request end",
+			status: http.StatusNoContent,
+			header: http.Header{"X-Next-Offset": []string{strconv.Itoa(len(content))}},
+		},
+		{
+			name:   "409 missing expected offset",
+			status: http.StatusConflict,
+			header: http.Header{},
+		},
+		{
+			name:   "409 malformed expected offset",
+			status: http.StatusConflict,
+			header: http.Header{"X-Expected-Offset": []string{"bad"}},
+		},
+		{
+			name:   "409 out-of-range expected offset",
+			status: http.StatusConflict,
+			header: http.Header{"X-Expected-Offset": []string{strconv.Itoa(len(content) + 1)}},
+		},
+		{
+			name:   "409 non-progress expected offset",
+			status: http.StatusConflict,
+			header: http.Header{"X-Expected-Offset": []string{"0"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tarPath := writeSingleEntryFSTar(t, "none", content)
+
+			var methods []string
+
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method)
+
+				switch req.Method {
+				case http.MethodHead:
+					return fileHTTPResponse(http.StatusNotFound, http.Header{}), nil
+				case http.MethodPut:
+					if _, err := io.Copy(io.Discard, req.Body); err != nil {
+						return nil, fmt.Errorf("consume PUT: %w", err)
+					}
+
+					return fileHTTPResponse(tc.status, tc.header), nil
+				case http.MethodPost:
+					return fileHTTPResponse(http.StatusOK, http.Header{}), nil
+				default:
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
+			})
+
+			progressed := 0
+			importer := &clusterVolumeImporter{log: discardLogger()}
+			leaf := PlannedNode{FilesystemData: true, TarFile: tarPath}
+
+			err := importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://import.example",
+				volumeModeFilesystem,
+				leaf,
+				"target",
+				"data-import",
+				nil,
+				func(n int) { progressed += n },
+				nil,
+			)
+			if err == nil {
+				t.Fatal("sendVolumeData error = nil, want protocol failure")
+			}
+
+			if !slices.Equal(methods, []string{http.MethodHead, http.MethodPut}) {
+				t.Errorf("HTTP methods = %v, want HEAD+PUT only (no finished POST)", methods)
+			}
+
+			if progressed != 0 {
+				t.Errorf("progress = %d, want 0 after invalid response", progressed)
+			}
+		})
+	}
+}
+
+func TestSendVolumeData_FSCompressedCancelDuringRepositionDoesNotPUTOrFinalize(t *testing.T) {
+	t.Parallel()
+
+	content := bytes.Repeat([]byte("cancel-aware-discard"), 1024)
+	tarPath := writeSingleEntryFSTar(t, "zstd", content)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var methods []string
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		methods = append(methods, req.Method)
+
+		if req.Method != http.MethodHead {
+			return nil, fmt.Errorf("unexpected method %s after cancellation", req.Method)
+		}
+
+		cancel()
+
+		return fileHTTPResponse(http.StatusOK, http.Header{"X-Next-Offset": []string{"1"}}), nil
+	})
+
+	progressed := 0
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	leaf := PlannedNode{FilesystemData: true, TarFile: tarPath}
+
+	err := importer.sendVolumeData(
+		ctx,
+		doer,
+		"https://import.example",
+		volumeModeFilesystem,
+		leaf,
+		"target",
+		"data-import",
+		nil,
+		func(n int) { progressed += n },
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sendVolumeData error = %v, want context.Canceled", err)
+	}
+
+	if !slices.Equal(methods, []string{http.MethodHead}) {
+		t.Errorf("HTTP methods = %v, want HEAD only", methods)
+	}
+
+	if progressed != 1 {
+		t.Errorf("progress = %d, want validated durable HEAD high-water 1", progressed)
+	}
+}
+
 // newMemoryBoundedFSServer returns an httptest.Server mimicking just enough of the
 // import_files HEAD/PUT contract for a single fresh (offset 0) upload: HEAD reports
 // not-found (no prior partial or completed upload), and PUT discards the body without
@@ -1421,7 +2208,18 @@ func newMemoryBoundedFSServer(t *testing.T) *httptest.Server {
 				return
 			}
 
-			w.WriteHeader(http.StatusCreated)
+			offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+			next := offset + r.ContentLength
+			w.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+
+			total, _ := strconv.ParseInt(r.Header.Get("X-Content-Length"), 10, 64)
+			if next == total {
+				w.WriteHeader(http.StatusCreated)
+
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
 		}

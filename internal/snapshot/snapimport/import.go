@@ -294,6 +294,12 @@ func preflight(plan []PlannedNode) error {
 		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() && !node.FilesystemData {
 			return fmt.Errorf("data leaf %s/%s has no volume data file (data.bin or data.tar) in the archive", node.Kind, node.Name)
 		}
+
+		if node.FilesystemData {
+			if _, err := scanFSTar(node.TarFile); err != nil {
+				return fmt.Errorf("filesystem tar preflight for %s/%s: %w", node.Kind, node.Name, err)
+			}
+		}
 	}
 
 	return nil

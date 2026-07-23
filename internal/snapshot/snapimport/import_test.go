@@ -17,6 +17,8 @@ limitations under the License.
 package snapimport
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -377,6 +379,55 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 	// The leaf import-mode VolumeSnapshot CR must have been created.
 	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr != nil {
 		t.Errorf("VolumeSnapshot import CR not created: %v", gErr)
+	}
+}
+
+func TestRun_UnsafeFilesystemPAXFailsBeforeClusterMutation(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryRawPAX(t, tw, "C:/escape.txt", "C:/escape.txt", "none", 1, []byte("x"))
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    tarBuf.Bytes(),
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+		t.Fatalf("Run error = %v, want ErrInvalidFSMetadata", err)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(actions), actions)
 	}
 }
 
