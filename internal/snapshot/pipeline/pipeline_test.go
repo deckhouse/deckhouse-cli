@@ -327,6 +327,61 @@ func TestPipeline_HappyPath(t *testing.T) {
 		"disk-snap snapshot.yaml must not be rewritten on second run")
 }
 
+func TestPipeline_UnsupportedFilesystemEntryDoesNotFinalizeNode(t *testing.T) {
+	t.Parallel()
+
+	var fileGets atomic.Int64
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"regular.txt","type":"file","uri":"regular.txt","attributes":{"size":4}},`+
+				`{"name":"execq","type":"other","uri":"execq","attributes":{"permissions":"0660","modtime":"2026-07-23T12:00:00Z","uid":0,"gid":999}}`+
+				`]}`)
+		case "/api/v1/files/regular.txt":
+			fileGets.Add(1)
+			_, _ = io.WriteString(w, "data")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	outputDir := t.TempDir()
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           buildFakeClient(t),
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-unsupported-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "execq")
+	require.ErrorContains(t, err, "other")
+
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName))
+
+	_, statErr := os.Stat(filepath.Join(diskSnapDir, archive.FsTarName))
+	require.True(t, os.IsNotExist(statErr), "unsupported listing item must not publish data.tar")
+
+	_, statErr = os.Stat(filepath.Join(diskSnapDir, archive.SnapshotYAMLName))
+	require.True(t, os.IsNotExist(statErr),
+		"unsupported listing item must not reach node finalization or publish snapshot.yaml")
+	require.Zero(t, fileGets.Load(), "listing validation must finish before any regular file is staged")
+}
+
 // TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed is the
 // end-to-end regression for resume-checksum-mismatch: a node is fully
 // downloaded and finalized, then its data.bin is corrupted AFTER finalize. On

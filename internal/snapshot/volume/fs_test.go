@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,6 +254,94 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 		if metadata.Codec != "none" || metadata.OriginalPath != file.relPath || metadata.RawSize != int64(len(file.content)) {
 			t.Errorf("metadata for %s = %#v", file.relPath, metadata)
 		}
+	}
+}
+
+func TestDownloadFilesystemVolume_RejectsUnsupportedListingItems(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		itemName   string
+		itemType   string
+		attributes string
+	}{
+		{
+			name:       "Other",
+			itemName:   "execq",
+			itemType:   "other",
+			attributes: `{"permissions":"0660","modtime":"2026-07-23T12:00:00Z","uid":0,"gid":999}`,
+		},
+		{
+			name:       "LinkError",
+			itemName:   "broken-link",
+			itemType:   "linkErr",
+			attributes: `{"permissions":"0777","modtime":"2026-07-23T12:00:00Z","uid":0,"gid":0}`,
+		},
+		{
+			name:       "UnknownFutureType",
+			itemName:   "future-entry",
+			itemType:   "deviceV2",
+			attributes: `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fileGets atomic.Int64
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/files/":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprintf(w,
+						`{"apiVersion":"v1","items":[`+
+							`{"name":"regular.txt","type":"file","uri":"regular.txt","attributes":{"size":4}},`+
+							`{"name":%q,"type":%q,"uri":%q,"attributes":%s}`+
+							`]}`,
+						tt.itemName, tt.itemType, tt.itemName, tt.attributes)
+				case "/files/regular.txt":
+					fileGets.Add(1)
+					_, _ = io.WriteString(w, "data")
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+			stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+			err := volume.DownloadFilesystemVolume(
+				context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+				1, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+			)
+			if err == nil {
+				t.Fatal("expected unsupported listing item to fail the download")
+			}
+
+			if !strings.Contains(err.Error(), tt.itemName) {
+				t.Errorf("error %q does not contain item path %q", err, tt.itemName)
+			}
+
+			if !strings.Contains(err.Error(), tt.itemType) {
+				t.Errorf("error %q does not contain wire type %q", err, tt.itemType)
+			}
+
+			if _, statErr := os.Stat(tarPath); !os.IsNotExist(statErr) {
+				t.Errorf("data.tar must not be published after unsupported listing item: %v", statErr)
+			}
+
+			if got := fileGets.Load(); got != 0 {
+				t.Errorf("regular file was fetched %d times before listing validation completed", got)
+			}
+		})
 	}
 }
 
