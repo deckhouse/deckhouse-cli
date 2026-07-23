@@ -109,6 +109,20 @@ func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _
 	return nil
 }
 
+type countingRESTMapper struct {
+	meta.RESTMapper
+	calls atomic.Int32
+}
+
+func (m *countingRESTMapper) RESTMapping(
+	gk schema.GroupKind,
+	versions ...string,
+) (*meta.RESTMapping, error) {
+	m.calls.Add(1)
+
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
 func testMapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper(nil)
 	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
@@ -1128,6 +1142,161 @@ func TestFilterPlanToSubtree_NotFound(t *testing.T) {
 
 	if _, err := filterPlanToSubtree(plan, "Snapshot", "nonexistent"); err == nil {
 		t.Fatal("expected error for missing node, got nil")
+	}
+}
+
+func TestRun_RejectsDuplicateIdentityBeforeExternalCalls(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	for _, physicalName := range []string{"first", "second"} {
+		writeArchiveNode(t, filepath.Join(root, archive.SnapshotsDirName, physicalName), archiveNode{
+			apiVersion: "domain.example.io/v1",
+			kind:       "DemoSnapshot",
+			name:       "duplicate",
+		})
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	mapper := &countingRESTMapper{RESTMapper: testMapper()}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = mapper
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() error = nil, want duplicate identity rejection")
+	}
+
+	if !strings.Contains(err.Error(), "canonical identity domain.example.io/v1 DemoSnapshot/duplicate") {
+		t.Fatalf("Run() error = %q, want duplicate canonical identity", err)
+	}
+
+	if calls := mapper.calls.Load(); calls != 0 {
+		t.Errorf("RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic client actions = %v, want none", actions)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume calls = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+}
+
+func TestRun_SameKindNameAcrossAPIVersions(t *testing.T) {
+	const (
+		firstAPIVersion  = "alpha.example.io/v1"
+		secondAPIVersion = "beta.example.io/v1"
+		domainKind       = "DemoSnapshot"
+		domainName       = "shared"
+	)
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	firstPath := filepath.Join(root, archive.SnapshotsDirName, "z-physical")
+	writeArchiveNode(t, firstPath, archiveNode{
+		apiVersion: firstAPIVersion,
+		kind:       domainKind,
+		name:       domainName,
+	})
+
+	secondPath := filepath.Join(root, archive.SnapshotsDirName, "a-physical")
+	writeArchiveNode(t, secondPath, archiveNode{
+		apiVersion: secondAPIVersion,
+		kind:       domainKind,
+		name:       domainName,
+	})
+
+	newMapper := func() meta.RESTMapper {
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: snapshotKind},
+			meta.RESTScopeNamespace)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "alpha.example.io", Version: "v1", Kind: domainKind},
+			meta.RESTScopeNamespace)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "beta.example.io", Version: "v1", Kind: domainKind},
+			meta.RESTScopeNamespace)
+
+		return mapper
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	fullCfg := baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot()))
+	fullCfg.Mapper = newMapper()
+
+	if err := Run(context.Background(), fullCfg); err != nil {
+		t.Fatalf("full-tree Run() error = %v", err)
+	}
+
+	if len(up.calls) != 3 {
+		t.Fatalf("full-tree manifest uploads = %d, want 3", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("full-tree volume calls = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	selectedUp := &stubUploader{}
+	selectedVol := &stubVolumes{}
+	selectedDyn := newFakeDynamic(readyRootSnapshot())
+	selectedMapper := &countingRESTMapper{RESTMapper: newMapper()}
+	selectedCfg := baseConfig(root, selectedUp, selectedVol, selectedDyn)
+	selectedCfg.Mapper = selectedMapper
+	selectedCfg.SelectedNodeKind = domainKind
+	selectedCfg.SelectedNodeName = domainName
+
+	err := Run(context.Background(), selectedCfg)
+	if err == nil {
+		t.Fatal("selected Run() error = nil, want ambiguity rejection")
+	}
+
+	firstCandidate := firstAPIVersion + " at " + firstPath
+	secondCandidate := secondAPIVersion + " at " + secondPath
+	errorText := err.Error()
+
+	for _, want := range []string{"is ambiguous across apiVersions", firstCandidate, secondCandidate} {
+		if !strings.Contains(errorText, want) {
+			t.Errorf("selected Run() error = %q, want substring %q", errorText, want)
+		}
+	}
+
+	if strings.Index(errorText, firstCandidate) > strings.Index(errorText, secondCandidate) {
+		t.Errorf("ambiguity candidates are not deterministic: %q", errorText)
+	}
+
+	if calls := selectedMapper.calls.Load(); calls != 0 {
+		t.Errorf("selected RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := selectedDyn.Actions(); len(actions) != 0 {
+		t.Errorf("selected dynamic client actions = %v, want none", actions)
+	}
+
+	if len(selectedUp.calls) != 0 ||
+		len(selectedVol.ensure) != 0 ||
+		len(selectedVol.upload) != 0 {
+		t.Errorf(
+			"selected external calls = manifests %d ensure %v upload %v, want none",
+			len(selectedUp.calls), selectedVol.ensure, selectedVol.upload)
 	}
 }
 

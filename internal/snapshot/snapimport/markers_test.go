@@ -138,6 +138,79 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 	assertImportMarker(t, obj)
 }
 
+func TestPlannedNode_ClassificationRequiresExactGVK(t *testing.T) {
+	tests := []struct {
+		name           string
+		node           PlannedNode
+		wantStructural bool
+		wantCSILeaf    bool
+		wantDomainLeaf bool
+	}{
+		{
+			name:           "exact_core_snapshot",
+			node:           PlannedNode{APIVersion: snapshotAPIVersion, Kind: snapshotKind},
+			wantStructural: true,
+		},
+		{
+			name:        "exact_csi_volume_snapshot",
+			node:        PlannedNode{APIVersion: volumeSnapshotAPIVersion, Kind: volumeSnapshotKind},
+			wantCSILeaf: true,
+		},
+		{
+			name: "same_snapshot_kind_in_domain_api",
+			node: PlannedNode{
+				APIVersion: "domain.example.io/v1",
+				Kind:       snapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "wrong_core_snapshot_version",
+			node: PlannedNode{
+				APIVersion: "state-snapshotter.deckhouse.io/v1beta1",
+				Kind:       snapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "wrong_csi_volume_snapshot_version",
+			node: PlannedNode{
+				APIVersion: "snapshot.storage.k8s.io/v1beta1",
+				Kind:       volumeSnapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "same_volume_snapshot_kind_in_domain_api",
+			node: PlannedNode{
+				APIVersion: "domain.example.io/v1",
+				Kind:       volumeSnapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.node.isStructural(); got != test.wantStructural {
+				t.Errorf("isStructural() = %v, want %v", got, test.wantStructural)
+			}
+
+			if got := test.node.isVolumeSnapshotLeaf(); got != test.wantCSILeaf {
+				t.Errorf("isVolumeSnapshotLeaf() = %v, want %v", got, test.wantCSILeaf)
+			}
+
+			if got := test.node.isDomainDataLeaf(); got != test.wantDomainLeaf {
+				t.Errorf("isDomainDataLeaf() = %v, want %v", got, test.wantDomainLeaf)
+			}
+		})
+	}
+}
+
 // TestPlannedNode_IsDomainAggregator verifies the classification that gates the standalone
 // --node root restriction: only a domain node with no own volume data but WITH child refs is
 // an aggregator. Aggregators are still importable as non-root nodes within a tree.
