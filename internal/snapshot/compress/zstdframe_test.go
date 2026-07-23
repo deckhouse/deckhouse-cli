@@ -186,7 +186,7 @@ func TestSkipZstdFrames_DecodedBytesMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("zstd.NewReader: %v", err)
 	}
-	defer dec.Close()
+	t.Cleanup(dec.Close)
 
 	got, err := io.ReadAll(dec)
 	if err != nil {
@@ -195,6 +195,67 @@ func TestSkipZstdFrames_DecodedBytesMatch(t *testing.T) {
 
 	if want := bytes.Join(raws, nil); !bytes.Equal(got, want) {
 		t.Errorf("decoded %d bytes, want %d", len(got), len(want))
+	}
+}
+
+func TestSkipZstdFrames_MixedEncodeAllAndStreamingFrames(t *testing.T) {
+	t.Parallel()
+
+	codec, err := New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	raws := [][]byte{
+		bytes.Repeat([]byte("encode-all-"), 40_000),
+		pseudoRandom(700_000, 0xBAD5EED),
+		bytes.Repeat([]byte("streaming-tail-"), 20_000),
+	}
+
+	frame0, err := codec.EncodeFrame(raws[0])
+	if err != nil {
+		t.Fatalf("EncodeFrame(first): %v", err)
+	}
+
+	var frame1 bytes.Buffer
+	if err := codec.EncodeFrameStream(&frame1, bytes.NewReader(raws[1]), int64(len(raws[1]))); err != nil {
+		t.Fatalf("EncodeFrameStream(second): %v", err)
+	}
+
+	frame2, err := codec.EncodeFrame(raws[2])
+	if err != nil {
+		t.Fatalf("EncodeFrame(third): %v", err)
+	}
+
+	frames := [][]byte{frame0, frame1.Bytes(), frame2}
+	concat := bytes.Join(frames, nil)
+	offsets := cumulativeOffsets(frames)
+
+	for i := range frames {
+		got, err := SkipZstdFrames(bytes.NewReader(concat), i)
+		if err != nil {
+			t.Fatalf("SkipZstdFrames(_, %d): %v", i, err)
+		}
+
+		if got != offsets[i] {
+			t.Errorf("frame %d boundary = %d, want %d", i, got, offsets[i])
+		}
+	}
+
+	dec, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+
+	t.Cleanup(dec.Close)
+
+	got, err := dec.DecodeAll(concat, nil)
+	if err != nil {
+		t.Fatalf("DecodeAll mixed frames: %v", err)
+	}
+
+	if want := bytes.Join(raws, nil); !bytes.Equal(got, want) {
+		t.Errorf("decoded mixed frames = %d bytes, want %d", len(got), len(want))
 	}
 }
 
