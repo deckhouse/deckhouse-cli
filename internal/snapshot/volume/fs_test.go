@@ -163,6 +163,35 @@ func readTarContents(t *testing.T, tarPath string) map[string][]byte {
 	return result
 }
 
+func readRegularTarHeaders(t *testing.T, tarPath string) map[string]*tar.Header {
+	t.Helper()
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	result := map[string]*tar.Header{}
+	tr := tar.NewReader(f)
+
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return result
+		}
+
+		if err != nil {
+			t.Fatalf("read tar header: %v", err)
+		}
+
+		if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
+			result[hdr.Name] = hdr
+		}
+	}
+}
+
 func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 	srv, files := fsTestServer(t)
 
@@ -211,6 +240,18 @@ func TestDownloadFilesystemVolume_DownloadsTree(t *testing.T) {
 
 		if !bytes.Equal(data, f.content) {
 			t.Errorf("entry %q: got %q, want %q", f.relPath, data, f.content)
+		}
+	}
+
+	headers := readRegularTarHeaders(t, tarPath)
+	for _, file := range files {
+		metadata, parseErr := archive.ParseFSMetadata(headers[file.relPath])
+		if parseErr != nil {
+			t.Fatalf("parse metadata for %s: %v", file.relPath, parseErr)
+		}
+
+		if metadata.Codec != "none" || metadata.OriginalPath != file.relPath || metadata.RawSize != int64(len(file.content)) {
+			t.Errorf("metadata for %s = %#v", file.relPath, metadata)
 		}
 	}
 }
@@ -456,16 +497,21 @@ func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pre-stage root.txt with a sentinel that is NOT the server's content.
-	// stageCompressedFile must skip it when it sees the file already present.
+	// Pre-stage root.txt with a valid encoded sentinel that is NOT the server's
+	// content. The resume path decodes it once to recover exact rawSize because
+	// this legacy fixture listing omits size and MD5, but must not re-download it.
 	sentinel := []byte("sentinel-not-server-content")
 	preStaged := filepath.Join(stagingDir, "root.txt.zst")
+	codec := mustCodec(t, "zstd")
 
-	if err := os.WriteFile(preStaged, sentinel, 0o644); err != nil {
-		t.Fatal(err)
+	var encoded bytes.Buffer
+	if err := codec.EncodeStream(&encoded, bytes.NewReader(sentinel)); err != nil {
+		t.Fatalf("encode sentinel: %v", err)
 	}
 
-	codec := mustCodec(t, "zstd")
+	if err := os.WriteFile(preStaged, encoded.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := volume.DownloadFilesystemVolume(context.Background(), slog.Default(), tarPath, stagingDir, rootURL, 1, 0, newFSFetcher(srv), codec, nil, nil); err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
@@ -500,8 +546,8 @@ func TestDownloadFilesystemVolume_SkipsExistingCompressedStaged(t *testing.T) {
 			t.Fatalf("read entry: %v", readErr)
 		}
 
-		if !bytes.Equal(got, sentinel) {
-			t.Errorf("root.txt.zst content = %q; want sentinel %q (file was re-downloaded)", got, sentinel)
+		if !bytes.Equal(got, encoded.Bytes()) {
+			t.Errorf("root.txt.zst content changed (file was re-downloaded)")
 		}
 
 		return
@@ -1914,6 +1960,68 @@ func decodeTarEntryByCodec(t *testing.T, tarPath, relPath string, codec compress
 	return data
 }
 
+func TestDownloadFilesystemVolume_CodecSuffixedSourceNameMetadata(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		codec      string
+		storedPath string
+	}{
+		{name: "none does not reinterpret source suffix", codec: "none", storedPath: "report.zst"},
+		{name: "zstd appends a distinct storage suffix", codec: "zstd", storedPath: "report.zst.zst"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			content := []byte("codec-suffixed source filename")
+			codec := mustCodec(t, tc.codec)
+			srv, _ := newFileGetCountingFSServer(t, "report.zst", content, hexMD5(content))
+			nodeDir := t.TempDir()
+			tarPath := filepath.Join(nodeDir, archive.FsTarName)
+
+			err := volume.DownloadFilesystemVolume(
+				context.Background(),
+				slog.Default(),
+				tarPath,
+				filepath.Join(nodeDir, archive.FsTarStagingDirName),
+				srv.URL+"/files/",
+				1,
+				0,
+				newFSFetcher(srv),
+				codec,
+				nil,
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("DownloadFilesystemVolume: %v", err)
+			}
+
+			headers := readRegularTarHeaders(t, tarPath)
+			hdr, ok := headers[tc.storedPath]
+			if !ok {
+				t.Fatalf("tar missing stored entry %q", tc.storedPath)
+			}
+
+			metadata, err := archive.ParseFSMetadata(hdr)
+			if err != nil {
+				t.Fatalf("ParseFSMetadata: %v", err)
+			}
+
+			if metadata.Codec != tc.codec || metadata.OriginalPath != "report.zst" ||
+				metadata.RawSize != int64(len(content)) {
+				t.Fatalf("metadata = %#v", metadata)
+			}
+
+			if got := decodeTarEntryByCodec(t, tarPath, "report.zst", codec); !bytes.Equal(got, content) {
+				t.Fatalf("decoded content = %q, want %q", got, content)
+			}
+		})
+	}
+}
+
 // TestDownloadFilesystemVolume_ResumeSkip_VerifiedBlobSkipped verifies that an
 // already-staged blob whose decoded MD5 matches the exporter-advertised digest
 // is skipped exactly as before: no file GET is issued, its declared size is
@@ -1979,6 +2087,16 @@ func TestDownloadFilesystemVolume_ResumeSkip_VerifiedBlobSkipped(t *testing.T) {
 			got := decodeTarEntryByCodec(t, tarPath, "file.bin", codec)
 			if !bytes.Equal(got, content) {
 				t.Errorf("tar entry content = %q; want %q", got, content)
+			}
+
+			hdr := readRegularTarHeaders(t, tarPath)["file.bin"+codec.Ext()]
+			metadata, err := archive.ParseFSMetadata(hdr)
+			if err != nil {
+				t.Fatalf("ParseFSMetadata: %v", err)
+			}
+
+			if metadata.RawSize != int64(len(content)) {
+				t.Errorf("resumed entry rawSize = %d, want %d", metadata.RawSize, len(content))
 			}
 		})
 	}
