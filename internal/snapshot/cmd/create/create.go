@@ -21,6 +21,7 @@ package create
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -324,14 +325,27 @@ func parseMatchLabels(selector string) (map[string]interface{}, error) {
 // elapses. Ready=False is treated as still-in-progress (capture is async), so it
 // keeps polling; on timeout it surfaces the last observed reason/message.
 func waitReady(ctx context.Context, dyn dynamic.Interface, namespace, name string, timeout, poll time.Duration, log *slog.Logger) (*unstructured.Unstructured, error) {
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var lastReason, lastMessage string
 
 	for {
-		obj, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err := waitCtx.Err(); err != nil {
+			return nil, waitReadyContextError(err, namespace, name, lastReason, lastMessage)
+		}
+
+		obj, err := dyn.Resource(snapshotGVR).Namespace(namespace).Get(waitCtx, name, metav1.GetOptions{})
 		if err != nil {
+			if waitErr := waitCtx.Err(); waitErr != nil {
+				return nil, waitReadyContextError(waitErr, namespace, name, lastReason, lastMessage)
+			}
+
 			return nil, fmt.Errorf("get Snapshot %s/%s: %w", namespace, name, err)
+		}
+
+		if err := waitCtx.Err(); err != nil {
+			return nil, waitReadyContextError(err, namespace, name, lastReason, lastMessage)
 		}
 
 		status, reason, message := readyCondition(obj)
@@ -343,11 +357,6 @@ func waitReady(ctx context.Context, dyn dynamic.Interface, namespace, name strin
 
 		lastReason, lastMessage = reason, message
 
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for Snapshot %s/%s to become Ready (last reason=%q message=%q)",
-				namespace, name, lastReason, lastMessage)
-		}
-
 		log.Debug("waiting for Snapshot to become Ready",
 			slog.String("namespace", namespace),
 			slog.String("name", name),
@@ -355,10 +364,25 @@ func waitReady(ctx context.Context, dyn dynamic.Interface, namespace, name strin
 			slog.String("reason", reason),
 		)
 
-		if !sleepCtx(ctx, poll) {
-			return nil, ctx.Err()
+		if !sleepCtx(waitCtx, poll) {
+			return nil, waitReadyContextError(waitCtx.Err(), namespace, name, lastReason, lastMessage)
 		}
 	}
+}
+
+func waitReadyContextError(err error, namespace, name, lastReason, lastMessage string) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf(
+			"timeout waiting for Snapshot %s/%s to become Ready (last reason=%q message=%q): %w",
+			namespace,
+			name,
+			lastReason,
+			lastMessage,
+			err,
+		)
+	}
+
+	return err
 }
 
 // readyCondition returns the status/reason/message of the "Ready" condition, or
@@ -406,10 +430,13 @@ func renderCreated(w io.Writer, obj *unstructured.Unstructured, outputFmt string
 
 // sleepCtx sleeps for d or until ctx is cancelled, returning false on cancel.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	}
 }
