@@ -377,6 +377,18 @@ func pvcManifestSC(name, phase, storageClassName string) map[string]interface{} 
 	return obj
 }
 
+func restoredPVCObject(name, phase, storageClassName string, terminating bool) *unstructured.Unstructured {
+	obj := pvcManifestSC(name, phase, storageClassName)
+	metadata, _ := obj["metadata"].(map[string]interface{})
+	metadata["namespace"] = testNS
+
+	if terminating {
+		metadata["deletionTimestamp"] = "2026-07-23T12:00:00Z"
+	}
+
+	return &unstructured.Unstructured{Object: obj}
+}
+
 // storageClassObj returns a StorageClass object for the volumeBindingMode wait tests.
 // An empty bindingMode leaves the field unset, matching a real StorageClass that omits
 // volumeBindingMode and so defaults to Immediate.
@@ -598,7 +610,8 @@ func TestRun_WaitBound(t *testing.T) {
 // TestRun_WaitTimeout returns a timeout error when a restored PVC never binds.
 func TestRun_WaitTimeout(t *testing.T) {
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", "Pending"))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+	pvc := restoredPVCObject("pvc-1", pvcPhasePending, "", false)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), pvc)
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -614,45 +627,187 @@ func TestRun_WaitTimeout(t *testing.T) {
 	}
 }
 
-// TestRun_Wait_WFFCPendingPVC_DoesNotBlock verifies a standalone PVC on a
-// WaitForFirstConsumer StorageClass, left Pending with no consumer, does not block or
-// time out --wait: the timeout is set to a single nanosecond, which any polling loop
-// (even one iteration plus its deadline check) would fail.
-func TestRun_Wait_WFFCPendingPVC_DoesNotBlock(t *testing.T) {
-	sc := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
+// TestRun_Wait_WFFCHealthyStates verifies the only two accepted WFFC states:
+// non-terminating Pending is skipped without polling, while non-terminating Bound
+// succeeds normally.
+func TestRun_Wait_WFFCHealthyStates(t *testing.T) {
+	cases := []struct {
+		name           string
+		phase          string
+		wantPendingLog int
+	}{
+		{
+			name:           "Pending is a non-blocking skip",
+			phase:          pvcPhasePending,
+			wantPendingLog: 1,
+		},
+		{
+			name:  "Bound succeeds",
+			phase: pvcPhaseBound,
+		},
+	}
 
-	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", "wffc-sc"))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
+			pvc := restoredPVCObject("pvc-1", tc.phase, "wffc-sc", false)
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", tc.phase, "wffc-sc"))}
+			dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc)
+			capture := &logCapture{}
 
-	cfg := baseConfig(src, dyn)
-	cfg.Wait = true
-	cfg.Timeout = time.Nanosecond
+			cfg := baseConfig(src, dyn)
+			cfg.Log = slog.New(capture)
+			cfg.Wait = true
+			cfg.Timeout = time.Nanosecond
 
-	if err := Run(context.Background(), cfg); err != nil {
-		t.Fatalf("Run with a Pending WFFC PVC must not block or time out: %v", err)
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run with a healthy WFFC PVC in phase %s: %v", tc.phase, err)
+			}
+
+			const pendingMessage = "PVC is WaitForFirstConsumer and Pending with no consumer yet; not waiting for Bound"
+			if got := capture.countMsg(pendingMessage); got != tc.wantPendingLog {
+				t.Errorf("Pending skip log count = %d, want %d", got, tc.wantPendingLog)
+			}
+		})
 	}
 }
 
-// TestRun_Wait_ImmediateStillWaits verifies a PVC on an explicit Immediate StorageClass
-// is unaffected by the WFFC exception: it still times out waiting for Bound exactly as
-// before.
+// TestRun_Wait_ImmediateStillWaits verifies a Pending PVC on an explicit Immediate
+// StorageClass is polled until it becomes Bound.
 func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
 	sc := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
-
+	pvc := restoredPVCObject("pvc-1", pvcPhasePending, "immediate-sc", false)
 	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", "immediate-sc"))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc)
+
+	var pvcGets int
+
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getAction, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		pvcGets++
+		phase := pvcPhasePending
+		if pvcGets == 2 {
+			phase = pvcPhaseBound
+		}
+
+		return true, restoredPVCObject(getAction.GetName(), phase, "immediate-sc", false), nil
+	})
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
-	cfg.Timeout = time.Millisecond
+	cfg.Timeout = time.Second
 
-	err := Run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("expected timeout error for a Pending PVC on an Immediate StorageClass, got nil")
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with a Pending-then-Bound Immediate PVC: %v", err)
 	}
 
-	if !contains(err.Error(), "Bound") {
-		t.Errorf("error %q does not mention Bound", err.Error())
+	if pvcGets != 2 {
+		t.Errorf("PVC GET count = %d, want 2", pvcGets)
+	}
+}
+
+// TestRun_Wait_InvalidPVCStatesFailClosed verifies post-apply absence and terminal or
+// ambiguous states cannot be mistaken for a healthy Pending or Bound PVC.
+func TestRun_Wait_InvalidPVCStatesFailClosed(t *testing.T) {
+	cases := []struct {
+		name        string
+		bindingMode string
+		phase       string
+		terminating bool
+		notFound    bool
+		wantError   []string
+	}{
+		{
+			name:        "WFFC NotFound",
+			bindingMode: volumeBindingModeWFC,
+			notFound:    true,
+			wantError:   []string{"default/pvc-terminal", "not found", "after apply"},
+		},
+		{
+			name:        "WFFC Lost",
+			bindingMode: volumeBindingModeWFC,
+			phase:       pvcPhaseLost,
+			wantError:   []string{"default/pvc-terminal", "terminal phase", pvcPhaseLost},
+		},
+		{
+			name:        "WFFC missing phase",
+			bindingMode: volumeBindingModeWFC,
+			wantError:   []string{"default/pvc-terminal", "missing status.phase"},
+		},
+		{
+			name:        "WFFC unknown phase",
+			bindingMode: volumeBindingModeWFC,
+			phase:       "Released",
+			wantError:   []string{"default/pvc-terminal", "unrecognized phase", "Released"},
+		},
+		{
+			name:        "WFFC terminating Pending",
+			bindingMode: volumeBindingModeWFC,
+			phase:       pvcPhasePending,
+			terminating: true,
+			wantError:   []string{"default/pvc-terminal", "terminating", "deletionTimestamp", pvcPhasePending},
+		},
+		{
+			name:        "WFFC terminating Bound",
+			bindingMode: volumeBindingModeWFC,
+			phase:       pvcPhaseBound,
+			terminating: true,
+			wantError:   []string{"default/pvc-terminal", "terminating", "deletionTimestamp", pvcPhaseBound},
+		},
+		{
+			name:        "Immediate Lost",
+			bindingMode: volumeBindingModeImmediate,
+			phase:       pvcPhaseLost,
+			wantError:   []string{"default/pvc-terminal", "terminal phase", pvcPhaseLost},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := storageClassObj("wait-sc", tc.bindingMode, false)
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-terminal", tc.phase, "wait-sc"))}
+			objects := []runtime.Object{readySnapshot(), readyVolumeSnapshot("vs-1"), sc}
+
+			if !tc.notFound {
+				objects = append(objects, restoredPVCObject("pvc-terminal", tc.phase, "wait-sc", tc.terminating))
+			}
+
+			dyn := newFakeDynamic(objects...)
+			if tc.notFound {
+				dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+					return true, nil, kubeerrors.NewNotFound(
+						schema.GroupResource{Resource: pvcGVR.Resource},
+						"pvc-terminal",
+					)
+				})
+			}
+
+			capture := &logCapture{}
+			cfg := baseConfig(src, dyn)
+			cfg.Log = slog.New(capture)
+			cfg.Wait = true
+			cfg.Timeout = time.Hour
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected invalid restored PVC state to fail")
+			}
+
+			for _, want := range tc.wantError {
+				if !contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err.Error(), want)
+				}
+			}
+
+			const pendingMessage = "PVC is WaitForFirstConsumer and Pending with no consumer yet; not waiting for Bound"
+			if got := capture.countMsg(pendingMessage); got != 0 {
+				t.Errorf("invalid state emitted %d misleading Pending success logs", got)
+			}
+		})
 	}
 }
 
@@ -665,24 +820,21 @@ func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
 func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 	wffcSC := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
 	immediateSC := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
-
-	// Pre-seed the Immediate PVC as already Bound; applyObject strips status from the
-	// SSA patch so the existing Bound status survives the apply.
-	boundImmediate := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolumeClaim",
-		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      "pvc-immediate",
-		},
-		"status": map[string]interface{}{"phase": "Bound"},
-	}}
+	pendingWFFC := restoredPVCObject("pvc-wffc", pvcPhasePending, "wffc-sc", false)
+	boundImmediate := restoredPVCObject("pvc-immediate", pvcPhaseBound, "immediate-sc", false)
 
 	src := &stubSource{body: mustArray(t,
 		pvcManifestSC("pvc-wffc", "Pending", "wffc-sc"),
 		pvcManifestSC("pvc-immediate", "", "immediate-sc"),
 	)}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), wffcSC, immediateSC, boundImmediate)
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		wffcSC,
+		immediateSC,
+		pendingWFFC,
+		boundImmediate,
+	)
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -700,9 +852,9 @@ func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 func TestRun_Wait_EmptyStorageClassName_ResolvesDefault(t *testing.T) {
 	defaultSC := storageClassObj("default-sc", volumeBindingModeWFC, true)
 	otherSC := storageClassObj("other-sc", volumeBindingModeImmediate, false)
-
+	pvc := restoredPVCObject("pvc-1", pvcPhasePending, "", false)
 	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", ""))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), defaultSC, otherSC)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), defaultSC, otherSC, pvc)
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true

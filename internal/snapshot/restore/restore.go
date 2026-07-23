@@ -60,6 +60,8 @@ const (
 	readyConditionType = "Ready"
 	conditionFalse     = "False"
 	pvcPhaseBound      = "Bound"
+	pvcPhaseLost       = "Lost"
+	pvcPhasePending    = "Pending"
 
 	// volumeSnapshotGroup is the CSI VolumeSnapshot API group. Readiness is
 	// determined by status.readyToUse (bool), not by conditions.
@@ -737,53 +739,100 @@ func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.Group
 	return nil, nil
 }
 
-// checkWFFCPVCOnce checks a WaitForFirstConsumer PVC's phase exactly once, never
-// polling it: a Pending PVC with no consumer yet is expected under this binding mode
-// and must not consume the shared --wait deadline. An already-Bound PVC (e.g. a
-// consumer already existed) is still reported as bound.
+// checkWFFCPVCOnce checks a WaitForFirstConsumer PVC's state exactly once, never
+// polling it: a non-terminating Pending PVC with no consumer yet is expected under this
+// binding mode and must not consume the shared --wait deadline. An already-Bound PVC
+// (e.g. a consumer already existed) is still reported as bound.
 func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) error {
-	pvc, err := cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
-	if err != nil && !kubeerrors.IsNotFound(err) {
-		return fmt.Errorf("get PVC %s/%s: %w", ref.namespace, ref.name, err)
+	phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
+	if err != nil {
+		return err
 	}
 
-	if err == nil {
-		phase, _, _ := unstructured.NestedString(pvc.Object, "status", "phase")
-		if phase == pvcPhaseBound {
-			cfg.Log.Info("PVC bound", slog.String("namespace", ref.namespace), slog.String("name", ref.name))
+	if phase == pvcPhaseBound {
+		cfg.Log.Info("PVC bound",
+			slog.String("namespace", ref.namespace),
+			slog.String("name", ref.name),
+			slog.String("phase", phase))
 
-			return nil
-		}
+		return nil
 	}
 
 	cfg.Log.Info("PVC is WaitForFirstConsumer and Pending with no consumer yet; not waiting for Bound",
-		slog.String("namespace", ref.namespace), slog.String("name", ref.name))
+		slog.String("namespace", ref.namespace),
+		slog.String("name", ref.name),
+		slog.String("phase", phase))
 
 	return nil
 }
 
-// waitOnePVCBound polls a single PVC until it is Bound or the shared deadline passes.
+// waitOnePVCBound polls a single non-terminating Pending PVC until it is Bound or the
+// shared deadline passes. Every other observed state is terminal for restore waiting.
 func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef, deadline time.Time) error {
 	for {
-		pvc, err := cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
-		if err == nil {
-			phase, _, _ := unstructured.NestedString(pvc.Object, "status", "phase")
-			if phase == pvcPhaseBound {
-				cfg.Log.Info("PVC bound", slog.String("namespace", ref.namespace), slog.String("name", ref.name))
+		phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
+		if err != nil {
+			return err
+		}
 
-				return nil
-			}
-		} else if !kubeerrors.IsNotFound(err) {
-			return fmt.Errorf("get PVC %s/%s: %w", ref.namespace, ref.name, err)
+		if phase == pvcPhaseBound {
+			cfg.Log.Info("PVC bound",
+				slog.String("namespace", ref.namespace),
+				slog.String("name", ref.name),
+				slog.String("phase", phase))
+
+			return nil
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for PVC %s/%s to become Bound", ref.namespace, ref.name)
+			return fmt.Errorf("timeout waiting for PVC %s/%s to become Bound; observed phase %q", ref.namespace, ref.name, phase)
 		}
 
 		if !sleepCtx(ctx, cfg.PollInterval) {
 			return ctx.Err()
 		}
+	}
+}
+
+func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) (string, error) {
+	pvc, err := cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
+	if kubeerrors.IsNotFound(err) {
+		return "", fmt.Errorf("restored PVC %s/%s was not found after apply: %w", ref.namespace, ref.name, err)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("get restored PVC %s/%s: %w", ref.namespace, ref.name, err)
+	}
+
+	phase, found, err := unstructured.NestedString(pvc.Object, "status", "phase")
+	if err != nil {
+		return "", fmt.Errorf("read status.phase of restored PVC %s/%s: %w", ref.namespace, ref.name, err)
+	}
+
+	observedPhase := phase
+	if !found || phase == "" {
+		observedPhase = "<missing>"
+	}
+
+	if deletionTimestamp := pvc.GetDeletionTimestamp(); deletionTimestamp != nil {
+		return "", fmt.Errorf(
+			"restored PVC %s/%s is terminating with deletionTimestamp %s; observed phase %q",
+			ref.namespace,
+			ref.name,
+			deletionTimestamp.UTC().Format(time.RFC3339),
+			observedPhase,
+		)
+	}
+
+	switch phase {
+	case pvcPhaseBound, pvcPhasePending:
+		return phase, nil
+	case pvcPhaseLost:
+		return "", fmt.Errorf("restored PVC %s/%s is in terminal phase %q", ref.namespace, ref.name, phase)
+	case "":
+		return "", fmt.Errorf("restored PVC %s/%s has missing status.phase", ref.namespace, ref.name)
+	default:
+		return "", fmt.Errorf("restored PVC %s/%s has unrecognized phase %q", ref.namespace, ref.name, phase)
 	}
 }
 
