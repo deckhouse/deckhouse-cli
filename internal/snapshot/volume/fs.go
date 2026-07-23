@@ -170,6 +170,8 @@ const (
 	fsInventoryMaxRecordSize = 64 << 10
 	fsInventoryMaxPathSize   = 4 << 10
 	fsInventoryMaxURISize    = 16 << 10
+	fsProgressReadBatchSize  = 256
+	fsProgressMaxPathSize    = fsInventoryMaxPathSize + 256
 	fsSizesMaterializeBytes  = 16 << 20
 )
 
@@ -1757,8 +1759,12 @@ func stageWholeFile(
 //   - Legacy flat chunk dirs from trees written before the relocation
 //     (stagingDir/<relPath><ext>.d) are not scanned; such a file re-downloads
 //     once, which is acceptable and preferable to risking a user-blob alias.
-func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
+func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, error) {
 	chunksRoot := filepath.Join(stagingDir, FSMetaDirName, archive.FSChunksDirName)
+
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
+	}
 
 	if _, err := os.Stat(chunksRoot); err != nil {
 		if os.IsNotExist(err) {
@@ -1768,36 +1774,150 @@ func ScanFSStagingProgress(stagingDir, ext string) (int64, error) {
 		return 0, fmt.Errorf("stat fs chunks dir %s: %w", chunksRoot, err)
 	}
 
+	queueFile, err := os.CreateTemp("", "d8-snapshot-fs-progress-*.jsonl")
+	if err != nil {
+		return 0, fmt.Errorf("create fs progress directory queue: %w", err)
+	}
+
+	queuePath := queueFile.Name()
+
+	defer func() {
+		_ = queueFile.Close()
+		_ = os.Remove(queuePath)
+	}()
+
+	if err := appendDirectoryRecord(queueFile, fsDirectoryRecord{}); err != nil {
+		return 0, fmt.Errorf("seed fs progress directory queue: %w", err)
+	}
+
+	readerFile, err := os.Open(queuePath)
+	if err != nil {
+		return 0, fmt.Errorf("open fs progress directory queue: %w", err)
+	}
+
+	defer func() { _ = readerFile.Close() }()
+
+	reader := bufio.NewReaderSize(readerFile, fsInventoryMaxRecordSize)
+	queued := int64(1)
+
 	var committed int64
 
-	walkErr := filepath.WalkDir(chunksRoot, func(path string, d fs.DirEntry, err error) error {
+	for processed := int64(0); processed < queued; processed++ {
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
+		}
+
+		record, err := readDirectoryRecord(reader)
 		if err != nil {
-			return err
+			return 0, fmt.Errorf("read fs progress directory queue: %w", err)
 		}
 
-		if !d.IsDir() {
-			return nil
+		directoryCommitted, children, err := scanFSProgressDirectory(
+			ctx,
+			chunksRoot,
+			record.RelPrefix,
+			ext,
+			queueFile,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
 		}
 
-		_, found, metaErr := archive.ReadChunkMeta(path)
-		if metaErr != nil || !found {
-			return nil
-		}
-
-		fileCommitted, _, scanErr := ScanBlockChunkProgress(path, ext)
-		if scanErr != nil {
-			return scanErr
-		}
-
-		committed += fileCommitted
-
-		return fs.SkipDir
-	})
-	if walkErr != nil {
-		return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, walkErr)
+		committed += directoryCommitted
+		queued += children
 	}
 
 	return committed, nil
+}
+
+// scanFSProgressDirectory holds one directory batch and one descriptor at a time.
+// The disk queue in ScanFSStagingProgress keeps total path count out of heap, so
+// peak memory is O(fsProgressReadBatchSize) and descriptors are capped at four
+// including the transient chunks.meta read.
+func scanFSProgressDirectory(
+	ctx context.Context,
+	chunksRoot string,
+	relPath string,
+	ext string,
+	queueFile *os.File,
+) (int64, int64, error) {
+	if len(relPath) > fsProgressMaxPathSize {
+		return 0, 0, fmt.Errorf("chunk directory path exceeds %d-byte limit", fsProgressMaxPathSize)
+	}
+
+	path := filepath.Join(chunksRoot, filepath.FromSlash(relPath))
+
+	directory, err := os.Open(path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open chunk directory %s: %w", path, err)
+	}
+
+	defer func() { _ = directory.Close() }()
+
+	var (
+		committed int64
+		children  int64
+	)
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, err
+		}
+
+		entries, readErr := directory.ReadDir(fsProgressReadBatchSize)
+		slices.SortFunc(entries, func(left, right fs.DirEntry) int {
+			return cmp.Compare(left.Name(), right.Name())
+		})
+
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return 0, 0, err
+			}
+
+			if !entry.IsDir() {
+				continue
+			}
+
+			if len(entry.Name()) > fsInventoryMaxPathSize {
+				return 0, 0, fmt.Errorf("chunk directory entry exceeds %d-byte limit", fsInventoryMaxPathSize)
+			}
+
+			childRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
+			if len(childRelPath) > fsProgressMaxPathSize {
+				return 0, 0, fmt.Errorf("chunk directory path exceeds %d-byte limit", fsProgressMaxPathSize)
+			}
+
+			childPath := filepath.Join(chunksRoot, filepath.FromSlash(childRelPath))
+
+			_, found, metaErr := archive.ReadChunkMeta(childPath)
+			if metaErr == nil && found {
+				fileCommitted, _, scanErr := ScanBlockChunkProgress(childPath, ext)
+				if scanErr != nil {
+					return 0, 0, scanErr
+				}
+
+				committed += fileCommitted
+
+				continue
+			}
+
+			if err := appendDirectoryRecord(queueFile, fsDirectoryRecord{RelPrefix: childRelPath}); err != nil {
+				return 0, 0, err
+			}
+
+			children++
+		}
+
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+
+		if readErr != nil {
+			return 0, 0, fmt.Errorf("read chunk directory %s: %w", path, readErr)
+		}
+	}
+
+	return committed, children, nil
 }
 
 // FSMetaDirName is the reserved metadata subdirectory of an FS staging dir
@@ -2005,10 +2125,14 @@ func decodeFSSizesSidecar(path string) (FSSizesSidecar, error) {
 // a from-scratch run, or a staging dir predating this feature — so the
 // caller knows to fall back to the network-driven total/credit path instead
 // of trusting a zero total.
-func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
+func ScanFSStagingSizes(ctx context.Context, stagingDir, ext string) (int64, int64, bool, error) {
 	path := filepath.Join(stagingDir, FSMetaDirName, FSSizesSidecarName)
 
-	total, staged, err := scanFSSizesFile(path, stagingDir, ext)
+	if err := ctx.Err(); err != nil {
+		return 0, 0, false, fmt.Errorf("scan fs sizes sidecar %s: %w", path, err)
+	}
+
+	total, staged, err := scanFSSizesFile(ctx, path, stagingDir, ext)
 	if err == nil {
 		return total, staged, true, nil
 	}
@@ -2019,8 +2143,12 @@ func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
 
 	legacyPath := filepath.Join(stagingDir, FSSizesSidecarName)
 
-	total, staged, err = scanFSSizesFile(legacyPath, stagingDir, ext)
+	total, staged, err = scanFSSizesFile(ctx, legacyPath, stagingDir, ext)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 0, 0, false, err
+		}
+
 		if os.IsNotExist(err) {
 			return 0, 0, false, nil
 		}
@@ -2034,7 +2162,7 @@ func ScanFSStagingSizes(stagingDir, ext string) (int64, int64, bool, error) {
 	return total, staged, true, nil
 }
 
-func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
+func scanFSSizesFile(ctx context.Context, path, stagingDir, ext string) (int64, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
@@ -2057,6 +2185,10 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 	firstField := true
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, fmt.Errorf("scan fs sizes sidecar %s: %w", path, err)
+		}
+
 		done, err := beforeNextFSSizesJSONValue(reader, firstField, '}')
 		if err != nil {
 			return 0, 0, fmt.Errorf("parse fs sizes sidecar %s field: %w", path, err)
@@ -2092,6 +2224,10 @@ func scanFSSizesFile(path, stagingDir, ext string) (int64, int64, error) {
 			firstFile := true
 
 			for {
+				if err := ctx.Err(); err != nil {
+					return 0, 0, fmt.Errorf("scan fs sizes sidecar %s files: %w", path, err)
+				}
+
 				filesDone, err := beforeNextFSSizesJSONValue(reader, firstFile, '}')
 				if err != nil {
 					return 0, 0, fmt.Errorf("parse fs sizes sidecar %s file path: %w", path, err)

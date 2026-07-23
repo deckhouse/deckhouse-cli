@@ -140,7 +140,12 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// Pre-create one progress stream per volume leaf before the worker errgroup
 	// starts, so every bar appears immediately (docker-pull style).
-	streams := precreateStreams(tasks, cfg)
+	streams, err := precreateStreams(ctx, tasks, cfg)
+	if err != nil {
+		failUnsettledStreams(streams)
+
+		return fmt.Errorf("pre-create progress streams: %w", err)
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cfg.Workers)
@@ -229,9 +234,9 @@ func failUnsettledStreams(streams map[streamKey]streamHandle) {
 // Returns nil when cfg.Progress is nil (progress disabled), which causes all
 // lookupStream calls to return a zero streamHandle (nil stream) and behave
 // as no-ops.
-func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
+func precreateStreams(ctx context.Context, tasks []nodeTask, cfg Config) (map[streamKey]streamHandle, error) {
 	if cfg.Progress == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Count the exact number of streams to pre-allocate the map.
@@ -260,17 +265,27 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 		}
 
 		s := cfg.Progress.NewStream(node.DisplayLabel(), 0)
+		key := streamKey{node: node}
 
 		if t.done {
 			s.Done()
 
-			out[streamKey{node: node}] = streamHandle{stream: s}
-		} else {
-			out[streamKey{node: node}] = streamHandle{stream: s, seeded: seedStreamFromDisk(cfg, s, t.nodeDir)}
+			out[key] = streamHandle{stream: s}
+
+			continue
 		}
+
+		out[key] = streamHandle{stream: s}
+
+		seeded, err := seedStreamFromDisk(ctx, cfg, s, t.nodeDir)
+		if err != nil {
+			return out, fmt.Errorf("seed stream for %s: %w", node.DisplayLabel(), err)
+		}
+
+		out[key] = streamHandle{stream: s, seeded: seeded}
 	}
 
-	return out
+	return out, nil
 }
 
 // seedStreamFromDisk seeds s with already-committed on-disk bytes scanned
@@ -311,11 +326,15 @@ func precreateStreams(tasks []nodeTask, cfg Config) map[streamKey]streamHandle {
 // SAME already-committed state, so the displayed value only ever moves
 // forward from the seed onward while the final total still lands exactly on
 // the volume size.
-func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) int64 {
+func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, nodeDir string) (int64, error) {
 	ext := cfg.Compression.Ext()
 	dest := flatDest(nodeDir, ext)
 
 	var seeded int64
+
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("seed resume progress: %w", err)
+	}
 
 	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgress(dest.chunkDir, ext)
 	if err != nil {
@@ -332,13 +351,17 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) int64 {
 		seeded += blockCommitted
 	}
 
-	fsCommitted, err := volume.ScanFSStagingProgress(dest.fsTarStagingDir, ext)
+	fsCommitted, err := volume.ScanFSStagingProgress(ctx, dest.fsTarStagingDir, ext)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return seeded, fmt.Errorf("scan filesystem resume progress: %w", err)
+		}
+
 		cfg.Log.Warn("failed to scan filesystem resume progress for seeding",
 			slog.String("dir", dest.fsTarStagingDir),
 			slog.String("error", err.Error()))
 
-		return seeded
+		return seeded, nil
 	}
 
 	if fsCommitted > 0 {
@@ -347,17 +370,21 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) int64 {
 		seeded += fsCommitted
 	}
 
-	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizes(dest.fsTarStagingDir, ext)
+	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizes(ctx, dest.fsTarStagingDir, ext)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return seeded, fmt.Errorf("scan filesystem sizes sidecar: %w", err)
+		}
+
 		cfg.Log.Warn("failed to scan filesystem sizes sidecar for seeding",
 			slog.String("dir", dest.fsTarStagingDir),
 			slog.String("error", err.Error()))
 
-		return seeded
+		return seeded, nil
 	}
 
 	if !sizesFound {
-		return seeded
+		return seeded, nil
 	}
 
 	if sizesTotal > 0 {
@@ -370,7 +397,7 @@ func seedStreamFromDisk(cfg Config, s progress.Stream, nodeDir string) int64 {
 		seeded += stagedBytes
 	}
 
-	return seeded
+	return seeded, nil
 }
 
 // lookupStream returns the pre-created streamHandle for the given node, or a
