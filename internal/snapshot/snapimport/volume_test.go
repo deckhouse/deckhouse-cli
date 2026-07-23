@@ -1299,9 +1299,12 @@ func (s *boundaryFailSeeker) Seek(offset int64, whence int) (int64, error) {
 func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 	t.Parallel()
 
-	const intra = int64(73)
+	const (
+		chunkSize = int64(100)
+		intra     = int64(73)
+	)
 
-	offset := int64(volume.DefaultChunkSize) + intra
+	offset := chunkSize + intra
 	source := bytes.NewReader([]byte("compressed-prefix-frame-suffix"))
 	decoded := append(bytes.Repeat([]byte("d"), int(intra)), []byte("wanted-suffix")...)
 
@@ -1341,6 +1344,7 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 		"data.bin.zst",
 		".zst",
 		offset,
+		chunkSize,
 		discardLogger(),
 		deps,
 	)
@@ -1365,8 +1369,8 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 		t.Errorf("discarded = %d, want intra-frame %d", discarded, intra)
 	}
 
-	if discarded >= int64(volume.DefaultChunkSize) {
-		t.Errorf("discarded = %d, want less than fixed frame size %d", discarded, volume.DefaultChunkSize)
+	if discarded >= chunkSize {
+		t.Errorf("discarded = %d, want less than fixed frame size %d", discarded, chunkSize)
 	}
 
 	got, err := io.ReadAll(reader)
@@ -1376,6 +1380,74 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 
 	if string(got) != "wanted-suffix" {
 		t.Errorf("resolved suffix = %q, want %q", got, "wanted-suffix")
+	}
+}
+
+func TestResolveBlockDecodeReader_ZstdCorruptionDoesNotYieldSuffix(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = int64(100)
+
+	codec, err := compress.New(compress.DefaultCodecName, 0)
+	if err != nil {
+		t.Fatalf("create zstd codec: %v", err)
+	}
+
+	var encoded bytes.Buffer
+	for _, frame := range [][]byte{bytes.Repeat([]byte("a"), int(chunkSize)), bytes.Repeat([]byte("b"), int(chunkSize))} {
+		if err := codec.EncodeFrameStream(&encoded, bytes.NewReader(frame), int64(len(frame))); err != nil {
+			t.Fatalf("encode zstd frame: %v", err)
+		}
+	}
+
+	stream := encoded.Bytes()
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "corrupt first frame magic", data: append([]byte{stream[0] ^ 0xff}, stream[1:]...)},
+		{name: "truncated second frame", data: append([]byte(nil), stream[:len(stream)-1]...)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "data.bin.zst")
+			if err := os.WriteFile(path, tc.data, 0o600); err != nil {
+				t.Fatalf("write malformed archive: %v", err)
+			}
+
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatalf("open malformed archive: %v", err)
+			}
+			t.Cleanup(func() {
+				if closeErr := file.Close(); closeErr != nil {
+					t.Errorf("close malformed archive: %v", closeErr)
+				}
+			})
+
+			reader, _, resolveErr := resolveBlockDecodeReaderWith(
+				context.Background(), file, path, ".zst", chunkSize+1, chunkSize, discardLogger(), blockDecodeDependencies{
+					skipZstdFrames: compress.SkipZstdFrames,
+					newReader:      compress.NewReader,
+				},
+			)
+			if resolveErr != nil {
+				return
+			}
+
+			t.Cleanup(func() {
+				if closeErr := reader.Close(); closeErr != nil {
+					t.Errorf("close malformed decoder: %v", closeErr)
+				}
+			})
+
+			if _, err := io.ReadAll(reader); err == nil {
+				t.Fatal("malformed zstd archive produced a suffix without an error")
+			}
+		})
 	}
 }
 
@@ -1447,6 +1519,7 @@ func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				offset,
+				volume.DefaultChunkSize,
 				discardLogger(),
 				deps,
 			)
@@ -1521,6 +1594,7 @@ func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				5,
+				volume.DefaultChunkSize,
 				discardLogger(),
 				deps,
 			)
@@ -1592,6 +1666,7 @@ func TestResolveBlockDecodeReader_ResetFailureIsReturned(t *testing.T) {
 		"data.bin.zst",
 		".zst",
 		1,
+		volume.DefaultChunkSize,
 		discardLogger(),
 		deps,
 	)
@@ -1641,6 +1716,7 @@ func TestResolveBlockDecodeReader_BoundarySeekFailureFallsBackFromZero(t *testin
 		"data.bin.zst",
 		".zst",
 		5,
+		volume.DefaultChunkSize,
 		discardLogger(),
 		deps,
 	)
@@ -1708,6 +1784,7 @@ func TestResolveBlockDecodeReader_DiscardHonorsContextAndBound(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				int64(blockDiscardBufferSize*2),
+				volume.DefaultChunkSize,
 				discardLogger(),
 				deps,
 			)
