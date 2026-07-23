@@ -1,4 +1,4 @@
-//go:build (!unix && !windows) || netbsd
+//go:build darwin
 
 /*
 Copyright 2026 Flant JSC
@@ -19,24 +19,28 @@ limitations under the License.
 package archive
 
 import (
-	"errors"
-	"fmt"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 func openArchiveRoot(path string) (*os.File, error) {
-	return nil, unsupportedRootedArchivePlatform(path)
+	return openArchiveRootUnix(path)
 }
 
-func openArchiveDirectoryAt(_ *os.File, _, path string) (*os.File, error) {
-	return nil, unsupportedRootedArchivePlatform(path)
+func openArchiveDirectoryAt(parent *os.File, name, path string) (*os.File, error) {
+	return openArchiveAtUnix(parent, name, path, true, readDarwinArchiveMountStat)
 }
 
-func openArchiveRegularAt(_ *os.File, _, path string) (*os.File, error) {
-	return nil, unsupportedRootedArchivePlatform(path)
+func openArchiveRegularAt(parent *os.File, name, path string) (*os.File, error) {
+	return openArchiveAtUnix(parent, name, path, false, readDarwinArchiveMountStat)
 }
 
-func unsupportedRootedArchivePlatform(path string) error {
-	return fmt.Errorf("rooted no-follow archive access is unsupported for %s: %w",
-		path, errors.Join(ErrArchiveMountBoundaryUnsupported, ErrNonRegularArchiveArtifact))
+func readDarwinArchiveMountStat(fd int) (any, error) {
+	var stat unix.Statfs_t
+	if err := unix.Fstatfs(fd, &stat); err != nil {
+		return nil, err
+	}
+
+	return stat, nil
 }
