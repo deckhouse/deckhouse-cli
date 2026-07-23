@@ -3876,6 +3876,249 @@ func TestDownloadFilesystemVolume_StagingCallerCancellationRemainsCausal(t *test
 	requireObservedDoerQuiescent(t, sourceDoer)
 }
 
+func TestDownloadFilesystemVolume_StagingCauseOrder(t *testing.T) {
+	const entries = 100
+
+	t.Run("WorkerBeforeParentCancellation", func(t *testing.T) {
+		errWorker := errors.New("worker-first sentinel")
+		srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+		ctx, cancel := context.WithCancel(context.Background())
+		parentCanceled := make(chan struct{})
+		secondStarted := make(chan struct{})
+		var calls atomic.Int64
+
+		sourceDoer := &observedDoer{
+			do: func(req *http.Request) (*http.Response, error) {
+				switch calls.Add(1) {
+				case 1:
+					<-secondStarted
+
+					return nil, errWorker
+				case 2:
+					close(secondStarted)
+					<-req.Context().Done()
+					cancel()
+					close(parentCanceled)
+
+					return nil, req.Context().Err()
+				default:
+					return nil, errors.New("unexpected source request")
+				}
+			},
+		}
+
+		err := downloadFilesystemWithSourceDoer(t, ctx, srv, 2, sourceDoer)
+		if !errors.Is(err, errWorker) {
+			t.Fatalf("DownloadFilesystemVolume error = %v, want worker-first cause", err)
+		}
+
+		<-parentCanceled
+		requireObservedDoerQuiescent(t, sourceDoer)
+	})
+
+	t.Run("ParentCancellationBeforeWorkerError", func(t *testing.T) {
+		errWorker := errors.New("late worker sentinel")
+		srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+		ctx, cancel := context.WithCancel(context.Background())
+		requestStarted := make(chan struct{})
+		var startedOnce sync.Once
+
+		sourceDoer := &observedDoer{
+			do: func(req *http.Request) (*http.Response, error) {
+				startedOnce.Do(func() { close(requestStarted) })
+				<-req.Context().Done()
+
+				return nil, errWorker
+			},
+		}
+
+		result := make(chan error, 1)
+		go func() {
+			result <- downloadFilesystemWithSourceDoer(t, ctx, srv, 1, sourceDoer)
+		}()
+
+		<-requestStarted
+		cancel()
+
+		err := <-result
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("DownloadFilesystemVolume error = %v, want parent cancellation", err)
+		}
+
+		if errors.Is(err, errWorker) {
+			t.Fatalf("late worker error replaced parent cause: %v", err)
+		}
+
+		requireObservedDoerQuiescent(t, sourceDoer)
+	})
+
+	t.Run("DeadlineAlreadyExpired", func(t *testing.T) {
+		srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+		ctx, cancel := context.WithDeadline(context.Background(), time.Unix(1, 0))
+		defer cancel()
+
+		sourceDoer := &observedDoer{
+			do: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("request must not start after deadline")
+			},
+		}
+
+		err := downloadFilesystemWithSourceDoer(t, ctx, srv, 1, sourceDoer)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DownloadFilesystemVolume error = %v, want deadline exceeded", err)
+		}
+
+		if calls := sourceDoer.calls.Load(); calls != 0 {
+			t.Fatalf("source requests = %d, want zero after expired deadline", calls)
+		}
+	})
+}
+
+func TestDownloadFilesystemVolume_StagingFirstWorkerCauseWins(t *testing.T) {
+	errFirst := errors.New("first worker sentinel")
+	errSecond := errors.New("second worker sentinel")
+	srv := newLargeFileInventoryServer(t, 100, md5Hex([]byte("x")))
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int64
+
+	sourceDoer := &observedDoer{
+		do: func(req *http.Request) (*http.Response, error) {
+			switch calls.Add(1) {
+			case 1:
+				close(firstStarted)
+				<-releaseFirst
+
+				return nil, errFirst
+			case 2:
+				close(secondStarted)
+				<-req.Context().Done()
+
+				return nil, errSecond
+			default:
+				return nil, errors.New("unexpected source request")
+			}
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- downloadFilesystemWithSourceDoer(t, context.Background(), srv, 2, sourceDoer)
+	}()
+
+	<-firstStarted
+	<-secondStarted
+	close(releaseFirst)
+
+	err := <-result
+	if !errors.Is(err, errFirst) {
+		t.Fatalf("DownloadFilesystemVolume error = %v, want first worker cause", err)
+	}
+
+	if errors.Is(err, errSecond) {
+		t.Fatalf("second worker error replaced first cause: %v", err)
+	}
+
+	requireObservedDoerQuiescent(t, sourceDoer)
+}
+
+func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.T) {
+	const entries = 500
+
+	srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+	nodeDir := t.TempDir()
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	inventoryPath := filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.jsonl")
+	requestStarted := make(chan struct{})
+	var truncateOnce sync.Once
+
+	sourceDoer := &observedDoer{
+		do: func(req *http.Request) (*http.Response, error) {
+			var truncateErr error
+
+			truncateOnce.Do(func() {
+				info, err := os.Stat(inventoryPath)
+				if err != nil {
+					truncateErr = err
+
+					return
+				}
+
+				truncateErr = os.Truncate(inventoryPath, info.Size()-64)
+				close(requestStarted)
+			})
+			if truncateErr != nil {
+				return nil, fmt.Errorf("truncate inventory fixture: %w", truncateErr)
+			}
+
+			<-req.Context().Done()
+
+			return nil, req.Context().Err()
+		},
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- volume.DownloadFilesystemVolume(
+			context.Background(),
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			filepath.Join(nodeDir, archive.FsTarName),
+			stagingDir,
+			srv.URL+"/files/",
+			entries,
+			0,
+			exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+			mustCodec(t, "none"),
+			nil,
+			nil,
+		)
+	}()
+
+	<-requestStarted
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "filesystem inventory spool is corrupt") {
+			t.Fatalf("DownloadFilesystemVolume error = %v, want inventory corruption", err)
+		}
+
+		if errors.Is(err, context.Canceled) {
+			t.Fatalf("inventory corruption was replaced by derivative cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DownloadFilesystemVolume deadlocked after independent inventory failure")
+	}
+
+	requireObservedDoerQuiescent(t, sourceDoer)
+}
+
+func downloadFilesystemWithSourceDoer(
+	t *testing.T,
+	ctx context.Context,
+	srv *httptest.Server,
+	workers int,
+	sourceDoer *observedDoer,
+) error {
+	t.Helper()
+
+	nodeDir := t.TempDir()
+
+	return volume.DownloadFilesystemVolume(
+		ctx,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		filepath.Join(nodeDir, archive.FsTarName),
+		filepath.Join(nodeDir, archive.FsTarStagingDirName),
+		srv.URL+"/files/",
+		workers,
+		0,
+		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+}
+
 func md5Hex(data []byte) string {
 	sum := md5.Sum(data)
 

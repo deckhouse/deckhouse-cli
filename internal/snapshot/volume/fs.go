@@ -1221,7 +1221,16 @@ func stageFSInventoryFiles(
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
-	g, gctx := errgroup.WithContext(ctx)
+	stageCtx, cancelStage := context.WithCancelCause(ctx)
+	defer cancelStage(nil)
+
+	recordCause := func(err error) error {
+		cancelStage(err)
+
+		return err
+	}
+
+	g, gctx := errgroup.WithContext(stageCtx)
 	jobs := make(chan fsItem, workers)
 
 	for range workers {
@@ -1229,20 +1238,20 @@ func stageFSInventoryFiles(
 			for item := range jobs {
 				uri, err := resolveInventoryURI(base, item.uri)
 				if err != nil {
-					return err
+					return recordCause(err)
 				}
 
 				item.uri = uri
 
 				sourceMD5, err := fetcher.SourceMD5(gctx, item.uri, item.size)
 				if err != nil {
-					return fmt.Errorf("fetch source MD5 for %s: %w", item.relPath, err)
+					return recordCause(fmt.Errorf("fetch source MD5 for %s: %w", item.relPath, err))
 				}
 
 				item.md5 = sourceMD5
 
 				if _, err := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress); err != nil {
-					return err
+					return recordCause(err)
 				}
 			}
 
@@ -1250,29 +1259,37 @@ func stageFSInventoryFiles(
 		})
 	}
 
-	_, produceErr := validateFSInventory(gctx, inventoryPath, codec.Ext(), func(item fsItem) error {
-		if item.itemType != "file" {
-			return nil
+	g.Go(func() error {
+		defer close(jobs)
+
+		_, err := validateFSInventory(gctx, inventoryPath, codec.Ext(), func(item fsItem) error {
+			if item.itemType != "file" {
+				return nil
+			}
+
+			select {
+			case jobs <- item:
+				return nil
+			case <-gctx.Done():
+				return context.Cause(stageCtx)
+			}
+		})
+		if err != nil {
+			return recordCause(err)
 		}
 
-		select {
-		case jobs <- item:
-			return nil
-		case <-gctx.Done():
-			return gctx.Err()
-		}
+		return nil
 	})
-
-	close(jobs)
 
 	waitErr := g.Wait()
 
-	if produceErr != nil {
-		if waitErr != nil && ctx.Err() == nil && errors.Is(produceErr, context.Canceled) {
-			return waitErr
-		}
+	cause := context.Cause(stageCtx)
+	if cause != nil {
+		return cause
+	}
 
-		return produceErr
+	if waitErr == nil {
+		return nil
 	}
 
 	return waitErr
