@@ -828,6 +828,140 @@ func TestVerifiedHandleRejectsMutateUseRestoreBeforeExposingBytes(t *testing.T) 
 	}
 }
 
+func TestVerifiedHandleReusesImmutableCacheAndRejectsBoundaryMutation(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	payloadPath := filepath.Join(nodeDir, DataBlockName(""))
+	payload := bytes.Repeat([]byte("authenticated-boundary-data"), authChunkSize/8+1)
+
+	if err := os.WriteFile(payloadPath, payload, 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc",
+		Checksum:   checksum,
+		Volumes: []VolumeInfo{{
+			Target: VolumeObjectRef{
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "pvc",
+			},
+			Artifact: VolumeObjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "pvc-content",
+			},
+			VolumeMode:       VolumeModeBlock,
+			StorageClassName: "test",
+			Size:             "2Mi",
+		}},
+	}); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+
+	view, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	node, err := view.VerifyNode(context.Background(), nodeDir)
+	if err != nil {
+		t.Fatalf("verify node: %v", err)
+	}
+
+	expected, ok := node.File(DataBlockName(""))
+	if !ok {
+		t.Fatal("verified payload is absent")
+	}
+
+	handle, err := view.OpenVerifiedFile(context.Background(), expected)
+	if err != nil {
+		t.Fatalf("open verified payload: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	hardlinkPath := filepath.Join(t.TempDir(), "payload-hardlink")
+	if err := os.Link(payloadPath, hardlinkPath); err != nil {
+		t.Fatalf("create payload hardlink: %v", err)
+	}
+
+	writer, err := os.OpenFile(hardlinkPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open hardlink writer: %v", err)
+	}
+	defer func() { _ = writer.Close() }()
+
+	const cachedOffset = authChunkSize - 64
+
+	originalCached := append([]byte(nil), payload[cachedOffset:cachedOffset+32]...)
+	first := make([]byte, len(originalCached))
+	if _, err := handle.ReadAt(first, cachedOffset); err != nil {
+		t.Fatalf("prime authenticated cache: %v", err)
+	}
+
+	changedCached := bytes.Repeat([]byte{0xA5}, len(originalCached))
+	if _, err := writer.WriteAt(changedCached, cachedOffset); err != nil {
+		t.Fatalf("mutate cached range: %v", err)
+	}
+
+	reused := make([]byte, len(originalCached))
+	if _, err := handle.ReadAt(reused, cachedOffset); err != nil {
+		t.Fatalf("read cached range after mutation: %v", err)
+	}
+
+	if !bytes.Equal(reused, originalCached) {
+		t.Fatalf("cached bytes = %x, want verified original %x", reused, originalCached)
+	}
+
+	if _, err := writer.WriteAt(originalCached, cachedOffset); err != nil {
+		t.Fatalf("restore cached range: %v", err)
+	}
+
+	originalBoundary := payload[authChunkSize]
+	if _, err := writer.WriteAt([]byte{originalBoundary ^ 0xFF}, authChunkSize); err != nil {
+		t.Fatalf("mutate next authentication chunk: %v", err)
+	}
+
+	crossing := make([]byte, 2)
+	count, readErr := handle.ReadAt(crossing, authChunkSize-1)
+	if count != 1 {
+		t.Fatalf("boundary read returned %d bytes, want only the verified prefix byte", count)
+	}
+
+	if crossing[0] != payload[authChunkSize-1] {
+		t.Fatalf("boundary prefix = %#x, want %#x", crossing[0], payload[authChunkSize-1])
+	}
+
+	if !errors.Is(readErr, ErrVerifiedArchiveChanged) {
+		t.Fatalf("boundary read error = %v, want ErrVerifiedArchiveChanged", readErr)
+	}
+
+	if _, err := writer.WriteAt([]byte{originalBoundary}, authChunkSize); err != nil {
+		t.Fatalf("restore next authentication chunk: %v", err)
+	}
+
+	if err := handle.Verify(context.Background()); !errors.Is(err, ErrVerifiedArchiveChanged) {
+		t.Fatalf("Verify after boundary restore = %v, want sticky ErrVerifiedArchiveChanged", err)
+	}
+
+	stats := handle.AuthenticatedReadStats()
+	if stats.SourceBytes != 2*stats.ChunkSize || stats.HashedBytes != stats.SourceBytes {
+		t.Fatalf("authenticated work = %+v, want exactly two full chunk reads and hashes", stats)
+	}
+
+	if stats.ChunkLoads != 2 || stats.CacheHits < 2 {
+		t.Fatalf("authenticated cache stats = %+v, want two loads and at least two hits", stats)
+	}
+}
+
 func TestPrePostOnlyRehashDoesNotDetectMutateUseRestore(t *testing.T) {
 	payloadPath := filepath.Join(t.TempDir(), "payload")
 	original := bytes.Repeat([]byte("pre-post-only-authentication-gap"), 4096)

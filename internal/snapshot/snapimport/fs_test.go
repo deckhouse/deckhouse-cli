@@ -2359,6 +2359,274 @@ func TestSendVolumeData_FSCompressedCancelDuringRepositionDoesNotPUTOrFinalize(t
 	}
 }
 
+const highCardinalityFSEntryCount = 2048
+
+func buildHighCardinalityFSTar(t *testing.T, codec string, content []byte) []byte {
+	t.Helper()
+
+	ext, stored := encodeEntry(t, codec, content)
+
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	for i := range highCardinalityFSEntryCount {
+		originalPath := fmt.Sprintf("tiny/file-%05d.bin", i)
+		addTarEntryMetadata(
+			t,
+			tarWriter,
+			originalPath+ext,
+			originalPath,
+			codec,
+			int64(len(content)),
+			stored,
+			0o600,
+			0,
+			0,
+			time.Time{},
+		)
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close high-cardinality tar: %v", err)
+	}
+
+	return tarBuffer.Bytes()
+}
+
+func openVerifiedFSTarHandle(
+	t *testing.T,
+	ctx context.Context,
+	tarData []byte,
+) (string, *archive.VerifiedHandle) {
+	t.Helper()
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc",
+		namespace:  "source",
+		tarData:    tarData,
+	})
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := view.Close(); err != nil {
+			t.Errorf("close verified archive: %v", err)
+		}
+	})
+
+	node, err := view.VerifyNode(context.Background(), root)
+	if err != nil {
+		t.Fatalf("verify archive node: %v", err)
+	}
+
+	payload, ok := node.File(archive.FsTarName)
+	if !ok {
+		t.Fatal("verified filesystem payload is absent")
+	}
+
+	handle, err := view.OpenVerifiedFile(ctx, payload)
+	if err != nil {
+		t.Fatalf("open verified filesystem payload: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := handle.Close(); err != nil {
+			t.Errorf("close verified filesystem payload: %v", err)
+		}
+	})
+
+	return filepath.Join(root, archive.FsTarName), handle
+}
+
+func assertHighCardinalityAuthenticationBound(
+	t *testing.T,
+	stats archive.AuthenticatedReadStats,
+	archiveSize int64,
+) {
+	t.Helper()
+
+	// Preflight and upload each traverse the tar once. Entry bodies, compressed proofs, and
+	// boundary overlap have four additional archive-sized passes of headroom. The allowance is
+	// independent of entry count and intentionally far below one 1 MiB reload per tiny file.
+	const maxTraversalFactor = int64(6)
+
+	maxBytes := maxTraversalFactor*archiveSize + 2*stats.ChunkSize
+	if stats.SourceBytes > maxBytes || stats.HashedBytes > maxBytes {
+		t.Fatalf("authenticated work = %+v for %d encoded bytes, want at most %d bytes",
+			stats, archiveSize, maxBytes)
+	}
+
+	if stats.SourceBytes != stats.HashedBytes {
+		t.Fatalf("authenticated source/hash bytes differ: %+v", stats)
+	}
+
+	chunks := (archiveSize + stats.ChunkSize - 1) / stats.ChunkSize
+	maxLoads := maxTraversalFactor*chunks + 2
+	if stats.ChunkLoads > maxLoads {
+		t.Fatalf("authenticated chunk loads = %d, want at most %d for %d chunks",
+			stats.ChunkLoads, maxLoads, chunks)
+	}
+
+	if stats.Resets != 2 {
+		t.Fatalf("authenticated cache resets = %d, want exactly preflight and upload pass resets", stats.Resets)
+	}
+}
+
+func TestImportFSFromTarSource_HighCardinalityAuthenticationWorkIsBounded(t *testing.T) {
+	tests := []struct {
+		name            string
+		codec           string
+		resumeConflict  bool
+		concurrentStats bool
+	}{
+		{name: "raw adjacent entries with concurrent stats", codec: "none", concurrentStats: true},
+		{name: "zstd adjacent entries", codec: "zstd"},
+		{name: "raw resume and backward conflict", codec: "none", resumeConflict: true},
+		{name: "zstd resume and backward conflict", codec: "zstd", resumeConflict: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			content := []byte("x")
+			if tc.resumeConflict {
+				content = []byte("abc")
+			}
+
+			tarData := buildHighCardinalityFSTar(t, tc.codec, content)
+			tarPath, handle := openVerifiedFSTarHandle(t, context.Background(), tarData)
+
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodHead:
+					if tc.resumeConflict {
+						return fileHTTPResponse(http.StatusOK, http.Header{
+							"X-Next-Offset": []string{"1"},
+						}), nil
+					}
+
+					return fileHTTPResponse(http.StatusNotFound, nil), nil
+				case http.MethodPut:
+					offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+					if err != nil {
+						return nil, fmt.Errorf("parse X-Offset: %w", err)
+					}
+
+					if tc.concurrentStats {
+						readDone := make(chan error, 1)
+						go func() {
+							_, copyErr := io.Copy(io.Discard, req.Body)
+							readDone <- copyErr
+						}()
+
+						for range 4 {
+							_ = handle.AuthenticatedReadStats()
+						}
+
+						if err := <-readDone; err != nil {
+							return nil, fmt.Errorf("consume concurrent request body: %w", err)
+						}
+					}
+
+					if tc.resumeConflict && offset == 1 {
+						return fileHTTPResponse(http.StatusConflict, http.Header{
+							"X-Expected-Offset": []string{"0"},
+						}), nil
+					}
+
+					next := offset + req.ContentLength
+
+					return fileHTTPResponse(http.StatusCreated, http.Header{
+						"X-Next-Offset": []string{strconv.FormatInt(next, 10)},
+					}), nil
+				default:
+					return nil, fmt.Errorf("unexpected HTTP method %s", req.Method)
+				}
+			})
+
+			err := importFSFromTarSource(
+				context.Background(),
+				doer,
+				"https://import.example",
+				tarPath,
+				handle,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("import high-cardinality filesystem tar: %v", err)
+			}
+
+			assertHighCardinalityAuthenticationBound(
+				t,
+				handle.AuthenticatedReadStats(),
+				int64(len(tarData)),
+			)
+		})
+	}
+}
+
+func TestImportFSFromTarSource_HighCardinalityCancellationIsStickyAndBounded(t *testing.T) {
+	tarData := buildHighCardinalityFSTar(t, "zstd", []byte("cancel"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tarPath, handle := openVerifiedFSTarHandle(t, ctx, tarData)
+
+	putCount := 0
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case http.MethodHead:
+			return fileHTTPResponse(http.StatusNotFound, nil), nil
+		case http.MethodPut:
+			putCount++
+			if putCount == highCardinalityFSEntryCount/4 {
+				cancel()
+
+				return nil, context.Canceled
+			}
+
+			return fileHTTPResponse(http.StatusCreated, http.Header{
+				"X-Next-Offset": []string{strconv.FormatInt(req.ContentLength, 10)},
+			}), nil
+		default:
+			return nil, fmt.Errorf("unexpected HTTP method %s", req.Method)
+		}
+	})
+
+	err := importFSFromTarSource(
+		ctx,
+		doer,
+		"https://import.example",
+		tarPath,
+		handle,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("import high-cardinality filesystem tar error = %v, want context.Canceled", err)
+	}
+
+	var probe [1]byte
+	if _, err := handle.ReadAt(probe[:], 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("read after cancellation = %v, want sticky context.Canceled", err)
+	}
+
+	assertHighCardinalityAuthenticationBound(
+		t,
+		handle.AuthenticatedReadStats(),
+		int64(len(tarData)),
+	)
+}
+
 // newMemoryBoundedFSServer returns an httptest.Server mimicking just enough of the
 // import_files HEAD/PUT contract for a single fresh (offset 0) upload: HEAD reports
 // not-found (no prior partial or completed upload), and PUT discards the body without
