@@ -51,6 +51,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -1280,6 +1281,142 @@ func TestUploadControlEndpoints_PropagateResponseDrainDeadline(t *testing.T) {
 	}
 }
 
+func TestUploadControlEndpoints_PropagateResponseByteLimit(t *testing.T) {
+	t.Parallel()
+
+	newPUTRequest := func(t *testing.T) *http.Request {
+		t.Helper()
+
+		req, err := http.NewRequestWithContext(
+			context.Background(),
+			http.MethodPut,
+			"https://upload.test/data",
+			io.NopCloser(strings.NewReader("x")),
+		)
+		if err != nil {
+			t.Fatalf("build PUT request: %v", err)
+		}
+
+		req.ContentLength = 1
+
+		return req
+	}
+
+	tests := []struct {
+		name   string
+		status int
+		next   string
+		run    func(*testing.T, httpDoer) error
+	}{
+		{
+			name:   "block HEAD",
+			status: http.StatusOK,
+			next:   "0",
+			run: func(_ *testing.T, doer httpDoer) error {
+				_, err := headBlockOffset(context.Background(), doer, "https://upload.test/api/v1/block", 1)
+
+				return err
+			},
+		},
+		{
+			name:   "filesystem HEAD",
+			status: http.StatusOK,
+			next:   "0",
+			run: func(_ *testing.T, doer httpDoer) error {
+				_, _, _, err := headFileOffset(
+					context.Background(),
+					doer,
+					"https://upload.test/api/v1/files/data",
+					1,
+				)
+
+				return err
+			},
+		},
+		{
+			name:   "block successful PUT",
+			status: http.StatusCreated,
+			next:   "1",
+			run: func(t *testing.T, doer httpDoer) error {
+				_, _, err := doBlockChunk(doer, newPUTRequest(t), 0, 1, 1)
+
+				return err
+			},
+		},
+		{
+			name:   "block conflict PUT",
+			status: http.StatusConflict,
+			next:   "0",
+			run: func(t *testing.T, doer httpDoer) error {
+				_, _, err := doBlockChunk(doer, newPUTRequest(t), 0, 1, 1)
+
+				return err
+			},
+		},
+		{
+			name:   "block error response",
+			status: http.StatusInternalServerError,
+			run: func(t *testing.T, doer httpDoer) error {
+				_, _, err := doBlockChunk(doer, newPUTRequest(t), 0, 1, 1)
+
+				return err
+			},
+		},
+		{
+			name:   "filesystem successful PUT",
+			status: http.StatusCreated,
+			next:   "1",
+			run: func(t *testing.T, doer httpDoer) error {
+				_, _, err := doFileChunk(doer, newPUTRequest(t), 0, 1, 1)
+
+				return err
+			},
+		},
+		{
+			name:   "filesystem conflict PUT",
+			status: http.StatusConflict,
+			next:   "0",
+			run: func(t *testing.T, doer httpDoer) error {
+				_, _, err := doFileChunk(doer, newPUTRequest(t), 0, 1, 1)
+
+				return err
+			},
+		},
+		{
+			name:   "finished POST",
+			status: http.StatusOK,
+			run: func(_ *testing.T, doer httpDoer) error {
+				return postFinished(context.Background(), doer, "https://upload.test")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				if tc.next != "" {
+					header.Set("X-Next-Offset", tc.next)
+				}
+
+				return &http.Response{
+					StatusCode: tc.status,
+					Status:     fmt.Sprintf("%d %s", tc.status, http.StatusText(tc.status)),
+					Header:     header,
+					Body: causalResponseBody{
+						err: safeClient.ErrResponseBodyLimitExceeded,
+					},
+				}, nil
+			})
+
+			err := tc.run(t, doer)
+			if !errors.Is(err, safeClient.ErrResponseBodyLimitExceeded) {
+				t.Fatalf("error = %v, want ErrResponseBodyLimitExceeded", err)
+			}
+		})
+	}
+}
+
 func TestSendVolumeData_WriteDeadlineLeavesResumeOffsetAndSkipsFinished(t *testing.T) {
 	t.Parallel()
 
@@ -1369,6 +1506,91 @@ func TestSendVolumeData_WriteDeadlineLeavesResumeOffsetAndSkipsFinished(t *testi
 	}
 }
 
+func TestSendVolumeData_ResponseLimitLeavesResumeOffsetAndSkipsFinished(t *testing.T) {
+	t.Parallel()
+
+	const (
+		totalSize    = int64(10)
+		resumeOffset = int64(3)
+	)
+
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("write data file: %v", err)
+	}
+
+	var (
+		finishedCalls int
+		progress      int
+	)
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+
+		switch req.Method {
+		case http.MethodHead:
+			header.Set("X-Next-Offset", strconv.FormatInt(resumeOffset, 10))
+
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     http.StatusText(http.StatusOK),
+				Header:     header,
+				Body:       http.NoBody,
+			}, nil
+		case http.MethodPut:
+			header.Set("X-Next-Offset", strconv.FormatInt(totalSize, 10))
+
+			return &http.Response{
+				StatusCode: http.StatusCreated,
+				Status:     http.StatusText(http.StatusCreated),
+				Header:     header,
+				Body: causalResponseBody{
+					err: safeClient.ErrResponseBodyLimitExceeded,
+				},
+			}, nil
+		case http.MethodPost:
+			finishedCalls++
+
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Status:     http.StatusText(http.StatusNoContent),
+				Header:     header,
+				Body:       http.NoBody,
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+	})
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	leaf := PlannedNode{
+		DataFile: dataFile,
+		Size:     strconv.FormatInt(totalSize, 10),
+	}
+
+	err := importer.sendVolumeData(
+		context.Background(),
+		doer,
+		"https://upload.test",
+		volumeModeBlock,
+		leaf,
+		"target",
+		"dataimport",
+		nil,
+		func(count int) { progress += count },
+		nil,
+	)
+	if !errors.Is(err, safeClient.ErrResponseBodyLimitExceeded) {
+		t.Fatalf("sendVolumeData error = %v, want ErrResponseBodyLimitExceeded", err)
+	}
+	if progress != int(resumeOffset) {
+		t.Fatalf("durable progress = %d, want resume offset %d only", progress, resumeOffset)
+	}
+	if finishedCalls != 0 {
+		t.Fatalf("finished POST calls = %d, want 0 after response limit", finishedCalls)
+	}
+}
+
 type deadlineResponseBody struct{}
 
 func (deadlineResponseBody) Read([]byte) (int, error) {
@@ -1376,6 +1598,18 @@ func (deadlineResponseBody) Read([]byte) (int, error) {
 }
 
 func (deadlineResponseBody) Close() error {
+	return nil
+}
+
+type causalResponseBody struct {
+	err error
+}
+
+func (b causalResponseBody) Read([]byte) (int, error) {
+	return 0, b.err
+}
+
+func (causalResponseBody) Close() error {
 	return nil
 }
 

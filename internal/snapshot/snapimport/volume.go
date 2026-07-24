@@ -74,6 +74,8 @@ const (
 	uploadResponseHeaderTimeout = 30 * time.Second
 	uploadWriteIdleTimeout      = 30 * time.Second
 	uploadReadIdleTimeout       = 15 * time.Second
+	uploadResponseTotalTimeout  = 30 * time.Second
+	uploadResponseByteLimit     = 1 * 1024 * 1024
 
 	dataImportIdentityVersion  = "v1"
 	dataImportIdentityIDLength = 16
@@ -712,6 +714,8 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 		ResponseHeader: uploadResponseHeaderTimeout,
 		WriteIdle:      uploadWriteIdleTimeout,
 		ReadIdle:       uploadReadIdleTimeout,
+		ResponseTotal:  uploadResponseTotalTimeout,
+		ResponseBytes:  uploadResponseByteLimit,
 	}); err != nil {
 		return nil, fmt.Errorf("configure DataImport upload network timeouts: %w", err)
 	}
