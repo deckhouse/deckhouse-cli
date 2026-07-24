@@ -478,6 +478,9 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 	if pullflags.ModulesWhitelist != nil {
 		filter, err := modules.NewFilter(pullflags.ModulesWhitelist, modules.FilterTypeWhitelist)
 		if err != nil {
+			if diag := errdetect.DiagnoseConstraintParseError(err, "include-module", pullflags.ModulesWhitelist...); diag != nil {
+				return nil, diag
+			}
 			return nil, fmt.Errorf("Prepare module filter: %w", err)
 		}
 
@@ -499,6 +502,9 @@ func (p *Puller) createPackageFilter() (*modules.Filter, error) {
 	if pullflags.PackagesWhitelist != nil {
 		filter, err := modules.NewFilter(pullflags.PackagesWhitelist, modules.FilterTypeWhitelist)
 		if err != nil {
+			if diag := errdetect.DiagnoseConstraintParseError(err, "include-package", pullflags.PackagesWhitelist...); diag != nil {
+				return nil, diag
+			}
 			return nil, fmt.Errorf("Prepare package filter: %w", err)
 		}
 

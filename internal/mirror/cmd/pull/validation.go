@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/errdetect"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
@@ -164,6 +165,9 @@ func parseAndValidateVersionFlags() error {
 	if pullflags.PlatformConstraintString != "" {
 		pullflags.PlatformConstraint, err = modules.ParseVersionConstraint(pullflags.PlatformConstraintString)
 		if err != nil {
+			if diag := errdetect.DiagnoseConstraintParseError(err, "include-platform", pullflags.PlatformConstraintString); diag != nil {
+				return diag
+			}
 			return fmt.Errorf("Parse --include-platform constraint: %w", err)
 		}
 	}
