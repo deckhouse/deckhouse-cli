@@ -64,6 +64,66 @@ func TestWindowsArchiveLockDeniesRootAndEntryReplacementWhileHeld(t *testing.T) 
 	}
 }
 
+func TestWindowsArchiveLockDeniesExternalDomainReplacementWhileHeld(t *testing.T) {
+	root := t.TempDir()
+	domainPath, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve external archive lock domain: %v", err)
+	}
+
+	lock, err := AcquireReadLock(root)
+	if err != nil {
+		t.Fatalf("acquire archive reader: %v", err)
+	}
+
+	if err := os.Rename(domainPath, domainPath+".replacement"); err == nil {
+		t.Fatal("renamed an external lock domain whose handle denies delete sharing")
+	}
+
+	if err := lock.Verify(); err != nil {
+		t.Fatalf("verify retained external lock domain: %v", err)
+	}
+
+	runArchiveLockHelper(t, root, "write", false)
+
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("release archive reader: %v", err)
+	}
+
+	if err := os.Rename(domainPath, domainPath+".released"); err != nil {
+		t.Fatalf("rename external lock domain after release: %v", err)
+	}
+}
+
+func TestWindowsArchiveLockJunctionAliasSharesProcessDomain(t *testing.T) {
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "archive-alias")
+
+	output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", alias, root).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create archive-root junction: %v: %s", err, output)
+	}
+
+	rootDomain, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve root lock domain: %v", err)
+	}
+
+	aliasDomain, err := archiveLockDomainPath(alias)
+	if err != nil {
+		t.Fatalf("resolve junction lock domain: %v", err)
+	}
+
+	if rootDomain != aliasDomain {
+		t.Fatalf("junction alias domains differ: root=%s alias=%s", rootDomain, aliasDomain)
+	}
+
+	holder := startArchiveLockHolder(t, root, "read")
+	runArchiveLockHelper(t, alias, "write", false)
+	holder.Release()
+	runArchiveLockHelper(t, alias, "write", true)
+}
+
 func TestWindowsArchiveLockKeepsDomainAcrossAncestorReplacement(t *testing.T) {
 	base := t.TempDir()
 	ancestor := filepath.Join(base, "ancestor")

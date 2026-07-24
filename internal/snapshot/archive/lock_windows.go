@@ -31,7 +31,12 @@ import (
 )
 
 func openArchiveLockAnchor(source *RootedSource) (*os.File, error) {
-	domainPath, err := archiveLockDomainPath(source.path)
+	pathIdentity, _, err := archiveLockDomainIdentity(source)
+	if err != nil {
+		return nil, err
+	}
+
+	domainPath, err := archiveLockDomainPathForIdentity(pathIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -62,15 +67,25 @@ func openArchiveLockAnchor(source *RootedSource) (*os.File, error) {
 	return anchor, nil
 }
 
-// archiveLockDomainPath uses the case-insensitive absolute archive name only as a bounded
-// locator. The returned handle, pinned root, and descriptor-relative in-root entry form the
-// actual lock identity.
+// archiveLockDomainPath resolves aliases through a root handle before selecting the external
+// domain. The opened domain handle denies delete sharing and is therefore the stable namespace
+// entry while any reader or writer holds it.
 func archiveLockDomainPath(path string) (string, error) {
-	identity, err := archiveLockCanonicalPath(path)
+	root, err := openArchiveRoot(path)
+	if err != nil {
+		return "", fmt.Errorf("open archive root for lock-domain identity %s: %w", path, err)
+	}
+	defer func() { _ = root.Close() }()
+
+	identity, err := archiveLockCanonicalHandlePath(root, path)
 	if err != nil {
 		return "", err
 	}
 
+	return archiveLockDomainPathForIdentity(identity)
+}
+
+func archiveLockDomainPathForIdentity(identity string) (string, error) {
 	domainDirectory, err := windows.KnownFolderPath(
 		windows.FOLDERID_LocalAppData,
 		windows.KF_FLAG_DEFAULT,
@@ -152,7 +167,7 @@ func openArchiveLockAt(parent *os.File, name, path string) (*os.File, error) {
 }
 
 func archiveLockDomainIdentity(source *RootedSource) (string, string, error) {
-	path, err := archiveLockCanonicalPath(source.path)
+	path, err := archiveLockCanonicalHandlePath(source.dir, source.path)
 	if err != nil {
 		return "", "", err
 	}
@@ -172,13 +187,30 @@ func archiveLockDomainIdentity(source *RootedSource) (string, string, error) {
 	return path, rootID, nil
 }
 
-func archiveLockCanonicalPath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("resolve archive lock identity path %s: %w", path, err)
-	}
+func archiveLockCanonicalHandlePath(file *os.File, displayPath string) (string, error) {
+	const (
+		fileNameNormalized = 0
+		volumeNameGUID     = 1
+	)
 
-	return strings.ToLower(filepath.Clean(absolute)), nil
+	buffer := make([]uint16, windows.MAX_LONG_PATH)
+	for {
+		length, err := windows.GetFinalPathNameByHandle(
+			windows.Handle(file.Fd()),
+			&buffer[0],
+			uint32(len(buffer)),
+			fileNameNormalized|volumeNameGUID,
+		)
+		if err != nil {
+			return "", fmt.Errorf("resolve canonical archive lock path %s: %w", displayPath, err)
+		}
+
+		if int(length) < len(buffer) {
+			return strings.ToLower(windows.UTF16ToString(buffer[:length])), nil
+		}
+
+		buffer = make([]uint16, int(length)+1)
+	}
 }
 
 func tryArchiveAnchorLock(anchor *os.File, source *RootedSource, exclusive bool) (bool, error) {

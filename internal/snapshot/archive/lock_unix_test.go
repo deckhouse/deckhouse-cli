@@ -23,6 +23,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,6 +182,236 @@ func TestArchiveLockEntryReplacementFailsClosedAndKeepsRootDomain(t *testing.T) 
 		t.Fatalf("acquire replacement entry after release: %v", err)
 	}
 	defer func() { _ = writer.Unlock() }()
+}
+
+func TestArchiveLockExternalDomainReplacementFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	reader, err := AcquireReadLock(root)
+	if err != nil {
+		t.Fatalf("acquire reader: %v", err)
+	}
+
+	domainPath, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve external lock domain: %v", err)
+	}
+
+	if err := os.Remove(domainPath); err != nil {
+		t.Fatalf("unlink held external lock record: %v", err)
+	}
+
+	if err := os.WriteFile(domainPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("create replacement external lock record: %v", err)
+	}
+
+	if err := reader.Verify(); !errors.Is(err, ErrArchiveLockChanged) {
+		t.Fatalf("Verify error = %v, want ErrArchiveLockChanged", err)
+	}
+
+	writer, err := AcquireWriteLock(root)
+	if writer != nil {
+		_ = writer.Unlock()
+	}
+
+	if !errors.Is(err, ErrArchiveLocked) {
+		t.Fatalf("replacement-domain writer error = %v, want ErrArchiveLocked", err)
+	}
+
+	runArchiveLockHelper(t, root, "write", false)
+
+	if err := reader.Unlock(); err != nil {
+		t.Fatalf("release reader: %v", err)
+	}
+
+	runArchiveLockHelper(t, root, "write", true)
+}
+
+func TestArchiveLockAliasAndReplacementShareStableProcessDomain(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "ancestor")
+	root := filepath.Join(ancestor, "archive")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create archive root: %v", err)
+	}
+
+	aliasParent := filepath.Join(base, "alias")
+	if err := os.Symlink(ancestor, aliasParent); err != nil {
+		t.Fatalf("create archive-root alias: %v", err)
+	}
+	aliasRoot := filepath.Join(aliasParent, "archive")
+
+	holder := startArchiveLockHolder(t, root, "read")
+	runArchiveLockHelper(t, aliasRoot, "write", false)
+
+	domainPath, err := archiveLockDomainPath(aliasRoot)
+	if err != nil {
+		t.Fatalf("resolve aliased external lock domain: %v", err)
+	}
+
+	if err := os.Remove(domainPath); err != nil {
+		t.Fatalf("unlink held external lock record: %v", err)
+	}
+
+	if err := os.WriteFile(domainPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatalf("create replacement external lock record: %v", err)
+	}
+
+	displaced := ancestor + ".displaced"
+	if err := os.Rename(ancestor, displaced); err != nil {
+		t.Fatalf("replace archive ancestor: %v", err)
+	}
+
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create replacement archive tree: %v", err)
+	}
+
+	runArchiveLockHelper(t, aliasRoot, "write", false)
+
+	holder.Release()
+	runArchiveLockHelper(t, aliasRoot, "write", true)
+}
+
+func TestArchiveLockStaleExternalDomainRecoversAcrossProcess(t *testing.T) {
+	root := t.TempDir()
+	domainPath, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve external lock domain: %v", err)
+	}
+
+	if err := os.WriteFile(domainPath, []byte("stale malformed record"), 0o600); err != nil {
+		t.Fatalf("write stale external lock record: %v", err)
+	}
+
+	runArchiveLockHelper(t, root, "write", true)
+	runArchiveLockHelper(t, root, "read", true)
+}
+
+func TestArchiveLockRejectsDomainLocatorIdentityCollision(t *testing.T) {
+	root := t.TempDir()
+	domainPath, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve external lock domain: %v", err)
+	}
+
+	collisionRecord, err := encodeArchiveLockDomain("/different/archive", "different-root")
+	if err != nil {
+		t.Fatalf("encode colliding lock-domain record: %v", err)
+	}
+
+	if err := os.WriteFile(domainPath, collisionRecord, 0o600); err != nil {
+		t.Fatalf("write colliding lock-domain record: %v", err)
+	}
+
+	lock, err := AcquireWriteLock(root)
+	if lock != nil {
+		_ = lock.Unlock()
+	}
+
+	if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+		t.Fatalf("colliding lock-domain error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+}
+
+func TestDarwinArchiveLockTmpAliasesShareProcessDomain(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin /tmp alias is platform-specific")
+	}
+
+	privateRoot, err := os.MkdirTemp("/private/tmp", "d8-archive-lock-alias-")
+	if err != nil {
+		t.Fatalf("create private tmp archive root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(privateRoot) })
+
+	publicRoot := strings.Replace(privateRoot, "/private/tmp/", "/tmp/", 1)
+	privateDomain, err := archiveLockDomainPath(privateRoot)
+	if err != nil {
+		t.Fatalf("resolve private tmp lock domain: %v", err)
+	}
+
+	publicDomain, err := archiveLockDomainPath(publicRoot)
+	if err != nil {
+		t.Fatalf("resolve public tmp lock domain: %v", err)
+	}
+
+	if privateDomain != publicDomain {
+		t.Fatalf("tmp alias domains differ: private=%s public=%s", privateDomain, publicDomain)
+	}
+
+	holder := startArchiveLockHolder(t, privateRoot, "read")
+	runArchiveLockHelper(t, publicRoot, "write", false)
+	holder.Release()
+	runArchiveLockHelper(t, publicRoot, "write", true)
+}
+
+func TestArchiveLockCarrierReleasesPartialAcquisition(t *testing.T) {
+	const (
+		freeKey    = int64(0x6d31f001)
+		blockedKey = int64(0x6d31f002)
+	)
+
+	blocker := registerTestArchiveCarrierAnchor(t, []int64{blockedKey})
+	locked, err := tryArchiveCarrierLock(blocker, false)
+	if err != nil {
+		t.Fatalf("acquire blocking carrier range: %v", err)
+	}
+
+	if !locked {
+		t.Fatal("blocking carrier range was unexpectedly busy")
+	}
+
+	contender := registerTestArchiveCarrierAnchor(t, []int64{freeKey, blockedKey})
+	locked, err = tryArchiveCarrierLock(contender, true)
+	if err != nil {
+		t.Fatalf("attempt partial carrier acquisition: %v", err)
+	}
+
+	if locked {
+		t.Fatal("partial carrier acquisition unexpectedly succeeded")
+	}
+
+	archiveLockCarrier.Lock()
+	_, leaked := archiveLockCarrier.ranges[freeKey]
+	archiveLockCarrier.Unlock()
+	if leaked {
+		t.Fatal("failed carrier acquisition leaked its first range")
+	}
+
+	if err := unlockArchiveCarrierLock(blocker); err != nil {
+		t.Fatalf("release blocking carrier range: %v", err)
+	}
+
+	archiveLockCarrier.Lock()
+	carrierOpen := archiveLockCarrier.file != nil
+	archiveLockCarrier.Unlock()
+	if carrierOpen {
+		t.Fatal("last carrier range release retained the carrier descriptor")
+	}
+}
+
+func registerTestArchiveCarrierAnchor(t *testing.T, lockKeys []int64) *os.File {
+	t.Helper()
+
+	file, err := os.CreateTemp(t.TempDir(), "carrier-anchor-")
+	if err != nil {
+		t.Fatalf("create carrier anchor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+
+	archiveLockCarrier.Lock()
+	if archiveLockCarrier.anchors == nil {
+		archiveLockCarrier.anchors = make(map[*os.File]*archiveLockAnchorState)
+	}
+
+	archiveLockCarrier.anchors[file] = &archiveLockAnchorState{lockKeys: lockKeys}
+	archiveLockCarrier.Unlock()
+	t.Cleanup(func() {
+		archiveLockCarrier.Lock()
+		delete(archiveLockCarrier.anchors, file)
+		archiveLockCarrier.Unlock()
+	})
+
+	return file
 }
 
 func TestArchiveLockRootReplacementFailsClosed(t *testing.T) {
