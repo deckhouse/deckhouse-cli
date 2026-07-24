@@ -65,8 +65,9 @@ var (
 
 // stubSource records the call and returns a canned manifest array body.
 type stubSource struct {
-	body []byte
-	err  error
+	body   []byte
+	err    error
+	onCall func()
 
 	gotRef  aggapi.NodeRef
 	gotNS   string
@@ -79,6 +80,10 @@ func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRe
 	s.gotRef = ref
 	s.gotNS = targetNamespace
 	s.gotOpts = opts
+
+	if s.onCall != nil {
+		s.onCall()
+	}
 
 	return s.body, s.err
 }
@@ -94,6 +99,16 @@ func assertNoRestoreMutation(t *testing.T, src *stubSource, dyn *dynamicfake.Fak
 		switch action.GetVerb() {
 		case "create", "delete", "delete-collection", "patch", "update":
 			t.Errorf("cluster mutation %s %s must not occur", action.GetVerb(), action.GetResource().Resource)
+		}
+	}
+}
+
+func assertNoPatchActions(t *testing.T, dyn *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "patch" {
+			t.Errorf("Patch must not occur for %s", action.GetResource().Resource)
 		}
 	}
 }
@@ -684,6 +699,176 @@ func TestRun_AppliesClusterScopedObject(t *testing.T) {
 	if got.GetNamespace() != "" {
 		t.Errorf("cluster-scoped object got namespace %q, want empty", got.GetNamespace())
 	}
+}
+
+func TestRun_ManifestNamespacePreflightRejectsForeignNamespace(t *testing.T) {
+	tests := []struct {
+		name   string
+		dryRun bool
+	}{
+		{name: "implicit dry-run and real apply", dryRun: false},
+		{name: "explicit dry-run", dryRun: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			foreign := configMapManifest("foreign")
+			metadata, _ := foreign["metadata"].(map[string]interface{})
+			metadata["namespace"] = "other"
+
+			src := &stubSource{body: mustArray(t, configMapManifest("valid"), foreign)}
+			dyn := newFakeDynamic(readySnapshot())
+			cfg := baseConfig(src, dyn)
+			cfg.DryRun = tc.dryRun
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected cross-namespace manifest error, got nil")
+			}
+
+			for _, value := range []string{
+				`apiVersion="v1"`,
+				`kind="ConfigMap"`,
+				`name="foreign"`,
+				`namespace "other"`,
+				`required namespace is "default"`,
+			} {
+				if !contains(err.Error(), value) {
+					t.Errorf("error %q does not contain %q", err.Error(), value)
+				}
+			}
+
+			assertNoPatchActions(t, dyn)
+		})
+	}
+}
+
+func TestRun_ManifestNamespacePreflightAcceptsTargetScope(t *testing.T) {
+	emptyNamespace := configMapManifest("empty-namespace")
+	matchingNamespace := configMapManifest("matching-namespace")
+	metadata, _ := matchingNamespace["metadata"].(map[string]interface{})
+	metadata["namespace"] = testNS
+	pv := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolume",
+		"metadata":   map[string]interface{}{"name": "cluster-scoped"},
+	}
+
+	src := &stubSource{body: mustArray(t, emptyNamespace, matchingNamespace, pv)}
+	dyn := newFakeDynamic(readySnapshot())
+
+	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, name := range []string{"empty-namespace", "matching-namespace"} {
+		obj, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get ConfigMap %s: %v", name, err)
+		}
+
+		if obj.GetNamespace() != testNS {
+			t.Errorf("ConfigMap %s namespace = %q, want %q", name, obj.GetNamespace(), testNS)
+		}
+	}
+
+	clusterScoped, err := dyn.Resource(pvGVR).Get(context.Background(), "cluster-scoped", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PersistentVolume: %v", err)
+	}
+
+	if clusterScoped.GetNamespace() != "" {
+		t.Errorf("PersistentVolume namespace = %q, want empty", clusterScoped.GetNamespace())
+	}
+}
+
+func TestPreflightManifestNamespaces_NormalizesOnlyAfterValidation(t *testing.T) {
+	objs := []unstructured.Unstructured{
+		{Object: configMapManifest("empty")},
+		{Object: configMapManifest("foreign")},
+		{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolume",
+			"metadata":   map[string]interface{}{"name": "cluster-scoped"},
+		}},
+	}
+	objs[1].SetNamespace("other")
+	cfg := Config{
+		Namespace: testNS,
+		Mapper:    testMapper(),
+	}
+
+	if err := preflightManifestNamespaces(context.Background(), cfg, objs); err == nil {
+		t.Fatal("expected cross-namespace manifest error, got nil")
+	}
+
+	if objs[0].GetNamespace() != "" {
+		t.Errorf("first object was normalized before the complete set passed: namespace = %q", objs[0].GetNamespace())
+	}
+
+	objs[1].SetNamespace(testNS)
+
+	if err := preflightManifestNamespaces(context.Background(), cfg, objs); err != nil {
+		t.Fatalf("preflightManifestNamespaces: %v", err)
+	}
+
+	for i := range objs[:2] {
+		if objs[i].GetNamespace() != testNS {
+			t.Errorf("namespaced object %d namespace = %q, want %q", i, objs[i].GetNamespace(), testNS)
+		}
+	}
+
+	if objs[2].GetNamespace() != "" {
+		t.Errorf("cluster-scoped object namespace = %q, want unchanged empty namespace", objs[2].GetNamespace())
+	}
+}
+
+func TestRun_ManifestNamespacePreflightMapperErrorAbortsBeforePatch(t *testing.T) {
+	mapperErr := errors.New("mapper unavailable")
+	mapper := restMappingInterceptor{
+		RESTMapper: testMapper(),
+		intercept: func(groupKind schema.GroupKind, _ ...string) (*meta.RESTMapping, error) {
+			if groupKind.Kind == "ConfigMap" {
+				return nil, mapperErr
+			}
+
+			return nil, nil
+		},
+	}
+	src := &stubSource{body: mustArray(t, configMapManifest("valid"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(src, dyn)
+	cfg.Mapper = mapper
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, mapperErr) {
+		t.Fatalf("Run error = %v, want mapper error", err)
+	}
+
+	assertNoPatchActions(t, dyn)
+}
+
+func TestRun_ManifestNamespacePreflightCancellationAbortsBeforePatch(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancelCause := errors.New("operator canceled namespace validation")
+	src := &stubSource{
+		body: mustArray(t, configMapManifest("valid")),
+		onCall: func() {
+			cancel(cancelCause)
+		},
+	}
+	dyn := newFakeDynamic(readySnapshot())
+
+	err := Run(ctx, baseConfig(src, dyn))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+
+	if !errors.Is(err, cancelCause) {
+		t.Fatalf("Run error = %v, want cancellation cause", err)
+	}
+
+	assertNoPatchActions(t, dyn)
 }
 
 // TestRun_UpdatesExistingObject verifies the upsert path updates a pre-existing object.

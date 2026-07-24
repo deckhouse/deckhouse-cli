@@ -318,6 +318,51 @@ func TestRun_Edit_MutatedManifestApplied(t *testing.T) {
 	}
 }
 
+func TestRun_Edit_CrossNamespaceMutationAbortsBeforePatch(t *testing.T) {
+	dir := t.TempDir()
+
+	editedYAML := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valid
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foreign
+  namespace: other
+`
+	contentFile := writeEditorContent(t, dir, "cross-namespace.yaml", editedYAML)
+	editor := fakeEditorScript(t, dir, fmt.Sprintf(`cp '%s' "$1"`, contentFile))
+
+	t.Setenv("EDITOR", editor)
+	t.Setenv("KUBE_EDITOR", "")
+
+	src := &stubSource{body: mustArray(t, configMapManifest("original"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(src, dyn)
+	cfg.Edit = true
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected cross-namespace edit error, got nil")
+	}
+
+	for _, value := range []string{
+		`apiVersion="v1"`,
+		`kind="ConfigMap"`,
+		`name="foreign"`,
+		`namespace "other"`,
+		`required namespace is "default"`,
+	} {
+		if !contains(err.Error(), value) {
+			t.Errorf("error %q does not contain %q", err.Error(), value)
+		}
+	}
+
+	assertNoPatchActions(t, dyn)
+}
+
 // TestRun_Edit_NonZeroEditorAborts verifies that when the editor exits non-zero during
 // a full Run with Edit=true, no object is applied.
 func TestRun_Edit_NonZeroEditorAborts(t *testing.T) {
