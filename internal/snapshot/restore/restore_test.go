@@ -2855,10 +2855,689 @@ func TestRun_SelectedNode_APIVersionDisambiguatesGeneratedIdentity(t *testing.T)
 				}
 			}
 
-			if hierarchyGets != len(apiVersions)+1 {
-				t.Errorf("hierarchy GET calls = %d, want %d", hierarchyGets, len(apiVersions)+1)
+			wantHierarchyGets := len(apiVersions) + 1
+			if tc.wantAPIVersion != "" {
+				wantHierarchyGets = slices.Index(apiVersions, tc.wantAPIVersion) + 2
+			}
+
+			if hierarchyGets != wantHierarchyGets {
+				t.Errorf("hierarchy GET calls = %d, want %d", hierarchyGets, wantHierarchyGets)
 			}
 		})
+	}
+}
+
+func TestResolveNodeRef_IterativeDepthFirstTraversal(t *testing.T) {
+	t.Parallel()
+
+	target := readyDomainDiskSnapshot("target")
+	grandchild := snapshotWithChildren(
+		readyDomainDiskSnapshot("grandchild"),
+		snapshotChildRef(target.GetAPIVersion(), target.GetKind(), target.GetName()),
+	)
+	child := snapshotWithChildren(
+		readyDomainDiskSnapshot("child"),
+		snapshotChildRef(grandchild.GetAPIVersion(), grandchild.GetKind(), grandchild.GetName()),
+	)
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+	)
+	baseDynamic := newFakeDynamic(root, child, grandchild, target)
+
+	var getOrder []string
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(
+			_ context.Context,
+			verb string,
+			_ schema.GroupVersionResource,
+			_ string,
+			name string,
+		) error {
+			if verb == "get" {
+				getOrder = append(getOrder, name)
+			}
+
+			return nil
+		},
+	}
+	cfg := Config{
+		Namespace:              testNS,
+		Snapshot:               testSnap,
+		SelectedNodeKind:       target.GetKind(),
+		SelectedNodeName:       target.GetName(),
+		SelectedNodeAPIVersion: target.GetAPIVersion(),
+		Dynamic:                dyn,
+		Mapper:                 testMapperWithDomain(),
+	}
+
+	var (
+		maxNodes int
+		maxStack int
+	)
+
+	ref, obj, err := cfg.resolveNodeRefWithLimits(
+		context.Background(),
+		hierarchyWalkLimits{maxDepth: 3, maxNodes: 4},
+		func(stats hierarchyWalkStats) {
+			maxNodes = max(maxNodes, stats.nodes)
+			maxStack = max(maxStack, stats.stackDepth)
+		},
+	)
+	if err != nil {
+		t.Fatalf("resolveNodeRefWithLimits: %v", err)
+	}
+
+	if ref.Name != target.GetName() || obj.GetName() != target.GetName() {
+		t.Errorf("resolved (%+v, %s), want target %q", ref, obj.GetName(), target.GetName())
+	}
+
+	wantOrder := []string{testSnap, child.GetName(), grandchild.GetName(), target.GetName()}
+	if !slices.Equal(getOrder, wantOrder) {
+		t.Errorf("hierarchy GET order = %v, want depth-first parent-before-child order %v", getOrder, wantOrder)
+	}
+
+	if maxNodes != 4 {
+		t.Errorf("maximum accounted nodes = %d, want 4", maxNodes)
+	}
+
+	if maxStack > 4 {
+		t.Errorf("maximum iterative stack depth = %d, want at most 4", maxStack)
+	}
+}
+
+func TestResolveNodeRef_RejectsRecursiveGraphShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		objects      func() []runtime.Object
+		wantGetOrder []string
+		wantRef      string
+	}{
+		{
+			name: "self cycle",
+			objects: func() []runtime.Object {
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(
+						snapshotapi.StorageGroup+"/"+snapshotapi.Version,
+						snapshotKind,
+						testSnap,
+					),
+				)
+
+				return []runtime.Object{root}
+			},
+			wantGetOrder: []string{testSnap},
+			wantRef:      testSnap,
+		},
+		{
+			name: "multi-node cycle",
+			objects: func() []runtime.Object {
+				child := snapshotWithChildren(
+					readyDomainDiskSnapshot("cycle-child"),
+					snapshotChildRef(
+						snapshotapi.StorageGroup+"/"+snapshotapi.Version,
+						snapshotKind,
+						testSnap,
+					),
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			wantGetOrder: []string{testSnap, "cycle-child"},
+			wantRef:      testSnap,
+		},
+		{
+			name: "duplicate sibling",
+			objects: func() []runtime.Object {
+				child := readyDomainDiskSnapshot("duplicate")
+				ref := snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName())
+				root := snapshotWithChildren(readySnapshot(), ref, ref)
+
+				return []runtime.Object{root, child}
+			},
+			wantGetOrder: []string{testSnap, "duplicate"},
+			wantRef:      "duplicate",
+		},
+		{
+			name: "diamond",
+			objects: func() []runtime.Object {
+				shared := readyDomainDiskSnapshot("shared")
+				left := snapshotWithChildren(
+					readyDomainDiskSnapshot("left"),
+					snapshotChildRef(shared.GetAPIVersion(), shared.GetKind(), shared.GetName()),
+				)
+				right := snapshotWithChildren(
+					readyDomainDiskSnapshot("right"),
+					snapshotChildRef(shared.GetAPIVersion(), shared.GetKind(), shared.GetName()),
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(left.GetAPIVersion(), left.GetKind(), left.GetName()),
+					snapshotChildRef(right.GetAPIVersion(), right.GetKind(), right.GetName()),
+				)
+
+				return []runtime.Object{root, left, right, shared}
+			},
+			wantGetOrder: []string{testSnap, "left", "shared", "right"},
+			wantRef:      "shared",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseDynamic := newFakeDynamic(tc.objects()...)
+
+			var getOrder []string
+			dyn := &interceptingDynamicClient{
+				Interface: baseDynamic,
+				intercept: func(
+					_ context.Context,
+					verb string,
+					_ schema.GroupVersionResource,
+					_ string,
+					name string,
+				) error {
+					if verb == "get" {
+						getOrder = append(getOrder, name)
+					}
+
+					return nil
+				},
+			}
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: "NeverMatches",
+				SelectedNodeName: "never",
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+			}
+
+			_, _, err := cfg.resolveNodeRefWithLimits(
+				context.Background(),
+				hierarchyWalkLimits{maxDepth: 8, maxNodes: 16},
+				nil,
+			)
+			if err == nil {
+				t.Fatal("resolveNodeRefWithLimits unexpectedly succeeded")
+			}
+
+			for _, part := range []string{"duplicate or cyclic ref", tc.wantRef} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not contain %q", err, part)
+				}
+			}
+
+			if !slices.Equal(getOrder, tc.wantGetOrder) {
+				t.Errorf("hierarchy GET order = %v, want %v", getOrder, tc.wantGetOrder)
+			}
+		})
+	}
+}
+
+func TestResolveNodeRef_LimitBoundaries(t *testing.T) {
+	t.Parallel()
+
+	first := readyDomainDiskSnapshot("first")
+	second := readyDomainDiskSnapshot("second")
+	chainRoot := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(first.GetAPIVersion(), first.GetKind(), first.GetName()),
+	)
+	chainFirst := snapshotWithChildren(
+		first,
+		snapshotChildRef(second.GetAPIVersion(), second.GetKind(), second.GetName()),
+	)
+	flatFirst := readyDomainDiskSnapshot("flat-first")
+	flatSecond := readyDomainDiskSnapshot("flat-second")
+	missingBudgetSecond := readyDomainDiskSnapshot("budget-second")
+
+	tests := []struct {
+		name         string
+		limits       hierarchyWalkLimits
+		objects      []runtime.Object
+		selectedName string
+		wantSuccess  bool
+		wantError    []string
+		wantGets     []string
+	}{
+		{
+			name:         "depth at limit succeeds",
+			limits:       hierarchyWalkLimits{maxDepth: 2, maxNodes: 3},
+			objects:      []runtime.Object{chainRoot, chainFirst, second},
+			selectedName: second.GetName(),
+			wantSuccess:  true,
+			wantGets:     []string{testSnap, first.GetName(), second.GetName()},
+		},
+		{
+			name:         "depth over limit fails before get",
+			limits:       hierarchyWalkLimits{maxDepth: 1, maxNodes: 3},
+			objects:      []runtime.Object{chainRoot, chainFirst, second},
+			selectedName: second.GetName(),
+			wantError:    []string{"depth budget of 1", "depth 2", second.GetName()},
+			wantGets:     []string{testSnap, first.GetName()},
+		},
+		{
+			name:   "node count at limit completes",
+			limits: hierarchyWalkLimits{maxDepth: 1, maxNodes: 3},
+			objects: []runtime.Object{
+				snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(flatFirst.GetAPIVersion(), flatFirst.GetKind(), flatFirst.GetName()),
+					snapshotChildRef(flatSecond.GetAPIVersion(), flatSecond.GetKind(), flatSecond.GetName()),
+				),
+				flatFirst,
+				flatSecond,
+			},
+			selectedName: "absent",
+			wantError:    []string{"does not belong"},
+			wantGets:     []string{testSnap, flatFirst.GetName(), flatSecond.GetName()},
+		},
+		{
+			name:   "missing ref consumes final node slot",
+			limits: hierarchyWalkLimits{maxDepth: 1, maxNodes: 2},
+			objects: []runtime.Object{
+				snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", "missing"),
+					snapshotChildRef(
+						missingBudgetSecond.GetAPIVersion(),
+						missingBudgetSecond.GetKind(),
+						missingBudgetSecond.GetName(),
+					),
+				),
+				missingBudgetSecond,
+			},
+			selectedName: "absent",
+			wantError: []string{
+				"node budget of 2",
+				"including missing children",
+				missingBudgetSecond.GetName(),
+			},
+			wantGets: []string{testSnap, "missing"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			baseDynamic := newFakeDynamic(tc.objects...)
+
+			var getOrder []string
+			dyn := &interceptingDynamicClient{
+				Interface: baseDynamic,
+				intercept: func(
+					_ context.Context,
+					verb string,
+					_ schema.GroupVersionResource,
+					_ string,
+					name string,
+				) error {
+					if verb == "get" {
+						getOrder = append(getOrder, name)
+					}
+
+					return nil
+				},
+			}
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       "DemoVirtualDiskSnapshot",
+				SelectedNodeName:       tc.selectedName,
+				SelectedNodeAPIVersion: domainDiskAPIVersion,
+				Dynamic:                dyn,
+				Mapper:                 testMapperWithDomain(),
+			}
+
+			ref, _, err := cfg.resolveNodeRefWithLimits(context.Background(), tc.limits, nil)
+			if tc.wantSuccess {
+				if err != nil {
+					t.Fatalf("resolveNodeRefWithLimits: %v", err)
+				}
+
+				if ref.Name != tc.selectedName {
+					t.Errorf("resolved ref = %+v, want name %q", ref, tc.selectedName)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("resolveNodeRefWithLimits unexpectedly succeeded")
+				}
+
+				for _, part := range tc.wantError {
+					if !strings.Contains(err.Error(), part) {
+						t.Errorf("error %q does not contain %q", err, part)
+					}
+				}
+			}
+
+			if !slices.Equal(getOrder, tc.wantGets) {
+				t.Errorf("hierarchy GET order = %v, want %v", getOrder, tc.wantGets)
+			}
+		})
+	}
+}
+
+func TestResolveNodeRef_ExactGeneratedSelectorStopsAtAuthoritativeRef(t *testing.T) {
+	t.Parallel()
+
+	alias := readyDomainDiskSnapshot("earlier-alias")
+	target := readyDomainDiskSnapshot("target")
+	setSnapshotSourceRef(alias, target.GetAPIVersion(), target.GetKind(), target.GetName())
+	targetStatus, _ := target.Object["status"].(map[string]interface{})
+	targetStatus["childrenSnapshotRefs"] = []interface{}{"malformed descendant"}
+	root := readySnapshot()
+	rootStatus, _ := root.Object["status"].(map[string]interface{})
+	rootStatus["childrenSnapshotRefs"] = []interface{}{
+		snapshotChildRef(alias.GetAPIVersion(), alias.GetKind(), alias.GetName()),
+		snapshotChildRef(target.GetAPIVersion(), target.GetKind(), target.GetName()),
+		"malformed unrelated sibling",
+	}
+	baseDynamic := newFakeDynamic(root, alias, target)
+
+	var getOrder []string
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(
+			_ context.Context,
+			verb string,
+			_ schema.GroupVersionResource,
+			_ string,
+			name string,
+		) error {
+			if verb == "get" {
+				getOrder = append(getOrder, name)
+			}
+
+			return nil
+		},
+	}
+	cfg := Config{
+		Namespace:              testNS,
+		Snapshot:               testSnap,
+		SelectedNodeKind:       target.GetKind(),
+		SelectedNodeName:       target.GetName(),
+		SelectedNodeAPIVersion: target.GetAPIVersion(),
+		Dynamic:                dyn,
+		Mapper:                 testMapperWithDomain(),
+	}
+
+	ref, _, err := cfg.resolveNodeRefWithLimits(
+		context.Background(),
+		hierarchyWalkLimits{maxDepth: 1, maxNodes: 3},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolveNodeRefWithLimits: %v", err)
+	}
+
+	if ref.Name != target.GetName() {
+		t.Errorf("resolved ref = %+v, want target %q", ref, target.GetName())
+	}
+
+	wantOrder := []string{testSnap, alias.GetName(), target.GetName()}
+	if !slices.Equal(getOrder, wantOrder) {
+		t.Errorf("hierarchy GET order = %v, want %v", getOrder, wantOrder)
+	}
+}
+
+func TestRun_SelectedNode_CancellationStopsBetweenHierarchyNodes(t *testing.T) {
+	t.Parallel()
+
+	first := readyDomainDiskSnapshot("first")
+	second := readyDomainDiskSnapshot("second")
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(first.GetAPIVersion(), first.GetKind(), first.GetName()),
+		snapshotChildRef(second.GetAPIVersion(), second.GetKind(), second.GetName()),
+	)
+	baseDynamic := newFakeDynamic(root, first, second)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	cause := errors.New("operator canceled hierarchy walk")
+
+	var getOrder []string
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(
+			_ context.Context,
+			verb string,
+			_ schema.GroupVersionResource,
+			_ string,
+			name string,
+		) error {
+			if verb != "get" {
+				return nil
+			}
+
+			getOrder = append(getOrder, name)
+			if name == first.GetName() {
+				cancel(cause)
+			}
+
+			return nil
+		},
+	}
+	src := &stubSource{body: mustArray(t, configMapManifest("must-not-apply"))}
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: "NeverMatches",
+		SelectedNodeName: "never",
+		Source:           src,
+		Dynamic:          dyn,
+		Mapper:           testMapperWithDomain(),
+		Log:              discardLogger(),
+	}
+
+	err := Run(ctx, cfg)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Errorf("error = %v, want cancellation cause %v", err, cause)
+	}
+
+	wantOrder := []string{testSnap, first.GetName()}
+	if !slices.Equal(getOrder, wantOrder) {
+		t.Errorf("hierarchy GET order = %v, want %v", getOrder, wantOrder)
+	}
+
+	assertNoRestoreMutation(t, src, baseDynamic)
+}
+
+func TestResolveNodeRef_ProductionDepthBudget(t *testing.T) {
+	t.Parallel()
+
+	const overLimitDepth = restoreHierarchyMaxDepth + 1
+
+	nodes := make([]*unstructured.Unstructured, 0, overLimitDepth)
+	objects := make([]runtime.Object, 0, overLimitDepth+1)
+	root := readySnapshot()
+	objects = append(objects, root)
+
+	for depth := 1; depth <= overLimitDepth; depth++ {
+		node := readyDomainDiskSnapshot(fmt.Sprintf("depth-%03d", depth))
+		nodes = append(nodes, node)
+		objects = append(objects, node)
+	}
+
+	snapshotWithChildren(
+		root,
+		snapshotChildRef(nodes[0].GetAPIVersion(), nodes[0].GetKind(), nodes[0].GetName()),
+	)
+	for i := 0; i+1 < len(nodes); i++ {
+		snapshotWithChildren(
+			nodes[i],
+			snapshotChildRef(nodes[i+1].GetAPIVersion(), nodes[i+1].GetKind(), nodes[i+1].GetName()),
+		)
+	}
+
+	baseDynamic := newFakeDynamic(objects...)
+
+	var hierarchyGets int
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(
+			_ context.Context,
+			verb string,
+			_ schema.GroupVersionResource,
+			_ string,
+			_ string,
+		) error {
+			if verb == "get" {
+				hierarchyGets++
+			}
+
+			return nil
+		},
+	}
+	cfg := Config{
+		Namespace:              testNS,
+		Snapshot:               testSnap,
+		SelectedNodeKind:       nodes[len(nodes)-1].GetKind(),
+		SelectedNodeName:       nodes[len(nodes)-1].GetName(),
+		SelectedNodeAPIVersion: nodes[len(nodes)-1].GetAPIVersion(),
+		Dynamic:                dyn,
+		Mapper:                 testMapperWithDomain(),
+	}
+
+	maxStack := 0
+	_, _, err := cfg.resolveNodeRefWithLimits(
+		context.Background(),
+		hierarchyWalkLimits{
+			maxDepth: restoreHierarchyMaxDepth,
+			maxNodes: restoreHierarchyMaxNodes,
+		},
+		func(stats hierarchyWalkStats) {
+			maxStack = max(maxStack, stats.stackDepth)
+		},
+	)
+	if err == nil {
+		t.Fatal("resolveNodeRefWithLimits unexpectedly succeeded")
+	}
+
+	for _, part := range []string{
+		fmt.Sprintf("depth budget of %d", restoreHierarchyMaxDepth),
+		fmt.Sprintf("depth %d", overLimitDepth),
+		nodes[len(nodes)-1].GetName(),
+	} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error %q does not contain %q", err, part)
+		}
+	}
+
+	if hierarchyGets != restoreHierarchyMaxDepth+1 {
+		t.Errorf("hierarchy GET calls = %d, want %d", hierarchyGets, restoreHierarchyMaxDepth+1)
+	}
+
+	if maxStack != restoreHierarchyMaxDepth+1 {
+		t.Errorf("maximum iterative stack depth = %d, want %d", maxStack, restoreHierarchyMaxDepth+1)
+	}
+}
+
+func TestResolveNodeRef_ProductionNodeBudgetBoundsWideWalk(t *testing.T) {
+	t.Parallel()
+
+	childRefs := make([]map[string]interface{}, 0, restoreHierarchyMaxNodes)
+	for i := 0; i < restoreHierarchyMaxNodes; i++ {
+		childRefs = append(childRefs, snapshotChildRef(
+			domainDiskAPIVersion,
+			"DemoVirtualDiskSnapshot",
+			fmt.Sprintf("wide-%05d", i),
+		))
+	}
+
+	root := snapshotWithChildren(readySnapshot(), childRefs...)
+	baseDynamic := newFakeDynamic(root)
+
+	var (
+		activeChildGets int
+		childGets       int
+		maxConcurrent   int
+	)
+
+	baseDynamic.PrependReactor("get", domainDiskGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getAction, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return true, nil, fmt.Errorf("unexpected action type %T", action)
+		}
+
+		activeChildGets++
+		childGets++
+		maxConcurrent = max(maxConcurrent, activeChildGets)
+		defer func() {
+			activeChildGets--
+		}()
+
+		return true, readyDomainDiskSnapshot(getAction.GetName()), nil
+	})
+
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: "NeverMatches",
+		SelectedNodeName: "never",
+		Dynamic:          baseDynamic,
+		Mapper:           testMapperWithDomain(),
+	}
+
+	var (
+		maxNodes int
+		maxStack int
+	)
+
+	_, _, err := cfg.resolveNodeRefWithLimits(
+		context.Background(),
+		hierarchyWalkLimits{
+			maxDepth: restoreHierarchyMaxDepth,
+			maxNodes: restoreHierarchyMaxNodes,
+		},
+		func(stats hierarchyWalkStats) {
+			maxNodes = max(maxNodes, stats.nodes)
+			maxStack = max(maxStack, stats.stackDepth)
+		},
+	)
+	if err == nil {
+		t.Fatal("resolveNodeRefWithLimits unexpectedly succeeded")
+	}
+
+	for _, part := range []string{
+		fmt.Sprintf("node budget of %d", restoreHierarchyMaxNodes),
+		"wide-09999",
+	} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("error %q does not contain %q", err, part)
+		}
+	}
+
+	if childGets != restoreHierarchyMaxNodes-1 {
+		t.Errorf("child GET calls = %d, want %d", childGets, restoreHierarchyMaxNodes-1)
+	}
+
+	if maxNodes != restoreHierarchyMaxNodes {
+		t.Errorf("maximum accounted nodes = %d, want %d", maxNodes, restoreHierarchyMaxNodes)
+	}
+
+	if maxStack != 2 {
+		t.Errorf("maximum iterative stack depth = %d, want 2 for a wide one-level hierarchy", maxStack)
+	}
+
+	if maxConcurrent != 1 || activeChildGets != 0 {
+		t.Errorf("child GET concurrency = max %d active %d, want max 1 and quiescent", maxConcurrent, activeChildGets)
 	}
 }
 
@@ -4012,10 +4691,10 @@ func TestRun_SelectedNode_MissingChildProofAPIFailures(t *testing.T) {
 		{
 			name: "deadline during list remains causal",
 			ctx: func() (context.Context, context.CancelFunc) {
-				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				return context.WithCancel(context.Background())
 			},
 			interceptList: func(
-				ctx context.Context,
+				_ context.Context,
 				gvr schema.GroupVersionResource,
 				_ string,
 				_ metav1.ListOptions,
@@ -4024,7 +4703,7 @@ func TestRun_SelectedNode_MissingChildProofAPIFailures(t *testing.T) {
 					return nil, false, nil
 				}
 
-				return nil, true, ctx.Err()
+				return nil, true, context.DeadlineExceeded
 			},
 			wantIs:         context.DeadlineExceeded,
 			wantErrSubstrs: []string{"prove absence", "context deadline exceeded"},
@@ -4162,8 +4841,8 @@ func TestRun_SelectedNode_MissingChildProofPagination(t *testing.T) {
 	live := readyDomainDiskSnapshot(liveName)
 	root := snapshotWithChildren(
 		notReadySnapshot(),
-		snapshotChildRef(live.GetAPIVersion(), live.GetKind(), live.GetName()),
 		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+		snapshotChildRef(live.GetAPIVersion(), live.GetKind(), live.GetName()),
 	)
 	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
 	baseDynamic := newFakeDynamic(root, live)

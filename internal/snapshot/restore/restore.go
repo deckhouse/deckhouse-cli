@@ -92,6 +92,12 @@ const (
 	missingChildProofPageLimit int64 = 100
 	missingChildProofMaxPages  int   = 100
 
+	// A successful full walk processes at most maxNodes-1 child edges. It is
+	// sequential, keeps at most maxDepth+1 parent frames, and issues at most one
+	// GET plus missingChildProofMaxPages LISTs per child.
+	restoreHierarchyMaxDepth = 64
+	restoreHierarchyMaxNodes = 10_000
+
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
 )
@@ -941,16 +947,57 @@ type nodeIdentity struct {
 }
 
 type nodeResolver struct {
-	cfg         Config
-	seen        map[string]struct{}
-	matches     []nodeMatch
-	missingRefs []aggapi.NodeRef
+	cfg           Config
+	limits        hierarchyWalkLimits
+	seen          map[string]struct{}
+	matches       []nodeMatch
+	missingRefs   []aggapi.NodeRef
+	authoritative *nodeMatch
+	nodeCount     int
+	observe       func(hierarchyWalkStats)
+}
+
+type hierarchyWalkLimits struct {
+	maxDepth int
+	maxNodes int
+}
+
+type hierarchyWalkStats struct {
+	nodes      int
+	stackDepth int
+}
+
+type hierarchyWalkFrame struct {
+	ref       aggapi.NodeRef
+	obj       *unstructured.Unstructured
+	depth     int
+	childRefs []interface{}
+	nextChild int
 }
 
 // resolveNodeRef resolves the selector only within the hierarchy rooted at the
 // positional Snapshot. Child refs carry the real snapshot GVK, so no cross-group
 // kind guess is needed.
 func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstructured.Unstructured, error) {
+	return cfg.resolveNodeRefWithLimits(ctx, hierarchyWalkLimits{
+		maxDepth: restoreHierarchyMaxDepth,
+		maxNodes: restoreHierarchyMaxNodes,
+	}, nil)
+}
+
+func (cfg Config) resolveNodeRefWithLimits(
+	ctx context.Context,
+	limits hierarchyWalkLimits,
+	observe func(hierarchyWalkStats),
+) (aggapi.NodeRef, *unstructured.Unstructured, error) {
+	if limits.maxDepth < 0 {
+		return aggapi.NodeRef{}, nil, fmt.Errorf("snapshot hierarchy max depth must be non-negative")
+	}
+
+	if limits.maxNodes <= 0 {
+		return aggapi.NodeRef{}, nil, fmt.Errorf("snapshot hierarchy max nodes must be positive")
+	}
+
 	rootRef := aggapi.NodeRef{
 		APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
 		Kind:       snapshotKind,
@@ -958,18 +1005,28 @@ func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstruct
 		Namespace:  cfg.Namespace,
 	}
 
+	resolver := nodeResolver{
+		cfg:     cfg,
+		limits:  limits,
+		seen:    make(map[string]struct{}, limits.maxNodes),
+		observe: observe,
+	}
+
+	if err := resolver.reserveNode(rootRef, 0); err != nil {
+		return aggapi.NodeRef{}, nil, err
+	}
+
 	root, err := cfg.getSnapshotNode(ctx, rootRef)
 	if err != nil {
 		return aggapi.NodeRef{}, nil, fmt.Errorf("get root Snapshot %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
 
-	resolver := nodeResolver{
-		cfg:  cfg,
-		seen: make(map[string]struct{}),
+	if err := resolver.walk(ctx, rootRef, root); err != nil {
+		return aggapi.NodeRef{}, nil, err
 	}
 
-	if err := resolver.visit(ctx, rootRef, root); err != nil {
-		return aggapi.NodeRef{}, nil, err
+	if resolver.authoritative != nil {
+		return resolver.authoritative.ref, resolver.authoritative.obj, nil
 	}
 
 	switch len(resolver.matches) {
@@ -1163,71 +1220,200 @@ func (cfg Config) selectedNodeDescription() string {
 	return cfg.SelectedNodeAPIVersion + " " + identity
 }
 
-func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstructured.Unstructured) error {
-	if err := r.markSeen(ref); err != nil {
-		return err
-	}
-
+func (r *nodeResolver) enterNode(
+	ref aggapi.NodeRef,
+	obj *unstructured.Unstructured,
+	depth int,
+) (hierarchyWalkFrame, bool, error) {
 	apiVersions, generated, err := r.matchingAPIVersions(obj, ref)
 	if err != nil {
-		return err
+		return hierarchyWalkFrame{}, false, err
 	}
 
 	if len(apiVersions) != 0 {
-		r.matches = append(r.matches, nodeMatch{
+		match := nodeMatch{
 			ref:         ref,
 			obj:         obj,
 			apiVersions: apiVersions,
 			generated:   generated,
-		})
+		}
+		r.matches = append(r.matches, match)
+
+		if generated &&
+			r.cfg.SelectedNodeAPIVersion != "" &&
+			ref.APIVersion == r.cfg.SelectedNodeAPIVersion &&
+			ref.Kind == r.cfg.SelectedNodeKind &&
+			ref.Name == r.cfg.SelectedNodeName {
+			r.authoritative = &match
+
+			return hierarchyWalkFrame{}, true, nil
+		}
 	}
 
-	childRefs, err := snapshotChildRefs(obj)
+	childRefs, err := snapshotChildRefValues(obj)
 	if err != nil {
-		return fmt.Errorf("%s %s/%s: status.childrenSnapshotRefs: %w", ref.APIVersion, ref.Kind, ref.Name, err)
+		return hierarchyWalkFrame{}, false, fmt.Errorf(
+			"%s %s/%s: status.childrenSnapshotRefs: %w",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			err,
+		)
 	}
 
-	for _, childRef := range childRefs {
+	return hierarchyWalkFrame{
+		ref:       ref,
+		obj:       obj,
+		depth:     depth,
+		childRefs: childRefs,
+	}, false, nil
+}
+
+func (r *nodeResolver) walk(
+	ctx context.Context,
+	rootRef aggapi.NodeRef,
+	root *unstructured.Unstructured,
+) error {
+	rootFrame, done, err := r.enterNode(rootRef, root, 0)
+	if err != nil {
+		return err
+	}
+
+	if done {
+		return nil
+	}
+
+	stackCapacity := min(r.limits.maxDepth, r.limits.maxNodes-1) + 1
+	stack := make([]hierarchyWalkFrame, 0, stackCapacity)
+	stack = append(stack, rootFrame)
+	r.report(len(stack))
+
+	for len(stack) != 0 {
+		if err := hierarchyWalkContextError(ctx); err != nil {
+			return err
+		}
+
+		frame := &stack[len(stack)-1]
+		if frame.nextChild == len(frame.childRefs) {
+			stack = stack[:len(stack)-1]
+			r.report(len(stack))
+
+			continue
+		}
+
+		childIndex := frame.nextChild
+		frame.nextChild++
+
+		childRef, err := snapshotChildRefAt(frame.childRefs, childIndex)
+		if err != nil {
+			return fmt.Errorf(
+				"%s %s/%s: status.childrenSnapshotRefs: %w",
+				frame.ref.APIVersion,
+				frame.ref.Kind,
+				frame.ref.Name,
+				err,
+			)
+		}
+
 		child := aggapi.NodeRef{
 			APIVersion: childRef.APIVersion,
 			Kind:       childRef.Kind,
 			Name:       childRef.Name,
 			Namespace:  r.cfg.Namespace,
 		}
+		childDepth := frame.depth + 1
 
-		if _, seen := r.seen[nodeRefKey(child)]; seen {
-			return duplicateNodeRefError(child)
+		if err := r.reserveNode(child, childDepth); err != nil {
+			return err
 		}
 
-		childObj, missing, getErr := r.cfg.getSnapshotChild(ctx, ref, obj, child)
+		r.report(len(stack))
+
+		childObj, missing, getErr := r.cfg.getSnapshotChild(ctx, frame.ref, frame.obj, child)
 		if getErr != nil {
 			return fmt.Errorf("get snapshot child %s %s/%s: %w", child.APIVersion, child.Kind, child.Name, getErr)
 		}
 
 		if missing {
-			r.seen[nodeRefKey(child)] = struct{}{}
 			r.missingRefs = append(r.missingRefs, child)
 
 			continue
 		}
 
-		if err := r.visit(ctx, child, childObj); err != nil {
+		childFrame, done, err := r.enterNode(child, childObj, childDepth)
+		if err != nil {
 			return err
 		}
+
+		if done {
+			return nil
+		}
+
+		stack = append(stack, childFrame)
+		r.report(len(stack))
 	}
 
 	return nil
 }
 
-func (r *nodeResolver) markSeen(ref aggapi.NodeRef) error {
+func (r *nodeResolver) reserveNode(ref aggapi.NodeRef, depth int) error {
+	if r.nodeCount >= r.limits.maxNodes {
+		return fmt.Errorf(
+			"snapshot hierarchy exceeds node budget of %d while adding %s %s/%s at depth %d; the root and every referenced child, including missing children, count toward the limit",
+			r.limits.maxNodes,
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			depth,
+		)
+	}
+
+	r.nodeCount++
+
 	key := nodeRefKey(ref)
 	if _, seen := r.seen[key]; seen {
 		return duplicateNodeRefError(ref)
 	}
 
+	if depth > r.limits.maxDepth {
+		return fmt.Errorf(
+			"snapshot hierarchy exceeds depth budget of %d at %s %s/%s (depth %d; root depth is 0)",
+			r.limits.maxDepth,
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			depth,
+		)
+	}
+
 	r.seen[key] = struct{}{}
 
 	return nil
+}
+
+func (r *nodeResolver) report(stackDepth int) {
+	if r.observe == nil {
+		return
+	}
+
+	r.observe(hierarchyWalkStats{
+		nodes:      r.nodeCount,
+		stackDepth: stackDepth,
+	})
+}
+
+func hierarchyWalkContextError(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil && !errors.Is(cause, err) {
+		err = errors.Join(err, cause)
+	}
+
+	return fmt.Errorf("walk snapshot hierarchy: %w", err)
 }
 
 func nodeRefKey(ref aggapi.NodeRef) string {
@@ -1648,8 +1834,8 @@ func proveMissingSnapshotChild(
 	)
 }
 
-func snapshotChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotChildRef, error) {
-	rawRefs, found, err := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotRefs")
+func snapshotChildRefValues(obj *unstructured.Unstructured) ([]interface{}, error) {
+	value, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status", "childrenSnapshotRefs")
 	if err != nil {
 		return nil, err
 	}
@@ -1658,33 +1844,47 @@ func snapshotChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotCh
 		return nil, nil
 	}
 
-	refs := make([]snapshotapi.SnapshotChildRef, 0, len(rawRefs))
-	for i, rawRef := range rawRefs {
-		m, ok := rawRef.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("element %d has unexpected type %T", i, rawRef)
-		}
-
-		apiVersion, _ := m["apiVersion"].(string)
-		kind, _ := m["kind"].(string)
-		name, _ := m["name"].(string)
-
-		if apiVersion == "" || kind == "" || name == "" {
-			return nil, fmt.Errorf("element %d is incomplete (apiVersion/kind/name required)", i)
-		}
-
-		if err := ValidateNodeAPIVersion(apiVersion); err != nil {
-			return nil, fmt.Errorf("element %d has invalid apiVersion %q: %w", i, apiVersion, err)
-		}
-
-		refs = append(refs, snapshotapi.SnapshotChildRef{
-			APIVersion: apiVersion,
-			Kind:       kind,
-			Name:       name,
-		})
+	rawRefs, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("has unexpected type %T", value)
 	}
 
-	return refs, nil
+	return rawRefs, nil
+}
+
+func snapshotChildRefAt(rawRefs []interface{}, index int) (snapshotapi.SnapshotChildRef, error) {
+	rawRef := rawRefs[index]
+
+	m, ok := rawRef.(map[string]interface{})
+	if !ok {
+		return snapshotapi.SnapshotChildRef{}, fmt.Errorf("element %d has unexpected type %T", index, rawRef)
+	}
+
+	apiVersion, _ := m["apiVersion"].(string)
+	kind, _ := m["kind"].(string)
+	name, _ := m["name"].(string)
+
+	if apiVersion == "" || kind == "" || name == "" {
+		return snapshotapi.SnapshotChildRef{}, fmt.Errorf(
+			"element %d is incomplete (apiVersion/kind/name required)",
+			index,
+		)
+	}
+
+	if err := ValidateNodeAPIVersion(apiVersion); err != nil {
+		return snapshotapi.SnapshotChildRef{}, fmt.Errorf(
+			"element %d has invalid apiVersion %q: %w",
+			index,
+			apiVersion,
+			err,
+		)
+	}
+
+	return snapshotapi.SnapshotChildRef{
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       name,
+	}, nil
 }
 
 // isConditionTrue reports whether status.conditions[type==Ready].status == "True".
