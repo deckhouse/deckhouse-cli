@@ -1213,6 +1213,51 @@ func TestScanFSTar_AcceptsStructuralDirectoryChain(t *testing.T) {
 	}
 }
 
+func TestScanFSTar_AcceptsReservedEmptyDirectory(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeDir,
+		Name:     "lost+found/",
+		Mode:     0o700,
+	}); err != nil {
+		t.Fatalf("write reserved directory header: %v", err)
+	}
+
+	addTarEntryMetadata(t, tw, "payload.txt", "payload.txt", "none", 1, []byte("x"), 0o600, 0, 0, time.Time{})
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	scan, err := scanFSTar(context.Background(), tarPath)
+	if err != nil {
+		t.Fatalf("scanFSTar: %v", err)
+	}
+
+	t.Cleanup(func() {
+		if err := scan.Close(); err != nil {
+			t.Errorf("close scan: %v", err)
+		}
+	})
+
+	if scan.ReservedEmptyDirectoryCount != 1 {
+		t.Errorf("reserved empty directory count = %d, want 1", scan.ReservedEmptyDirectoryCount)
+	}
+
+	if scan.StructuralDirectoryCount != 0 {
+		t.Errorf("structural directory count = %d, want 0", scan.StructuralDirectoryCount)
+	}
+}
+
 func TestCompareFSTarPaths_PreservesComponentRelations(t *testing.T) {
 	t.Parallel()
 
@@ -1658,14 +1703,14 @@ func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *test
 		t.Fatalf("finalize million-entry inventory: %v", err)
 	}
 
-	gotStructuralDirectories, err := validateSortedFSTar(context.Background(), sortedPath)
+	directoryCounts, err := validateSortedFSTar(context.Background(), sortedPath)
 	if err != nil {
 		t.Fatalf("validate million-entry inventory: %v", err)
 	}
 
-	if gotStructuralDirectories != structuralDirectoryCount {
+	if directoryCounts.Structural != structuralDirectoryCount {
 		t.Fatalf("structural directory count = %d, want %d",
-			gotStructuralDirectories, structuralDirectoryCount)
+			directoryCounts.Structural, structuralDirectoryCount)
 	}
 
 	if fdCountSupported {
@@ -1803,15 +1848,15 @@ func TestFSTarPreflightInventory_ComponentRelationsAcrossSortRuns(t *testing.T) 
 				t.Fatalf("finalize inventory: %v", err)
 			}
 
-			structuralDirectoryCount, err := validateSortedFSTar(context.Background(), sortedPath)
+			directoryCounts, err := validateSortedFSTar(context.Background(), sortedPath)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("validateSortedFSTar: %v", err)
 				}
 
-				if structuralDirectoryCount != tc.wantStructuralDirectories {
+				if directoryCounts.Structural != tc.wantStructuralDirectories {
 					t.Fatalf("structural directory count = %d, want %d",
-						structuralDirectoryCount, tc.wantStructuralDirectories)
+						directoryCounts.Structural, tc.wantStructuralDirectories)
 				}
 
 				return
@@ -2771,6 +2816,80 @@ func TestImportFSFromTar_StructuralDirectoriesWarnOnceAndOnlyUploadRegularFiles(
 		if strings.Contains(logOutput, archivePath) {
 			t.Errorf("bounded warning must not list archive path %q: %q", archivePath, logOutput)
 		}
+	}
+}
+
+func TestImportFSFromTar_ReservedEmptyDirectorySkipsWithWarningRatherThanFailing(t *testing.T) {
+	fileContent := []byte("only file")
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeDir,
+		Name:     "lost+found/",
+		Mode:     0o700,
+	}); err != nil {
+		t.Fatalf("write reserved directory header: %v", err)
+	}
+
+	addTarEntry(t, tw, "payload.txt", fileContent, 0o644, 0, 0, time.Now())
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	cap := &fsCapture{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		relPath := strings.TrimPrefix(r.URL.Path, "/api/v1/files/")
+		cap.record(relPath, body, r.Header.Clone())
+		w.Header().Set("X-Next-Offset", strconv.FormatInt(r.ContentLength, 10))
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	var logs bytes.Buffer
+
+	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, log, nil, nil, nil); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	cap.mu.Lock()
+	total := len(cap.uploads)
+	cap.mu.Unlock()
+
+	if total != 1 {
+		t.Errorf("upload count = %d, want 1 regular file only", total)
+	}
+
+	if _, ok := cap.find("payload.txt"); !ok {
+		t.Error("regular file not found in uploads")
+	}
+
+	logOutput := logs.String()
+	if got := strings.Count(logOutput, "filesystem import skips filesystem-reserved empty directories"); got != 1 {
+		t.Errorf("reserved-directory warning count = %d, want 1; logs=%q", got, logOutput)
+	}
+
+	if !strings.Contains(logOutput, "directory_count=1") {
+		t.Errorf("warning %q does not contain directory_count=1", logOutput)
+	}
+
+	if strings.Contains(logOutput, "lost+found") {
+		t.Errorf("bounded warning must not list archive path: %q", logOutput)
 	}
 }
 
