@@ -379,16 +379,14 @@ func ValidateNodeAPIVersion(apiVersion string) error {
 
 // preflightRootSnapshot verifies the source Snapshot is Ready and has a bound SnapshotContent.
 func preflightRootSnapshot(ctx context.Context, cfg Config) error {
-	gvr, _, err := cfg.resourceFor(schema.GroupVersionKind{
-		Group:   snapshotapi.StorageGroup,
-		Version: snapshotapi.Version,
-		Kind:    snapshotKind,
-	})
-	if err != nil {
-		return fmt.Errorf("resolve Snapshot resource: %w", err)
+	ref := aggapi.NodeRef{
+		APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
+		Kind:       snapshotKind,
+		Name:       cfg.Snapshot,
+		Namespace:  cfg.Namespace,
 	}
 
-	snap, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, cfg.Snapshot, metav1.GetOptions{})
+	snap, err := cfg.getSnapshotNode(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("get Snapshot: %w", err)
 	}
@@ -1459,7 +1457,7 @@ func (i nodeIdentity) matches(kind, name, apiVersion string) bool {
 }
 
 func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {
-	resource, _, err := cfg.snapshotResource(ref)
+	resource, err := cfg.snapshotResource(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -1478,7 +1476,7 @@ func (cfg Config) getSnapshotChild(
 	parent *unstructured.Unstructured,
 	ref aggapi.NodeRef,
 ) (*unstructured.Unstructured, bool, error) {
-	resource, namespaced, err := cfg.snapshotResource(ref)
+	resource, err := cfg.snapshotResource(ref)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1490,15 +1488,6 @@ func (cfg Config) getSnapshotChild(
 
 	if !kubeerrors.IsNotFound(err) {
 		return nil, false, err
-	}
-
-	if !namespaced {
-		return nil, false, fmt.Errorf(
-			"cannot prove absence of namespace-local child ref %s %s/%s: REST mapping is cluster-scoped",
-			ref.APIVersion,
-			ref.Kind,
-			ref.Name,
-		)
 	}
 
 	parentResourceVersion := parent.GetResourceVersion()
@@ -1523,10 +1512,10 @@ func (cfg Config) getSnapshotChild(
 
 func (cfg Config) snapshotResource(
 	ref aggapi.NodeRef,
-) (dynamic.ResourceInterface, bool, error) {
+) (dynamic.ResourceInterface, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
-		return nil, false, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+		return nil, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
 	}
 
 	gvk := schema.GroupVersionKind{
@@ -1537,11 +1526,11 @@ func (cfg Config) snapshotResource(
 
 	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+		return nil, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
 	}
 
 	if mapping.GroupVersionKind != gvk {
-		return nil, false, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"resolve resource for %s: REST mapping returned mismatched GVK %s",
 			gvk.String(),
 			mapping.GroupVersionKind.String(),
@@ -1549,15 +1538,20 @@ func (cfg Config) snapshotResource(
 	}
 
 	if mapping.Scope == nil {
-		return nil, false, fmt.Errorf("resolve resource for %s: REST mapping has no scope", gvk.String())
+		return nil, fmt.Errorf("resolve resource for %s: REST mapping has no scope", gvk.String())
 	}
 
-	namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
-	if namespaced {
-		return cfg.Dynamic.Resource(mapping.Resource).Namespace(cfg.Namespace), true, nil
+	if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
+		return nil, fmt.Errorf(
+			"snapshot hierarchy ref %s %s/%s violates the namespace-local contract: REST mapping for GVK %s is cluster-scoped",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			gvk.String(),
+		)
 	}
 
-	return cfg.Dynamic.Resource(mapping.Resource), false, nil
+	return cfg.Dynamic.Resource(mapping.Resource).Namespace(cfg.Namespace), nil
 }
 
 func proveMissingSnapshotChild(
