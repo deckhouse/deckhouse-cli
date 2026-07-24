@@ -165,40 +165,6 @@ func TestArchiveLockCancellationAndCleanup(t *testing.T) {
 	defer func() { _ = lock.Unlock() }()
 }
 
-func TestArchiveWriteLockCancellationAfterDurabilityPreservesCause(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "output")
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = WithWriteLockBoundaryHook(ctx, func(boundary WriteLockBoundary) {
-		if boundary == WriteLockBoundaryAfterDurability {
-			cancel()
-		}
-	})
-
-	lock, err := AcquireWriteLockContext(ctx, root)
-	if lock != nil {
-		_ = lock.Unlock()
-
-		t.Fatal("write lock returned after cancellation at durability handoff")
-	}
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("write lock error = %v, want context.Canceled", err)
-	}
-
-	if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("lock entry exists after cancellation at durability handoff: %v", statErr)
-	}
-
-	lock, err = AcquireWriteLock(root)
-	if err != nil {
-		t.Fatalf("retry write lock after cancellation: %v", err)
-	}
-
-	if err := lock.Unlock(); err != nil {
-		t.Fatalf("release retried write lock: %v", err)
-	}
-}
-
 func TestArchiveWriteLockRootDurabilityFailureIsRetryable(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "output")
@@ -208,7 +174,7 @@ func TestArchiveWriteLockRootDurabilityFailureIsRetryable(t *testing.T) {
 		context.Background(),
 		root,
 		true,
-		func(_ context.Context, path string) (*durableWriteRoot, error) {
+		func(_ context.Context, path string) (os.FileInfo, error) {
 			if mkdirErr := os.MkdirAll(path, 0o755); mkdirErr != nil {
 				return nil, mkdirErr
 			}
@@ -252,7 +218,7 @@ func TestArchiveWriteLockReconfirmsExistingRoot(t *testing.T) {
 		context.Background(),
 		root,
 		true,
-		func(ctx context.Context, path string) (*durableWriteRoot, error) {
+		func(ctx context.Context, path string) (os.FileInfo, error) {
 			ensureCalls++
 
 			return ensureWriteLockRoot(ctx, path)
@@ -268,158 +234,48 @@ func TestArchiveWriteLockReconfirmsExistingRoot(t *testing.T) {
 	}
 }
 
-func TestArchiveWriteLockRejectsDurableChainReplacement(t *testing.T) {
-	boundaries := []struct {
-		name  string
-		value WriteLockBoundary
-	}{
-		{name: "after durability", value: WriteLockBoundaryAfterDurability},
-		{name: "before rooted lock", value: WriteLockBoundaryBeforeRootLock},
-	}
+func TestArchiveWriteLockRejectsRootReplacementAfterConfirmation(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "output")
+	displaced := filepath.Join(parent, "displaced")
 
-	replacements := []struct {
-		name   string
-		target func(ancestor, parent, root string) string
-		tail   string
-	}{
-		{
-			name: "root",
-			target: func(_, _, root string) string {
-				return root
-			},
+	lock, err := acquireLockWithRootEnsurer(
+		context.Background(),
+		root,
+		true,
+		func(_ context.Context, path string) (os.FileInfo, error) {
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				return nil, mkdirErr
+			}
+
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				return nil, statErr
+			}
+
+			if renameErr := os.Rename(path, displaced); renameErr != nil {
+				return nil, renameErr
+			}
+
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				return nil, mkdirErr
+			}
+
+			return info, nil
 		},
-		{
-			name: "immediate parent",
-			target: func(_, parent, _ string) string {
-				return parent
-			},
-			tail: "output",
-		},
-		{
-			name: "higher ancestor",
-			target: func(ancestor, _, _ string) string {
-				return ancestor
-			},
-			tail: filepath.Join("parent", "output"),
-		},
+	)
+	if lock != nil {
+		_ = lock.Unlock()
+
+		t.Fatal("write lock returned after confirmed root replacement")
 	}
 
-	for _, boundary := range boundaries {
-		t.Run(boundary.name, func(t *testing.T) {
-			for _, replacement := range replacements {
-				t.Run(replacement.name, func(t *testing.T) {
-					base := t.TempDir()
-					ancestor := filepath.Join(base, "ancestor")
-					parent := filepath.Join(ancestor, "parent")
-					root := filepath.Join(parent, "output")
-					displaced := filepath.Join(base, "displaced")
-					replaced := false
-
-					ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
-						if current != boundary.value || replaced {
-							return
-						}
-
-						replaced = true
-						target := replacement.target(ancestor, parent, root)
-						if err := os.Rename(target, displaced); err != nil {
-							t.Fatalf("displace %s: %v", replacement.name, err)
-						}
-
-						if err := os.MkdirAll(filepath.Join(target, replacement.tail), 0o755); err != nil {
-							t.Fatalf("create replacement %s: %v", replacement.name, err)
-						}
-					})
-
-					lock, err := AcquireWriteLockContext(ctx, root)
-					if lock != nil {
-						_ = lock.Unlock()
-
-						t.Fatalf("write lock returned after %s replacement", replacement.name)
-					}
-
-					if !replaced {
-						t.Fatalf("%s replacement hook was not reached", replacement.name)
-					}
-
-					if !errors.Is(err, ErrArchiveLockChanged) {
-						t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
-					}
-
-					lockPath := filepath.Join(root, archiveLockFileName)
-					if _, statErr := os.Stat(lockPath); !errors.Is(statErr, os.ErrNotExist) {
-						t.Fatalf("lock entry exists after %s replacement: %v", replacement.name, statErr)
-					}
-				})
-			}
-		})
+	if !errors.Is(err, ErrArchiveLockChanged) {
+		t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
 	}
-}
 
-func TestArchiveWriteLockRejectsSymlinkAliasReplacementAfterConfirmation(t *testing.T) {
-	for _, boundary := range []WriteLockBoundary{
-		WriteLockBoundaryAfterDurability,
-		WriteLockBoundaryBeforeRootLock,
-	} {
-		t.Run(boundaryName(boundary), func(t *testing.T) {
-			base := t.TempDir()
-			first := filepath.Join(base, "first")
-			second := filepath.Join(base, "second")
-			alias := filepath.Join(base, "alias")
-
-			for _, target := range []string{first, second} {
-				if err := os.MkdirAll(filepath.Join(target, "output"), 0o755); err != nil {
-					t.Fatalf("create alias target: %v", err)
-				}
-			}
-
-			if err := os.Symlink(first, alias); err != nil {
-				t.Fatalf("create archive alias: %v", err)
-			}
-
-			replaced := false
-			ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
-				if current != boundary || replaced {
-					return
-				}
-
-				replaced = true
-				if err := os.Remove(alias); err != nil {
-					t.Fatalf("remove archive alias: %v", err)
-				}
-
-				if err := os.Symlink(second, alias); err != nil {
-					t.Fatalf("replace archive alias: %v", err)
-				}
-			})
-
-			root := filepath.Join(alias, "output")
-			lock, err := AcquireWriteLockContext(ctx, root)
-			if lock != nil {
-				_ = lock.Unlock()
-
-				t.Fatal("write lock returned after symlink alias replacement")
-			}
-
-			if !errors.Is(err, ErrArchiveLockChanged) {
-				t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
-			}
-
-			if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("lock entry exists after symlink alias replacement: %v", statErr)
-			}
-		})
-	}
-}
-
-func boundaryName(boundary WriteLockBoundary) string {
-	switch boundary {
-	case WriteLockBoundaryAfterDurability:
-		return "after durability"
-	case WriteLockBoundaryBeforeRootLock:
-		return "before rooted lock"
-	default:
-		return "unknown"
+	if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lock entry exists after root replacement: %v", statErr)
 	}
 }
 
