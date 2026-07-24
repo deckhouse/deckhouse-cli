@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -651,6 +652,230 @@ func TestWriteFileAtomic_parentDirSynced(t *testing.T) {
 	err := WriteFileAtomic(path, bytes.NewReader([]byte("durable")))
 	if err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
+	}
+}
+
+func TestRootedDestinationEnsureDir_reconfirmsVisibleDeepAncestry(t *testing.T) {
+	t.Helper()
+
+	base := t.TempDir()
+	destination, err := OpenRootedDestination(base, nil)
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	const depth = 64
+
+	components := make([]string, 0, depth)
+	for index := range depth {
+		components = append(components, fmt.Sprintf("d%02d", index))
+	}
+
+	nested := filepath.Join(append([]string{base}, components...)...)
+	failure := errors.New("ancestor sync failure")
+	failAt := filepath.Join(base, components[0])
+
+	var (
+		attempt   int
+		events    [][]string
+		nextCalls int
+	)
+
+	destination.SetDirectorySyncHook(func(path string, next func() error) error {
+		relative, relErr := filepath.Rel(base, path)
+		if relErr != nil {
+			return relErr
+		}
+
+		events[attempt] = append(events[attempt], relative)
+		if attempt < 2 && filepath.Clean(path) == filepath.Clean(failAt) {
+			return failure
+		}
+
+		if attempt == 2 && filepath.Clean(path) == filepath.Clean(failAt) {
+			return context.Canceled
+		}
+
+		nextCalls++
+
+		return next()
+	})
+
+	for attempt = 0; attempt < 3; attempt++ {
+		events = append(events, nil)
+
+		err = destination.EnsureDir(nested)
+		if attempt < 2 && !errors.Is(err, failure) {
+			t.Fatalf("attempt %d: expected sync failure, got %v", attempt, err)
+		}
+
+		if attempt == 2 && !errors.Is(err, context.Canceled) {
+			t.Fatalf("attempt %d: expected cancellation, got %v", attempt, err)
+		}
+
+		info, statErr := os.Stat(nested)
+		if statErr != nil {
+			t.Fatalf("attempt %d: stat visible nested directory: %v", attempt, statErr)
+		}
+
+		if !info.IsDir() {
+			t.Fatalf("attempt %d: nested path is not a directory", attempt)
+		}
+
+		if len(events[attempt]) != depth {
+			t.Fatalf("attempt %d: got %d confirmations before failure, want %d",
+				attempt, len(events[attempt]), depth)
+		}
+
+		if events[attempt][0] != filepath.Join(components...) {
+			t.Fatalf("attempt %d: first confirmation = %q, want leaf %q",
+				attempt, events[attempt][0], filepath.Join(components...))
+		}
+
+		if events[attempt][len(events[attempt])-1] != components[0] {
+			t.Fatalf("attempt %d: last confirmation = %q, want failed ancestor %q",
+				attempt, events[attempt][len(events[attempt])-1], components[0])
+		}
+	}
+
+	attempt = 3
+	events = append(events, nil)
+
+	if err := destination.EnsureDir(nested); err != nil {
+		t.Fatalf("successful retry: %v", err)
+	}
+
+	if len(events[attempt]) != depth+1 {
+		t.Fatalf("successful retry confirmations = %d, want %d", len(events[attempt]), depth+1)
+	}
+
+	if events[attempt][0] != filepath.Join(components...) {
+		t.Fatalf("successful retry first confirmation = %q, want leaf %q",
+			events[attempt][0], filepath.Join(components...))
+	}
+
+	if events[attempt][len(events[attempt])-1] != "." {
+		t.Fatalf("successful retry last confirmation = %q, want rooted destination", events[attempt][len(events[attempt])-1])
+	}
+
+	wantNextCalls := 3*(depth-1) + depth + 1
+	if nextCalls != wantNextCalls {
+		t.Fatalf("platform confirmation calls = %d, want %d", nextCalls, wantNextCalls)
+	}
+}
+
+func TestRootedDestinationEnsureDir_retriesEveryVisibleEntry(t *testing.T) {
+	t.Helper()
+
+	components := []string{"a", "b", "c", "d"}
+
+	for failedEntry := range components {
+		t.Run(fmt.Sprintf("entry-%d", failedEntry), func(t *testing.T) {
+			base := t.TempDir()
+			destination, err := OpenRootedDestination(base, nil)
+			if err != nil {
+				t.Fatalf("OpenRootedDestination: %v", err)
+			}
+			defer func() { _ = destination.Close() }()
+
+			nested := filepath.Join(append([]string{base}, components...)...)
+			containingComponents := components[:failedEntry]
+			failAt := filepath.Join(append([]string{base}, containingComponents...)...)
+			failure := fmt.Errorf("sync entry %d: %w", failedEntry, io.ErrUnexpectedEOF)
+
+			destination.SetDirectorySyncHook(func(path string, next func() error) error {
+				if filepath.Clean(path) == filepath.Clean(failAt) {
+					return failure
+				}
+
+				return next()
+			})
+
+			err = destination.EnsureDir(nested)
+			if !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("expected entry sync failure, got %v", err)
+			}
+
+			if _, err := os.Stat(nested); err != nil {
+				t.Fatalf("nested directory was not left visible: %v", err)
+			}
+
+			confirmations := 0
+			destination.SetDirectorySyncHook(func(_ string, next func() error) error {
+				confirmations++
+
+				return next()
+			})
+
+			if err := destination.EnsureDir(nested); err != nil {
+				t.Fatalf("retry visible ancestry: %v", err)
+			}
+
+			if confirmations != len(components)+1 {
+				t.Fatalf("retry confirmations = %d, want %d", confirmations, len(components)+1)
+			}
+		})
+	}
+}
+
+func TestRootedDestinationEnsureDir_rootReplacementDuringConfirmation(t *testing.T) {
+	t.Helper()
+
+	base := t.TempDir()
+	output := filepath.Join(base, "output")
+	pinned := filepath.Join(base, "pinned")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatalf("Mkdir output: %v", err)
+	}
+
+	var replaced bool
+
+	destination, err := OpenRootedDestination(output, func(phase MutationPhase, _ string) {
+		if phase != MutationSync || replaced {
+			return
+		}
+
+		replaced = true
+		if renameErr := os.Rename(output, pinned); renameErr != nil {
+			t.Fatalf("replace rooted destination: %v", renameErr)
+		}
+
+		if mkdirErr := os.Mkdir(output, 0o755); mkdirErr != nil {
+			t.Fatalf("recreate rooted destination: %v", mkdirErr)
+		}
+	})
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	var bindingLoss error
+	destination.SetBindingLossHandler(func(err error) {
+		bindingLoss = err
+	})
+
+	nested := filepath.Join(output, "a", "b")
+	err = destination.EnsureDir(nested)
+	if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+		t.Fatalf("expected binding loss, got %v", err)
+	}
+
+	if !errors.Is(bindingLoss, ErrNonRegularArchiveArtifact) {
+		t.Fatalf("binding-loss handler got %v", bindingLoss)
+	}
+
+	if _, err := os.Stat(filepath.Join(pinned, "a", "b")); err != nil {
+		t.Fatalf("pinned tree lost created ancestry: %v", err)
+	}
+
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatalf("ReadDir replacement: %v", err)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf("replacement tree was mutated: %v", entries)
 	}
 }
 
