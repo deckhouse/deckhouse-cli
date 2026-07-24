@@ -19,6 +19,7 @@ package download
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -481,6 +482,68 @@ func TestAcquireOutputLock_CreatesMissingOutputRoot(t *testing.T) {
 
 	if err := lock.Verify(); err != nil {
 		t.Fatalf("verify lock for created output root: %v", err)
+	}
+}
+
+func TestAcquireOutputLock_RejectsReplacementAfterDurabilityConfirmation(t *testing.T) {
+	for _, boundary := range []archive.WriteLockBoundary{
+		archive.WriteLockBoundaryAfterDurability,
+		archive.WriteLockBoundaryBeforeRootLock,
+	} {
+		t.Run(fmt.Sprintf("boundary %d", boundary), func(t *testing.T) {
+			parent := t.TempDir()
+			root := filepath.Join(parent, "output")
+			displaced := filepath.Join(parent, "displaced")
+			markerPath := filepath.Join(root, "unchanged")
+			replaced := false
+
+			ctx := archive.WithWriteLockBoundaryHook(context.Background(), func(current archive.WriteLockBoundary) {
+				if current != boundary || replaced {
+					return
+				}
+
+				replaced = true
+				if err := os.Rename(root, displaced); err != nil {
+					t.Fatalf("displace confirmed output root: %v", err)
+				}
+
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatalf("create replacement output root: %v", err)
+				}
+
+				if err := os.WriteFile(markerPath, []byte("unchanged"), 0o600); err != nil {
+					t.Fatalf("write replacement marker: %v", err)
+				}
+			})
+
+			lock, err := acquireOutputLockContext(ctx, root)
+			if lock != nil {
+				_ = lock.Unlock()
+
+				t.Fatal("output lock returned after confirmed root replacement")
+			}
+
+			if !replaced {
+				t.Fatal("replacement hook was not reached")
+			}
+
+			if !errors.Is(err, archive.ErrArchiveLockChanged) {
+				t.Fatalf("output lock error = %v, want ErrArchiveLockChanged", err)
+			}
+
+			data, readErr := os.ReadFile(markerPath)
+			if readErr != nil {
+				t.Fatalf("read replacement marker: %v", readErr)
+			}
+
+			if string(data) != "unchanged" {
+				t.Fatalf("replacement marker = %q, want unchanged", data)
+			}
+
+			if _, statErr := os.Stat(filepath.Join(root, downloadLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("lock entry exists in replacement output root: %v", statErr)
+			}
+		})
 	}
 }
 
