@@ -96,6 +96,14 @@ func bytesBodyFactory(payload []byte) fileBodyFactory {
 	}
 }
 
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+
+	return len(p), nil
+}
+
 func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
 	t.Parallel()
 
@@ -107,7 +115,7 @@ func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
 
 	responses := []*http.Response{
 		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"6"}}),
-		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"0"}}),
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"3"}}),
 		fileHTTPResponse(http.StatusCreated, http.Header{"X-Next-Offset": []string{"10"}}),
 	}
 
@@ -160,15 +168,15 @@ func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
 		t.Fatalf("putFile: %v", err)
 	}
 
-	if want := []int64{0, 6, 0}; !slices.Equal(gotOffsets, want) {
+	if want := []int64{0, 6, 3}; !slices.Equal(gotOffsets, want) {
 		t.Errorf("request offsets = %v, want %v", gotOffsets, want)
 	}
 
-	if want := []int64{0, 6, 0}; !slices.Equal(openedOffsets, want) {
+	if want := []int64{0, 6, 3}; !slices.Equal(openedOffsets, want) {
 		t.Errorf("opened body offsets = %v, want %v", openedOffsets, want)
 	}
 
-	wantBodies := [][]byte{payload, payload[6:], payload}
+	wantBodies := [][]byte{payload, payload[6:], payload[3:]}
 	if !reflect.DeepEqual(gotBodies, wantBodies) {
 		t.Errorf("request bodies = %q, want %q", gotBodies, wantBodies)
 	}
@@ -179,6 +187,249 @@ func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
 
 	if activated != 3 {
 		t.Errorf("activate calls = %d, want 3", activated)
+	}
+}
+
+func TestPutFile_ConflictSequencesAreBounded(t *testing.T) {
+	payload := []byte("0123456789abcdef")
+	maximumConflicts := make([]int64, maxConsecutiveFileConflicts)
+	for i := range maximumConflicts {
+		maximumConflicts[i] = int64(i + 1)
+	}
+
+	excessConflicts := append(slices.Clone(maximumConflicts), int64(maxConsecutiveFileConflicts+1))
+
+	tests := []struct {
+		name         string
+		conflicts    []int64
+		recover      bool
+		wantErr      string
+		wantProgress int
+	}{
+		{
+			name:         "maximum unique sequence recovers",
+			conflicts:    maximumConflicts,
+			recover:      true,
+			wantProgress: len(payload),
+		},
+		{
+			name:         "one excess unique transition stops",
+			conflicts:    excessConflicts,
+			wantErr:      "too many consecutive file upload conflicts (8)",
+			wantProgress: maxConsecutiveFileConflicts,
+		},
+		{
+			name:         "offset cycle stops",
+			conflicts:    []int64{6, 0},
+			wantErr:      "server-directed file upload offset cycle from 6 to 0",
+			wantProgress: 6,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var requestOffsets []int64
+
+			var openedOffsets []int64
+
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("parse X-Offset: %w", err)
+				}
+
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, fmt.Errorf("read request body: %w", err)
+				}
+				if !bytes.Equal(body, payload[offset:]) {
+					return nil, fmt.Errorf("body at offset %d = %q, want %q", offset, body, payload[offset:])
+				}
+
+				requestOffsets = append(requestOffsets, offset)
+				step := len(requestOffsets) - 1
+				if step < len(tc.conflicts) {
+					return fileHTTPResponse(http.StatusConflict, http.Header{
+						"X-Expected-Offset": []string{strconv.FormatInt(tc.conflicts[step], 10)},
+					}), nil
+				}
+				if !tc.recover {
+					return nil, errors.New("opened an extra request body after rejecting conflict history")
+				}
+
+				return fileHTTPResponse(http.StatusCreated, http.Header{
+					"X-Next-Offset": []string{strconv.Itoa(len(payload))},
+				}), nil
+			})
+
+			newBody := func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+				openedOffsets = append(openedOffsets, offset)
+
+				return bytesBodyFactory(payload)(ctx, offset, size)
+			}
+
+			progressed := 0
+			activated := 0
+			progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
+
+			err := putFile(
+				context.Background(),
+				doer,
+				"https://import.example",
+				"file.bin",
+				int64(len(payload)),
+				0,
+				fileAttrs{Perm: 0o600},
+				newBody,
+				progress,
+				func() { activated++ },
+			)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("putFile: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("putFile error = %v, want containing %q", err, tc.wantErr)
+			}
+
+			wantRequests := len(tc.conflicts)
+			if tc.recover {
+				wantRequests++
+			}
+
+			if len(requestOffsets) != wantRequests {
+				t.Errorf("request count = %d, want %d", len(requestOffsets), wantRequests)
+			}
+			if !slices.Equal(openedOffsets, requestOffsets) {
+				t.Errorf("opened offsets = %v, request offsets %v", openedOffsets, requestOffsets)
+			}
+			if progressed != tc.wantProgress {
+				t.Errorf("high-water progress = %d, want %d", progressed, tc.wantProgress)
+			}
+			if activated != wantRequests {
+				t.Errorf("activate calls = %d, want %d", activated, wantRequests)
+			}
+		})
+	}
+}
+
+func TestFileConflictTracker_ResetCompactsHistoryAndBoundsLifetimeReplay(t *testing.T) {
+	var tracker fileConflictTracker
+
+	for i := range maxFileConflictReplays {
+		if err := tracker.observe(0, 1); err != nil {
+			t.Fatalf("observe replay %d: %v", i+1, err)
+		}
+
+		tracker.reset()
+	}
+
+	if tracker.count != 0 {
+		t.Fatalf("consecutive history count = %d, want compacted to zero", tracker.count)
+	}
+	if tracker.total != maxFileConflictReplays {
+		t.Fatalf("lifetime replay count = %d, want %d", tracker.total, maxFileConflictReplays)
+	}
+
+	err := tracker.observe(0, 1)
+	if err == nil || !strings.Contains(err.Error(), "too many file upload conflict replays (32)") {
+		t.Fatalf("observe excess lifetime replay error = %v, want bounded replay failure", err)
+	}
+	if tracker.count != 0 || tracker.total != maxFileConflictReplays {
+		t.Fatalf("tracker changed after rejected replay: count=%d total=%d", tracker.count, tracker.total)
+	}
+}
+
+func TestPutFile_SuccessResetsConflictHistory(t *testing.T) {
+	totalSize := int64(blockPutPayloadLimit) + 2
+	responses := []*http.Response{
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"1"}}),
+		fileHTTPResponse(http.StatusNoContent, http.Header{
+			"X-Next-Offset": []string{strconv.FormatInt(int64(blockPutPayloadLimit)+1, 10)},
+		}),
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"0"}}),
+		fileHTTPResponse(http.StatusConflict, http.Header{"X-Expected-Offset": []string{"1"}}),
+		fileHTTPResponse(http.StatusNoContent, http.Header{
+			"X-Next-Offset": []string{strconv.FormatInt(int64(blockPutPayloadLimit)+1, 10)},
+		}),
+		fileHTTPResponse(http.StatusCreated, http.Header{
+			"X-Next-Offset": []string{strconv.FormatInt(totalSize, 10)},
+		}),
+	}
+
+	var requestOffsets []int64
+
+	var requestSizes []int64
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse X-Offset: %w", err)
+		}
+
+		requestOffsets = append(requestOffsets, offset)
+		requestSizes = append(requestSizes, req.ContentLength)
+
+		step := len(requestOffsets) - 1
+		if step >= len(responses) {
+			return nil, errors.New("unexpected request after successful recovery")
+		}
+
+		return responses[step], nil
+	})
+
+	var openedOffsets []int64
+
+	newBody := func(_ context.Context, offset, size int64) (io.ReadCloser, error) {
+		openedOffsets = append(openedOffsets, offset)
+
+		return io.NopCloser(io.LimitReader(zeroReader{}, size)), nil
+	}
+
+	progressed := 0
+	activated := 0
+	progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
+
+	err := putFile(
+		context.Background(),
+		doer,
+		"https://import.example",
+		"file.bin",
+		totalSize,
+		0,
+		fileAttrs{Perm: 0o600},
+		newBody,
+		progress,
+		func() { activated++ },
+	)
+	if err != nil {
+		t.Fatalf("putFile: %v", err)
+	}
+
+	wantOffsets := []int64{0, 1, int64(blockPutPayloadLimit) + 1, 0, 1, int64(blockPutPayloadLimit) + 1}
+	if !slices.Equal(requestOffsets, wantOffsets) {
+		t.Errorf("request offsets = %v, want %v", requestOffsets, wantOffsets)
+	}
+	if !slices.Equal(openedOffsets, wantOffsets) {
+		t.Errorf("opened offsets = %v, want %v", openedOffsets, wantOffsets)
+	}
+
+	wantSizes := []int64{
+		blockPutPayloadLimit,
+		blockPutPayloadLimit,
+		1,
+		blockPutPayloadLimit,
+		blockPutPayloadLimit,
+		1,
+	}
+	if !slices.Equal(requestSizes, wantSizes) {
+		t.Errorf("request sizes = %v, want %v", requestSizes, wantSizes)
+	}
+	if progressed != int(totalSize) {
+		t.Errorf("high-water progress = %d, want %d", progressed, totalSize)
+	}
+	if activated != len(responses) {
+		t.Errorf("activate calls = %d, want %d", activated, len(responses))
 	}
 }
 
@@ -603,6 +854,18 @@ func encodeEntry(t *testing.T, codecName string, content []byte) (string, []byte
 func writeSingleEntryFSTar(t *testing.T, codec string, content []byte) string {
 	t.Helper()
 
+	tarData := buildSingleEntryFSTar(t, codec, content)
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarData, 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	return tarPath
+}
+
+func buildSingleEntryFSTar(t *testing.T, codec string, content []byte) []byte {
+	t.Helper()
+
 	ext, stored := encodeEntry(t, codec, content)
 
 	var tarBuf bytes.Buffer
@@ -626,12 +889,7 @@ func writeSingleEntryFSTar(t *testing.T, codec string, content []byte) string {
 		t.Fatalf("close tar: %v", err)
 	}
 
-	tarPath := filepath.Join(t.TempDir(), "data.tar")
-	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
-		t.Fatalf("write data.tar: %v", err)
-	}
-
-	return tarPath
+	return tarBuf.Bytes()
 }
 
 // addTarEntry writes a format-current regular entry. rawSizes can avoid decoding
@@ -2307,6 +2565,87 @@ func TestSendVolumeData_FSProtocolErrorDoesNotFinalizeOrCreditProgress(t *testin
 	}
 }
 
+func TestSendVolumeData_FSExcessConflictsDoNotFinalize(t *testing.T) {
+	content := []byte("0123456789abcdef")
+
+	for _, codec := range []string{"none", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			tarPath := writeSingleEntryFSTar(t, codec, content)
+
+			var methods []string
+
+			putCount := 0
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method)
+
+				switch req.Method {
+				case http.MethodHead:
+					return fileHTTPResponse(http.StatusNotFound, nil), nil
+				case http.MethodPut:
+					putCount++
+					if putCount > maxConsecutiveFileConflicts+1 {
+						return nil, errors.New("opened an extra request body after rejecting conflict history")
+					}
+
+					offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+					if err != nil {
+						return nil, fmt.Errorf("parse X-Offset: %w", err)
+					}
+
+					body, err := io.ReadAll(req.Body)
+					if err != nil {
+						return nil, fmt.Errorf("read request body: %w", err)
+					}
+					if !bytes.Equal(body, content[offset:]) {
+						return nil, fmt.Errorf("body at offset %d = %q, want %q", offset, body, content[offset:])
+					}
+
+					return fileHTTPResponse(http.StatusConflict, http.Header{
+						"X-Expected-Offset": []string{strconv.Itoa(putCount)},
+					}), nil
+				case http.MethodPost:
+					return nil, errors.New("finished POST issued after rejecting conflict history")
+				default:
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
+			})
+
+			progressed := 0
+			importer := &clusterVolumeImporter{log: discardLogger()}
+			leaf := PlannedNode{FilesystemData: true, TarFile: tarPath}
+
+			err := importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://import.example",
+				volumeModeFilesystem,
+				leaf,
+				"target",
+				"data-import",
+				nil,
+				func(n int) { progressed += n },
+				nil,
+			)
+			if err == nil || !strings.Contains(err.Error(), "too many consecutive file upload conflicts (8)") {
+				t.Fatalf("sendVolumeData error = %v, want bounded conflict failure", err)
+			}
+
+			wantMethods := make([]string, 1, maxConsecutiveFileConflicts+2)
+			wantMethods[0] = http.MethodHead
+			for range maxConsecutiveFileConflicts + 1 {
+				wantMethods = append(wantMethods, http.MethodPut)
+			}
+
+			if !slices.Equal(methods, wantMethods) {
+				t.Errorf("HTTP methods = %v, want %v (no extra PUT or finished POST)", methods, wantMethods)
+			}
+			if progressed != maxConsecutiveFileConflicts {
+				t.Errorf("high-water progress = %d, want %d", progressed, maxConsecutiveFileConflicts)
+			}
+		})
+	}
+}
+
 func TestSendVolumeData_FSCompressedCancelDuringRepositionDoesNotPUTOrFinalize(t *testing.T) {
 	t.Parallel()
 
@@ -2473,6 +2812,143 @@ func assertHighCardinalityAuthenticationBound(
 
 	if stats.Resets != 2 {
 		t.Fatalf("authenticated cache resets = %d, want exactly preflight and upload pass resets", stats.Resets)
+	}
+}
+
+func TestImportFSFromTarSource_ConflictReplayWorkIsBounded(t *testing.T) {
+	content := []byte("0123456789abcdef")
+
+	tests := []struct {
+		name          string
+		codec         string
+		conflictCount int
+		wantErr       string
+	}{
+		{
+			name:          "raw maximum conflicts recover",
+			codec:         "none",
+			conflictCount: maxConsecutiveFileConflicts,
+		},
+		{
+			name:          "zstd maximum conflicts recover",
+			codec:         "zstd",
+			conflictCount: maxConsecutiveFileConflicts,
+		},
+		{
+			name:          "raw excess conflict stops",
+			codec:         "none",
+			conflictCount: maxConsecutiveFileConflicts + 1,
+			wantErr:       "too many consecutive file upload conflicts (8)",
+		},
+		{
+			name:          "zstd excess conflict stops",
+			codec:         "zstd",
+			conflictCount: maxConsecutiveFileConflicts + 1,
+			wantErr:       "too many consecutive file upload conflicts (8)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tarData := buildSingleEntryFSTar(t, tc.codec, content)
+			tarPath, handle := openVerifiedFSTarHandle(t, context.Background(), tarData)
+
+			putCount := 0
+			var traversedPlaintext int64
+
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodHead:
+					return fileHTTPResponse(http.StatusNotFound, nil), nil
+				case http.MethodPut:
+					putCount++
+					maxPUTs := tc.conflictCount
+					if tc.wantErr == "" {
+						maxPUTs++
+					}
+					if putCount > maxPUTs {
+						return nil, errors.New("opened an extra request body after rejecting conflict history")
+					}
+
+					offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+					if err != nil {
+						return nil, fmt.Errorf("parse X-Offset: %w", err)
+					}
+
+					body, err := io.ReadAll(req.Body)
+					if err != nil {
+						return nil, fmt.Errorf("read request body: %w", err)
+					}
+					if !bytes.Equal(body, content[offset:]) {
+						return nil, fmt.Errorf("body at offset %d = %q, want %q", offset, body, content[offset:])
+					}
+
+					// A compressed reopen decodes and discards offset bytes before yielding body.
+					traversedPlaintext += offset + int64(len(body))
+
+					if putCount <= tc.conflictCount {
+						return fileHTTPResponse(http.StatusConflict, http.Header{
+							"X-Expected-Offset": []string{strconv.Itoa(putCount)},
+						}), nil
+					}
+
+					return fileHTTPResponse(http.StatusCreated, http.Header{
+						"X-Next-Offset": []string{strconv.Itoa(len(content))},
+					}), nil
+				default:
+					return nil, fmt.Errorf("unexpected HTTP method %s", req.Method)
+				}
+			})
+
+			err := importFSFromTarSource(
+				context.Background(),
+				doer,
+				"https://import.example",
+				tarPath,
+				handle,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("import filesystem tar: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("import filesystem tar error = %v, want containing %q", err, tc.wantErr)
+			}
+
+			wantPUTs := tc.conflictCount
+			if tc.wantErr == "" {
+				wantPUTs++
+			}
+
+			if putCount != wantPUTs {
+				t.Errorf("PUT count = %d, want %d", putCount, wantPUTs)
+			}
+
+			maxPlaintextWork := int64(maxConsecutiveFileConflicts+1) * int64(len(content))
+			if traversedPlaintext > maxPlaintextWork {
+				t.Errorf("plaintext replay work = %d, want at most %d", traversedPlaintext, maxPlaintextWork)
+			}
+
+			stats := handle.AuthenticatedReadStats()
+			maxAuthenticatedBytes := 2 * int64(len(tarData))
+			if stats.SourceBytes > maxAuthenticatedBytes || stats.HashedBytes > maxAuthenticatedBytes {
+				t.Errorf("authenticated replay work = %+v, want at most two encoded traversals (%d bytes)",
+					stats, maxAuthenticatedBytes)
+			}
+			if stats.ChunkLoads > 2 {
+				t.Errorf("authenticated chunk loads = %d, want at most 2", stats.ChunkLoads)
+			}
+
+			assertHighCardinalityAuthenticationBound(
+				t,
+				stats,
+				int64(len(tarData)),
+			)
+		})
 	}
 }
 

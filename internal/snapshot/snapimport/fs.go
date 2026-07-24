@@ -37,7 +37,11 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
-const uploadFilesSubpath = "api/v1/files"
+const (
+	uploadFilesSubpath          = "api/v1/files"
+	maxConsecutiveFileConflicts = 8
+	maxFileConflictReplays      = 4 * maxConsecutiveFileConflicts
+)
 
 // fileAttrs carries the filesystem metadata sent to the FS importer for each file.
 // The importer's CheckRequiredHeaders middleware requires X-Attribute-Permissions,
@@ -75,6 +79,51 @@ func (p *fileUploadProgress) creditTo(offset int64) {
 	p.credited = offset
 }
 
+// fileConflictTracker bounds server-directed repositions without retaining attacker-controlled
+// history. Successful PUTs compact the current offset path, while the lifetime counter limits
+// compressed prefix replay to a constant number of whole-file traversals.
+type fileConflictTracker struct {
+	offsets [maxConsecutiveFileConflicts + 1]int64
+	count   int
+	total   int
+}
+
+func (t *fileConflictTracker) observe(from, to int64) error {
+	if t.total == maxFileConflictReplays {
+		return fmt.Errorf(
+			"too many file upload conflict replays (%d); latest transition from %d to %d",
+			maxFileConflictReplays,
+			from,
+			to,
+		)
+	}
+
+	if t.count == 0 {
+		t.offsets[0] = from
+		t.count = 1
+	}
+
+	for _, offset := range t.offsets[:t.count] {
+		if offset == to {
+			return fmt.Errorf("server-directed file upload offset cycle from %d to %d", from, to)
+		}
+	}
+
+	if t.count == len(t.offsets) {
+		return fmt.Errorf("too many consecutive file upload conflicts (%d)", maxConsecutiveFileConflicts)
+	}
+
+	t.offsets[t.count] = to
+	t.count++
+	t.total++
+
+	return nil
+}
+
+func (t *fileConflictTracker) reset() {
+	t.count = 0
+}
+
 // putFile sends bounded requests using a fresh body positioned at every server-selected
 // raw offset. Callers probe HEAD first and supply the validated durable offset.
 func putFile(
@@ -96,7 +145,7 @@ func putFile(
 		return fmt.Errorf("invalid initial file offset: %w", err)
 	}
 
-	conflicts := make(map[[2]int64]struct{})
+	var conflicts fileConflictTracker
 
 	for {
 		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
@@ -134,12 +183,11 @@ func putFile(
 		}
 
 		if reposition {
-			transition := [2]int64{offset, next}
-			if _, repeated := conflicts[transition]; repeated {
-				return fmt.Errorf("server-directed file upload offset loop from %d to %d", offset, next)
+			if err := conflicts.observe(offset, next); err != nil {
+				return err
 			}
-
-			conflicts[transition] = struct{}{}
+		} else {
+			conflicts.reset()
 		}
 
 		if progress != nil {
