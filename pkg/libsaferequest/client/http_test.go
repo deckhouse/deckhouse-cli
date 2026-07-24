@@ -632,15 +632,7 @@ func TestTLSIdentityClient_PreservesAuthenticationWrappers(t *testing.T) {
 			configure: func(t *testing.T, config *rest.Config) {
 				t.Helper()
 
-				const pluginName = "deckhouse-cli-persistent-http-test"
-
-				err := rest.RegisterAuthProviderPlugin(pluginName, func(
-					_ string,
-					_ map[string]string,
-					_ rest.AuthProviderConfigPersister,
-				) (rest.AuthProvider, error) {
-					return persistentTestAuthProvider{}, nil
-				})
+				pluginName, err := registerPersistentTestAuthProvider()
 				if err != nil {
 					t.Fatalf("RegisterAuthProviderPlugin: %v", err)
 				}
@@ -2213,6 +2205,20 @@ func persistentRequest(
 
 	return resp.ProtoMajor, nil
 }
+
+const persistentTestAuthProviderPluginName = "deckhouse-cli-persistent-http-test"
+
+var registerPersistentTestAuthProvider = sync.OnceValues(func() (string, error) {
+	err := rest.RegisterAuthProviderPlugin(persistentTestAuthProviderPluginName, func(
+		_ string,
+		_ map[string]string,
+		_ rest.AuthProviderConfigPersister,
+	) (rest.AuthProvider, error) {
+		return persistentTestAuthProvider{}, nil
+	})
+
+	return persistentTestAuthProviderPluginName, err
+})
 
 type persistentTestAuthProvider struct{}
 
