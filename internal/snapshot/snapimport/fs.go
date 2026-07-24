@@ -58,6 +58,12 @@ const (
 	fsTarCancellationCadence = 128
 )
 
+// Keep this list evidence-grounded: lost+found is confirmed in ext4 archives, while other
+// filesystem-specific names need their own observed import failure before being allowed.
+var fsTarReservedEmptyDirectories = map[string]struct{}{
+	"lost+found": {},
+}
+
 // The preflight inventory keeps one fixed-size in-memory run, merges at most eight runs at
 // once, and retains a fixed sixteen-level run table. A merge therefore opens at most nine
 // inventory descriptors (eight inputs plus one output), while sorted metadata occupies at
@@ -482,13 +488,19 @@ type fsTarIndexOptions struct {
 	writeRecord func(io.Writer, fsTarRecord) error
 }
 
+type fsTarDirectoryCounts struct {
+	Structural    int
+	ReservedEmpty int
+}
+
 type fsTarScan struct {
-	tempDir                  string
-	sequencePath             string
-	entryCount               uint64
-	regularCount             uint64
-	StructuralDirectoryCount int
-	removeAll                func(string) error
+	tempDir                     string
+	sequencePath                string
+	entryCount                  uint64
+	regularCount                uint64
+	StructuralDirectoryCount    int
+	ReservedEmptyDirectoryCount int
+	removeAll                   func(string) error
 }
 
 func (s *fsTarScan) Close() error {
@@ -1164,6 +1176,11 @@ func uploadFSTarFromScan(
 			slog.Int("directory_count", scan.StructuralDirectoryCount))
 	}
 
+	if scan.ReservedEmptyDirectoryCount > 0 {
+		log.Warn("filesystem import skips filesystem-reserved empty directories that cannot be recreated by the upload protocol",
+			slog.Int("directory_count", scan.ReservedEmptyDirectoryCount))
+	}
+
 	info, err := source.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", tarPath, err)
@@ -1600,18 +1617,19 @@ func scanFSTarReaderWithOptions(
 		return cleanup(err)
 	}
 
-	structuralDirectoryCount, err := validateSortedFSTar(ctx, sortedPath)
+	directoryCounts, err := validateSortedFSTar(ctx, sortedPath)
 	if err != nil {
 		return cleanup(err)
 	}
 
 	return fsTarScan{
-		tempDir:                  tempDir,
-		sequencePath:             sequencePath,
-		entryCount:               entryCount,
-		regularCount:             regularCount,
-		StructuralDirectoryCount: structuralDirectoryCount,
-		removeAll:                options.removeAll,
+		tempDir:                     tempDir,
+		sequencePath:                sequencePath,
+		entryCount:                  entryCount,
+		regularCount:                regularCount,
+		StructuralDirectoryCount:    directoryCounts.Structural,
+		ReservedEmptyDirectoryCount: directoryCounts.ReservedEmpty,
+		removeAll:                   options.removeAll,
 	}, nil
 }
 
@@ -1653,25 +1671,25 @@ func (c *fsTarDiagnosticCollector) Err() error {
 	return fmt.Errorf("unsupported filesystem tar entries (%d): %s", c.count, message)
 }
 
-func validateSortedFSTar(ctx context.Context, sortedPath string) (int, error) {
+func validateSortedFSTar(ctx context.Context, sortedPath string) (fsTarDirectoryCounts, error) {
 	diagnostics := &fsTarDiagnosticCollector{
 		messages: make([]string, 0, fsTarMaxDiagnostics),
 	}
 
 	if err := inspectSortedFSTarConflicts(ctx, sortedPath, diagnostics); err != nil {
-		return 0, err
+		return fsTarDirectoryCounts{}, err
 	}
 
-	structuralDirectoryCount, err := classifySortedFSTarDirectories(ctx, sortedPath, diagnostics)
+	directoryCounts, err := classifySortedFSTarDirectories(ctx, sortedPath, diagnostics)
 	if err != nil {
-		return 0, err
+		return fsTarDirectoryCounts{}, err
 	}
 
 	if err := diagnostics.Err(); err != nil {
-		return 0, err
+		return fsTarDirectoryCounts{}, err
 	}
 
-	return structuralDirectoryCount, nil
+	return directoryCounts, nil
 }
 
 func inspectSortedFSTarConflicts(
@@ -1824,20 +1842,20 @@ func classifySortedFSTarDirectories(
 	ctx context.Context,
 	sortedPath string,
 	diagnostics *fsTarDiagnosticCollector,
-) (int, error) {
+) (fsTarDirectoryCounts, error) {
 	directories, err := openFSTarKindCursor(ctx, sortedPath, fsTarRecordDirectory)
 	if err != nil {
-		return 0, err
+		return fsTarDirectoryCounts{}, err
 	}
 
 	regulars, err := openFSTarKindCursor(ctx, sortedPath, fsTarRecordRegular)
 	if err != nil {
-		return 0, errors.Join(err, directories.Close())
+		return fsTarDirectoryCounts{}, errors.Join(err, directories.Close())
 	}
 
 	regular, regularErr := regulars.Next()
 
-	structuralDirectoryCount := 0
+	directoryCounts := fsTarDirectoryCounts{}
 
 	for {
 		directory, err := directories.Next()
@@ -1846,7 +1864,7 @@ func classifySortedFSTarDirectories(
 		}
 
 		if err != nil {
-			return 0, errors.Join(err, directories.Close(), regulars.Close())
+			return fsTarDirectoryCounts{}, errors.Join(err, directories.Close(), regulars.Close())
 		}
 
 		for regularErr == nil && compareFSTarPaths(regular.Path, directory.Path) <= 0 {
@@ -1854,11 +1872,17 @@ func classifySortedFSTarDirectories(
 		}
 
 		if regularErr != nil && !errors.Is(regularErr, io.EOF) {
-			return 0, errors.Join(regularErr, directories.Close(), regulars.Close())
+			return fsTarDirectoryCounts{}, errors.Join(regularErr, directories.Close(), regulars.Close())
 		}
 
 		if regularErr == nil && isFSTarPathAncestor(directory.Path, regular.Path) {
-			structuralDirectoryCount++
+			directoryCounts.Structural++
+
+			continue
+		}
+
+		if _, ok := fsTarReservedEmptyDirectories[path.Base(directory.Path)]; ok {
+			directoryCounts.ReservedEmpty++
 
 			continue
 		}
@@ -1869,7 +1893,7 @@ func classifySortedFSTarDirectories(
 		))
 	}
 
-	return structuralDirectoryCount, errors.Join(directories.Close(), regulars.Close())
+	return directoryCounts, errors.Join(directories.Close(), regulars.Close())
 }
 
 func validateFSTarPathLength(value string) error {
