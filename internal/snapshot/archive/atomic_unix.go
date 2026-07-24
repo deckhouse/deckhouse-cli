@@ -156,63 +156,83 @@ func durableDirPath(path string) (string, []string, error) {
 	return rootPath, strings.Split(relativePath, string(filepath.Separator)), nil
 }
 
-// ensureDirAt keeps a rooted handle for every component. This pins each
-// traversed directory across concurrent renames and lets the durability pass
-// sync the actual containing directories rather than reopening mutable paths.
-// Every call confirms the full chain because an existing component may be
-// residue from a previous process that failed before syncing its parent.
+// ensureDirAt rolls one parent and child handle through the path. A parent is
+// synced before it is released, so every child entry is confirmed through the
+// exact descriptor that created or opened it without retaining descriptors in
+// proportion to path depth. Every call confirms the full chain because an
+// existing component may be residue from a previous process that failed before
+// syncing its parent.
 func ensureDirAt(root durableDir, rootPath string, components []string) error {
-	steps := make([]durableDirStep, 1, len(components)+1)
-	steps[0] = durableDirStep{dir: root, path: rootPath}
+	parent := durableDirStep{dir: root, path: rootPath}
 
 	for _, component := range components {
-		parent := steps[len(steps)-1]
 		childPath := filepath.Join(parent.path, component)
 
 		child, err := parent.dir.OpenRoot(component)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return closeDurableDirs(steps, fmt.Errorf("opening dir %s: %w", childPath, err))
+			return closeDurableDir(parent, nil, fmt.Errorf("opening dir %s: %w", childPath, err))
 		}
 
 		if errors.Is(err, os.ErrNotExist) {
 			if mkdirErr := parent.dir.Mkdir(component, 0o755); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
-				return closeDurableDirs(steps, fmt.Errorf("creating dir %s: %w", childPath, mkdirErr))
+				return closeDurableDir(parent, nil, fmt.Errorf("creating dir %s: %w", childPath, mkdirErr))
 			}
 
 			child, err = parent.dir.OpenRoot(component)
 			if err != nil {
-				return closeDurableDirs(steps, fmt.Errorf("opening created dir %s: %w", childPath, err))
+				return closeDurableDir(parent, nil, fmt.Errorf("opening created dir %s: %w", childPath, err))
 			}
 		}
 
-		steps = append(steps, durableDirStep{dir: child, path: childPath})
-	}
+		childStep := durableDirStep{dir: child, path: childPath}
 
-	for i := len(steps) - 1; i >= 0; i-- {
-		if err := steps[i].dir.Sync(); err != nil {
-			syncErr := fmt.Errorf("syncing dir %s: %w", steps[i].path, err)
+		if err := parent.dir.Sync(); err != nil {
+			syncErr := fmt.Errorf("syncing dir %s: %w", parent.path, err)
 
-			return closeDurableDirs(steps, syncErr)
+			return closeDurableDir(parent, &childStep, syncErr)
 		}
+
+		if err := parent.dir.Close(); err != nil {
+			return closeDurableDir(childStep, nil, fmt.Errorf("closing dir %s: %w", parent.path, err))
+		}
+
+		parent = childStep
 	}
 
-	return closeDurableDirs(steps, nil)
+	if err := parent.dir.Sync(); err != nil {
+		return closeDurableDir(parent, nil, fmt.Errorf("syncing dir %s: %w", parent.path, err))
+	}
+
+	return closeDurableDir(parent, nil, nil)
 }
 
-func closeDurableDirs(steps []durableDirStep, operationErr error) error {
-	var closeErr error
+func closeDurableDir(primary durableDirStep, secondary *durableDirStep, operationErr error) error {
+	var secondaryCloseErr error
 
-	for i := len(steps) - 1; i >= 0; i-- {
-		if err := steps[i].dir.Close(); err != nil && closeErr == nil {
-			closeErr = fmt.Errorf("closing dir %s: %w", steps[i].path, err)
+	if secondary != nil {
+		if err := secondary.dir.Close(); err != nil {
+			secondaryCloseErr = fmt.Errorf("closing dir %s: %w", secondary.path, err)
 		}
 	}
 
-	if operationErr != nil {
-		return operationErr
+	primaryCloseErr := primary.dir.Close()
+	if operationErr != nil || secondaryCloseErr != nil || primaryCloseErr != nil {
+		return errors.Join(
+			operationErr,
+			secondaryCloseErr,
+			wrapDurableDirCloseError(primary.path, primaryCloseErr),
+		)
 	}
 
-	return closeErr
+	return nil
+}
+
+func wrapDurableDirCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("closing dir %s: %w", path, err)
 }
 
 func (d *rootedDurableDir) OpenRoot(name string) (durableDir, error) {

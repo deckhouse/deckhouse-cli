@@ -461,6 +461,29 @@ func TestAcquireOutputLock_ReacquireAfterRelease(t *testing.T) {
 	defer func() { _ = second.Unlock() }()
 }
 
+func TestAcquireOutputLock_CreatesMissingOutputRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing", "output")
+
+	lock, err := acquireOutputLock(root)
+	if err != nil {
+		t.Fatalf("acquire missing output root: %v", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat created output root: %v", err)
+	}
+
+	if !info.IsDir() {
+		t.Fatalf("created output root mode = %s, want directory", info.Mode())
+	}
+
+	if err := lock.Verify(); err != nil {
+		t.Fatalf("verify lock for created output root: %v", err)
+	}
+}
+
 func TestAcquireOutputLock_CancelledContextDoesNotLeak(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

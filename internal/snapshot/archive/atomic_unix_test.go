@@ -19,12 +19,17 @@ limitations under the License.
 package archive
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -38,6 +43,7 @@ type fakeDurableFS struct {
 	concurrentDirs  map[string]struct{}
 	concurrentFiles map[string]struct{}
 	openHandles     int
+	maxOpenHandles  int
 }
 
 type fakeDurableDir struct {
@@ -63,6 +69,7 @@ func newFakeDurableFS(existingDirs ...string) *fakeDurableFS {
 
 func (f *fakeDurableFS) root(path string) durableDir {
 	f.openHandles++
+	f.maxOpenHandles = max(f.maxOpenHandles, f.openHandles)
 
 	return &fakeDurableDir{fs: f, path: path}
 }
@@ -80,6 +87,7 @@ func (d *fakeDurableDir) OpenRoot(name string) (durableDir, error) {
 	}
 
 	d.fs.openHandles++
+	d.fs.maxOpenHandles = max(d.fs.maxOpenHandles, d.fs.openHandles)
 
 	return &fakeDurableDir{fs: d.fs, path: childPath}, nil
 }
@@ -145,10 +153,10 @@ func TestEnsureDirAtCreationAndSyncOrdering(t *testing.T) {
 			existingDirs: []string{"root"},
 			components:   []string{"a", "b", "c"},
 			wantEvents: []string{
-				"open root/a", "mkdir root/a", "open root/a",
-				"open root/a/b", "mkdir root/a/b", "open root/a/b",
-				"open root/a/b/c", "mkdir root/a/b/c", "open root/a/b/c",
-				"sync root/a/b/c", "sync root/a/b", "sync root/a", "sync root",
+				"open root/a", "mkdir root/a", "open root/a", "sync root",
+				"open root/a/b", "mkdir root/a/b", "open root/a/b", "sync root/a",
+				"open root/a/b/c", "mkdir root/a/b/c", "open root/a/b/c", "sync root/a/b",
+				"sync root/a/b/c",
 			},
 		},
 		{
@@ -156,9 +164,10 @@ func TestEnsureDirAtCreationAndSyncOrdering(t *testing.T) {
 			existingDirs: []string{"root", "root/a", "root/a/b"},
 			components:   []string{"a", "b", "c"},
 			wantEvents: []string{
-				"open root/a", "open root/a/b",
-				"open root/a/b/c", "mkdir root/a/b/c", "open root/a/b/c",
-				"sync root/a/b/c", "sync root/a/b", "sync root/a", "sync root",
+				"open root/a", "sync root",
+				"open root/a/b", "sync root/a",
+				"open root/a/b/c", "mkdir root/a/b/c", "open root/a/b/c", "sync root/a/b",
+				"sync root/a/b/c",
 			},
 		},
 		{
@@ -166,8 +175,10 @@ func TestEnsureDirAtCreationAndSyncOrdering(t *testing.T) {
 			existingDirs: []string{"root", "root/a", "root/a/b", "root/a/b/c"},
 			components:   []string{"a", "b", "c"},
 			wantEvents: []string{
-				"open root/a", "open root/a/b", "open root/a/b/c",
-				"sync root/a/b/c", "sync root/a/b", "sync root/a", "sync root",
+				"open root/a", "sync root",
+				"open root/a/b", "sync root/a",
+				"open root/a/b/c", "sync root/a/b",
+				"sync root/a/b/c",
 			},
 		},
 	}
@@ -181,6 +192,7 @@ func TestEnsureDirAtCreationAndSyncOrdering(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tt.wantEvents, fakeFS.events)
 			require.Zero(t, fakeFS.openHandles)
+			require.LessOrEqual(t, fakeFS.maxOpenHandles, 2)
 		})
 	}
 }
@@ -196,10 +208,12 @@ func TestEnsureDirAtRepeatedCallReconfirmsExistingChain(t *testing.T) {
 	fakeFS.events = nil
 	require.NoError(t, ensureDirAt(fakeFS.root("root"), "root", components))
 	require.Equal(t, []string{
-		"open root/a", "open root/a/b",
-		"sync root/a/b", "sync root/a", "sync root",
+		"open root/a", "sync root",
+		"open root/a/b", "sync root/a",
+		"sync root/a/b",
 	}, fakeFS.events)
 	require.Zero(t, fakeFS.openHandles)
+	require.LessOrEqual(t, fakeFS.maxOpenHandles, 2)
 }
 
 func TestEnsureDirAtConcurrentCreator(t *testing.T) {
@@ -237,7 +251,7 @@ func TestEnsureDirAtConcurrentCreator(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, []string{
 					"open root/a", "mkdir root/a", "open root/a",
-					"sync root/a", "sync root",
+					"sync root", "sync root/a",
 				}, fakeFS.events)
 			} else {
 				require.ErrorIs(t, err, tt.wantErr)
@@ -247,6 +261,7 @@ func TestEnsureDirAtConcurrentCreator(t *testing.T) {
 			}
 
 			require.Zero(t, fakeFS.openHandles)
+			require.LessOrEqual(t, fakeFS.maxOpenHandles, 2)
 		})
 	}
 }
@@ -254,7 +269,7 @@ func TestEnsureDirAtConcurrentCreator(t *testing.T) {
 func TestEnsureDirAtSyncFailureIsRetryable(t *testing.T) {
 	t.Parallel()
 
-	syncPaths := []string{"root/a/b/c", "root/a/b", "root/a", "root"}
+	syncPaths := []string{"root", "root/a", "root/a/b", "root/a/b/c"}
 	for _, failurePath := range syncPaths {
 		t.Run(failurePath, func(t *testing.T) {
 			t.Parallel()
@@ -267,20 +282,21 @@ func TestEnsureDirAtSyncFailureIsRetryable(t *testing.T) {
 			require.ErrorIs(t, err, sentinel)
 			require.Zero(t, fakeFS.openHandles)
 
-			for _, dir := range []string{"root/a", "root/a/b", "root/a/b/c"} {
-				_, ok := fakeFS.dirs[dir]
-				require.True(t, ok, "created directory %s must remain retryable", dir)
-			}
-
 			delete(fakeFS.syncFailures, failurePath)
 			fakeFS.events = nil
 
 			require.NoError(t, ensureDirAt(fakeFS.root("root"), "root", []string{"a", "b", "c"}))
 			require.Equal(t, []string{
-				"open root/a", "open root/a/b", "open root/a/b/c",
-				"sync root/a/b/c", "sync root/a/b", "sync root/a", "sync root",
-			}, fakeFS.events)
+				"sync root", "sync root/a", "sync root/a/b", "sync root/a/b/c",
+			}, syncEvents(fakeFS.events))
+
+			for _, dir := range []string{"root/a", "root/a/b", "root/a/b/c"} {
+				_, ok := fakeFS.dirs[dir]
+				require.True(t, ok, "created directory %s must remain retryable", dir)
+			}
+
 			require.Zero(t, fakeFS.openHandles)
+			require.LessOrEqual(t, fakeFS.maxOpenHandles, 2)
 		})
 	}
 }
@@ -296,4 +312,90 @@ func TestEnsureDirAtCreationFailurePreservesCause(t *testing.T) {
 	require.ErrorIs(t, err, sentinel)
 	require.Equal(t, []string{"open root/a", "mkdir root/a"}, fakeFS.events)
 	require.Zero(t, fakeFS.openHandles)
+}
+
+func TestEnsureDirAtCreationFailuresAreRetryable(t *testing.T) {
+	t.Parallel()
+
+	for _, failurePath := range []string{"root/a", "root/a/b", "root/a/b/c"} {
+		t.Run(failurePath, func(t *testing.T) {
+			t.Parallel()
+
+			sentinel := errors.New("mkdir retry sentinel")
+			fakeFS := newFakeDurableFS("root")
+			fakeFS.mkdirFailures[failurePath] = sentinel
+
+			err := ensureDirAt(fakeFS.root("root"), "root", []string{"a", "b", "c"})
+			require.ErrorIs(t, err, sentinel)
+			require.Zero(t, fakeFS.openHandles)
+
+			delete(fakeFS.mkdirFailures, failurePath)
+			fakeFS.events = nil
+
+			require.NoError(t, ensureDirAt(fakeFS.root("root"), "root", []string{"a", "b", "c"}))
+			require.Equal(t, []string{
+				"sync root", "sync root/a", "sync root/a/b", "sync root/a/b/c",
+			}, syncEvents(fakeFS.events))
+			require.Zero(t, fakeFS.openHandles)
+			require.LessOrEqual(t, fakeFS.maxOpenHandles, 2)
+		})
+	}
+}
+
+const ensureDirLowDescriptorPath = "D8_ENSURE_DIR_LOW_DESCRIPTOR_PATH"
+
+func TestEnsureDirDurablyUsesBoundedDescriptors(t *testing.T) {
+	path := os.Getenv(ensureDirLowDescriptorPath)
+	if path != "" {
+		limit := &syscall.Rlimit{Cur: 32, Max: 32}
+		if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, limit); err != nil {
+			t.Fatalf("lower descriptor limit: %v", err)
+		}
+
+		if err := EnsureDir(path); err != nil {
+			t.Fatalf("ensure deep directory under low descriptor limit: %v", err)
+		}
+
+		return
+	}
+
+	path = t.TempDir()
+	for i := range 128 {
+		path = filepath.Join(path, fmt.Sprintf("d%03d", i))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnsureDirDurablyUsesBoundedDescriptors$")
+	cmd.Env = append(os.Environ(), ensureDirLowDescriptorPath+"="+path)
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("low-descriptor helper did not return promptly: %v", ctx.Err())
+	}
+
+	if err != nil {
+		t.Fatalf("low-descriptor helper failed: %v\n%s", err, output)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat deep output path: %v", err)
+	}
+
+	if !info.IsDir() {
+		t.Fatalf("deep output mode = %s, want directory", info.Mode())
+	}
+}
+
+func syncEvents(events []string) []string {
+	syncs := make([]string, 0, len(events))
+	for _, event := range events {
+		if strings.HasPrefix(event, "sync ") {
+			syncs = append(syncs, event)
+		}
+	}
+
+	return syncs
 }
