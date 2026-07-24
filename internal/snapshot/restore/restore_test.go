@@ -100,6 +100,52 @@ func (e *typedControlPlaneError) Unwrap() error {
 	return e.cause
 }
 
+type controlledDeadlineContext struct {
+	context.Context
+
+	done chan struct{}
+	mu   sync.RWMutex
+	err  error
+}
+
+func newControlledDeadlineContext(parent context.Context) *controlledDeadlineContext {
+	return &controlledDeadlineContext{
+		Context: parent,
+		done:    make(chan struct{}),
+	}
+}
+
+func (c *controlledDeadlineContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *controlledDeadlineContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.err
+}
+
+func (c *controlledDeadlineContext) expire() {
+	c.finish(context.DeadlineExceeded)
+}
+
+func (c *controlledDeadlineContext) cancel() {
+	c.finish(context.Canceled)
+}
+
+func (c *controlledDeadlineContext) finish(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.err != nil {
+		return
+	}
+
+	c.err = err
+	close(c.done)
+}
+
 type blockingSource struct {
 	entered  chan struct{}
 	returned chan struct{}
@@ -723,6 +769,35 @@ func assertReturnedBeforeRun(t *testing.T, returned <-chan struct{}) {
 	case <-returned:
 	default:
 		t.Fatal("blocked control-plane call did not return before Run completed")
+	}
+}
+
+func awaitTestSignal(t *testing.T, signal <-chan struct{}, failure string) {
+	t.Helper()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-signal:
+	case <-timer.C:
+		t.Fatal(failure)
+	}
+}
+
+func awaitTestError(t *testing.T, result <-chan error, failure string) error {
+	t.Helper()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case err := <-result:
+		return err
+	case <-timer.C:
+		t.Fatal(failure)
+
+		return nil
 	}
 }
 
@@ -1870,6 +1945,212 @@ func TestRun_WaitBlockedAPICallsHonorControlPlaneTimeout(t *testing.T) {
 				t.Fatal("blocked API call did not return before Run completed")
 			}
 		})
+	}
+}
+
+func TestRun_WaitRequestErrorsPreserveConcurrentContextCause(t *testing.T) {
+	requests := []struct {
+		name             string
+		storageClassName string
+		bindingMode      string
+		blockGVR         schema.GroupVersionResource
+		blockVerb        string
+		requestObject    string
+		wantPhase        string
+	}{
+		{
+			name:             "StorageClass Get",
+			storageClassName: "blocked-sc",
+			blockGVR:         scGVR,
+			blockVerb:        "get",
+			requestObject:    "blocked-sc",
+			wantPhase:        `getting StorageClass "blocked-sc"`,
+		},
+		{
+			name:          "default StorageClass List",
+			blockGVR:      scGVR,
+			blockVerb:     "list",
+			requestObject: "default-class-resolution",
+			wantPhase:     "listing StorageClasses to resolve the default",
+		},
+		{
+			name:             "PVC Get",
+			storageClassName: "wffc-sc",
+			bindingMode:      volumeBindingModeWFC,
+			blockGVR:         pvcGVR,
+			blockVerb:        "get",
+			requestObject:    "pvc-blocked",
+			wantPhase:        "getting restored PVC default/pvc-blocked",
+		},
+	}
+
+	for _, request := range requests {
+		for _, boundary := range []string{"outer cancellation", "shared wait deadline"} {
+			t.Run(request.name+"/"+boundary, func(t *testing.T) {
+				objects := []runtime.Object{readySnapshot(), readyVolumeSnapshot("vs-1")}
+				if request.bindingMode != "" {
+					objects = append(
+						objects,
+						storageClassObj(request.storageClassName, request.bindingMode, false),
+					)
+				}
+
+				baseDynamic := newFakeDynamic(objects...)
+				entered := make(chan struct{})
+				release := make(chan struct{})
+				returned := make(chan struct{})
+				var (
+					enterOnce   sync.Once
+					releaseOnce sync.Once
+					returnOnce  sync.Once
+					requests    int
+				)
+
+				requestErr := kubeerrors.NewForbidden(
+					request.blockGVR.GroupResource(),
+					request.requestObject,
+					errors.New("API server rejected wait request"),
+				)
+				dyn := &interceptingDynamicClient{
+					Interface: baseDynamic,
+					intercept: func(
+						_ context.Context,
+						verb string,
+						gvr schema.GroupVersionResource,
+						_ string,
+						_ string,
+					) error {
+						if verb != request.blockVerb || gvr != request.blockGVR {
+							return nil
+						}
+
+						requests++
+						enterOnce.Do(func() {
+							close(entered)
+						})
+						defer returnOnce.Do(func() {
+							close(returned)
+						})
+
+						<-release
+
+						return requestErr
+					},
+				}
+
+				src := &stubSource{body: mustArray(
+					t,
+					pvcManifestSC("pvc-blocked", pvcPhasePending, request.storageClassName),
+				)}
+				cfg := baseConfig(src, dyn)
+				cfg.Wait = true
+				cfg.Timeout = time.Hour
+				cfg.ControlPlaneTimeout = time.Hour
+
+				runCtx := context.Background()
+				releaseRequest := func() {
+					releaseOnce.Do(func() {
+						close(release)
+					})
+				}
+				t.Cleanup(releaseRequest)
+
+				var (
+					boundaryCause   error
+					triggerBoundary func()
+					waitCanceled    <-chan struct{}
+				)
+
+				switch boundary {
+				case "outer cancellation":
+					parentCtx, cancel := context.WithCancelCause(context.Background())
+					boundaryCause = errors.New("operator canceled restore at wait request boundary")
+					runCtx = parentCtx
+					triggerBoundary = func() {
+						cancel(boundaryCause)
+						releaseRequest()
+					}
+					t.Cleanup(func() {
+						cancel(errors.New("test cleanup"))
+					})
+				case "shared wait deadline":
+					cancelCalled := make(chan struct{})
+					waitCanceled = cancelCalled
+					var (
+						waitCtx    *controlledDeadlineContext
+						cancelOnce sync.Once
+					)
+
+					cfg.newWaitContext = func(
+						parent context.Context,
+						_ time.Duration,
+					) (context.Context, context.CancelFunc) {
+						waitCtx = newControlledDeadlineContext(parent)
+
+						return waitCtx, func() {
+							waitCtx.cancel()
+							cancelOnce.Do(func() {
+								close(cancelCalled)
+							})
+						}
+					}
+					boundaryCause = context.DeadlineExceeded
+					triggerBoundary = func() {
+						waitCtx.expire()
+						releaseRequest()
+					}
+				default:
+					t.Fatalf("unsupported boundary %q", boundary)
+				}
+
+				result := make(chan error, 1)
+				go func() {
+					result <- Run(runCtx, cfg)
+				}()
+
+				awaitTestSignal(t, entered, "wait API request did not reach the controlled boundary")
+				triggerBoundary()
+
+				err := awaitTestError(t, result, "restore did not return after the controlled wait boundary")
+
+				var statusErr *kubeerrors.StatusError
+				if !errors.As(err, &statusErr) {
+					t.Fatalf("Run error = %v, want typed Kubernetes StatusError", err)
+				}
+
+				if statusErr != requestErr {
+					t.Errorf("Run StatusError = %p, want exact request error %p", statusErr, requestErr)
+				}
+
+				if !errors.Is(err, boundaryCause) {
+					t.Errorf("Run error = %v, want boundary cause %v", err, boundaryCause)
+				}
+
+				if boundary == "outer cancellation" && !errors.Is(err, context.Canceled) {
+					t.Errorf("Run error = %v, want context.Canceled", err)
+				}
+
+				for _, want := range []string{request.wantPhase, "PVC default/pvc-blocked"} {
+					if !contains(err.Error(), want) {
+						t.Errorf("Run error = %q, want diagnostic %q", err, want)
+					}
+				}
+
+				if requests != 1 {
+					t.Errorf("controlled request count = %d, want 1", requests)
+				}
+
+				assertReturnedBeforeRun(t, returned)
+
+				if waitCanceled != nil {
+					select {
+					case <-waitCanceled:
+					default:
+						t.Fatal("shared wait context was not canceled before Run completed")
+					}
+				}
+			})
+		}
 	}
 }
 

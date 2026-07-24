@@ -186,6 +186,8 @@ type Config struct {
 	// Log receives progress output.
 	Log *slog.Logger
 
+	// newWaitContext is a test seam for controlling the shared wait boundary.
+	newWaitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	// silenceApplyLog suppresses the per-object "would apply"/"applied" log line in
 	// applyObject. Run sets it true on the implicit dry-run preflight config so operators
 	// only see those messages on an explicit --dry-run request; it is never a CLI flag.
@@ -954,7 +956,12 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		return nil
 	}
 
-	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	newWaitContext := context.WithTimeout
+	if cfg.newWaitContext != nil {
+		newWaitContext = cfg.newWaitContext
+	}
+
+	waitCtx, cancel := newWaitContext(ctx, cfg.Timeout)
 	defer cancel()
 
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
@@ -1031,7 +1038,7 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 		)
 		if err != nil {
 			if ctxErr := waitContextError(ctx, fmt.Sprintf("getting StorageClass %q", className)); ctxErr != nil {
-				return "", ctxErr
+				err = errors.Join(err, ctxErr)
 			}
 
 			return "", fmt.Errorf("get StorageClass %q: %w", className, err)
@@ -1075,7 +1082,7 @@ func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.Group
 	)
 	if err != nil {
 		if ctxErr := waitContextError(ctx, "listing StorageClasses to resolve the default"); ctxErr != nil {
-			return nil, ctxErr
+			err = errors.Join(err, ctxErr)
 		}
 
 		return nil, fmt.Errorf("list StorageClasses: %w", err)
@@ -1161,7 +1168,7 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 
 	if err != nil {
 		if ctxErr := waitContextError(ctx, fmt.Sprintf("getting restored PVC %s/%s", ref.namespace, ref.name)); ctxErr != nil {
-			return "", ctxErr
+			err = errors.Join(err, ctxErr)
 		}
 
 		return "", fmt.Errorf("get restored PVC %s/%s: %w", ref.namespace, ref.name, err)
