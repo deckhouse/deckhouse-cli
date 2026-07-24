@@ -777,6 +777,9 @@ func (b *fsUploadBody) Close() error {
 	return b.closeErr
 }
 
+// tarEntryBodyFactoryFromSource deliberately preserves the source's authenticated chunk cache
+// across adjacent entries and body reopens. Raw bytes are traversed once per requested range;
+// compressed bytes are traversed once per request plus any decoded-prefix replay for reposition.
 func tarEntryBodyFactoryFromSource(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) fileBodyFactory {
 	return func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
 		if err := validateBlockOffset(offset, rawSize); err != nil {
@@ -790,8 +793,6 @@ func tarEntryBodyFactoryFromSource(source io.ReaderAt, tarPath, ext string, payl
 		if payloadStart > math.MaxInt64-offset {
 			return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", payloadStart, offset)
 		}
-
-		resetAuthenticatedRead(source)
 
 		if ext == "" {
 			section := io.NewSectionReader(source, payloadStart+offset, size)
@@ -829,8 +830,6 @@ func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, ta
 
 		return nil
 	}
-
-	resetAuthenticatedRead(source)
 
 	stored := io.NewSectionReader(source, payloadStart, storedSize)
 

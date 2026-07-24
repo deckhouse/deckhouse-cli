@@ -74,6 +74,17 @@ type VerifiedFile struct {
 	info        os.FileInfo
 }
 
+// AuthenticatedReadStats reports chunk authentication performed while serving Read and ReadAt.
+// It excludes the intentional full-file scans that build the index and perform final Verify.
+type AuthenticatedReadStats struct {
+	ChunkSize   int64
+	SourceBytes int64
+	HashedBytes int64
+	ChunkLoads  int64
+	CacheHits   int64
+	Resets      int64
+}
+
 // VerifiedHandle is one exact regular-file descriptor whose identity and bytes were verified.
 // The handle must be closed before its VerifiedArchive.
 type VerifiedHandle struct {
@@ -89,6 +100,7 @@ type VerifiedHandle struct {
 	cacheLen   int
 	cache      []byte
 	stickyErr  error
+	readStats  AuthenticatedReadStats
 }
 
 // OpenVerifiedArchive pins root for planning, verification, upload, and final readiness.
@@ -361,6 +373,18 @@ func (h *VerifiedHandle) ResetAuthenticatedRead() {
 
 	h.cacheChunk = -1
 	h.cacheLen = 0
+	h.readStats.Resets++
+}
+
+// AuthenticatedReadStats returns a concurrency-safe snapshot of authenticated read work.
+func (h *VerifiedHandle) AuthenticatedReadStats() AuthenticatedReadStats {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	stats := h.readStats
+	stats.ChunkSize = authChunkSize
+
+	return stats
 }
 
 // Stat returns metadata for the pinned descriptor.
@@ -550,6 +574,8 @@ func (h *VerifiedHandle) readAtLocked(p []byte, offset int64) (int, error) {
 
 func (h *VerifiedHandle) loadChunkLocked(chunk int64) error {
 	if h.cacheChunk == chunk {
+		h.readStats.CacheHits++
+
 		return nil
 	}
 
@@ -572,6 +598,9 @@ func (h *VerifiedHandle) loadChunkLocked(chunk int64) error {
 	data := h.cache[:chunkLength]
 
 	count, readErr := h.file.ReadAt(data, chunkStart)
+	h.readStats.ChunkLoads++
+	h.readStats.SourceBytes += int64(count)
+
 	if readErr != nil || int64(count) != chunkLength {
 		return fmt.Errorf("read authentication chunk %d for %s: %w",
 			chunk, h.expected.archivePath,
@@ -587,7 +616,10 @@ func (h *VerifiedHandle) loadChunkLocked(chunk int64) error {
 			errors.Join(ErrVerifiedArchiveChanged, readErr, shortAuthenticatedReadError(count, sha256.Size)))
 	}
 
-	if actualDigest := sha256.Sum256(data); actualDigest != expectedDigest {
+	actualDigest := sha256.Sum256(data)
+	h.readStats.HashedBytes += int64(len(data))
+
+	if actualDigest != expectedDigest {
 		return fmt.Errorf("%s authentication chunk %d changed before consumption: %w",
 			h.expected.archivePath, chunk, ErrVerifiedArchiveChanged)
 	}
