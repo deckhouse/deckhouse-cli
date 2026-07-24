@@ -20,10 +20,12 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,6 +66,7 @@ func (d *recordingDoer) HTTPDo(req *http.Request) (*http.Response, error) {
 
 	if req.Body != nil {
 		_, _ = io.Copy(io.Discard, req.Body)
+		_ = req.Body.Close()
 	}
 
 	respHeader := http.Header{}
@@ -1221,7 +1225,37 @@ func TestResolveBlockDecodeReader_ResumedSuffixMatches(t *testing.T) {
 type testHTTPDoer func(*http.Request) (*http.Response, error)
 
 func (f testHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	resp, requestErr := f(req)
+	if req.Body == nil {
+		return resp, requestErr
+	}
+
+	_, drainErr := io.Copy(io.Discard, req.Body)
+	if errors.Is(drainErr, http.ErrBodyReadAfterClose) {
+		drainErr = nil
+	}
+
+	closeErr := req.Body.Close()
+
+	return resp, errors.Join(requestErr, drainErr, closeErr)
+}
+
+type testRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f testRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type clientHTTPDoer struct {
+	client *http.Client
+}
+
+func (d clientHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	return d.client.Do(req)
+}
+
+func newRoundTripDoer(roundTrip testRoundTripper) clientHTTPDoer {
+	return clientHTTPDoer{client: &http.Client{Transport: roundTrip}}
 }
 
 type testReadCloser struct {
@@ -1893,11 +1927,13 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
 				header := http.Header{}
 				if tc.header != "" {
 					header.Set("X-Next-Offset", tc.header)
 				}
+
+				_, _ = io.Copy(io.Discard, req.Body)
 
 				return &http.Response{
 					StatusCode: http.StatusNoContent,
@@ -1907,7 +1943,13 @@ func TestDoBlockChunk_ValidatesAdvancingServerOffset(t *testing.T) {
 				}, nil
 			})
 
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.local/block", nil)
+			body := bytes.Repeat([]byte("x"), int(requestEnd-offset))
+			req, err := http.NewRequestWithContext(
+				context.Background(),
+				http.MethodPut,
+				"https://importer.local/block",
+				bytes.NewReader(body),
+			)
 			if err != nil {
 				t.Fatalf("build request: %v", err)
 			}
@@ -1957,9 +1999,11 @@ func TestDoBlockChunk_EnforcesProducerSuccessStatusByPosition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
 				header := http.Header{}
 				header.Set("X-Next-Offset", strconv.FormatInt(tc.requestEnd, 10))
+
+				_, _ = io.Copy(io.Discard, req.Body)
 
 				return &http.Response{
 					StatusCode: tc.statusCode,
@@ -1969,7 +2013,13 @@ func TestDoBlockChunk_EnforcesProducerSuccessStatusByPosition(t *testing.T) {
 				}, nil
 			})
 
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.local/block", nil)
+			body := bytes.Repeat([]byte("x"), int(tc.requestEnd-4))
+			req, err := http.NewRequestWithContext(
+				context.Background(),
+				http.MethodPut,
+				"https://importer.local/block",
+				bytes.NewReader(body),
+			)
 			if err != nil {
 				t.Fatalf("build request: %v", err)
 			}
@@ -4187,4 +4237,631 @@ func readBodyDuringRestoredMutation(
 	}
 
 	return data, readErr
+}
+
+func TestSendVolumeData_BlockWaitsForExactBodyCompletion(t *testing.T) {
+	payload := bytes.Repeat([]byte("attested-block-payload-"), 4096)
+
+	tests := []struct {
+		name  string
+		codec string
+		ext   string
+	}{
+		{name: "raw", codec: "none"},
+		{name: "zstd", codec: "zstd", ext: ".zst"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			encodedPath := filepath.Join(t.TempDir(), "encoded"+tc.ext)
+			writeEncodedBlockFile(t, encodedPath, tc.codec, payload)
+
+			encoded, err := os.ReadFile(encodedPath)
+			if err != nil {
+				t.Fatalf("read encoded block: %v", err)
+			}
+
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				namespace:  "src",
+				blockData:  encoded,
+				blockExt:   tc.ext,
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			putBody := make(chan io.ReadCloser, 1)
+
+			var (
+				progressed atomic.Int64
+				finished   atomic.Int64
+			)
+
+			doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodHead:
+					header := http.Header{}
+					header.Set("X-Next-Offset", "0")
+
+					return newTestHTTPResponse(http.StatusOK, header), nil
+				case http.MethodPut:
+					putBody <- req.Body
+
+					header := http.Header{}
+					header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+					return newTestHTTPResponse(http.StatusCreated, header), nil
+				case http.MethodPost:
+					finished.Add(1)
+
+					return newTestHTTPResponse(http.StatusOK, nil), nil
+				default:
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
+			})
+
+			result := make(chan error, 1)
+			go func() {
+				importer := &clusterVolumeImporter{log: discardLogger()}
+				result <- importer.sendVolumeData(
+					context.Background(),
+					doer,
+					"https://importer.local",
+					volumeModeBlock,
+					plan[0],
+					targetNS,
+					"di-pvc-1",
+					nil,
+					func(count int) { progressed.Add(int64(count)) },
+					nil,
+				)
+			}()
+
+			body := <-putBody
+
+			select {
+			case err := <-result:
+				t.Fatalf("upload returned before body completion: %v", err)
+			default:
+			}
+
+			if got := progressed.Load(); got != 0 {
+				t.Fatalf("progress before body completion = %d, want 0", got)
+			}
+			if got := finished.Load(); got != 0 {
+				t.Fatalf("finished POSTs before body completion = %d, want 0", got)
+			}
+
+			received, err := io.ReadAll(body)
+			if err != nil {
+				t.Fatalf("finish asynchronous body read: %v", err)
+			}
+
+			select {
+			case err := <-result:
+				t.Fatalf("upload returned before delayed body close: %v", err)
+			default:
+			}
+
+			if err := body.Close(); err != nil {
+				t.Fatalf("finish asynchronous body close: %v", err)
+			}
+			if !bytes.Equal(received, payload) {
+				t.Fatalf("received %d bytes, want exact %d-byte payload", len(received), len(payload))
+			}
+
+			if err := <-result; err != nil {
+				t.Fatalf("sendVolumeData: %v", err)
+			}
+			if got := progressed.Load(); got != int64(len(payload)) {
+				t.Fatalf("progress after attestation = %d, want %d", got, len(payload))
+			}
+			if got := finished.Load(); got != 1 {
+				t.Fatalf("finished POSTs after attestation = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestSendVolumeData_BlockRejectsEarlySuccessShortBody(t *testing.T) {
+	payload := bytes.Repeat([]byte("short-body"), 1024)
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+		t.Fatalf("write block payload: %v", err)
+	}
+
+	putBody := make(chan io.ReadCloser, 1)
+
+	var (
+		progressed atomic.Int64
+		finished   atomic.Int64
+	)
+
+	doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case http.MethodHead:
+			header := http.Header{}
+			header.Set("X-Next-Offset", "0")
+
+			return newTestHTTPResponse(http.StatusOK, header), nil
+		case http.MethodPut:
+			putBody <- req.Body
+
+			header := http.Header{}
+			header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+			return newTestHTTPResponse(http.StatusCreated, header), nil
+		case http.MethodPost:
+			finished.Add(1)
+
+			return newTestHTTPResponse(http.StatusOK, nil), nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		importer := &clusterVolumeImporter{log: discardLogger()}
+		result <- importer.sendVolumeData(
+			context.Background(),
+			doer,
+			"https://importer.local",
+			volumeModeBlock,
+			PlannedNode{DataFile: dataFile, Size: strconv.Itoa(len(payload))},
+			targetNS,
+			"di-pvc-1",
+			nil,
+			func(count int) { progressed.Add(int64(count)) },
+			nil,
+		)
+	}()
+
+	body := <-putBody
+	prefix := make([]byte, len(payload)/2)
+	if _, err := io.ReadFull(body, prefix); err != nil {
+		t.Fatalf("read body prefix: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close body after prefix: %v", err)
+	}
+
+	err := <-result
+	if err == nil || !strings.Contains(err.Error(), "consumed") {
+		t.Fatalf("sendVolumeData error = %v, want short body attestation failure", err)
+	}
+	if got := progressed.Load(); got != 0 {
+		t.Fatalf("progress after short body = %d, want 0", got)
+	}
+	if got := finished.Load(); got != 0 {
+		t.Fatalf("finished POSTs after short body = %d, want 0", got)
+	}
+}
+
+func TestDoBlockChunk_CancellationClosesUnreadEarlySuccessBody(t *testing.T) {
+	payload := []byte("body must never be read")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bodySeen := make(chan io.ReadCloser, 1)
+	doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+		bodySeen <- req.Body
+
+		header := http.Header{}
+		header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+		return newTestHTTPResponse(http.StatusCreated, header), nil
+	})
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPut,
+		"https://importer.local/block",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, _, requestErr := doBlockChunk(doer, req, 0, int64(len(payload)), int64(len(payload)))
+		result <- requestErr
+	}()
+
+	body := <-bodySeen
+	cancel()
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("doBlockChunk error = %v, want context cancellation", err)
+	}
+
+	buffer := make([]byte, 1)
+	if _, err := body.Read(buffer); !errors.Is(err, http.ErrBodyReadAfterClose) {
+		t.Fatalf("read after cancellation = %v, want closed request body", err)
+	}
+}
+
+func TestSendVolumeData_BlockRejectsDelayedAuthenticatedReadFailure(t *testing.T) {
+	payload := randomPayload(t, 2*1024*1024+4096)
+	root := t.TempDir()
+
+	nodeSpec := archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  payload,
+	}
+	nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+	nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+	writeArchiveNode(t, root, nodeSpec)
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	plan, err := buildPlanFromVerifiedArchive(view)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+
+	if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+		t.Fatalf("verify archive: %v", err)
+	}
+
+	bodySeen := make(chan io.ReadCloser, 1)
+
+	var (
+		progressed atomic.Int64
+		finished   atomic.Int64
+	)
+
+	doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case http.MethodHead:
+			header := http.Header{}
+			header.Set("X-Next-Offset", "0")
+
+			return newTestHTTPResponse(http.StatusOK, header), nil
+		case http.MethodPut:
+			bodySeen <- req.Body
+
+			header := http.Header{}
+			header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+			return newTestHTTPResponse(http.StatusCreated, header), nil
+		case http.MethodPost:
+			finished.Add(1)
+
+			return newTestHTTPResponse(http.StatusOK, nil), nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+	})
+
+	result := make(chan error, 1)
+	go func() {
+		importer := &clusterVolumeImporter{log: discardLogger()}
+		result <- importer.sendVolumeData(
+			context.Background(),
+			doer,
+			"https://importer.local",
+			volumeModeBlock,
+			plan[0],
+			targetNS,
+			"di-pvc-1",
+			nil,
+			func(count int) { progressed.Add(int64(count)) },
+			nil,
+		)
+	}()
+
+	body := <-bodySeen
+	payloadPath := filepath.Join(root, archive.DataBlockName(""))
+	received, readErr := readBodyDuringRestoredMutation(
+		t,
+		body,
+		payloadPath,
+		payloadPath,
+		payload,
+		1024*1024+17,
+	)
+	if !errors.Is(readErr, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("delayed body read error = %v, want ErrVerifiedArchiveChanged", readErr)
+	}
+	if err := body.Close(); err != nil && !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("close delayed body: %v", err)
+	}
+	if !bytes.Equal(received, payload[:len(received)]) {
+		t.Fatalf("delayed body exposed bytes outside the authenticated original prefix")
+	}
+
+	err = <-result
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+	if got := progressed.Load(); got != 0 {
+		t.Fatalf("progress after authenticated body failure = %d, want 0", got)
+	}
+	if got := finished.Load(); got != 0 {
+		t.Fatalf("finished POSTs after authenticated body failure = %d, want 0", got)
+	}
+}
+
+type causalBody struct {
+	reader   io.Reader
+	closeErr error
+}
+
+func (b *causalBody) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *causalBody) Close() error {
+	return b.closeErr
+}
+
+type terminalErrorReader struct {
+	err error
+}
+
+func (r terminalErrorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestDoBlockChunk_JoinsTransportReadAndCloseCauses(t *testing.T) {
+	networkErr := errors.New("independent network failure")
+	closeErr := errors.New("independent body close failure")
+
+	body := &causalBody{
+		reader:   terminalErrorReader{err: archive.ErrVerifiedArchiveChanged},
+		closeErr: closeErr,
+	}
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPut,
+		"https://importer.local/block",
+		body,
+	)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.ContentLength = 1
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		buffer := make([]byte, 1)
+		_, _ = req.Body.Read(buffer)
+
+		return nil, networkErr
+	})
+
+	_, _, err = doBlockChunk(doer, req, 0, 1, 1)
+	for _, want := range []error{archive.ErrVerifiedArchiveChanged, networkErr, closeErr} {
+		if !errors.Is(err, want) {
+			t.Fatalf("doBlockChunk error = %v, want errors.Is(_, %v)", err, want)
+		}
+	}
+}
+
+func TestDoBlockChunk_RejectsDelayedCloseErrorAfterExactRead(t *testing.T) {
+	payload := []byte("exact bytes before delayed close failure")
+	closeErr := errors.New("delayed request body close failure")
+	bodySeen := make(chan io.ReadCloser, 1)
+
+	doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+		bodySeen <- req.Body
+
+		header := http.Header{}
+		header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+		return newTestHTTPResponse(http.StatusCreated, header), nil
+	})
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPut,
+		"https://importer.local/block",
+		&causalBody{reader: bytes.NewReader(payload), closeErr: closeErr},
+	)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.ContentLength = int64(len(payload))
+
+	result := make(chan error, 1)
+	go func() {
+		_, _, requestErr := doBlockChunk(doer, req, 0, int64(len(payload)), int64(len(payload)))
+		result <- requestErr
+	}()
+
+	body := <-bodySeen
+	received, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read exact delayed-close body: %v", err)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Fatalf("received %q, want %q", received, payload)
+	}
+
+	select {
+	case err := <-result:
+		t.Fatalf("request returned before delayed close: %v", err)
+	default:
+	}
+
+	if err := body.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("body close error = %v, want %v", err, closeErr)
+	}
+	if err := <-result; !errors.Is(err, closeErr) {
+		t.Fatalf("doBlockChunk error = %v, want delayed close cause", err)
+	}
+}
+
+func TestAttestedRequestBody_ReportsExactDigestAndRange(t *testing.T) {
+	payload := []byte("authenticated request payload")
+	body := newAttestedRequestBody(
+		io.NopCloser(bytes.NewReader(payload)),
+		requestBodyRange{start: 17, end: 17 + int64(len(payload))},
+		int64(len(payload)),
+	)
+
+	received, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read attested body: %v", err)
+	}
+	if !bytes.Equal(received, payload) {
+		t.Fatalf("received %q, want %q", received, payload)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("close attested body: %v", err)
+	}
+
+	report, err := body.wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait for body report: %v", err)
+	}
+	if err := report.validateExact(); err != nil {
+		t.Fatalf("validate exact report: %v", err)
+	}
+
+	wantDigest := sha256.Sum256(payload)
+	if report.digest != wantDigest {
+		t.Fatalf("body digest = %x, want %x", report.digest, wantDigest)
+	}
+	if report.bodyRange != (requestBodyRange{start: 17, end: 17 + int64(len(payload))}) {
+		t.Fatalf("body range = %+v, want [17,%d)", report.bodyRange, 17+len(payload))
+	}
+}
+
+func TestDoBlockChunk_AttestationPreservesConnectionReuse(t *testing.T) {
+	const totalSize = int64(12)
+
+	var newConnections atomic.Int64
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		offset, err := strconv.ParseInt(request.Header.Get("X-Offset"), 10, 64)
+		if err != nil {
+			http.Error(writer, "invalid offset", http.StatusBadRequest)
+
+			return
+		}
+
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(writer, "read body", http.StatusInternalServerError)
+
+			return
+		}
+
+		next := offset + int64(len(body))
+		writer.Header().Set("X-Next-Offset", strconv.FormatInt(next, 10))
+		if next == totalSize {
+			writer.WriteHeader(http.StatusCreated)
+
+			return
+		}
+
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConnections.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	client := clientHTTPDoer{client: server.Client()}
+
+	for offset := int64(0); offset < totalSize; offset += 6 {
+		requestEnd := offset + 6
+		req, err := http.NewRequestWithContext(
+			context.Background(),
+			http.MethodPut,
+			server.URL,
+			bytes.NewReader([]byte("123456")),
+		)
+		if err != nil {
+			t.Fatalf("build PUT: %v", err)
+		}
+		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
+
+		next, reposition, err := doBlockChunk(client, req, offset, requestEnd, totalSize)
+		if err != nil {
+			t.Fatalf("doBlockChunk at %d: %v", offset, err)
+		}
+		if reposition || next != requestEnd {
+			t.Fatalf("doBlockChunk at %d = (%d,%v), want (%d,false)", offset, next, reposition, requestEnd)
+		}
+	}
+
+	if got := newConnections.Load(); got != 1 {
+		t.Fatalf("new TCP connections = %d, want one reused connection", got)
+	}
+}
+
+func TestRequestBodyAttestation_DiscriminatesResponseOnlyAcceptance(t *testing.T) {
+	payload := []byte("response arrival is not body completion")
+	bodySeen := make(chan io.ReadCloser, 1)
+	responseAccepted := make(chan struct{}, 1)
+
+	doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+		bodySeen <- req.Body
+
+		header := http.Header{}
+		header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+		return newTestHTTPResponse(http.StatusCreated, header), nil
+	})
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPut,
+		"https://importer.local/block",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	go func() {
+		resp, requestErr := doer.HTTPDo(req)
+		if resp != nil && resp.Body != nil {
+			defer func() { _ = resp.Body.Close() }()
+		}
+
+		if requestErr == nil && resp.StatusCode == http.StatusCreated {
+			responseAccepted <- struct{}{}
+		}
+	}()
+
+	body := <-bodySeen
+	<-responseAccepted
+
+	if err := body.Close(); err != nil {
+		t.Fatalf("close unread baseline body: %v", err)
+	}
 }

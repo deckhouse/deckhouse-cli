@@ -300,15 +300,18 @@ func doFileChunk(client httpDoer, req *http.Request, offset, requestEnd, totalSi
 		return 0, false, fmt.Errorf("invalid PUT range [%d,%d)", offset, requestEnd)
 	}
 
-	resp, err := client.HTTPDo(req)
+	resp, bodyReport, err := doAttestedRequest(client, req, requestBodyRange{start: offset, end: requestEnd})
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+
 	if err != nil {
 		return 0, false, err
 	}
 
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	if resp == nil {
+		return 0, false, errors.New("PUT returned neither a response nor an error")
+	}
 
 	if resp.StatusCode == http.StatusConflict {
 		expected, parseErr := parseOffsetHeader(resp.Header, "X-Expected-Offset")
@@ -330,6 +333,10 @@ func doFileChunk(client httpDoer, req *http.Request, offset, requestEnd, totalSi
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+	}
+
+	if err := bodyReport.validateExact(); err != nil {
+		return 0, false, fmt.Errorf("attest successful PUT body: %w", err)
 	}
 
 	if resp.StatusCode == http.StatusCreated && requestEnd != totalSize {
