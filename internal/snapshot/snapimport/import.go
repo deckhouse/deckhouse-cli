@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -104,6 +105,13 @@ type Config struct {
 	// volume upload. Each leaf gets its own Stream; nil disables progress reporting
 	// and leaves upload behaviour unchanged.
 	Progress progress.Sink
+
+	testHooks *archiveRaceHooks
+}
+
+type archiveRaceHooks struct {
+	afterPlan   func()
+	afterVerify func()
 }
 
 // Run imports a local snapshot archive into the target namespace. It plans the tree
@@ -135,13 +143,45 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	plan, err := BuildPlan(cfg.InputDir)
+	archiveLock, err := archive.AcquireReadLock(cfg.InputDir)
+	if err != nil {
+		return fmt.Errorf("acquire snapshot archive read lock: %w", err)
+	}
+
+	view, err := archive.OpenVerifiedArchive(cfg.InputDir)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("open pinned snapshot archive: %w", err),
+			wrapArchiveUnlockError(archiveLock.Unlock()),
+		)
+	}
+
+	// Ownership is strictly nested: worker payload handles close inside runVerifiedArchive,
+	// then the rooted archive descriptor closes, and only then is the cooperative read lock
+	// released. This prevents a writer from starting while any verified handle is still live.
+	runErr := runVerifiedArchive(ctx, cfg, view)
+	closeErr := view.Close()
+	unlockErr := archiveLock.Unlock()
+
+	return errors.Join(
+		runErr,
+		wrapArchiveViewCloseError(closeErr),
+		wrapArchiveUnlockError(unlockErr),
+	)
+}
+
+func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedArchive) error {
+	plan, err := buildPlanFromVerifiedArchive(view)
 	if err != nil {
 		return fmt.Errorf("build import plan: %w", err)
 	}
 
 	if len(plan) == 0 {
 		return fmt.Errorf("archive %q contains no snapshot nodes", cfg.InputDir)
+	}
+
+	if cfg.testHooks != nil && cfg.testHooks.afterPlan != nil {
+		cfg.testHooks.afterPlan()
 	}
 
 	if cfg.SelectedNodeKind != "" {
@@ -186,11 +226,15 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	if err := verifyArchiveIntegrity(plan); err != nil {
+	if err := verifyArchiveIntegrity(ctx, view, plan); err != nil {
 		return err
 	}
 
-	if err := preflight(plan); err != nil {
+	if cfg.testHooks != nil && cfg.testHooks.afterVerify != nil {
+		cfg.testHooks.afterVerify()
+	}
+
+	if err := preflightContext(ctx, plan); err != nil {
 		return err
 	}
 
@@ -251,6 +295,22 @@ func Run(ctx context.Context, cfg Config) error {
 	return waitRootReady(ctx, cfg, root)
 }
 
+func wrapArchiveViewCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("close pinned snapshot archive: %w", err)
+}
+
+func wrapArchiveUnlockError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("release snapshot archive read lock: %w", err)
+}
+
 // verifyArchiveIntegrity re-verifies every SELECTED node before any cluster mutation: it
 // recomputes each node's integrity checksum (archive.VerifyNode) and strictly validates the
 // snapshot.yaml metadata the checksum does not cover (archive.ValidateNodeMetadata). It runs
@@ -263,20 +323,80 @@ func Run(ctx context.Context, cfg Config) error {
 // POSTs. This is the gate that makes a resume-skipped-but-corrupt volume payload impossible to
 // upload: the checksum recomputation reads every payload byte on disk regardless of any
 // upload-side resume skip (offset==totalSize) that would otherwise never re-read those bytes.
-func verifyArchiveIntegrity(plan []PlannedNode) error {
+func verifyArchiveIntegrity(ctx context.Context, view *archive.VerifiedArchive, plan []PlannedNode) error {
 	errs := make([]error, 0, len(plan))
 
 	for i := range plan {
-		node := plan[i]
+		node := &plan[i]
 		label := fmt.Sprintf("%s/%s", node.Kind, node.Name)
 
-		if err := archive.VerifyNode(node.Dir); err != nil {
+		verified, err := view.VerifyNode(ctx, node.Dir)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+
+			continue
 		}
 
-		if err := archive.ValidateNodeMetadata(node.Dir); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+		if verified.Checksum().Hex != node.NodeChecksum {
+			errs = append(errs, fmt.Errorf(
+				"%s: planned checksum %q differs from verified checksum %q: %w",
+				label, node.NodeChecksum, verified.Checksum().Hex, archive.ErrVerifiedArchiveChanged))
+
+			continue
 		}
+
+		if !verified.SnapshotDigestMatches(node.snapshotDigest) ||
+			!verified.SnapshotIdentityMatches(node.snapshotInfo) {
+			errs = append(errs, fmt.Errorf(
+				"%s: snapshot.yaml changed after planning: %w",
+				label, archive.ErrVerifiedArchiveChanged))
+
+			continue
+		}
+
+		manifestMismatch := false
+
+		for _, manifest := range node.manifestFiles {
+			relPath := filepath.Join(archive.ManifestsDirName, manifest.name)
+			file, ok := verified.File(relPath)
+
+			if !ok ||
+				!file.DigestMatches(manifest.digest) ||
+				!file.IdentityMatches(manifest.info) {
+				errs = append(errs, fmt.Errorf(
+					"%s: manifest %s changed after planning: %w",
+					label, manifest.name, archive.ErrVerifiedArchiveChanged))
+				manifestMismatch = true
+			}
+		}
+
+		if manifestMismatch {
+			continue
+		}
+
+		var payloadPath string
+
+		switch {
+		case node.HasBlockData():
+			payloadPath = filepath.Base(node.DataFile)
+		case node.FilesystemData:
+			payloadPath = archive.FsTarName
+		}
+
+		if payloadPath != "" {
+			payload, ok := verified.File(payloadPath)
+			if !ok || !payload.IdentityMatches(node.payloadInfo) {
+				errs = append(errs, fmt.Errorf(
+					"%s: payload %s changed identity after planning: %w",
+					label, payloadPath, archive.ErrVerifiedArchiveChanged))
+
+				continue
+			}
+
+			node.payloadFile = payload
+		}
+
+		node.archiveView = view
 	}
 
 	if len(errs) > 0 {
@@ -294,13 +414,17 @@ func verifyArchiveIntegrity(plan []PlannedNode) error {
 // manifests + child refs). The standalone --node root restriction is enforced separately in
 // Run, not here.
 func preflight(plan []PlannedNode) error {
+	return preflightContext(context.Background(), plan)
+}
+
+func preflightContext(ctx context.Context, plan []PlannedNode) error {
 	for _, node := range plan {
 		if node.isVolumeSnapshotLeaf() && !node.HasBlockData() && !node.FilesystemData {
 			return fmt.Errorf("data leaf %s/%s has no volume data file (data.bin or data.tar) in the archive", node.Kind, node.Name)
 		}
 
 		if node.FilesystemData {
-			if _, err := scanFSTar(node.TarFile); err != nil {
+			if err := scanVerifiedFSTar(ctx, node); err != nil {
 				return fmt.Errorf("filesystem tar preflight for %s/%s: %w", node.Kind, node.Name, err)
 			}
 		}

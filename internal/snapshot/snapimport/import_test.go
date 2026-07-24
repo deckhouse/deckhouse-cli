@@ -622,6 +622,146 @@ func TestRun_CorruptSkippedBlockPayload_NoMutation(t *testing.T) {
 	}
 }
 
+func TestRun_ArchiveWriterLockFailsBeforeParsingOrMutation(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	writer, err := archive.AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("acquire archive writer lock: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err = Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if !errors.Is(err, archive.ErrArchiveLocked) {
+		t.Fatalf("Run error = %v, want ErrArchiveLocked", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("lock contention reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_CancellationReleasesArchiveReadLock(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic(readyRootSnapshot()))
+	if err := Run(ctx, cfg); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+
+	writer, err := archive.AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("archive read lock leaked after cancellation: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+}
+
+func TestRun_ManifestChangedAfterPlanningFailsBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, archive.ManifestsDirName, archive.ManifestFileName("obj", "a", ""))
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		manifests: []map[string]interface{}{{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "before"},
+		}},
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterPlan: func() {
+			if err := os.WriteFile(manifestPath,
+				[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: after\n"), 0o600); err != nil {
+				t.Fatalf("replace planned manifest: %v", err)
+			}
+
+			rewriteNodeChecksum(t, root)
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("Run error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("planning race reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_ManifestReplacementAfterVerificationUploadsPinnedBytes(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, archive.ManifestsDirName, archive.ManifestFileName("obj", "a", ""))
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		manifests: []map[string]interface{}{{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "verified"},
+		}},
+	})
+
+	up := &stubUploader{}
+	cfg := baseConfig(root, up, &stubVolumes{}, newFakeDynamic(readyRootSnapshot()))
+	cfg.testHooks = &archiveRaceHooks{
+		afterVerify: func() {
+			if err := os.WriteFile(manifestPath,
+				[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: replacement\n"), 0o600); err != nil {
+				t.Fatalf("replace verified manifest: %v", err)
+			}
+		},
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(up.calls) != 1 {
+		t.Fatalf("manifest uploads = %d, want 1", len(up.calls))
+	}
+
+	body := string(up.calls[0].body.Manifests)
+	if !strings.Contains(body, `"name":"verified"`) || strings.Contains(body, `"name":"replacement"`) {
+		t.Fatalf("uploaded manifests = %s, want only verified bytes", body)
+	}
+}
+
+func rewriteNodeChecksum(t *testing.T, nodeDir string) {
+	t.Helper()
+
+	checksum, err := archive.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("recompute node checksum: %v", err)
+	}
+
+	metadata, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("read snapshot metadata: %v", err)
+	}
+
+	metadata.Checksum = checksum
+	if err := archive.WriteSnapshotYAML(nodeDir, metadata); err != nil {
+		t.Fatalf("rewrite snapshot metadata: %v", err)
+	}
+}
+
 func TestRunRejectsNonRegularArchiveArtifactsBeforeExternalCalls(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -53,6 +53,11 @@ type fileAttrs struct {
 
 type fileBodyFactory func(ctx context.Context, offset, size int64) (io.ReadCloser, error)
 
+type fsTarSource interface {
+	io.ReaderAt
+	Stat() (os.FileInfo, error)
+}
+
 type fileUploadProgress struct {
 	onProgress func(int)
 	credited   int64
@@ -412,7 +417,19 @@ type fsTarScan struct {
 // progress stream — activate only distinguishes "at least one file was genuinely
 // transferred" from "nothing was transferred".
 func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
-	scan, err := scanFSTar(tarPath)
+	file, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", tarPath, err)
+	}
+
+	uploadErr := importFSFromTarSource(ctx, client, baseURL, tarPath, file, log, setTotal, onProgress, activate)
+	closeErr := file.Close()
+
+	return errors.Join(uploadErr, closeTarFileError(tarPath, closeErr))
+}
+
+func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPath string, source fsTarSource, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
+	scan, err := scanFSTarSource(source, tarPath)
 	if err != nil {
 		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
 	}
@@ -422,14 +439,13 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			slog.Int("directory_count", scan.StructuralDirectoryCount))
 	}
 
-	f, err := os.Open(tarPath)
+	info, err := source.Stat()
 	if err != nil {
-		return fmt.Errorf("open %s: %w", tarPath, err)
+		return fmt.Errorf("inspect %s: %w", tarPath, err)
 	}
 
-	defer func() { _ = f.Close() }()
-
-	tr := tar.NewReader(f)
+	section := io.NewSectionReader(source, 0, info.Size())
+	tr := tar.NewReader(section)
 	regularIndex := 0
 
 	var runningTotal int64
@@ -471,7 +487,7 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 
 		relPath := metadata.OriginalPath
 
-		payloadStart, err := f.Seek(0, io.SeekCurrent)
+		payloadStart, err := section.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, err)
 		}
@@ -517,13 +533,13 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 			ModTime: hdr.ModTime,
 		}
 
-		newBody := tarEntryBodyFactory(tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
+		newBody := tarEntryBodyFactoryFromSource(source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
 		if err := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
 			newBody, progress, activate); err != nil {
 			return fmt.Errorf("upload %s: %w", relPath, err)
 		}
 
-		if err := verifyTarEntryRawSize(ctx, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
+		if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
 			return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
 		}
 	}
@@ -542,7 +558,7 @@ func scanFSTar(tarPath string) (fsTarScan, error) {
 		return fsTarScan{}, fmt.Errorf("open %s: %w", tarPath, err)
 	}
 
-	scan, scanErr := scanFSTarReader(tar.NewReader(f), tarPath)
+	scan, scanErr := scanFSTarSource(f, tarPath)
 
 	closeErr := f.Close()
 	if closeErr != nil {
@@ -554,6 +570,38 @@ func scanFSTar(tarPath string) (fsTarScan, error) {
 	}
 
 	return scan, nil
+}
+
+func scanVerifiedFSTar(ctx context.Context, node PlannedNode) error {
+	if node.archiveView == nil || node.payloadFile == nil {
+		_, err := scanFSTar(node.TarFile)
+
+		return err
+	}
+
+	handle, err := node.archiveView.OpenVerifiedFile(ctx, node.payloadFile)
+	if err != nil {
+		return err
+	}
+
+	_, scanErr := scanFSTarSource(handle, node.TarFile)
+	verifyErr := handle.Verify(ctx)
+	closeErr := handle.Close()
+
+	return errors.Join(
+		scanErr,
+		verifyErr,
+		closeTarFileError(node.TarFile, closeErr),
+	)
+}
+
+func scanFSTarSource(source fsTarSource, tarPath string) (fsTarScan, error) {
+	info, err := source.Stat()
+	if err != nil {
+		return fsTarScan{}, fmt.Errorf("inspect %s: %w", tarPath, err)
+	}
+
+	return scanFSTarReader(tar.NewReader(io.NewSectionReader(source, 0, info.Size())), tarPath)
 }
 
 func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
@@ -718,7 +766,7 @@ func (b *fsUploadBody) Close() error {
 	return b.closeErr
 }
 
-func tarEntryBodyFactory(tarPath, ext string, payloadStart, storedSize, rawSize int64) fileBodyFactory {
+func tarEntryBodyFactoryFromSource(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) fileBodyFactory {
 	return func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
 		if err := validateBlockOffset(offset, rawSize); err != nil {
 			return nil, fmt.Errorf("validate body offset: %w", err)
@@ -732,43 +780,35 @@ func tarEntryBodyFactory(tarPath, ext string, payloadStart, storedSize, rawSize 
 			return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", payloadStart, offset)
 		}
 
-		file, err := os.Open(tarPath)
-		if err != nil {
-			return nil, fmt.Errorf("reopen %s: %w", tarPath, err)
-		}
-
 		if ext == "" {
-			section := io.NewSectionReader(file, payloadStart+offset, size)
+			section := io.NewSectionReader(source, payloadStart+offset, size)
 
-			return &fsUploadBody{reader: section, closers: []io.Closer{file}}, nil
+			return &fsUploadBody{reader: section}, nil
 		}
 
-		stored := io.NewSectionReader(file, payloadStart, storedSize)
+		stored := io.NewSectionReader(source, payloadStart, storedSize)
 
 		decoder, err := compress.NewReader(ext, stored)
 		if err != nil {
-			return nil, errors.Join(
-				fmt.Errorf("open decompressor: %w", err),
-				closeTarFile(file),
-			)
+			return nil, fmt.Errorf("open decompressor for %s: %w", tarPath, err)
 		}
 
 		discarded, err := discardDecoded(ctx, decoder, offset)
 		if err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, offset, err),
-				closeTarEntryReaders(decoder, file),
+				closeTarEntryDecoder(decoder),
 			)
 		}
 
 		return &fsUploadBody{
 			reader:  io.LimitReader(decoder, size),
-			closers: []io.Closer{decoder, file},
+			closers: []io.Closer{decoder},
 		}, nil
 	}
 }
 
-func verifyTarEntryRawSize(ctx context.Context, tarPath, ext string, payloadStart, storedSize, rawSize int64) error {
+func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) error {
 	if ext == "" {
 		if storedSize != rawSize {
 			return fmt.Errorf("stored size %d differs from declared raw size %d", storedSize, rawSize)
@@ -777,26 +817,18 @@ func verifyTarEntryRawSize(ctx context.Context, tarPath, ext string, payloadStar
 		return nil
 	}
 
-	file, err := os.Open(tarPath)
-	if err != nil {
-		return fmt.Errorf("reopen %s: %w", tarPath, err)
-	}
-
-	stored := io.NewSectionReader(file, payloadStart, storedSize)
+	stored := io.NewSectionReader(source, payloadStart, storedSize)
 
 	decoder, err := compress.NewReader(ext, stored)
 	if err != nil {
-		return errors.Join(
-			fmt.Errorf("open decompressor: %w", err),
-			closeTarFile(file),
-		)
+		return fmt.Errorf("open decompressor for %s: %w", tarPath, err)
 	}
 
 	discarded, err := discardDecoded(ctx, decoder, rawSize)
 	if err != nil {
 		return errors.Join(
 			fmt.Errorf("discard decoded payload (got %d of %d bytes): %w", discarded, rawSize, err),
-			closeTarEntryReaders(decoder, file),
+			closeTarEntryDecoder(decoder),
 		)
 	}
 
@@ -813,7 +845,7 @@ func verifyTarEntryRawSize(ctx context.Context, tarPath, ext string, payloadStar
 		readErr = fmt.Errorf("probe decoded stream end: %w", readErr)
 	}
 
-	closeErr := closeTarEntryReaders(decoder, file)
+	closeErr := closeTarEntryDecoder(decoder)
 
 	if readErr != nil || closeErr != nil {
 		return errors.Join(readErr, closeErr)
@@ -822,24 +854,18 @@ func verifyTarEntryRawSize(ctx context.Context, tarPath, ext string, payloadStar
 	return nil
 }
 
-func closeTarEntryReaders(decoder io.Closer, file *os.File) error {
-	var errs []error
-
+func closeTarEntryDecoder(decoder io.Closer) error {
 	if err := decoder.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("close decoder: %w", err))
-	}
-
-	if err := file.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("close tar: %w", err))
-	}
-
-	return errors.Join(errs...)
-}
-
-func closeTarFile(file *os.File) error {
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close tar: %w", err)
+		return fmt.Errorf("close decoder: %w", err)
 	}
 
 	return nil
+}
+
+func closeTarFileError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("close tar %s: %w", path, err)
 }

@@ -110,11 +110,24 @@ type PlannedNode struct {
 	// DataImportIdentity is the versioned full content identity used to qualify and
 	// validate the shared DataImport object.
 	DataImportIdentity string
+
+	snapshotDigest [sha256.Size]byte
+	snapshotInfo   os.FileInfo
+	manifestFiles  []plannedManifest
+	archiveView    *archive.VerifiedArchive
+	payloadFile    *archive.VerifiedFile
+	payloadInfo    os.FileInfo
 }
 
 type planTopology struct {
 	nodes   map[string]int
 	parents map[string]int
+}
+
+type plannedManifest struct {
+	name   string
+	digest [sha256.Size]byte
+	info   os.FileInfo
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -146,6 +159,19 @@ func (n PlannedNode) isDomainDataLeaf() bool {
 // data file (if any) are resolved.
 func BuildPlan(rootDir string) ([]PlannedNode, error) {
 	return buildPlan(rootDir, nil)
+}
+
+func buildPlanFromVerifiedArchive(view *archive.VerifiedArchive) ([]PlannedNode, error) {
+	var plan []PlannedNode
+	if _, err := appendPostOrder(view.RootSource(), &plan); err != nil {
+		return nil, err
+	}
+
+	if _, err := indexPlanTopology(plan); err != nil {
+		return nil, err
+	}
+
+	return plan, nil
 }
 
 func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, error) {
@@ -361,15 +387,29 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		return PlannedNode{}, fmt.Errorf("read node %s: %w", dir, err)
 	}
 
-	snapshotData, readErr := io.ReadAll(snapshotFile)
-	closeErr := snapshotFile.Close()
-
-	if readErr != nil {
-		return PlannedNode{}, fmt.Errorf("read node %s snapshot.yaml: %w", dir, readErr)
+	snapshotInfoBefore, err := snapshotFile.Stat()
+	if err != nil {
+		return PlannedNode{}, errors.Join(
+			fmt.Errorf("inspect node %s snapshot.yaml: %w", dir, err),
+			wrapPlanFileError("close", filepath.Join(dir, archive.SnapshotYAMLName), snapshotFile.Close()),
+		)
 	}
 
-	if closeErr != nil {
-		return PlannedNode{}, fmt.Errorf("close node %s snapshot.yaml: %w", dir, closeErr)
+	snapshotData, readErr := io.ReadAll(snapshotFile)
+	snapshotInfoAfter, statErr := snapshotFile.Stat()
+	closeErr := snapshotFile.Close()
+
+	if readErr != nil || statErr != nil || closeErr != nil {
+		return PlannedNode{}, errors.Join(
+			wrapPlanFileError("read", filepath.Join(dir, archive.SnapshotYAMLName), readErr),
+			wrapPlanFileError("inspect", filepath.Join(dir, archive.SnapshotYAMLName), statErr),
+			wrapPlanFileError("close", filepath.Join(dir, archive.SnapshotYAMLName), closeErr),
+		)
+	}
+
+	if !samePlanFileInfo(snapshotInfoBefore, snapshotInfoAfter) {
+		return PlannedNode{}, fmt.Errorf("node %s snapshot.yaml changed while planning: %w",
+			dir, archive.ErrVerifiedArchiveChanged)
 	}
 
 	var sy archive.SnapshotYAML
@@ -381,7 +421,7 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		return PlannedNode{}, fmt.Errorf("node %s: snapshot.yaml missing apiVersion/kind/name", dir)
 	}
 
-	manifests, err := readManifests(source)
+	manifests, manifestFiles, err := readManifests(source)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
@@ -402,6 +442,9 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		Manifests:       manifests,
 		SourceObjectRef: sy.SourceObjectRef,
 		NodeChecksum:    sy.Checksum.Hex,
+		snapshotDigest:  sha256.Sum256(snapshotData),
+		snapshotInfo:    snapshotInfoBefore,
+		manifestFiles:   manifestFiles,
 	}
 
 	// Data leaves carry exactly one volume; lift its captured scratch-volume parameters onto
@@ -424,13 +467,27 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		node.Ext = blockPayload.Ext
 		node.PayloadKind = dataImportPayloadBlock
 		node.Codec = codecName(blockPayload.Ext)
+
+		payload, openErr := source.OpenRegularFile(filepath.Base(blockPayload.Path))
+		if openErr != nil {
+			return PlannedNode{}, fmt.Errorf("node %s: reopen block payload: %w", dir, openErr)
+		}
+
+		node.payloadInfo, err = statAndClosePlanFile(payload, blockPayload.Path)
+		if err != nil {
+			return PlannedNode{}, err
+		}
 	}
 
 	tarPath := filepath.Join(dir, archive.FsTarName)
 
 	tarFile, statErr := source.OpenRegularFile(archive.FsTarName)
 	if statErr == nil {
-		_ = tarFile.Close()
+		node.payloadInfo, err = statAndClosePlanFile(tarFile, tarPath)
+		if err != nil {
+			return PlannedNode{}, err
+		}
+
 		node.FilesystemData = true
 		node.TarFile = tarPath
 		node.PayloadKind = dataImportPayloadFilesystem
@@ -553,21 +610,21 @@ func dataImportIdentity(node PlannedNode) string {
 }
 
 // readManifests parses every <dir>/manifests/*.yaml file into an unstructured object.
-func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, error) {
+func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, []plannedManifest, error) {
 	manifestsDir, err := source.OpenDirectory(archive.ManifestsDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
 
-		return nil, fmt.Errorf("read manifests dir: %w", err)
+		return nil, nil, fmt.Errorf("read manifests dir: %w", err)
 	}
 
 	defer func() { _ = manifestsDir.Close() }()
 
 	entries, err := manifestsDir.ReadDirectory()
 	if err != nil {
-		return nil, fmt.Errorf("read manifests dir: %w", err)
+		return nil, nil, fmt.Errorf("read manifests dir: %w", err)
 	}
 
 	names := make([]string, 0, len(entries))
@@ -582,32 +639,72 @@ func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, e
 	sort.Strings(names)
 
 	manifests := make([]unstructured.Unstructured, 0, len(names))
+	files := make([]plannedManifest, 0, len(names))
+
 	for _, name := range names {
 		file, openErr := manifestsDir.OpenRegularFile(name)
 		if openErr != nil {
-			return nil, fmt.Errorf("open manifest %s: %w", name, openErr)
+			return nil, nil, fmt.Errorf("open manifest %s: %w", name, openErr)
 		}
 
+		infoBefore, statBeforeErr := file.Stat()
 		data, readErr := io.ReadAll(file)
+		infoAfter, statAfterErr := file.Stat()
 		closeErr := file.Close()
 
-		if readErr != nil {
-			return nil, fmt.Errorf("read manifest %s: %w", name, readErr)
+		if readErr != nil || statBeforeErr != nil || statAfterErr != nil || closeErr != nil {
+			return nil, nil, errors.Join(
+				wrapPlanFileError("read", name, readErr),
+				wrapPlanFileError("inspect before read", name, statBeforeErr),
+				wrapPlanFileError("inspect after read", name, statAfterErr),
+				wrapPlanFileError("close", name, closeErr),
+			)
 		}
 
-		if closeErr != nil {
-			return nil, fmt.Errorf("close manifest %s: %w", name, closeErr)
+		if !samePlanFileInfo(infoBefore, infoAfter) {
+			return nil, nil, fmt.Errorf("manifest %s changed while planning: %w",
+				name, archive.ErrVerifiedArchiveChanged)
 		}
 
 		var obj map[string]interface{}
 		if err := sigsyaml.Unmarshal(data, &obj); err != nil {
-			return nil, fmt.Errorf("unmarshal manifest %s: %w", name, err)
+			return nil, nil, fmt.Errorf("unmarshal manifest %s: %w", name, err)
 		}
 
 		manifests = append(manifests, unstructured.Unstructured{Object: obj})
+		files = append(files, plannedManifest{name: name, digest: sha256.Sum256(data), info: infoBefore})
 	}
 
-	return manifests, nil
+	return manifests, files, nil
+}
+
+func statAndClosePlanFile(file *os.File, path string) (os.FileInfo, error) {
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+
+	if statErr != nil || closeErr != nil {
+		return nil, errors.Join(
+			wrapPlanFileError("inspect", path, statErr),
+			wrapPlanFileError("close", path, closeErr),
+		)
+	}
+
+	return info, nil
+}
+
+func samePlanFileInfo(expected, actual os.FileInfo) bool {
+	return os.SameFile(expected, actual) &&
+		expected.Mode() == actual.Mode() &&
+		expected.Size() == actual.Size() &&
+		expected.ModTime().Equal(actual.ModTime())
+}
+
+func wrapPlanFileError(operation, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%s archive file %s: %w", operation, path, err)
 }
 
 // childNodeNames returns sorted direct child names and a pinned snapshots directory.

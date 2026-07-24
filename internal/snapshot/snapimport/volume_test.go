@@ -2975,6 +2975,59 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	}
 }
 
+func TestUploadVolumeData_CompletedReuseRejectsChangedVerifiedPayload(t *testing.T) {
+	payload := []byte("verified completed payload")
+	nodeSpec := archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  payload,
+	}
+	nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+	nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, nodeSpec)
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	plan, err := buildPlanFromVerifiedArchive(view)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+
+	if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+		t.Fatalf("verify archive: %v", err)
+	}
+
+	leaf := plan[0]
+	completed := dataImportObjForLeaf(targetNS, leaf, false)
+	_ = unstructured.SetNestedSlice(completed.Object, readyConditions(conditionCompleted), "status", "conditions")
+	_ = unstructured.SetNestedMap(completed.Object, map[string]interface{}{"name": "vsc-1"}, "status", "data", "artifactRef")
+
+	dataPath := filepath.Join(root, archive.DataBlockName(""))
+	if err := os.Rename(dataPath, dataPath+".verified"); err != nil {
+		t.Fatalf("move verified payload: %v", err)
+	}
+
+	if err := os.WriteFile(dataPath, []byte("changed completed payload!"), 0o600); err != nil {
+		t.Fatalf("write changed payload: %v", err)
+	}
+
+	importer := newTestVolumeImporter(newFakeDataImportDyn(completed))
+	diName := importer.DataImportName(leaf)
+
+	err = importer.UploadVolumeData(context.Background(), leaf, diName, targetNS, nil, nil, nil)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("UploadVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+}
+
 func newFakeDataImportDyn(objs ...k8sruntime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
 		dataImportGVR: "DataImportList",
@@ -3805,5 +3858,106 @@ func TestSendVolumeData_Block_InvalidSize_SendsNoHTTP(t *testing.T) {
 				t.Fatal("expected error for missing captured size, got nil")
 			}
 		})
+	}
+}
+
+func TestSendVolumeData_MidPUTReplacementUsesPinnedBytesAndDoesNotFinish(t *testing.T) {
+	payload := bytes.Repeat([]byte("verified-block-"), 4096)
+	nodeSpec := archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  payload,
+	}
+	nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+	nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, nodeSpec)
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	plan, err := buildPlanFromVerifiedArchive(view)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+
+	if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+		t.Fatalf("verify archive: %v", err)
+	}
+
+	dataPath := filepath.Join(root, archive.DataBlockName(""))
+	replacement := bytes.Repeat([]byte("changed-block--"), 4096)
+
+	var (
+		received []byte
+		finished int
+		replaced bool
+	)
+
+	const resumeOffset = 1024
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodHead:
+			writer.Header().Set("X-Next-Offset", strconv.Itoa(resumeOffset))
+			writer.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			if !replaced {
+				replaced = true
+				if err := os.Rename(dataPath, dataPath+".verified"); err != nil {
+					t.Fatalf("move verified payload: %v", err)
+				}
+
+				if err := os.WriteFile(dataPath, replacement, 0o600); err != nil {
+					t.Fatalf("write replacement payload: %v", err)
+				}
+			}
+
+			var err error
+			received, err = io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read PUT body: %v", err)
+			}
+
+			writer.Header().Set("X-Next-Offset", strconv.Itoa(len(payload)))
+			writer.WriteHeader(http.StatusCreated)
+		case http.MethodPost:
+			finished++
+			writer.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	err = importer.sendVolumeData(
+		context.Background(),
+		plainHTTPDoer{},
+		server.URL,
+		volumeModeBlock,
+		plan[0],
+		targetNS,
+		"di-pvc-1",
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+
+	if !bytes.Equal(received, payload[resumeOffset:]) {
+		t.Fatal("PUT consumed replacement bytes instead of the pinned verified descriptor")
+	}
+
+	if finished != 0 {
+		t.Fatalf("finished POSTs = %d, want 0", finished)
 	}
 }
