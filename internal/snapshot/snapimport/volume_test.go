@@ -3961,3 +3961,230 @@ func TestSendVolumeData_MidPUTReplacementUsesPinnedBytesAndDoesNotFinish(t *test
 		t.Fatalf("finished POSTs = %d, want 0", finished)
 	}
 }
+
+func TestSendVolumeData_BlockMutateUseRestoreDuringPUTIsRejected(t *testing.T) {
+	payload := randomPayload(t, 2*1024*1024+4096)
+
+	tests := []struct {
+		name         string
+		codec        string
+		ext          string
+		resumeOffset int64
+		conflictTo   int64
+		hardlink     bool
+		swallowError bool
+	}{
+		{name: "raw same inode with transport swallowing body error", codec: "none", swallowError: true},
+		{name: "raw external hardlink partial resume", codec: "none", resumeOffset: 1024*1024 + 17, hardlink: true},
+		{name: "raw conflict reposition rereads authenticated range", codec: "none", conflictTo: 2*1024*1024 + 17},
+		{name: "zstd same inode", codec: "zstd", ext: ".zst"},
+		{name: "zstd external hardlink", codec: "zstd", ext: ".zst", hardlink: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			encodedPath := filepath.Join(t.TempDir(), "encoded"+tc.ext)
+			writeEncodedBlockFile(t, encodedPath, tc.codec, payload)
+
+			encoded, err := os.ReadFile(encodedPath)
+			if err != nil {
+				t.Fatalf("read encoded payload: %v", err)
+			}
+
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				namespace:  "src",
+				blockData:  encoded,
+				blockExt:   tc.ext,
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			payloadPath := filepath.Join(root, archive.DataBlockName(tc.ext))
+			writerPath := payloadPath
+			if tc.hardlink {
+				writerPath = filepath.Join(t.TempDir(), "external-hardlink")
+				if err := os.Link(payloadPath, writerPath); err != nil {
+					t.Fatalf("create external hardlink: %v", err)
+				}
+			}
+
+			mutationOffset := tc.resumeOffset
+			if tc.ext != "" {
+				mutationOffset = 1024*1024 + 17
+			}
+
+			var (
+				finished int
+				received []byte
+				methods  []string
+				putCount int
+			)
+
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method)
+
+				switch req.Method {
+				case http.MethodHead:
+					header := http.Header{}
+					header.Set("X-Next-Offset", strconv.FormatInt(tc.resumeOffset, 10))
+
+					return newTestHTTPResponse(http.StatusOK, header), nil
+				case http.MethodPut:
+					putCount++
+					if tc.conflictTo > 0 && putCount == 1 {
+						firstBody, readErr := io.ReadAll(req.Body)
+						if readErr != nil {
+							t.Fatalf("read pre-conflict PUT body: %v", readErr)
+						}
+
+						if !bytes.Equal(firstBody, payload[tc.resumeOffset:]) {
+							t.Fatal("pre-conflict PUT did not consume the authenticated original payload")
+						}
+
+						header := http.Header{}
+						header.Set("X-Expected-Offset", strconv.FormatInt(tc.conflictTo, 10))
+
+						return newTestHTTPResponse(http.StatusConflict, header), nil
+					}
+
+					if tc.conflictTo > 0 {
+						mutationOffset = tc.conflictTo
+					}
+
+					readData, readErr := readBodyDuringRestoredMutation(
+						t,
+						req.Body,
+						payloadPath,
+						writerPath,
+						encoded,
+						mutationOffset,
+					)
+					received = append(received, readData...)
+
+					if readErr != nil && !tc.swallowError {
+						return nil, readErr
+					}
+
+					header := http.Header{}
+					header.Set("X-Next-Offset", strconv.Itoa(len(payload)))
+
+					return newTestHTTPResponse(http.StatusCreated, header), nil
+				case http.MethodPost:
+					finished++
+
+					return newTestHTTPResponse(http.StatusOK, nil), nil
+				default:
+					t.Fatalf("unexpected request method %s", req.Method)
+
+					return nil, nil
+				}
+			})
+
+			importer := &clusterVolumeImporter{log: discardLogger()}
+			err = importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://importer.local",
+				volumeModeBlock,
+				plan[0],
+				targetNS,
+				"di-pvc-1",
+				nil,
+				nil,
+				nil,
+			)
+			if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+				t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+			}
+
+			expectedStart := int(tc.resumeOffset)
+			if tc.conflictTo > 0 {
+				expectedStart = int(tc.conflictTo)
+			}
+
+			expectedEnd := expectedStart + len(received)
+			if expectedEnd > len(payload) || !bytes.Equal(received, payload[expectedStart:expectedEnd]) {
+				t.Fatalf("PUT received %d bytes that are not an authenticated original payload prefix", len(received))
+			}
+
+			if finished != 0 {
+				t.Fatalf("finished POSTs = %d, want 0", finished)
+			}
+
+			expectedMethods := []string{http.MethodHead, http.MethodPut}
+			if tc.conflictTo > 0 {
+				expectedMethods = append(expectedMethods, http.MethodPut)
+			}
+
+			if !slices.Equal(methods, expectedMethods) {
+				t.Fatalf("HTTP methods = %v, want %v", methods, expectedMethods)
+			}
+		})
+	}
+}
+
+func readBodyDuringRestoredMutation(
+	t *testing.T,
+	body io.Reader,
+	payloadPath, writerPath string,
+	original []byte,
+	offset int64,
+) ([]byte, error) {
+	t.Helper()
+
+	if offset < 0 || offset+32 > int64(len(original)) {
+		t.Fatalf("mutation range [%d,%d) is outside payload size %d", offset, offset+32, len(original))
+	}
+
+	info, err := os.Stat(payloadPath)
+	if err != nil {
+		t.Fatalf("inspect payload before mutation: %v", err)
+	}
+
+	writer, err := os.OpenFile(writerPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open mutation writer: %v", err)
+	}
+
+	changed := bytes.Repeat([]byte{0xA5}, 32)
+	if _, err := writer.WriteAt(changed, offset); err != nil {
+		t.Fatalf("mutate payload: %v", err)
+	}
+
+	data, readErr := io.ReadAll(body)
+
+	if _, err := writer.WriteAt(original[offset:offset+32], offset); err != nil {
+		t.Fatalf("restore payload: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close mutation writer: %v", err)
+	}
+
+	if err := os.Chtimes(payloadPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("restore payload timestamp: %v", err)
+	}
+
+	return data, readErr
+}

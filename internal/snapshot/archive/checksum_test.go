@@ -17,11 +17,13 @@ limitations under the License.
 package archive
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -658,6 +660,428 @@ func TestVerifiedArchiveHandleSurvivesReplacementAndDetectsNamespaceChange(t *te
 
 	if err := handle.Verify(context.Background()); !errors.Is(err, ErrVerifiedArchiveChanged) {
 		t.Fatalf("Verify error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+}
+
+func TestVerifiedHandleRejectsMutateUseRestoreBeforeExposingBytes(t *testing.T) {
+	tests := []struct {
+		name       string
+		writerPath func(t *testing.T, payloadPath string) string
+		read       func(handle *VerifiedHandle, buffer []byte) (int, error)
+	}{
+		{
+			name: "same inode through archive path with ReadAt",
+			writerPath: func(t *testing.T, payloadPath string) string {
+				t.Helper()
+
+				return payloadPath
+			},
+			read: func(handle *VerifiedHandle, buffer []byte) (int, error) {
+				return handle.ReadAt(buffer, authChunkSize+17)
+			},
+		},
+		{
+			name: "external hardlink with Seek and Read",
+			writerPath: func(t *testing.T, payloadPath string) string {
+				t.Helper()
+
+				linkPath := filepath.Join(t.TempDir(), "external-hardlink")
+				if err := os.Link(payloadPath, linkPath); err != nil {
+					t.Fatalf("create external hardlink: %v", err)
+				}
+
+				return linkPath
+			},
+			read: func(handle *VerifiedHandle, buffer []byte) (int, error) {
+				if _, err := handle.Seek(authChunkSize+17, io.SeekStart); err != nil {
+					return 0, err
+				}
+
+				return handle.Read(buffer)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeDir := makeNodeDir(t)
+			payloadPath := filepath.Join(nodeDir, DataBlockName(""))
+			payload := []byte(strings.Repeat("authenticated-payload-", authChunkSize/10+100))
+
+			if err := os.WriteFile(payloadPath, payload, 0o600); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+
+			checksum, err := ComputeNodeChecksum(nodeDir)
+			if err != nil {
+				t.Fatalf("compute checksum: %v", err)
+			}
+
+			if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Name:       "pvc",
+				Checksum:   checksum,
+				Volumes: []VolumeInfo{{
+					Target: VolumeObjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Name:       "pvc",
+					},
+					Artifact: VolumeObjectRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       "pvc-content",
+					},
+					VolumeMode:       VolumeModeBlock,
+					StorageClassName: "test",
+					Size:             "2Mi",
+				}},
+			}); err != nil {
+				t.Fatalf("write snapshot metadata: %v", err)
+			}
+
+			view, err := OpenVerifiedArchive(nodeDir)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+
+			node, err := view.VerifyNode(context.Background(), nodeDir)
+			if err != nil {
+				t.Fatalf("verify node: %v", err)
+			}
+
+			expected, ok := node.File(DataBlockName(""))
+			if !ok {
+				t.Fatal("verified payload is absent")
+			}
+
+			handle, err := view.OpenVerifiedFile(context.Background(), expected)
+			if err != nil {
+				t.Fatalf("open verified payload: %v", err)
+			}
+
+			info, err := os.Stat(payloadPath)
+			if err != nil {
+				t.Fatalf("inspect payload: %v", err)
+			}
+
+			writerPath := tc.writerPath(t, payloadPath)
+			writer, err := os.OpenFile(writerPath, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatalf("open mutation writer: %v", err)
+			}
+
+			const mutationOffset = authChunkSize + 17
+
+			original := append([]byte(nil), payload[mutationOffset:mutationOffset+32]...)
+			changed := bytes.Repeat([]byte{0xA5}, len(original))
+			if _, err := writer.WriteAt(changed, mutationOffset); err != nil {
+				t.Fatalf("mutate payload: %v", err)
+			}
+
+			buffer := make([]byte, len(original))
+			count, readErr := tc.read(handle, buffer)
+
+			if _, err := writer.WriteAt(original, mutationOffset); err != nil {
+				t.Fatalf("restore payload: %v", err)
+			}
+
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close mutation writer: %v", err)
+			}
+
+			if err := os.Chtimes(payloadPath, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatalf("restore payload timestamps: %v", err)
+			}
+
+			if count != 0 {
+				t.Fatalf("read returned %d unauthenticated bytes, want 0", count)
+			}
+
+			if !errors.Is(readErr, ErrVerifiedArchiveChanged) {
+				t.Fatalf("read error = %v, want ErrVerifiedArchiveChanged", readErr)
+			}
+
+			if err := handle.Verify(context.Background()); !errors.Is(err, ErrVerifiedArchiveChanged) {
+				t.Fatalf("Verify after restore = %v, want sticky ErrVerifiedArchiveChanged", err)
+			}
+
+			indexPath := handle.indexPath
+			if err := handle.Close(); err != nil {
+				t.Fatalf("close verified payload: %v", err)
+			}
+
+			if _, err := os.Stat(indexPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("authentication index remains after handle close: %v", err)
+			}
+
+			authDir := view.authDir
+			if err := view.Close(); err != nil {
+				t.Fatalf("close verified archive: %v", err)
+			}
+
+			if _, err := os.Stat(authDir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("private authentication directory remains after close: %v", err)
+			}
+		})
+	}
+}
+
+func TestPrePostOnlyRehashDoesNotDetectMutateUseRestore(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "payload")
+	original := bytes.Repeat([]byte("pre-post-only-authentication-gap"), 4096)
+	if err := os.WriteFile(payloadPath, original, 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	hardlinkPath := filepath.Join(t.TempDir(), "external-hardlink")
+	if err := os.Link(payloadPath, hardlinkPath); err != nil {
+		t.Fatalf("create external hardlink: %v", err)
+	}
+
+	reader, err := os.Open(payloadPath)
+	if err != nil {
+		t.Fatalf("open payload reader: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	info, err := reader.Stat()
+	if err != nil {
+		t.Fatalf("inspect payload: %v", err)
+	}
+
+	before, err := hashReaderAtContext(context.Background(), reader, info.Size())
+	if err != nil {
+		t.Fatalf("pre-consumption hash: %v", err)
+	}
+
+	writer, err := os.OpenFile(hardlinkPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open hardlink writer: %v", err)
+	}
+
+	const offset = 4096
+
+	changed := bytes.Repeat([]byte{0xA5}, 32)
+	if _, err := writer.WriteAt(changed, offset); err != nil {
+		t.Fatalf("mutate payload: %v", err)
+	}
+
+	consumed := make([]byte, len(changed))
+	if _, err := reader.ReadAt(consumed, offset); err != nil {
+		t.Fatalf("consume mutated payload: %v", err)
+	}
+
+	if _, err := writer.WriteAt(original[offset:offset+len(changed)], offset); err != nil {
+		t.Fatalf("restore payload: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close hardlink writer: %v", err)
+	}
+
+	if err := os.Chtimes(payloadPath, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatalf("restore payload timestamp: %v", err)
+	}
+
+	after, err := hashReaderAtContext(context.Background(), reader, info.Size())
+	if err != nil {
+		t.Fatalf("post-consumption hash: %v", err)
+	}
+
+	infoAfter, err := reader.Stat()
+	if err != nil {
+		t.Fatalf("inspect restored payload: %v", err)
+	}
+
+	if before != after || !sameVerifiedInfo(info, infoAfter) {
+		t.Fatal("pre/post-only baseline unexpectedly detected the restored mutation")
+	}
+
+	if !bytes.Equal(consumed, changed) {
+		t.Fatalf("baseline consumed %x, want mutated bytes %x", consumed, changed)
+	}
+}
+
+func TestVerifiedHandleCancellationIsStickyAndExposesNoBytes(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	payloadPath := filepath.Join(nodeDir, DataBlockName(""))
+	writeFile(t, payloadPath, strings.Repeat("cancel-authenticated-read", 1024))
+
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc",
+		Checksum:   checksum,
+		Volumes: []VolumeInfo{{
+			Target: VolumeObjectRef{
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "pvc",
+			},
+			Artifact: VolumeObjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "pvc-content",
+			},
+			VolumeMode:       VolumeModeBlock,
+			StorageClassName: "test",
+			Size:             "1Mi",
+		}},
+	}); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+
+	view, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	node, err := view.VerifyNode(context.Background(), nodeDir)
+	if err != nil {
+		t.Fatalf("verify node: %v", err)
+	}
+
+	expected, ok := node.File(DataBlockName(""))
+	if !ok {
+		t.Fatal("verified payload is absent")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	handle, err := view.OpenVerifiedFile(ctx, expected)
+	if err != nil {
+		t.Fatalf("open verified payload: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	cancel()
+
+	buffer := make([]byte, 32)
+	count, readErr := handle.Read(buffer)
+	if count != 0 {
+		t.Fatalf("read returned %d bytes after cancellation, want 0", count)
+	}
+
+	if !errors.Is(readErr, context.Canceled) {
+		t.Fatalf("read error = %v, want context.Canceled", readErr)
+	}
+
+	if err := handle.Verify(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Verify after canceled read = %v, want sticky context.Canceled", err)
+	}
+}
+
+func TestVerifiedHandleLargePayloadMemoryAndIndexAreBounded(t *testing.T) {
+	const payloadSize = 128 * 1024 * 1024
+
+	nodeDir := makeNodeDir(t)
+	payloadPath := filepath.Join(nodeDir, DataBlockName(""))
+
+	payload, err := os.Create(payloadPath)
+	if err != nil {
+		t.Fatalf("create sparse payload: %v", err)
+	}
+
+	if err := payload.Truncate(payloadSize); err != nil {
+		t.Fatalf("truncate sparse payload: %v", err)
+	}
+
+	if err := payload.Close(); err != nil {
+		t.Fatalf("close sparse payload: %v", err)
+	}
+
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc",
+		Checksum:   checksum,
+		Volumes: []VolumeInfo{{
+			Target: VolumeObjectRef{
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "pvc",
+			},
+			Artifact: VolumeObjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshotContent",
+				Name:       "pvc-content",
+			},
+			VolumeMode:       VolumeModeBlock,
+			StorageClassName: "test",
+			Size:             "128Mi",
+		}},
+	}); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+
+	view, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	node, err := view.VerifyNode(context.Background(), nodeDir)
+	if err != nil {
+		t.Fatalf("verify node: %v", err)
+	}
+
+	expected, ok := node.File(DataBlockName(""))
+	if !ok {
+		t.Fatal("verified payload is absent")
+	}
+
+	runtime.GC()
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	handle, err := view.OpenVerifiedFile(context.Background(), expected)
+	if err != nil {
+		t.Fatalf("open verified payload: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	runtime.GC()
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	const maxHeapGrowth = 16 * 1024 * 1024
+
+	if after.HeapAlloc > before.HeapAlloc+maxHeapGrowth {
+		t.Fatalf("heap grew by %d bytes for a %d-byte payload, limit is %d",
+			after.HeapAlloc-before.HeapAlloc, payloadSize, maxHeapGrowth)
+	}
+
+	indexInfo, err := os.Stat(handle.indexPath)
+	if err != nil {
+		t.Fatalf("inspect authentication index: %v", err)
+	}
+
+	recordCount, err := authIndexRecordCount(payloadSize)
+	if err != nil {
+		t.Fatalf("calculate authentication record count: %v", err)
+	}
+
+	expectedIndexSize := recordCount * authIndexRecordSize
+	if indexInfo.Size() != expectedIndexSize {
+		t.Fatalf("authentication index size = %d, want %d", indexInfo.Size(), expectedIndexSize)
+	}
+
+	if len(handle.cache) != authChunkSize {
+		t.Fatalf("authentication cache size = %d, want fixed %d", len(handle.cache), authChunkSize)
 	}
 }
 

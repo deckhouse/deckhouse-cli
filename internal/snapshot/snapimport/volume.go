@@ -840,6 +840,16 @@ type blockArchiveSource interface {
 	io.Seeker
 }
 
+type authenticatedReadResetter interface {
+	ResetAuthenticatedRead()
+}
+
+func resetAuthenticatedRead(source any) {
+	if resetter, ok := source.(authenticatedReadResetter); ok {
+		resetter.ResetAuthenticatedRead()
+	}
+}
+
 func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	if err := validateBlockOffset(0, totalSize); err != nil {
 		return fmt.Errorf("invalid block upload size %d: %w", totalSize, err)
@@ -981,6 +991,9 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io
 		}
 
 		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+
+		resetAuthenticatedRead(source)
+
 		section := io.NewSectionReader(source, offset, requestEnd-offset)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(section))

@@ -23,12 +23,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	sigsyaml "sigs.k8s.io/yaml"
+)
+
+const (
+	authChunkSize       = 1024 * 1024
+	authIndexRecordSize = sha256.Size
+	maxAuthIndexRecords = 8 * 1024 * 1024
 )
 
 // ErrChecksumMismatch is returned when the recomputed checksum differs from
@@ -45,8 +53,9 @@ var ErrVerifiedArchiveChanged = errors.New("verified archive view changed")
 // VerifiedArchive retains one rooted archive descriptor for the upload lifetime. Individual
 // payload handles are opened only for active workers, keeping descriptor use bounded.
 type VerifiedArchive struct {
-	root *RootedSource
-	path string
+	root    *RootedSource
+	path    string
+	authDir string
 }
 
 // VerifiedNode is the immutable verification result for one archive node.
@@ -68,8 +77,18 @@ type VerifiedFile struct {
 // VerifiedHandle is one exact regular-file descriptor whose identity and bytes were verified.
 // The handle must be closed before its VerifiedArchive.
 type VerifiedHandle struct {
-	file     *os.File
-	expected *VerifiedFile
+	ctx       context.Context
+	file      *os.File
+	index     *os.File
+	indexPath string
+	expected  *VerifiedFile
+
+	mu         sync.Mutex
+	offset     int64
+	cacheChunk int64
+	cacheLen   int
+	cache      []byte
+	stickyErr  error
 }
 
 // OpenVerifiedArchive pins root for planning, verification, upload, and final readiness.
@@ -84,12 +103,23 @@ func OpenVerifiedArchive(root string) (*VerifiedArchive, error) {
 		return nil, err
 	}
 
-	return &VerifiedArchive{root: source, path: absolute}, nil
+	authDir, err := os.MkdirTemp("", "d8-archive-auth-*")
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create private archive authentication directory: %w", err),
+			source.Close(),
+		)
+	}
+
+	return &VerifiedArchive{root: source, path: absolute, authDir: authDir}, nil
 }
 
 // Close releases the pinned archive root. All VerifiedHandles must already be closed.
 func (a *VerifiedArchive) Close() error {
-	return a.root.Close()
+	return errors.Join(
+		wrapAuthIndexCleanupError(os.RemoveAll(a.authDir)),
+		a.root.Close(),
+	)
 }
 
 // RootSource returns the pinned source used to build the plan. The caller must not close it.
@@ -242,14 +272,28 @@ func (a *VerifiedArchive) OpenVerifiedFile(ctx context.Context, expected *Verifi
 		return nil, err
 	}
 
-	handle := &VerifiedHandle{file: file, expected: expected}
-	if err := handle.Verify(ctx); err != nil {
-		return nil, errors.Join(err, wrapArchiveCloseError(expected.archivePath, file.Close()))
+	index, err := os.CreateTemp(a.authDir, "chunks-*")
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create authentication index for %s: %w", expected.archivePath, err),
+			wrapArchiveCloseError(expected.archivePath, file.Close()),
+		)
 	}
 
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	handle := &VerifiedHandle{
+		ctx:        ctx,
+		file:       file,
+		index:      index,
+		indexPath:  index.Name(),
+		expected:   expected,
+		cacheChunk: -1,
+		cache:      make([]byte, authChunkSize),
+	}
+	if err := handle.buildAuthenticationIndex(ctx); err != nil {
 		return nil, errors.Join(
-			fmt.Errorf("rewind verified archive file %s: %w", expected.archivePath, err),
+			err,
+			wrapAuthIndexCloseError(expected.archivePath, index.Close()),
+			wrapAuthIndexRemoveError(expected.archivePath, os.Remove(index.Name())),
 			wrapArchiveCloseError(expected.archivePath, file.Close()),
 		)
 	}
@@ -257,19 +301,66 @@ func (a *VerifiedArchive) OpenVerifiedFile(ctx context.Context, expected *Verifi
 	return handle, nil
 }
 
-// Read implements io.Reader on the pinned descriptor.
+// Read authenticates fixed-size chunks before exposing bytes from the pinned descriptor.
 func (h *VerifiedHandle) Read(p []byte) (int, error) {
-	return h.file.Read(p)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	count, err := h.readAtLocked(p, h.offset)
+	h.offset += int64(count)
+
+	return count, err
 }
 
-// ReadAt implements io.ReaderAt on the pinned descriptor.
+// ReadAt authenticates fixed-size chunks before exposing bytes from the pinned descriptor.
 func (h *VerifiedHandle) ReadAt(p []byte, offset int64) (int, error) {
-	return h.file.ReadAt(p, offset)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.readAtLocked(p, offset)
 }
 
-// Seek implements io.Seeker on the pinned descriptor.
+// Seek changes the logical authenticated-read offset.
 func (h *VerifiedHandle) Seek(offset int64, whence int) (int64, error) {
-	return h.file.Seek(offset, whence)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	var base int64
+
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		base = h.offset
+	case io.SeekEnd:
+		base = h.expected.info.Size()
+	default:
+		return 0, fmt.Errorf("seek verified archive file %s: invalid whence %d", h.expected.archivePath, whence)
+	}
+
+	if offset > 0 && base > math.MaxInt64-offset || offset < 0 && base < math.MinInt64-offset {
+		return 0, fmt.Errorf("seek verified archive file %s: offset overflow", h.expected.archivePath)
+	}
+
+	next := base + offset
+	if next < 0 {
+		return 0, fmt.Errorf("seek verified archive file %s: negative position %d", h.expected.archivePath, next)
+	}
+
+	h.offset = next
+	h.cacheChunk = -1
+	h.cacheLen = 0
+
+	return next, nil
+}
+
+// ResetAuthenticatedRead starts a fresh authenticated consumption pass. It prevents a retry,
+// range, or parser pass from relying on bytes cached by an earlier logical consumer.
+func (h *VerifiedHandle) ResetAuthenticatedRead() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.cacheChunk = -1
+	h.cacheLen = 0
 }
 
 // Stat returns metadata for the pinned descriptor.
@@ -280,6 +371,13 @@ func (h *VerifiedHandle) Stat() (os.FileInfo, error) {
 // Verify proves both the pinned descriptor bytes and the current rooted namespace entry still
 // match verification. It preserves the descriptor offset.
 func (h *VerifiedHandle) Verify(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.stickyErr != nil {
+		return h.stickyErr
+	}
+
 	info, err := h.file.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect pinned archive file %s: %w", h.expected.archivePath, err)
@@ -324,7 +422,188 @@ func (h *VerifiedHandle) Verify(ctx context.Context) error {
 
 // Close releases the pinned payload descriptor.
 func (h *VerifiedHandle) Close() error {
-	return h.file.Close()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return errors.Join(
+		wrapAuthIndexCloseError(h.expected.archivePath, h.index.Close()),
+		wrapAuthIndexRemoveError(h.expected.archivePath, os.Remove(h.indexPath)),
+		h.file.Close(),
+	)
+}
+
+func (h *VerifiedHandle) buildAuthenticationIndex(ctx context.Context) error {
+	infoBefore, err := h.file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect pinned archive file %s: %w", h.expected.archivePath, err)
+	}
+
+	if !sameVerifiedInfo(h.expected.info, infoBefore) {
+		return fmt.Errorf("%s identity or metadata changed: %w",
+			h.expected.archivePath, ErrVerifiedArchiveChanged)
+	}
+
+	if _, err := h.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind verified archive file %s: %w", h.expected.archivePath, err)
+	}
+
+	contentHash := sha256.New()
+	if err := indexAndHashContext(ctx, contentHash, h.file, h.index, infoBefore.Size()); err != nil {
+		return fmt.Errorf("build authentication index for %s: %w", h.expected.archivePath, err)
+	}
+
+	var digest [sha256.Size]byte
+	copy(digest[:], contentHash.Sum(nil))
+
+	if digest != h.expected.digest {
+		return fmt.Errorf("%s content changed while building authentication index: %w",
+			h.expected.archivePath, ErrVerifiedArchiveChanged)
+	}
+
+	infoAfter, err := h.file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect pinned archive file %s after authentication: %w",
+			h.expected.archivePath, err)
+	}
+
+	if !sameVerifiedInfo(infoBefore, infoAfter) {
+		return fmt.Errorf("%s changed while building authentication index: %w",
+			h.expected.archivePath, ErrVerifiedArchiveChanged)
+	}
+
+	return h.verifyCurrentNamespace()
+}
+
+func (h *VerifiedHandle) verifyCurrentNamespace() error {
+	current, err := h.expected.archive.root.OpenRegularPath(h.expected.archivePath)
+	if err != nil {
+		return fmt.Errorf("reopen current archive entry %s: %w", h.expected.archivePath, err)
+	}
+
+	currentInfo, statErr := current.Stat()
+	closeErr := current.Close()
+
+	if statErr != nil || closeErr != nil {
+		return errors.Join(
+			wrapArchiveReadError(h.expected.archivePath, statErr),
+			wrapArchiveCloseError(h.expected.archivePath, closeErr),
+		)
+	}
+
+	if !sameVerifiedInfo(h.expected.info, currentInfo) {
+		return fmt.Errorf("%s was replaced after verification: %w",
+			h.expected.archivePath, ErrVerifiedArchiveChanged)
+	}
+
+	return nil
+}
+
+func (h *VerifiedHandle) readAtLocked(p []byte, offset int64) (int, error) {
+	if h.stickyErr != nil {
+		return 0, h.stickyErr
+	}
+
+	if err := h.ctx.Err(); err != nil {
+		h.stickyErr = err
+
+		return 0, err
+	}
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if offset < 0 {
+		return 0, fmt.Errorf("read verified archive file %s at negative offset %d", h.expected.archivePath, offset)
+	}
+
+	size := h.expected.info.Size()
+	if offset >= size {
+		return 0, io.EOF
+	}
+
+	total := 0
+
+	for total < len(p) && offset < size {
+		chunk := offset / authChunkSize
+		if err := h.loadChunkLocked(chunk); err != nil {
+			h.stickyErr = err
+
+			return total, err
+		}
+
+		chunkOffset := int(offset % authChunkSize)
+		available := h.cacheLen - chunkOffset
+		count := min(len(p)-total, available)
+		copy(p[total:total+count], h.cache[chunkOffset:chunkOffset+count])
+
+		total += count
+		offset += int64(count)
+	}
+
+	if total < len(p) {
+		return total, io.EOF
+	}
+
+	return total, nil
+}
+
+func (h *VerifiedHandle) loadChunkLocked(chunk int64) error {
+	if h.cacheChunk == chunk {
+		return nil
+	}
+
+	if err := h.ctx.Err(); err != nil {
+		return err
+	}
+
+	chunkCount, err := authIndexRecordCount(h.expected.info.Size())
+	if err != nil {
+		return err
+	}
+
+	if chunk < 0 || chunk >= chunkCount {
+		return fmt.Errorf("%s authentication chunk %d is outside [0,%d): %w",
+			h.expected.archivePath, chunk, chunkCount, ErrVerifiedArchiveChanged)
+	}
+
+	chunkStart := chunk * authChunkSize
+	chunkLength := min(int64(authChunkSize), h.expected.info.Size()-chunkStart)
+	data := h.cache[:chunkLength]
+
+	count, readErr := h.file.ReadAt(data, chunkStart)
+	if readErr != nil || int64(count) != chunkLength {
+		return fmt.Errorf("read authentication chunk %d for %s: %w",
+			chunk, h.expected.archivePath,
+			errors.Join(ErrVerifiedArchiveChanged, readErr, shortAuthenticatedReadError(count, chunkLength)))
+	}
+
+	var expectedDigest [sha256.Size]byte
+
+	count, readErr = h.index.ReadAt(expectedDigest[:], chunk*authIndexRecordSize)
+	if readErr != nil || count != len(expectedDigest) {
+		return fmt.Errorf("read authentication index chunk %d for %s: %w",
+			chunk, h.expected.archivePath,
+			errors.Join(ErrVerifiedArchiveChanged, readErr, shortAuthenticatedReadError(count, sha256.Size)))
+	}
+
+	if actualDigest := sha256.Sum256(data); actualDigest != expectedDigest {
+		return fmt.Errorf("%s authentication chunk %d changed before consumption: %w",
+			h.expected.archivePath, chunk, ErrVerifiedArchiveChanged)
+	}
+
+	h.cacheChunk = chunk
+	h.cacheLen = len(data)
+
+	return nil
+}
+
+func shortAuthenticatedReadError(actual int, expected int64) error {
+	if int64(actual) == expected {
+		return nil
+	}
+
+	return fmt.Errorf("short authenticated read: got %d bytes, want %d", actual, expected)
 }
 
 func (a *VerifiedArchive) openNode(nodeDir string) (*RootedSource, func(), error) {
@@ -426,6 +705,88 @@ func (a *VerifiedArchive) captureFile(
 	}, nodeHash.Sum(nil), nil
 }
 
+func indexAndHashContext(
+	ctx context.Context,
+	writer io.Writer,
+	reader io.Reader,
+	index io.Writer,
+	expectedSize int64,
+) error {
+	chunkCount, err := authIndexRecordCount(expectedSize)
+	if err != nil {
+		return err
+	}
+
+	buffer := make([]byte, authChunkSize)
+
+	for chunk := int64(0); chunk < chunkCount; chunk++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		chunkLength := min(int64(authChunkSize), expectedSize-chunk*authChunkSize)
+		data := buffer[:chunkLength]
+
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return fmt.Errorf("read authentication chunk %d: %w",
+				chunk, errors.Join(ErrVerifiedArchiveChanged, err))
+		}
+
+		if err := writeFull(writer, data); err != nil {
+			return err
+		}
+
+		digest := sha256.Sum256(data)
+		if err := writeFull(index, digest[:]); err != nil {
+			return fmt.Errorf("write authentication index chunk %d: %w", chunk, err)
+		}
+	}
+
+	var probe [1]byte
+
+	count, err := reader.Read(probe[:])
+	if count > 0 {
+		return fmt.Errorf("archive file exceeds verified size %d: %w", expectedSize, ErrVerifiedArchiveChanged)
+	}
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+
+	return nil
+}
+
+func authIndexRecordCount(size int64) (int64, error) {
+	if size < 0 {
+		return 0, fmt.Errorf("negative archive file size %d", size)
+	}
+
+	var count int64
+	if size > 0 {
+		count = (size-1)/authChunkSize + 1
+	}
+
+	if count > maxAuthIndexRecords {
+		return 0, fmt.Errorf("archive file requires %d authentication records, limit is %d",
+			count, maxAuthIndexRecords)
+	}
+
+	return count, nil
+}
+
+func writeFull(writer io.Writer, data []byte) error {
+	written, err := writer.Write(data)
+	if err != nil {
+		return err
+	}
+
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+
+	return nil
+}
+
 func readAndHashContext(ctx context.Context, reader io.Reader) ([]byte, [sha256.Size]byte, error) {
 	var data bytes.Buffer
 
@@ -511,6 +872,30 @@ func wrapArchiveCloseError(path string, err error) error {
 	}
 
 	return fmt.Errorf("close archive file %s: %w", path, err)
+}
+
+func wrapAuthIndexCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("close authentication index for %s: %w", path, err)
+}
+
+func wrapAuthIndexRemoveError(path string, err error) error {
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	return fmt.Errorf("remove authentication index for %s: %w", path, err)
+}
+
+func wrapAuthIndexCleanupError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("remove private archive authentication directory: %w", err)
 }
 
 // ComputeNodeChecksum computes a deterministic SHA-256 digest over the node's own files.
