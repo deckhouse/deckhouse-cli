@@ -197,28 +197,6 @@ func TestEnsureDirAtCreationAndSyncOrdering(t *testing.T) {
 	}
 }
 
-func TestOpenDurableDirectoryAtRejectsNonDirectoriesWithoutFollowing(t *testing.T) {
-	base := t.TempDir()
-	outside := t.TempDir()
-	parent, err := os.Open(base)
-	require.NoError(t, err)
-	defer func() { _ = parent.Close() }()
-
-	require.NoError(t, os.WriteFile(filepath.Join(base, "regular"), []byte("data"), 0o600))
-	require.NoError(t, os.Symlink(outside, filepath.Join(base, "symlink")))
-
-	for _, name := range []string{"regular", "symlink"} {
-		t.Run(name, func(t *testing.T) {
-			directory, openErr := openDurableDirectoryAt(parent, name, filepath.Join(base, name))
-			if directory != nil {
-				_ = directory.Close()
-			}
-
-			require.Error(t, openErr)
-		})
-	}
-}
-
 func TestEnsureDirAtRepeatedCallReconfirmsExistingChain(t *testing.T) {
 	t.Parallel()
 

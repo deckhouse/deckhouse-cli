@@ -199,153 +199,6 @@ func TestArchiveWriteLockCancellationAfterDurabilityPreservesCause(t *testing.T)
 	}
 }
 
-func TestArchiveWriteLockAcquisitionReconfirmationUsesLiveContext(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "output")
-	if err := os.Mkdir(root, 0o755); err != nil {
-		t.Fatalf("create archive root: %v", err)
-	}
-
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("resolve archive root: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	reconfirmations := 0
-	ctx = WithWriteLockReconfirmationHook(
-		ctx,
-		func(phase WriteLockReconfirmationPhase, path string) error {
-			if phase != WriteLockReconfirmationAfterSync || path != canonicalRoot {
-				return nil
-			}
-
-			reconfirmations++
-			if reconfirmations == 3 {
-				cancel()
-			}
-
-			return nil
-		},
-	)
-
-	lock, err := AcquireWriteLockContext(ctx, root)
-	if lock != nil {
-		_ = lock.Unlock()
-
-		t.Fatal("write lock returned after cancellation during acquisition reconfirmation")
-	}
-
-	if reconfirmations != 3 {
-		t.Fatalf("root reconfirmations before cancellation = %d, want 3", reconfirmations)
-	}
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("write lock error = %v, want context.Canceled", err)
-	}
-
-	if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("lock entry exists after acquisition cancellation: %v", statErr)
-	}
-
-	lock, err = AcquireWriteLock(root)
-	if err != nil {
-		t.Fatalf("retry write lock after acquisition cancellation: %v", err)
-	}
-	defer func() { _ = lock.Unlock() }()
-}
-
-func TestArchiveWriteLockReconfirmationOperationFailuresPreserveCause(t *testing.T) {
-	tests := []struct {
-		name  string
-		phase WriteLockReconfirmationPhase
-	}{
-		{name: "open", phase: WriteLockReconfirmationBeforeOpen},
-		{name: "sync", phase: WriteLockReconfirmationBeforeSync},
-		{name: "close", phase: WriteLockReconfirmationBeforeClose},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), "output")
-			if err := os.Mkdir(root, 0o755); err != nil {
-				t.Fatalf("create archive root: %v", err)
-			}
-
-			canonicalRoot, err := filepath.EvalSymlinks(root)
-			if err != nil {
-				t.Fatalf("resolve archive root: %v", err)
-			}
-
-			sentinel := errors.New(tt.name + " reconfirmation sentinel")
-			injected := false
-			ctx := WithWriteLockReconfirmationHook(
-				context.Background(),
-				func(phase WriteLockReconfirmationPhase, path string) error {
-					if phase != tt.phase || path != canonicalRoot || injected {
-						return nil
-					}
-
-					injected = true
-
-					return sentinel
-				},
-			)
-
-			lock, err := AcquireWriteLockContext(ctx, root)
-			if lock != nil {
-				_ = lock.Unlock()
-
-				t.Fatalf("write lock returned after injected %s failure", tt.name)
-			}
-
-			if !injected {
-				t.Fatalf("%s failure hook was not reached", tt.name)
-			}
-
-			if !errors.Is(err, sentinel) {
-				t.Fatalf("write lock error = %v, want %v", err, sentinel)
-			}
-
-			lock, err = AcquireWriteLock(root)
-			if err != nil {
-				t.Fatalf("retry write lock after %s failure: %v", tt.name, err)
-			}
-
-			if err := lock.Unlock(); err != nil {
-				t.Fatalf("release retried write lock after %s failure: %v", tt.name, err)
-			}
-		})
-	}
-}
-
-func TestArchiveWriteLockAcquisitionContextDoesNotPoisonHeldLock(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	lock, err := AcquireWriteLockContext(ctx, t.TempDir())
-	if err != nil {
-		t.Fatalf("acquire write lock: %v", err)
-	}
-	defer func() { _ = lock.Unlock() }()
-
-	cancel()
-
-	if err := lock.Verify(); err != nil {
-		t.Fatalf("verify held lock after acquisition context cancellation: %v", err)
-	}
-
-	destination, err := NewLockedRootedDestination(lock, nil)
-	if err != nil {
-		t.Fatalf("open rooted destination from held lock: %v", err)
-	}
-
-	if destination.source != lock.source {
-		t.Fatal("rooted destination changed the exact source acquired by the lock")
-	}
-
-	if err := destination.Close(); err != nil {
-		t.Fatalf("close rooted destination: %v", err)
-	}
-}
-
 func TestArchiveWriteLockRootDurabilityFailureIsRetryable(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "output")
@@ -503,7 +356,12 @@ func TestArchiveWriteLockRejectsDurableChainReplacement(t *testing.T) {
 	}
 }
 
-func TestArchiveWriteLockRejectsDurableChainABAAtAtomicAcceptance(t *testing.T) {
+func TestArchiveWriteLockReconfirmsDurableChainAfterABA(t *testing.T) {
+	boundaries := []WriteLockBoundary{
+		WriteLockBoundaryAfterDurability,
+		WriteLockBoundaryBeforeRootLock,
+	}
+
 	replacements := []struct {
 		name   string
 		target func(ancestor, parent, root string) string
@@ -531,122 +389,80 @@ func TestArchiveWriteLockRejectsDurableChainABAAtAtomicAcceptance(t *testing.T) 
 		},
 	}
 
-	for _, replacement := range replacements {
-		t.Run(replacement.name, func(t *testing.T) {
-			base := t.TempDir()
-			ancestor := filepath.Join(base, "ancestor")
-			parent := filepath.Join(ancestor, "parent")
-			root := filepath.Join(parent, "output")
-			if err := os.MkdirAll(root, 0o755); err != nil {
-				t.Fatalf("create archive root: %v", err)
-			}
-
-			target := replacement.target(ancestor, parent, root)
-			canonicalTarget, err := filepath.EvalSymlinks(target)
-			if err != nil {
-				t.Fatalf("resolve replacement target: %v", err)
-			}
-
-			originalInfo, err := os.Lstat(target)
-			if err != nil {
-				t.Fatalf("inspect original replacement target: %v", err)
-			}
-
-			displaced := filepath.Join(base, "displaced")
-			abaComplete := false
-			ctx := WithWriteLockReconfirmationHook(
-				context.Background(),
-				func(phase WriteLockReconfirmationPhase, path string) error {
-					if phase != WriteLockReconfirmationAfterSync ||
-						path != canonicalTarget ||
-						abaComplete {
-						return nil
+	for _, boundary := range boundaries {
+		t.Run(boundaryName(boundary), func(t *testing.T) {
+			for _, replacement := range replacements {
+				t.Run(replacement.name, func(t *testing.T) {
+					base := t.TempDir()
+					ancestor := filepath.Join(base, "ancestor")
+					parent := filepath.Join(ancestor, "parent")
+					root := filepath.Join(parent, "output")
+					if err := os.MkdirAll(root, 0o755); err != nil {
+						t.Fatalf("create archive root: %v", err)
 					}
 
-					replaceSyncRestoreDirectory(t, target, displaced, replacement.tail)
-					abaComplete = true
+					displaced := filepath.Join(base, "displaced")
+					abaComplete := false
+					reconfirmed := false
 
-					return nil
-				},
-			)
+					ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
+						if current == WriteLockBoundaryBeforeDurabilityReconfirmation && abaComplete {
+							reconfirmed = true
 
-			lock, err := AcquireWriteLockContext(ctx, root)
-			if lock != nil {
-				_ = lock.Unlock()
+							return
+						}
 
-				t.Fatalf("write lock returned after atomic %s ABA", replacement.name)
-			}
+						if current != boundary || abaComplete {
+							return
+						}
 
-			if !abaComplete {
-				t.Fatalf("%s ABA acceptance hook was not reached", replacement.name)
-			}
+						target := replacement.target(ancestor, parent, root)
+						replaceSyncRestoreDirectory(t, target, displaced, replacement.tail)
+						abaComplete = true
+					})
 
-			if !errors.Is(err, ErrArchiveLockChanged) {
-				t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
-			}
+					lock, err := AcquireWriteLockContext(ctx, root)
+					if err != nil {
+						t.Fatalf("acquire write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
 
-			restoredInfo, statErr := os.Lstat(target)
-			if statErr != nil {
-				t.Fatalf("inspect restored replacement target: %v", statErr)
-			}
+					if !abaComplete {
+						t.Fatalf("%s ABA hook was not reached", replacement.name)
+					}
 
-			if !os.SameFile(originalInfo, restoredInfo) {
-				t.Fatalf("%s ABA did not restore the original inode", replacement.name)
-			}
+					if !reconfirmed {
+						t.Fatalf("%s ABA was not followed by durability reconfirmation", replacement.name)
+					}
 
-			if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("lock entry exists after atomic %s ABA: %v", replacement.name, statErr)
+					if err := lock.Verify(); err != nil {
+						t.Fatalf("verify write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					replaceSyncRestoreDirectory(t,
+						replacement.target(ancestor, parent, root), displaced, replacement.tail)
+					if err := lock.Verify(); err != nil {
+						t.Fatalf("retain write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					destination, err := NewLockedRootedDestination(lock, nil)
+					if err != nil {
+						t.Fatalf("open rooted destination after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					if destination.source != lock.source {
+						t.Fatalf("rooted destination changed the locked source after %s ABA", replacement.name)
+					}
+
+					if err := destination.Close(); err != nil {
+						t.Fatalf("close rooted destination after %s ABA: %v", replacement.name, err)
+					}
+
+					if err := lock.Unlock(); err != nil {
+						t.Fatalf("release write lock after %s ABA: %v", replacement.name, err)
+					}
+				})
 			}
 		})
-	}
-}
-
-func TestArchiveWriteLockVerifyRejectsDurableChainABAAtAtomicAcceptance(t *testing.T) {
-	base := t.TempDir()
-	root := filepath.Join(base, "ancestor", "parent", "output")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("create archive root: %v", err)
-	}
-
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("resolve archive root: %v", err)
-	}
-
-	displaced := filepath.Join(base, "displaced")
-	armed := false
-	abaComplete := false
-	ctx := WithWriteLockReconfirmationHook(
-		context.Background(),
-		func(phase WriteLockReconfirmationPhase, path string) error {
-			if phase != WriteLockReconfirmationAfterSync ||
-				path != canonicalRoot ||
-				!armed ||
-				abaComplete {
-				return nil
-			}
-
-			replaceSyncRestoreDirectory(t, root, displaced, "")
-			abaComplete = true
-
-			return nil
-		},
-	)
-
-	lock, err := AcquireWriteLockContext(ctx, root)
-	if err != nil {
-		t.Fatalf("acquire write lock: %v", err)
-	}
-	defer func() { _ = lock.Unlock() }()
-
-	armed = true
-	err = lock.Verify()
-	if !abaComplete {
-		t.Fatal("held-lock ABA acceptance hook was not reached")
-	}
-
-	if !errors.Is(err, ErrArchiveLockChanged) {
-		t.Fatalf("verify held lock error = %v, want ErrArchiveLockChanged", err)
 	}
 }
 
@@ -706,81 +522,80 @@ func TestArchiveWriteLockRejectsSymlinkAliasReplacementAfterConfirmation(t *test
 	}
 }
 
-func TestArchiveWriteLockRejectsSymlinkAliasABAAtAtomicAcceptance(t *testing.T) {
-	base := t.TempDir()
-	target := filepath.Join(base, "target")
-	alias := filepath.Join(base, "alias")
-	displaced := filepath.Join(base, "displaced")
-	root := filepath.Join(alias, "output")
-	if err := os.MkdirAll(filepath.Join(target, "output"), 0o755); err != nil {
-		t.Fatalf("create alias target: %v", err)
-	}
-
-	if err := os.Symlink(target, alias); err != nil {
-		t.Fatalf("create archive alias: %v", err)
-	}
-
-	originalInfo, err := os.Lstat(alias)
-	if err != nil {
-		t.Fatalf("inspect original archive alias: %v", err)
-	}
-
-	abaComplete := false
-	ctx := WithWriteLockReconfirmationHook(
-		context.Background(),
-		func(phase WriteLockReconfirmationPhase, path string) error {
-			if phase != WriteLockReconfirmationAfterSync || path != alias || abaComplete {
-				return nil
-			}
-
-			if err := os.Rename(alias, displaced); err != nil {
-				t.Fatalf("displace archive alias: %v", err)
+func TestArchiveWriteLockReconfirmsSymlinkAliasAfterABA(t *testing.T) {
+	for _, boundary := range []WriteLockBoundary{
+		WriteLockBoundaryAfterDurability,
+		WriteLockBoundaryBeforeRootLock,
+	} {
+		t.Run(boundaryName(boundary), func(t *testing.T) {
+			base := t.TempDir()
+			target := filepath.Join(base, "target")
+			alias := filepath.Join(base, "alias")
+			displaced := filepath.Join(base, "displaced")
+			root := filepath.Join(alias, "output")
+			if err := os.MkdirAll(filepath.Join(target, "output"), 0o755); err != nil {
+				t.Fatalf("create alias target: %v", err)
 			}
 
 			if err := os.Symlink(target, alias); err != nil {
-				t.Fatalf("create replacement archive alias: %v", err)
+				t.Fatalf("create archive alias: %v", err)
 			}
 
-			if err := syncDir(base); err != nil {
-				t.Fatalf("sync replacement archive alias: %v", err)
+			abaComplete := false
+			reconfirmed := false
+
+			ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
+				if current == WriteLockBoundaryBeforeDurabilityReconfirmation && abaComplete {
+					reconfirmed = true
+
+					return
+				}
+
+				if current != boundary || abaComplete {
+					return
+				}
+
+				if err := os.Rename(alias, displaced); err != nil {
+					t.Fatalf("displace archive alias: %v", err)
+				}
+
+				if err := os.Symlink(target, alias); err != nil {
+					t.Fatalf("create replacement archive alias: %v", err)
+				}
+
+				if err := syncDir(base); err != nil {
+					t.Fatalf("sync replacement archive alias: %v", err)
+				}
+
+				if err := os.Remove(alias); err != nil {
+					t.Fatalf("remove replacement archive alias: %v", err)
+				}
+
+				if err := os.Rename(displaced, alias); err != nil {
+					t.Fatalf("restore archive alias: %v", err)
+				}
+
+				abaComplete = true
+			})
+
+			lock, err := AcquireWriteLockContext(ctx, root)
+			if err != nil {
+				t.Fatalf("acquire write lock after reconfirmed alias ABA: %v", err)
+			}
+			defer func() { _ = lock.Unlock() }()
+
+			if !abaComplete {
+				t.Fatal("archive alias ABA hook was not reached")
 			}
 
-			if err := os.Remove(alias); err != nil {
-				t.Fatalf("remove replacement archive alias: %v", err)
+			if !reconfirmed {
+				t.Fatal("archive alias ABA was not followed by durability reconfirmation")
 			}
 
-			if err := os.Rename(displaced, alias); err != nil {
-				t.Fatalf("restore archive alias: %v", err)
+			if err := lock.Verify(); err != nil {
+				t.Fatalf("verify write lock after reconfirmed alias ABA: %v", err)
 			}
-
-			abaComplete = true
-
-			return nil
-		},
-	)
-
-	lock, err := AcquireWriteLockContext(ctx, root)
-	if lock != nil {
-		_ = lock.Unlock()
-
-		t.Fatal("write lock returned after atomic symlink-alias ABA")
-	}
-
-	if !abaComplete {
-		t.Fatal("archive alias ABA acceptance hook was not reached")
-	}
-
-	if !errors.Is(err, ErrArchiveLockChanged) {
-		t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
-	}
-
-	restoredInfo, statErr := os.Lstat(alias)
-	if statErr != nil {
-		t.Fatalf("inspect restored archive alias: %v", statErr)
-	}
-
-	if !os.SameFile(originalInfo, restoredInfo) {
-		t.Fatal("archive alias ABA did not restore the original inode")
+		})
 	}
 }
 

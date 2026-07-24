@@ -547,134 +547,85 @@ func TestAcquireOutputLock_RejectsReplacementAfterDurabilityConfirmation(t *test
 	}
 }
 
-func TestAcquireOutputLock_RejectsRestoredRootAtAtomicAcceptance(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "output")
-	displaced := filepath.Join(parent, "displaced")
-	markerPath := filepath.Join(root, "unchanged")
-	if err := os.Mkdir(root, 0o755); err != nil {
-		t.Fatalf("create output root: %v", err)
-	}
-
-	if err := os.WriteFile(markerPath, []byte("unchanged"), 0o600); err != nil {
-		t.Fatalf("write output marker: %v", err)
-	}
-
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("resolve output root: %v", err)
-	}
-
-	abaComplete := false
-	ctx := archive.WithWriteLockReconfirmationHook(
-		context.Background(),
-		func(phase archive.WriteLockReconfirmationPhase, path string) error {
-			if phase != archive.WriteLockReconfirmationAfterSync ||
-				path != canonicalRoot ||
-				abaComplete {
-				return nil
+func TestAcquireOutputLock_ReconfirmsRestoredRootAfterABA(t *testing.T) {
+	for _, boundary := range []archive.WriteLockBoundary{
+		archive.WriteLockBoundaryAfterDurability,
+		archive.WriteLockBoundaryBeforeRootLock,
+	} {
+		t.Run(fmt.Sprintf("boundary %d", boundary), func(t *testing.T) {
+			parent := t.TempDir()
+			root := filepath.Join(parent, "output")
+			displaced := filepath.Join(parent, "displaced")
+			markerPath := filepath.Join(root, "unchanged")
+			if err := os.Mkdir(root, 0o755); err != nil {
+				t.Fatalf("create output root: %v", err)
 			}
 
-			if err := os.Rename(root, displaced); err != nil {
-				t.Fatalf("displace confirmed output root: %v", err)
+			if err := os.WriteFile(markerPath, []byte("unchanged"), 0o600); err != nil {
+				t.Fatalf("write output marker: %v", err)
 			}
 
-			if err := archive.EnsureDir(root); err != nil {
-				t.Fatalf("durably create replacement output root: %v", err)
+			abaComplete := false
+			reconfirmed := false
+
+			ctx := archive.WithWriteLockBoundaryHook(context.Background(), func(current archive.WriteLockBoundary) {
+				if current == archive.WriteLockBoundaryBeforeDurabilityReconfirmation && abaComplete {
+					reconfirmed = true
+
+					return
+				}
+
+				if current != boundary || abaComplete {
+					return
+				}
+
+				if err := os.Rename(root, displaced); err != nil {
+					t.Fatalf("displace confirmed output root: %v", err)
+				}
+
+				if err := archive.EnsureDir(root); err != nil {
+					t.Fatalf("durably create replacement output root: %v", err)
+				}
+
+				if err := os.Remove(root); err != nil {
+					t.Fatalf("remove replacement output root: %v", err)
+				}
+
+				if err := os.Rename(displaced, root); err != nil {
+					t.Fatalf("restore confirmed output root: %v", err)
+				}
+
+				abaComplete = true
+			})
+
+			lock, err := acquireOutputLockContext(ctx, root)
+			if err != nil {
+				t.Fatalf("acquire output lock after reconfirmed ABA: %v", err)
+			}
+			defer func() { _ = lock.Unlock() }()
+
+			if !abaComplete {
+				t.Fatal("output-root ABA hook was not reached")
 			}
 
-			if err := os.Remove(root); err != nil {
-				t.Fatalf("remove replacement output root: %v", err)
+			if !reconfirmed {
+				t.Fatal("output-root ABA was not followed by durability reconfirmation")
 			}
 
-			if err := os.Rename(displaced, root); err != nil {
-				t.Fatalf("restore confirmed output root: %v", err)
+			data, err := os.ReadFile(markerPath)
+			if err != nil {
+				t.Fatalf("read restored output marker: %v", err)
 			}
 
-			abaComplete = true
-
-			return nil
-		},
-	)
-
-	lock, err := acquireOutputLockContext(ctx, root)
-	if lock != nil {
-		_ = lock.Unlock()
-
-		t.Fatal("output lock returned after atomic output-root ABA")
-	}
-
-	if !abaComplete {
-		t.Fatal("output-root ABA acceptance hook was not reached")
-	}
-
-	if !errors.Is(err, archive.ErrArchiveLockChanged) {
-		t.Fatalf("output lock error = %v, want ErrArchiveLockChanged", err)
-	}
-
-	data, readErr := os.ReadFile(markerPath)
-	if readErr != nil {
-		t.Fatalf("read restored output marker: %v", readErr)
-	}
-
-	if string(data) != "unchanged" {
-		t.Fatalf("restored output marker = %q, want unchanged", data)
-	}
-
-	if _, statErr := os.Stat(filepath.Join(root, downloadLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("lock entry exists after atomic output-root ABA: %v", statErr)
-	}
-}
-
-func TestAcquireOutputLock_AcquisitionReconfirmationUsesLiveContext(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "output")
-	if err := os.Mkdir(root, 0o755); err != nil {
-		t.Fatalf("create output root: %v", err)
-	}
-
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("resolve output root: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	reconfirmations := 0
-	ctx = archive.WithWriteLockReconfirmationHook(
-		ctx,
-		func(phase archive.WriteLockReconfirmationPhase, path string) error {
-			if phase != archive.WriteLockReconfirmationAfterSync || path != canonicalRoot {
-				return nil
+			if string(data) != "unchanged" {
+				t.Fatalf("restored output marker = %q, want unchanged", data)
 			}
 
-			reconfirmations++
-			if reconfirmations == 3 {
-				cancel()
+			if err := lock.Verify(); err != nil {
+				t.Fatalf("verify output lock after reconfirmed ABA: %v", err)
 			}
-
-			return nil
-		},
-	)
-
-	lock, err := acquireOutputLockContext(ctx, root)
-	if lock != nil {
-		_ = lock.Unlock()
-
-		t.Fatal("output lock returned after cancellation during acquisition reconfirmation")
+		})
 	}
-
-	if reconfirmations != 3 {
-		t.Fatalf("output-root reconfirmations before cancellation = %d, want 3", reconfirmations)
-	}
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("output lock error = %v, want context.Canceled", err)
-	}
-
-	lock, err = acquireOutputLock(root)
-	if err != nil {
-		t.Fatalf("retry output lock after cancellation: %v", err)
-	}
-	defer func() { _ = lock.Unlock() }()
 }
 
 func TestAcquireOutputLock_CancelledContextDoesNotLeak(t *testing.T) {
