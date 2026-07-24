@@ -147,6 +147,22 @@ func TestNewCommand_NodeFlagDefault(t *testing.T) {
 	}
 }
 
+func TestNewCommand_NodeHelpExplainsMissingChildProof(t *testing.T) {
+	t.Parallel()
+
+	longHelp := NewCommand(slog.Default()).Long
+	for _, text := range []string{
+		"identity remains restorable",
+		"belongs to the tree but is",
+		"Original-source selection fails closed",
+		"--node-api-version",
+	} {
+		if !strings.Contains(longHelp, text) {
+			t.Errorf("long help does not contain %q", text)
+		}
+	}
+}
+
 func TestParseNodeFlag(t *testing.T) {
 	t.Helper()
 

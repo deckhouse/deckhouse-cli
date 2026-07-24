@@ -42,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -87,6 +88,9 @@ const (
 	// defaultStorageClassAnnotation marks the cluster's default StorageClass,
 	// used to resolve a PVC whose spec.storageClassName is empty.
 	defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
+
+	missingChildProofPageLimit int64 = 100
+	missingChildProofMaxPages  int   = 100
 
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
@@ -928,18 +932,21 @@ type nodeMatch struct {
 	ref         aggapi.NodeRef
 	obj         *unstructured.Unstructured
 	apiVersions []string
+	generated   bool
 }
 
 type nodeIdentity struct {
 	apiVersion string
 	kind       string
 	name       string
+	generated  bool
 }
 
 type nodeResolver struct {
-	cfg     Config
-	seen    map[string]struct{}
-	matches []nodeMatch
+	cfg         Config
+	seen        map[string]struct{}
+	matches     []nodeMatch
+	missingRefs []aggapi.NodeRef
 }
 
 // resolveNodeRef resolves the selector only within the hierarchy rooted at the
@@ -969,6 +976,35 @@ func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstruct
 
 	switch len(resolver.matches) {
 	case 0:
+		missingMatches := resolver.matchingMissingRefs()
+		if len(missingMatches) == 1 {
+			missing := missingMatches[0]
+
+			return aggapi.NodeRef{}, nil, fmt.Errorf(
+				"%s belongs to Snapshot %s/%s as generated child ref %s %s/%s, but that child is deleted; retry after the snapshot hierarchy is reconciled",
+				cfg.selectedNodeDescription(),
+				cfg.Namespace,
+				cfg.Snapshot,
+				missing.APIVersion,
+				missing.Kind,
+				missing.Name,
+			)
+		}
+
+		if len(missingMatches) > 1 {
+			return aggapi.NodeRef{}, nil, cfg.ambiguousMissingNodeError(missingMatches)
+		}
+
+		if len(resolver.missingRefs) != 0 {
+			return aggapi.NodeRef{}, nil, fmt.Errorf(
+				"cannot prove whether %s belongs to Snapshot %s/%s because the hierarchy is incomplete; referenced child nodes are deleted: %s",
+				cfg.selectedNodeDescription(),
+				cfg.Namespace,
+				cfg.Snapshot,
+				formatNodeRefs(resolver.missingRefs),
+			)
+		}
+
 		return aggapi.NodeRef{}, nil, fmt.Errorf(
 			"%s does not belong to Snapshot %s/%s",
 			cfg.selectedNodeDescription(),
@@ -976,57 +1012,148 @@ func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstruct
 			cfg.Snapshot,
 		)
 	case 1:
-		return resolver.matches[0].ref, resolver.matches[0].obj, nil
-	default:
-		candidates := make([]string, 0, len(resolver.matches))
-		reruns := make([]string, 0, len(resolver.matches))
-		apiVersionCounts := make(map[string]int)
+		match := resolver.matches[0]
+		missingMatches := resolver.matchingMissingRefs()
 
-		for _, match := range resolver.matches {
-			for _, apiVersion := range match.apiVersions {
-				apiVersionCounts[apiVersion]++
-			}
+		if match.generated && len(missingMatches) != 0 {
+			return aggapi.NodeRef{}, nil, cfg.ambiguousLiveAndMissingNodeError(match, missingMatches)
 		}
 
-		for _, match := range resolver.matches {
-			candidates = append(candidates, fmt.Sprintf(
-				"%s %s/%s (matching apiVersions: %s)",
+		if !match.generated && len(resolver.missingRefs) != 0 {
+			return aggapi.NodeRef{}, nil, fmt.Errorf(
+				"cannot prove that original-source selector %s uniquely identifies %s %s/%s in Snapshot %s/%s because the hierarchy is incomplete; referenced child nodes are deleted: %s; retry with %s",
+				cfg.selectedNodeDescription(),
 				match.ref.APIVersion,
 				match.ref.Kind,
 				match.ref.Name,
-				strings.Join(match.apiVersions, ", "),
-			))
-
-			for _, apiVersion := range match.apiVersions {
-				kind := cfg.SelectedNodeKind
-				name := cfg.SelectedNodeName
-
-				if apiVersionCounts[apiVersion] > 1 {
-					apiVersion = match.ref.APIVersion
-					kind = match.ref.Kind
-					name = match.ref.Name
-				}
-
-				reruns = append(reruns, fmt.Sprintf(
-					"d8 snapshot restore %s -n %s --node %s/%s --node-api-version %s",
-					cfg.Snapshot,
-					cfg.Namespace,
-					kind,
-					name,
-					apiVersion,
-				))
-			}
+				cfg.Namespace,
+				cfg.Snapshot,
+				formatNodeRefs(resolver.missingRefs),
+				cfg.generatedNodeRerun(match.ref),
+			)
 		}
 
-		return aggapi.NodeRef{}, nil, fmt.Errorf(
-			"%s is ambiguous within Snapshot %s/%s; matching snapshot nodes: %s; rerun with an exact apiVersion: %s",
-			cfg.selectedNodeDescription(),
-			cfg.Namespace,
-			cfg.Snapshot,
-			strings.Join(candidates, ", "),
-			strings.Join(reruns, " or "),
-		)
+		return match.ref, match.obj, nil
+	default:
+		return aggapi.NodeRef{}, nil, cfg.ambiguousNodeError(resolver.matches)
 	}
+}
+
+func (cfg Config) ambiguousNodeError(matches []nodeMatch) error {
+	candidates := make([]string, 0, len(matches))
+	reruns := make([]string, 0, len(matches))
+	apiVersionCounts := make(map[string]int)
+
+	for _, match := range matches {
+		for _, apiVersion := range match.apiVersions {
+			apiVersionCounts[apiVersion]++
+		}
+	}
+
+	for _, match := range matches {
+		candidates = append(candidates, fmt.Sprintf(
+			"%s %s/%s (matching apiVersions: %s)",
+			match.ref.APIVersion,
+			match.ref.Kind,
+			match.ref.Name,
+			strings.Join(match.apiVersions, ", "),
+		))
+
+		for _, matchingAPIVersion := range match.apiVersions {
+			apiVersion := matchingAPIVersion
+			kind := cfg.SelectedNodeKind
+			name := cfg.SelectedNodeName
+
+			if apiVersionCounts[apiVersion] > 1 {
+				apiVersion = match.ref.APIVersion
+				kind = match.ref.Kind
+				name = match.ref.Name
+			}
+
+			reruns = append(reruns, fmt.Sprintf(
+				"d8 snapshot restore %s -n %s --node %s/%s --node-api-version %s",
+				cfg.Snapshot,
+				cfg.Namespace,
+				kind,
+				name,
+				apiVersion,
+			))
+		}
+	}
+
+	return fmt.Errorf(
+		"%s is ambiguous within Snapshot %s/%s; matching snapshot nodes: %s; rerun with an exact apiVersion: %s",
+		cfg.selectedNodeDescription(),
+		cfg.Namespace,
+		cfg.Snapshot,
+		strings.Join(candidates, ", "),
+		strings.Join(reruns, " or "),
+	)
+}
+
+func (cfg Config) ambiguousLiveAndMissingNodeError(match nodeMatch, refs []aggapi.NodeRef) error {
+	candidates := make([]string, 0, 1+len(refs))
+	candidates = append(candidates, fmt.Sprintf(
+		"live %s %s/%s",
+		match.ref.APIVersion,
+		match.ref.Kind,
+		match.ref.Name,
+	))
+	reruns := make([]string, 0, 1+len(refs))
+	reruns = append(reruns, cfg.generatedNodeRerun(match.ref))
+
+	for _, ref := range refs {
+		candidates = append(candidates, fmt.Sprintf("deleted %s %s/%s", ref.APIVersion, ref.Kind, ref.Name))
+		reruns = append(reruns, cfg.generatedNodeRerun(ref))
+	}
+
+	return fmt.Errorf(
+		"%s is ambiguous within incomplete Snapshot %s/%s; matching generated child refs: %s; retry with an exact generated identity: %s",
+		cfg.selectedNodeDescription(),
+		cfg.Namespace,
+		cfg.Snapshot,
+		strings.Join(candidates, ", "),
+		strings.Join(reruns, " or "),
+	)
+}
+
+func (cfg Config) ambiguousMissingNodeError(refs []aggapi.NodeRef) error {
+	candidates := make([]string, 0, len(refs))
+	reruns := make([]string, 0, len(refs))
+
+	for _, ref := range refs {
+		candidates = append(candidates, fmt.Sprintf("%s %s/%s", ref.APIVersion, ref.Kind, ref.Name))
+		reruns = append(reruns, cfg.generatedNodeRerun(ref))
+	}
+
+	return fmt.Errorf(
+		"%s matches multiple deleted child refs in Snapshot %s/%s: %s; retry with an exact generated identity: %s",
+		cfg.selectedNodeDescription(),
+		cfg.Namespace,
+		cfg.Snapshot,
+		strings.Join(candidates, ", "),
+		strings.Join(reruns, " or "),
+	)
+}
+
+func (cfg Config) generatedNodeRerun(ref aggapi.NodeRef) string {
+	return fmt.Sprintf(
+		"d8 snapshot restore %s -n %s --node %s/%s --node-api-version %s",
+		cfg.Snapshot,
+		cfg.Namespace,
+		ref.Kind,
+		ref.Name,
+		ref.APIVersion,
+	)
+}
+
+func formatNodeRefs(refs []aggapi.NodeRef) string {
+	values := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		values = append(values, fmt.Sprintf("%s %s/%s", ref.APIVersion, ref.Kind, ref.Name))
+	}
+
+	return strings.Join(values, ", ")
 }
 
 func (cfg Config) selectedNodeDescription() string {
@@ -1039,20 +1166,22 @@ func (cfg Config) selectedNodeDescription() string {
 }
 
 func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstructured.Unstructured) error {
-	key := ref.APIVersion + "/" + ref.Kind + "/" + ref.Name
-	if _, ok := r.seen[key]; ok {
-		return fmt.Errorf("snapshot hierarchy contains duplicate or cyclic ref %s %s/%s", ref.APIVersion, ref.Kind, ref.Name)
+	if err := r.markSeen(ref); err != nil {
+		return err
 	}
 
-	r.seen[key] = struct{}{}
-
-	apiVersions, err := r.matchingAPIVersions(obj, ref)
+	apiVersions, generated, err := r.matchingAPIVersions(obj, ref)
 	if err != nil {
 		return err
 	}
 
 	if len(apiVersions) != 0 {
-		r.matches = append(r.matches, nodeMatch{ref: ref, obj: obj, apiVersions: apiVersions})
+		r.matches = append(r.matches, nodeMatch{
+			ref:         ref,
+			obj:         obj,
+			apiVersions: apiVersions,
+			generated:   generated,
+		})
 	}
 
 	childRefs, err := snapshotChildRefs(obj)
@@ -1068,13 +1197,20 @@ func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstr
 			Namespace:  r.cfg.Namespace,
 		}
 
-		childObj, getErr := r.cfg.getSnapshotNode(ctx, child)
-		if kubeerrors.IsNotFound(getErr) {
-			continue
+		if _, seen := r.seen[nodeRefKey(child)]; seen {
+			return duplicateNodeRefError(child)
 		}
 
+		childObj, missing, getErr := r.cfg.getSnapshotChild(ctx, ref, obj, child)
 		if getErr != nil {
 			return fmt.Errorf("get snapshot child %s %s/%s: %w", child.APIVersion, child.Kind, child.Name, getErr)
+		}
+
+		if missing {
+			r.seen[nodeRefKey(child)] = struct{}{}
+			r.missingRefs = append(r.missingRefs, child)
+
+			continue
 		}
 
 		if err := r.visit(ctx, child, childObj); err != nil {
@@ -1085,15 +1221,59 @@ func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstr
 	return nil
 }
 
-func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref aggapi.NodeRef) ([]string, error) {
+func (r *nodeResolver) markSeen(ref aggapi.NodeRef) error {
+	key := nodeRefKey(ref)
+	if _, seen := r.seen[key]; seen {
+		return duplicateNodeRefError(ref)
+	}
+
+	r.seen[key] = struct{}{}
+
+	return nil
+}
+
+func nodeRefKey(ref aggapi.NodeRef) string {
+	return ref.APIVersion + "/" + ref.Kind + "/" + ref.Name
+}
+
+func duplicateNodeRefError(ref aggapi.NodeRef) error {
+	return fmt.Errorf(
+		"snapshot hierarchy contains duplicate or cyclic ref %s %s/%s",
+		ref.APIVersion,
+		ref.Kind,
+		ref.Name,
+	)
+}
+
+func (r *nodeResolver) matchingMissingRefs() []aggapi.NodeRef {
+	matches := make([]aggapi.NodeRef, 0, len(r.missingRefs))
+	for _, ref := range r.missingRefs {
+		if ref.Kind != r.cfg.SelectedNodeKind || ref.Name != r.cfg.SelectedNodeName {
+			continue
+		}
+
+		if r.cfg.SelectedNodeAPIVersion != "" && ref.APIVersion != r.cfg.SelectedNodeAPIVersion {
+			continue
+		}
+
+		matches = append(matches, ref)
+	}
+
+	return matches
+}
+
+func (r *nodeResolver) matchingAPIVersions(
+	obj *unstructured.Unstructured,
+	ref aggapi.NodeRef,
+) ([]string, bool, error) {
 	sourceRef, hasSourceRef, err := snapshotSourceIdentity(obj, ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	importSourceRef, hasImportSourceRef, err := importSourceIdentity(obj, ref)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	identities := make([]nodeIdentity, 0, 3)
@@ -1101,6 +1281,7 @@ func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref a
 		apiVersion: ref.APIVersion,
 		kind:       ref.Kind,
 		name:       ref.Name,
+		generated:  true,
 	})
 
 	if hasSourceRef {
@@ -1113,6 +1294,7 @@ func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref a
 
 	apiVersions := make([]string, 0, len(identities))
 	seenAPIVersions := make(map[string]struct{}, len(identities))
+	generated := false
 
 	for _, identity := range identities {
 		if !identity.matches(
@@ -1123,6 +1305,8 @@ func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref a
 			continue
 		}
 
+		generated = generated || identity.generated
+
 		if _, seen := seenAPIVersions[identity.apiVersion]; seen {
 			continue
 		}
@@ -1131,7 +1315,7 @@ func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref a
 		apiVersions = append(apiVersions, identity.apiVersion)
 	}
 
-	return apiVersions, nil
+	return apiVersions, generated, nil
 }
 
 func snapshotSourceIdentity(
@@ -1275,35 +1459,199 @@ func (i nodeIdentity) matches(kind, name, apiVersion string) bool {
 }
 
 func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {
-	gv, err := schema.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
-	}
-
-	gvr, namespaced, err := cfg.resourceFor(schema.GroupVersionKind{
-		Group:   gv.Group,
-		Version: gv.Version,
-		Kind:    ref.Kind,
-	})
+	resource, _, err := cfg.snapshotResource(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	if namespaced {
-		obj, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-
-		return obj, nil
-	}
-
-	obj, err := cfg.Dynamic.Resource(gvr).Get(ctx, ref.Name, metav1.GetOptions{})
+	obj, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	return obj, nil
+}
+
+func (cfg Config) getSnapshotChild(
+	ctx context.Context,
+	parentRef aggapi.NodeRef,
+	parent *unstructured.Unstructured,
+	ref aggapi.NodeRef,
+) (*unstructured.Unstructured, bool, error) {
+	resource, namespaced, err := cfg.snapshotResource(ref)
+	if err != nil {
+		return nil, false, err
+	}
+
+	obj, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
+	if err == nil {
+		return obj, false, nil
+	}
+
+	if !kubeerrors.IsNotFound(err) {
+		return nil, false, err
+	}
+
+	if !namespaced {
+		return nil, false, fmt.Errorf(
+			"cannot prove absence of namespace-local child ref %s %s/%s: REST mapping is cluster-scoped",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+		)
+	}
+
+	parentResourceVersion := parent.GetResourceVersion()
+	if parentResourceVersion == "" {
+		return nil, false, fmt.Errorf(
+			"cannot prove absence of child ref %s %s/%s: parent %s %s/%s has no metadata.resourceVersion",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			parentRef.APIVersion,
+			parentRef.Kind,
+			parentRef.Name,
+		)
+	}
+
+	if err := proveMissingSnapshotChild(ctx, resource, parentResourceVersion, ref); err != nil {
+		return nil, false, err
+	}
+
+	return nil, true, nil
+}
+
+func (cfg Config) snapshotResource(
+	ref aggapi.NodeRef,
+) (dynamic.ResourceInterface, bool, error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse apiVersion %q: %w", ref.APIVersion, err)
+	}
+
+	gvk := schema.GroupVersionKind{
+		Group:   gv.Group,
+		Version: gv.Version,
+		Kind:    ref.Kind,
+	}
+
+	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+	}
+
+	if mapping.GroupVersionKind != gvk {
+		return nil, false, fmt.Errorf(
+			"resolve resource for %s: REST mapping returned mismatched GVK %s",
+			gvk.String(),
+			mapping.GroupVersionKind.String(),
+		)
+	}
+
+	if mapping.Scope == nil {
+		return nil, false, fmt.Errorf("resolve resource for %s: REST mapping has no scope", gvk.String())
+	}
+
+	namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
+	if namespaced {
+		return cfg.Dynamic.Resource(mapping.Resource).Namespace(cfg.Namespace), true, nil
+	}
+
+	return cfg.Dynamic.Resource(mapping.Resource), false, nil
+}
+
+func proveMissingSnapshotChild(
+	ctx context.Context,
+	resource dynamic.ResourceInterface,
+	parentResourceVersion string,
+	ref aggapi.NodeRef,
+) error {
+	selector := fields.OneTermEqualSelector("metadata.name", ref.Name).String()
+	continueToken := ""
+	seenContinueTokens := make(map[string]struct{})
+
+	for pageNumber := 0; pageNumber < missingChildProofMaxPages; pageNumber++ {
+		options := metav1.ListOptions{
+			FieldSelector: selector,
+			Limit:         missingChildProofPageLimit,
+			Continue:      continueToken,
+		}
+		if continueToken == "" {
+			options.ResourceVersion = parentResourceVersion
+			options.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
+		}
+
+		page, err := resource.List(ctx, options)
+		if err != nil {
+			return fmt.Errorf(
+				"list %s %s/%s at or after parent resourceVersion %s to prove absence: %w",
+				ref.APIVersion,
+				ref.Kind,
+				ref.Name,
+				parentResourceVersion,
+				err,
+			)
+		}
+
+		if page == nil {
+			return fmt.Errorf(
+				"list %s %s/%s returned no page while proving absence",
+				ref.APIVersion,
+				ref.Kind,
+				ref.Name,
+			)
+		}
+
+		for i := range page.Items {
+			item := &page.Items[i]
+			if item.GetName() != ref.Name {
+				continue
+			}
+
+			return fmt.Errorf(
+				"child ref %s %s/%s appeared in the collection after its GET returned NotFound; hierarchy changed while resolving, retry",
+				ref.APIVersion,
+				ref.Kind,
+				ref.Name,
+			)
+		}
+
+		next := page.GetContinue()
+		if next == "" {
+			if page.GetRemainingItemCount() != nil && *page.GetRemainingItemCount() != 0 {
+				return fmt.Errorf(
+					"list %s %s/%s returned an incomplete final page with remainingItemCount=%d",
+					ref.APIVersion,
+					ref.Kind,
+					ref.Name,
+					*page.GetRemainingItemCount(),
+				)
+			}
+
+			return nil
+		}
+
+		if _, seen := seenContinueTokens[next]; seen {
+			return fmt.Errorf(
+				"list %s %s/%s repeated continue token %q while proving absence",
+				ref.APIVersion,
+				ref.Kind,
+				ref.Name,
+				next,
+			)
+		}
+
+		seenContinueTokens[next] = struct{}{}
+		continueToken = next
+	}
+
+	return fmt.Errorf(
+		"list %s %s/%s exceeded %d pages while proving absence",
+		ref.APIVersion,
+		ref.Kind,
+		ref.Name,
+		missingChildProofMaxPages,
+	)
 }
 
 func snapshotChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotChildRef, error) {

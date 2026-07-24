@@ -75,8 +75,12 @@ VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provision
 
 --node restricts the restore to a single node subtree. The positional Snapshot always
 anchors the hierarchy and must exist; the selection may use either the generated snapshot-CR
-Kind/name or the original captured source Kind/name. A Ready child remains restorable when
-the root is DEGRADED because an unrelated sibling CR was deleted.
+Kind/name or the original captured source Kind/name. A Ready child selected by its generated
+identity remains restorable when the root is DEGRADED because an unrelated sibling CR was
+deleted. Selecting that deleted generated child reports that it belongs to the tree but is
+missing. Original-source selection fails closed while any child ref is unresolved, because a
+missing child's original identity cannot be inspected; retry with the live match's generated
+Kind/name and --node-api-version shown in the error.
 
 --node-api-version disambiguates nodes whose selected Kind/name is shared across API groups
 or versions. Use "v1" for the Kubernetes core group, or "<group>/<version>" for a named group.
