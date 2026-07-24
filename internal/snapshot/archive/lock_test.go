@@ -17,17 +17,29 @@ limitations under the License.
 package archive
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 const archiveLockHelperMode = "D8_ARCHIVE_LOCK_HELPER_MODE"
+
+type archiveLockHolderProcess struct {
+	t      *testing.T
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stderr *bytes.Buffer
+	once   sync.Once
+}
 
 func TestArchiveLockCompatibility(t *testing.T) {
 	t.Run("readers coexist and exclude writer", func(t *testing.T) {
@@ -265,9 +277,9 @@ func TestArchiveLockProcessHelper(t *testing.T) {
 	)
 
 	switch mode {
-	case "read":
+	case "read", "read-hold":
 		lock, err = AcquireReadLock(root)
-	case "write", "write-crash":
+	case "write", "write-crash", "write-hold":
 		lock, err = AcquireWriteLock(root)
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
@@ -279,6 +291,16 @@ func TestArchiveLockProcessHelper(t *testing.T) {
 
 	if mode == "write-crash" {
 		os.Exit(0)
+	}
+
+	if strings.HasSuffix(mode, "-hold") {
+		if _, err := os.Stdout.WriteString("ready\n"); err != nil {
+			t.Fatalf("publish helper readiness: %v", err)
+		}
+
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			t.Fatalf("wait for helper release: %v", err)
+		}
 	}
 
 	if err := lock.Unlock(); err != nil {
@@ -314,4 +336,77 @@ func runArchiveLockHelper(t *testing.T, root, mode string, wantSuccess bool) {
 	if !wantSuccess && !strings.Contains(string(output), ErrArchiveLocked.Error()) {
 		t.Fatalf("archive lock helper %s output = %q, want %q", mode, output, ErrArchiveLocked)
 	}
+}
+
+func startArchiveLockHolder(t *testing.T, root, mode string) *archiveLockHolderProcess {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestArchiveLockProcessHelper$")
+	cmd.Env = append(os.Environ(),
+		archiveLockHelperMode+"="+mode+"-hold",
+		"D8_ARCHIVE_LOCK_HELPER_ROOT="+root,
+	)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("open archive lock helper stdin: %v", err)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+
+		t.Fatalf("open archive lock helper stdout: %v", err)
+	}
+
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+
+		t.Fatalf("start archive lock helper: %v", err)
+	}
+
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+
+		t.Fatalf("wait for archive lock helper readiness: %v\n%s", err, stderr)
+	}
+
+	if ready != "ready\n" {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+
+		t.Fatalf("archive lock helper readiness = %q, want ready", ready)
+	}
+
+	holder := &archiveLockHolderProcess{
+		t:      t,
+		cmd:    cmd,
+		stdin:  stdin,
+		stderr: stderr,
+	}
+	t.Cleanup(holder.Release)
+
+	return holder
+}
+
+func (p *archiveLockHolderProcess) Release() {
+	p.t.Helper()
+
+	p.once.Do(func() {
+		if err := p.stdin.Close(); err != nil {
+			p.t.Errorf("release archive lock helper: %v", err)
+		}
+
+		if err := p.cmd.Wait(); err != nil {
+			p.t.Errorf("archive lock holder failed: %v\n%s", err, p.stderr)
+		}
+	})
 }

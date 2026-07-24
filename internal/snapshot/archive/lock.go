@@ -244,7 +244,8 @@ func acquireSourceLock(
 	return lock, nil
 }
 
-// Verify proves that the current root name and lock entry still identify the pinned handles.
+// Verify proves that the external domain, current root name, and in-root lock entry still
+// identify the pinned handles.
 func (l *Lock) Verify() error {
 	if l == nil {
 		return errors.New("verify archive lock: lock is nil")
@@ -261,7 +262,35 @@ func (l *Lock) Verify() error {
 		return fmt.Errorf("verify locked archive root: %w", err)
 	}
 
+	if err := verifyArchiveLockAnchor(l.anchor); err != nil {
+		return fmt.Errorf("verify archive lock domain: %w", err)
+	}
+
 	return l.verifyLockEntryLocked()
+}
+
+func verifyArchiveLockAnchor(anchor *os.File) error {
+	if anchor == nil {
+		return fmt.Errorf("external archive lock domain is absent: %w", ErrArchiveLockChanged)
+	}
+
+	expectedInfo, err := anchor.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect held archive lock domain %s: %w", anchor.Name(), err)
+	}
+
+	currentInfo, err := os.Lstat(anchor.Name())
+	if err != nil {
+		return fmt.Errorf("inspect current archive lock domain %s: %w",
+			anchor.Name(), errors.Join(ErrArchiveLockChanged, err))
+	}
+
+	if !currentInfo.Mode().IsRegular() || !os.SameFile(expectedInfo, currentInfo) {
+		return fmt.Errorf("%s no longer names the held archive lock domain: %w",
+			anchor.Name(), errors.Join(ErrArchiveLockChanged, ErrNonRegularArchiveArtifact))
+	}
+
+	return nil
 }
 
 func (l *Lock) verifyLockEntry() error {
