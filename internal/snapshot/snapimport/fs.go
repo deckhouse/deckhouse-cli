@@ -18,9 +18,13 @@ package snapimport
 
 import (
 	"archive/tar"
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"math"
@@ -28,6 +32,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +46,25 @@ const (
 	uploadFilesSubpath          = "api/v1/files"
 	maxConsecutiveFileConflicts = 8
 	maxFileConflictReplays      = 4 * maxConsecutiveFileConflicts
+
+	fsTarMaxEntries          = 1_000_000_000
+	fsTarMaxPathBytes        = 16 << 10
+	fsTarRunMaxRecords       = 4096
+	fsTarRunMaxPathBytes     = 4 << 20
+	fsTarMergeFanIn          = 8
+	fsTarMergeLevels         = 16
+	fsTarIndexBufferBytes    = 64 << 10
+	fsTarMaxDiagnostics      = 32
+	fsTarCancellationCadence = 128
 )
+
+// The preflight inventory keeps one fixed-size in-memory run, merges at most eight runs at
+// once, and retains a fixed sixteen-level run table. A merge therefore opens at most nine
+// inventory descriptors (eight inputs plus one output), while sorted metadata occupies at
+// most two generations on disk in addition to the fixed-width archive-order sequence.
+// Files live in a 0700 OS temporary directory with mode 0600 and are never reused. Every
+// normal/error/cancellation path removes the directory; a process crash can only leave that
+// private, unreferenced directory for the host's standard temporary-directory scavenger.
 
 // fileAttrs carries the filesystem metadata sent to the FS importer for each file.
 // The importer's CheckRequiredHeaders middleware requires X-Attribute-Permissions,
@@ -436,14 +459,487 @@ func parseOffsetHeader(h http.Header, name string) (int64, error) {
 	return n, nil
 }
 
-type fsTarNonRegularEntry struct {
-	Typeflag   byte
-	HeaderPath string
+type fsTarRecordKind byte
+
+const (
+	fsTarRecordRegular fsTarRecordKind = iota
+	fsTarRecordDirectory
+	fsTarRecordUnsupported
+)
+
+type fsTarRecord struct {
+	Path     string
+	Ordinal  uint64
+	Kind     fsTarRecordKind
+	Typeflag byte
+}
+
+type fsTarIndexOptions struct {
+	tempRoot    string
+	mkdirTemp   func(string, string) (string, error)
+	createTemp  func(string, string) (*os.File, error)
+	removeAll   func(string) error
+	writeRecord func(io.Writer, fsTarRecord) error
 }
 
 type fsTarScan struct {
-	RegularPaths             []string
+	tempDir                  string
+	sequencePath             string
+	entryCount               uint64
+	regularCount             uint64
 	StructuralDirectoryCount int
+	removeAll                func(string) error
+}
+
+func (s *fsTarScan) Close() error {
+	if s == nil || s.tempDir == "" {
+		return nil
+	}
+
+	tempDir := s.tempDir
+	if err := s.removeAll(tempDir); err != nil {
+		return fmt.Errorf("remove filesystem tar preflight inventory %s: %w", tempDir, err)
+	}
+
+	s.tempDir = ""
+
+	return nil
+}
+
+func defaultFSTarIndexOptions() fsTarIndexOptions {
+	return fsTarIndexOptions{
+		mkdirTemp:   os.MkdirTemp,
+		createTemp:  os.CreateTemp,
+		removeAll:   os.RemoveAll,
+		writeRecord: writeFSTarRecord,
+	}
+}
+
+func (o fsTarIndexOptions) withDefaults() fsTarIndexOptions {
+	defaults := defaultFSTarIndexOptions()
+	if o.mkdirTemp == nil {
+		o.mkdirTemp = defaults.mkdirTemp
+	}
+
+	if o.createTemp == nil {
+		o.createTemp = defaults.createTemp
+	}
+
+	if o.removeAll == nil {
+		o.removeAll = defaults.removeAll
+	}
+
+	if o.writeRecord == nil {
+		o.writeRecord = defaults.writeRecord
+	}
+
+	return o
+}
+
+type fsTarRunBuilder struct {
+	ctx       context.Context
+	tempDir   string
+	options   fsTarIndexOptions
+	records   []fsTarRecord
+	pathBytes int
+	levels    [fsTarMergeLevels][]string
+}
+
+func newFSTarRunBuilder(ctx context.Context, tempDir string, options fsTarIndexOptions) *fsTarRunBuilder {
+	return &fsTarRunBuilder{
+		ctx:     ctx,
+		tempDir: tempDir,
+		options: options,
+		records: make([]fsTarRecord, 0, fsTarRunMaxRecords),
+	}
+}
+
+func (b *fsTarRunBuilder) Add(record fsTarRecord) error {
+	if len(record.Path) > fsTarMaxPathBytes {
+		return fmt.Errorf("%w: tar entry path exceeds %d bytes",
+			archive.ErrInvalidFSMetadata, fsTarMaxPathBytes)
+	}
+
+	if len(b.records) > 0 &&
+		(len(b.records) == fsTarRunMaxRecords || b.pathBytes+len(record.Path) > fsTarRunMaxPathBytes) {
+		if err := b.flush(); err != nil {
+			return err
+		}
+	}
+
+	b.records = append(b.records, record)
+	b.pathBytes += len(record.Path)
+
+	return nil
+}
+
+func (b *fsTarRunBuilder) Finalize() (string, error) {
+	if err := b.flush(); err != nil {
+		return "", err
+	}
+
+	runs := make([]string, 0, fsTarMergeLevels*(fsTarMergeFanIn-1))
+	for level := range b.levels {
+		runs = append(runs, b.levels[level]...)
+		clear(b.levels[level])
+		b.levels[level] = nil
+	}
+
+	if len(runs) == 0 {
+		empty, err := createPrivateFSTarTemp(b.options, b.tempDir, "sorted-*")
+		if err != nil {
+			return "", err
+		}
+
+		path := empty.Name()
+		if err := errors.Join(empty.Sync(), empty.Close()); err != nil {
+			_ = os.Remove(path)
+
+			return "", fmt.Errorf("finalize empty filesystem tar index: %w", err)
+		}
+
+		return path, nil
+	}
+
+	for len(runs) > 1 {
+		next := make([]string, 0, (len(runs)+fsTarMergeFanIn-1)/fsTarMergeFanIn)
+		for start := 0; start < len(runs); start += fsTarMergeFanIn {
+			end := min(start+fsTarMergeFanIn, len(runs))
+			if end-start == 1 {
+				next = append(next, runs[start])
+
+				continue
+			}
+
+			merged, err := mergeFSTarRuns(b.ctx, b.options, b.tempDir, runs[start:end])
+			if err != nil {
+				return "", err
+			}
+
+			next = append(next, merged)
+		}
+
+		clear(runs)
+		runs = next
+	}
+
+	return runs[0], nil
+}
+
+func (b *fsTarRunBuilder) flush() error {
+	if len(b.records) == 0 {
+		return nil
+	}
+
+	if err := checkFSTarContext(b.ctx); err != nil {
+		return err
+	}
+
+	sort.Slice(b.records, func(i, j int) bool {
+		left, right := b.records[i], b.records[j]
+
+		if left.Path != right.Path {
+			return left.Path < right.Path
+		}
+
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+
+		return left.Ordinal < right.Ordinal
+	})
+
+	run, err := createPrivateFSTarTemp(b.options, b.tempDir, "run-*")
+	if err != nil {
+		return err
+	}
+
+	runPath := run.Name()
+	writer := bufio.NewWriterSize(run, fsTarIndexBufferBytes)
+
+	for i := range b.records {
+		if i%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(b.ctx); err != nil {
+				_ = run.Close()
+				_ = os.Remove(runPath)
+
+				return err
+			}
+		}
+
+		if err := b.options.writeRecord(writer, b.records[i]); err != nil {
+			_ = run.Close()
+			_ = os.Remove(runPath)
+
+			return fmt.Errorf("write filesystem tar sort run: %w", err)
+		}
+	}
+
+	if err := errors.Join(writer.Flush(), run.Sync(), run.Close()); err != nil {
+		_ = os.Remove(runPath)
+
+		return fmt.Errorf("finalize filesystem tar sort run: %w", err)
+	}
+
+	if err := b.addRun(0, runPath); err != nil {
+		return err
+	}
+
+	clear(b.records)
+	b.records = b.records[:0]
+	b.pathBytes = 0
+
+	return nil
+}
+
+func (b *fsTarRunBuilder) addRun(level int, runPath string) error {
+	if level >= len(b.levels) {
+		return fmt.Errorf("%w: filesystem tar index exceeds %d merge levels",
+			archive.ErrInvalidFSMetadata, fsTarMergeLevels)
+	}
+
+	b.levels[level] = append(b.levels[level], runPath)
+	if len(b.levels[level]) < fsTarMergeFanIn {
+		return nil
+	}
+
+	merged, err := mergeFSTarRuns(b.ctx, b.options, b.tempDir, b.levels[level])
+	if err != nil {
+		return err
+	}
+
+	clear(b.levels[level])
+	b.levels[level] = b.levels[level][:0]
+
+	return b.addRun(level+1, merged)
+}
+
+type fsTarRunReader struct {
+	file    *os.File
+	reader  *bufio.Reader
+	current fsTarRecord
+	hasNext bool
+}
+
+func mergeFSTarRuns(
+	ctx context.Context,
+	options fsTarIndexOptions,
+	tempDir string,
+	runPaths []string,
+) (string, error) {
+	if len(runPaths) < 2 || len(runPaths) > fsTarMergeFanIn {
+		return "", fmt.Errorf("merge filesystem tar runs: invalid fan-in %d", len(runPaths))
+	}
+
+	readers := make([]fsTarRunReader, 0, len(runPaths))
+	for _, runPath := range runPaths {
+		file, err := os.Open(runPath)
+		if err != nil {
+			return "", errors.Join(
+				fmt.Errorf("open filesystem tar sort run %s: %w", runPath, err),
+				closeFSTarRunReaders(readers),
+			)
+		}
+
+		reader := fsTarRunReader{
+			file:   file,
+			reader: bufio.NewReaderSize(file, fsTarIndexBufferBytes),
+		}
+
+		record, err := readFSTarRecord(reader.reader)
+		if err != nil && !errors.Is(err, io.EOF) {
+			readers = append(readers, reader)
+
+			return "", errors.Join(
+				fmt.Errorf("read filesystem tar sort run %s: %w", runPath, err),
+				closeFSTarRunReaders(readers),
+			)
+		}
+
+		if err == nil {
+			reader.current = record
+			reader.hasNext = true
+		}
+
+		readers = append(readers, reader)
+	}
+
+	output, err := createPrivateFSTarTemp(options, tempDir, "merge-*")
+	if err != nil {
+		return "", errors.Join(err, closeFSTarRunReaders(readers))
+	}
+
+	outputPath := output.Name()
+	writer := bufio.NewWriterSize(output, fsTarIndexBufferBytes)
+	written := 0
+
+	var mergeErr error
+
+	for {
+		selected := -1
+
+		for i := range readers {
+			if !readers[i].hasNext {
+				continue
+			}
+
+			if selected < 0 || lessFSTarRecord(readers[i].current, readers[selected].current) {
+				selected = i
+			}
+		}
+
+		if selected < 0 {
+			break
+		}
+
+		if written%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(ctx); err != nil {
+				mergeErr = err
+
+				break
+			}
+		}
+
+		if err := options.writeRecord(writer, readers[selected].current); err != nil {
+			mergeErr = fmt.Errorf("write merged filesystem tar index: %w", err)
+
+			break
+		}
+
+		written++
+
+		record, err := readFSTarRecord(readers[selected].reader)
+		if errors.Is(err, io.EOF) {
+			readers[selected].hasNext = false
+
+			continue
+		}
+
+		if err != nil {
+			mergeErr = fmt.Errorf("read filesystem tar sort run %s: %w", readers[selected].file.Name(), err)
+
+			break
+		}
+
+		readers[selected].current = record
+	}
+
+	finalizeErr := errors.Join(writer.Flush(), output.Sync(), output.Close(), closeFSTarRunReaders(readers))
+	if err := errors.Join(mergeErr, finalizeErr); err != nil {
+		_ = os.Remove(outputPath)
+
+		return "", err
+	}
+
+	for _, runPath := range runPaths {
+		if err := os.Remove(runPath); err != nil {
+			_ = os.Remove(outputPath)
+
+			return "", fmt.Errorf("remove merged filesystem tar sort run %s: %w", runPath, err)
+		}
+	}
+
+	return outputPath, nil
+}
+
+func closeFSTarRunReaders(readers []fsTarRunReader) error {
+	closeErrs := make([]error, 0, len(readers))
+	for i := range readers {
+		if err := readers[i].file.Close(); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("close filesystem tar sort run %s: %w",
+				readers[i].file.Name(), err))
+		}
+	}
+
+	return errors.Join(closeErrs...)
+}
+
+func lessFSTarRecord(left, right fsTarRecord) bool {
+	if left.Path != right.Path {
+		return left.Path < right.Path
+	}
+
+	if left.Kind != right.Kind {
+		return left.Kind < right.Kind
+	}
+
+	return left.Ordinal < right.Ordinal
+}
+
+func createPrivateFSTarTemp(options fsTarIndexOptions, dir, pattern string) (*os.File, error) {
+	file, err := options.createTemp(dir, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("create private filesystem tar preflight file: %w", err)
+	}
+
+	if err := file.Chmod(0o600); err != nil {
+		path := file.Name()
+		closeErr := file.Close()
+		removeErr := os.Remove(path)
+
+		return nil, errors.Join(
+			fmt.Errorf("set private permissions on filesystem tar preflight file %s: %w", path, err),
+			closeErr,
+			removeErr,
+		)
+	}
+
+	return file, nil
+}
+
+func writeFSTarRecord(writer io.Writer, record fsTarRecord) error {
+	if len(record.Path) > fsTarMaxPathBytes {
+		return fmt.Errorf("%w: filesystem tar index path exceeds %d bytes",
+			archive.ErrInvalidFSMetadata, fsTarMaxPathBytes)
+	}
+
+	var header [14]byte
+
+	header[0] = byte(record.Kind)
+	header[1] = record.Typeflag
+	binary.BigEndian.PutUint64(header[2:10], record.Ordinal)
+	binary.BigEndian.PutUint32(header[10:14], uint32(len(record.Path)))
+
+	if _, err := writer.Write(header[:]); err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(writer, record.Path); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
+	var header [14]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return fsTarRecord{}, err
+	}
+
+	pathLength := binary.BigEndian.Uint32(header[10:14])
+	if pathLength > fsTarMaxPathBytes {
+		return fsTarRecord{}, fmt.Errorf("%w: filesystem tar index path length %d exceeds %d",
+			archive.ErrInvalidFSMetadata, pathLength, fsTarMaxPathBytes)
+	}
+
+	pathBytes := make([]byte, int(pathLength))
+	if _, err := io.ReadFull(reader, pathBytes); err != nil {
+		return fsTarRecord{}, err
+	}
+
+	kind := fsTarRecordKind(header[0])
+	if kind > fsTarRecordUnsupported {
+		return fsTarRecord{}, fmt.Errorf("%w: filesystem tar index has invalid record kind %d",
+			archive.ErrInvalidFSMetadata, kind)
+	}
+
+	return fsTarRecord{
+		Path:     string(pathBytes),
+		Ordinal:  binary.BigEndian.Uint64(header[2:10]),
+		Kind:     kind,
+		Typeflag: header[1],
+	}, nil
 }
 
 // importFSFromTar uploads regular data.tar entries without materializing plaintext
@@ -483,11 +979,140 @@ func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath stri
 }
 
 func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPath string, source fsTarSource, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
-	scan, err := scanFSTarSource(source, tarPath)
+	scan, err := scanFSTarSource(ctx, source, tarPath)
 	if err != nil {
 		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
 	}
 
+	if err := revalidateFSTarAgainstScan(ctx, source, tarPath, &scan); err != nil {
+		cleanupErr := scan.Close()
+
+		return errors.Join(fmt.Errorf("filesystem tar identity preflight: %w", err), cleanupErr)
+	}
+
+	uploadErr := uploadFSTarFromScan(ctx, client, baseURL, tarPath, source, log, setTotal, onProgress, activate, &scan)
+	cleanupErr := scan.Close()
+
+	return errors.Join(uploadErr, cleanupErr)
+}
+
+func revalidateFSTarAgainstScan(
+	ctx context.Context,
+	source fsTarSource,
+	tarPath string,
+	scan *fsTarScan,
+) error {
+	info, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", tarPath, err)
+	}
+
+	resetAuthenticatedRead(source)
+
+	section := io.NewSectionReader(source, 0, info.Size())
+	tr := tar.NewReader(section)
+
+	sequence, err := os.Open(scan.sequencePath)
+	if err != nil {
+		return fmt.Errorf("open filesystem tar preflight sequence: %w", err)
+	}
+
+	sequenceReader := bufio.NewReaderSize(sequence, fsTarIndexBufferBytes)
+
+	var (
+		entryIndex   uint64
+		regularIndex uint64
+	)
+
+	for {
+		if entryIndex%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(ctx); err != nil {
+				return errors.Join(err, closeFSTarSequence(sequence))
+			}
+		}
+
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("read tar entry from %s: %w", tarPath, err),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		expectedDigest, err := readFSTarSequenceDigest(sequenceReader)
+		if errors.Is(err, io.EOF) {
+			return errors.Join(
+				fmt.Errorf("%w: tar entry count changed after preflight (unexpected entry %q at index %d)",
+					archive.ErrInvalidFSMetadata, hdr.Name, entryIndex),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("read filesystem tar preflight sequence at entry %d: %w", entryIndex, err),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		actualDigest, err := digestFSTarHeader(hdr)
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		if actualDigest != expectedDigest {
+			return errors.Join(
+				fmt.Errorf("%w: tar entry identity or order changed after preflight at index %d (%q)",
+					archive.ErrInvalidFSMetadata, entryIndex, hdr.Name),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		entryIndex++
+
+		if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == 0 {
+			regularIndex++
+		}
+	}
+
+	if entryIndex != scan.entryCount || regularIndex != scan.regularCount {
+		return errors.Join(
+			fmt.Errorf("%w: tar entry count changed after preflight (entries %d/%d, regular entries %d/%d)",
+				archive.ErrInvalidFSMetadata, entryIndex, scan.entryCount, regularIndex, scan.regularCount),
+			closeFSTarSequence(sequence),
+		)
+	}
+
+	if _, err := readFSTarSequenceDigest(sequenceReader); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = fmt.Errorf("%w: filesystem tar preflight sequence has an unexpected trailing record",
+				archive.ErrInvalidFSMetadata)
+		}
+
+		return errors.Join(err, closeFSTarSequence(sequence))
+	}
+
+	return closeFSTarSequence(sequence)
+}
+
+func uploadFSTarFromScan(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, tarPath string,
+	source fsTarSource,
+	log *slog.Logger,
+	setTotal func(int64),
+	onProgress func(int),
+	activate func(),
+	scan *fsTarScan,
+) error {
 	if scan.StructuralDirectoryCount > 0 {
 		log.Warn("filesystem import creates structural parent directories implicitly; directory mode, uid, gid, and mtime cannot be restored",
 			slog.Int("directory_count", scan.StructuralDirectoryCount))
@@ -502,19 +1127,72 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 
 	section := io.NewSectionReader(source, 0, info.Size())
 	tr := tar.NewReader(section)
-	regularIndex := 0
 
-	var runningTotal int64
+	sequence, err := os.Open(scan.sequencePath)
+	if err != nil {
+		return fmt.Errorf("open filesystem tar preflight sequence: %w", err)
+	}
+
+	sequenceReader := bufio.NewReaderSize(sequence, fsTarIndexBufferBytes)
+
+	var (
+		entryIndex   uint64
+		regularIndex uint64
+		runningTotal int64
+	)
 
 	for {
+		if entryIndex%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(ctx); err != nil {
+				return errors.Join(err, closeFSTarSequence(sequence))
+			}
+		}
+
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 
 		if err != nil {
-			return fmt.Errorf("read tar entry from %s: %w", tarPath, err)
+			return errors.Join(
+				fmt.Errorf("read tar entry from %s: %w", tarPath, err),
+				closeFSTarSequence(sequence),
+			)
 		}
+
+		expectedDigest, err := readFSTarSequenceDigest(sequenceReader)
+		if errors.Is(err, io.EOF) {
+			return errors.Join(
+				fmt.Errorf("%w: tar entry count changed after preflight (unexpected entry %q at index %d)",
+					archive.ErrInvalidFSMetadata, hdr.Name, entryIndex),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("read filesystem tar preflight sequence at entry %d: %w", entryIndex, err),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		actualDigest, err := digestFSTarHeader(hdr)
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		if actualDigest != expectedDigest {
+			return errors.Join(
+				fmt.Errorf("%w: tar entry identity or order changed after preflight at index %d (%q)",
+					archive.ErrInvalidFSMetadata, entryIndex, hdr.Name),
+				closeFSTarSequence(sequence),
+			)
+		}
+
+		entryIndex++
 
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
 			continue
@@ -522,35 +1200,45 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 
 		metadata, err := archive.ParseFSMetadata(hdr)
 		if err != nil {
-			return fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err)
+			return errors.Join(
+				fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		if err := validateFSUploadPath(metadata.OriginalPath); err != nil {
-			return fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err)
-		}
-
-		if regularIndex >= len(scan.RegularPaths) || scan.RegularPaths[regularIndex] != metadata.OriginalPath {
-			return fmt.Errorf("%w: tar regular-entry order changed after preflight at entry %q",
-				archive.ErrInvalidFSMetadata, hdr.Name)
+			return errors.Join(
+				fmt.Errorf("revalidate tar entry %q: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		regularIndex++
 
 		ext, err := archive.FSCodecExtension(metadata.Codec)
 		if err != nil {
-			return fmt.Errorf("resolve codec for tar entry %q: %w", hdr.Name, err)
+			return errors.Join(
+				fmt.Errorf("resolve codec for tar entry %q: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		relPath := metadata.OriginalPath
 
 		payloadStart, err := section.Seek(0, io.SeekCurrent)
 		if err != nil {
-			return fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, err)
+			return errors.Join(
+				fmt.Errorf("determine tar payload offset for %s: %w", hdr.Name, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
 		if err != nil {
-			return fmt.Errorf("account tar entry %s: %w", relPath, err)
+			return errors.Join(
+				fmt.Errorf("account tar entry %s: %w", relPath, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		if setTotal != nil {
@@ -559,20 +1247,26 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 
 		fileURL, err := fileUploadURL(baseURL, relPath)
 		if err != nil {
-			return err
+			return errors.Join(err, closeFSTarSequence(sequence))
 		}
 
 		offset, done, doneSize, err := headFileOffset(ctx, client, fileURL, metadata.RawSize)
 		if err != nil {
-			return fmt.Errorf("probe upload state for %s: %w", relPath, err)
+			return errors.Join(
+				fmt.Errorf("probe upload state for %s: %w", relPath, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		progress := &fileUploadProgress{onProgress: onProgress}
 
 		if done {
 			if doneSize != metadata.RawSize {
-				return fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
-					relPath, doneSize, metadata.RawSize)
+				return errors.Join(
+					fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
+						relPath, doneSize, metadata.RawSize),
+					closeFSTarSequence(sequence),
+				)
 			}
 
 			progress.creditTo(metadata.RawSize)
@@ -592,29 +1286,47 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 		newBody := tarEntryBodyFactoryFromSource(source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
 		if err := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
 			newBody, progress, activate); err != nil {
-			return fmt.Errorf("upload %s: %w", relPath, err)
+			return errors.Join(
+				fmt.Errorf("upload %s: %w", relPath, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 
 		if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
-			return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
+			return errors.Join(
+				fmt.Errorf("verify plaintext size for %s: %w", relPath, err),
+				closeFSTarSequence(sequence),
+			)
 		}
 	}
 
-	if regularIndex != len(scan.RegularPaths) {
-		return fmt.Errorf("%w: tar regular-entry count changed after preflight (got %d, want %d)",
-			archive.ErrInvalidFSMetadata, regularIndex, len(scan.RegularPaths))
+	if entryIndex != scan.entryCount || regularIndex != scan.regularCount {
+		return errors.Join(
+			fmt.Errorf("%w: tar entry count changed after preflight (entries %d/%d, regular entries %d/%d)",
+				archive.ErrInvalidFSMetadata, entryIndex, scan.entryCount, regularIndex, scan.regularCount),
+			closeFSTarSequence(sequence),
+		)
 	}
 
-	return nil
+	if _, err := readFSTarSequenceDigest(sequenceReader); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = fmt.Errorf("%w: filesystem tar preflight sequence has an unexpected trailing record",
+				archive.ErrInvalidFSMetadata)
+		}
+
+		return errors.Join(err, closeFSTarSequence(sequence))
+	}
+
+	return closeFSTarSequence(sequence)
 }
 
-func scanFSTar(tarPath string) (fsTarScan, error) {
+func scanFSTar(ctx context.Context, tarPath string) (fsTarScan, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return fsTarScan{}, fmt.Errorf("open %s: %w", tarPath, err)
 	}
 
-	scan, scanErr := scanFSTarSource(f, tarPath)
+	scan, scanErr := scanFSTarSource(ctx, f, tarPath)
 
 	closeErr := f.Close()
 	if closeErr != nil {
@@ -622,7 +1334,7 @@ func scanFSTar(tarPath string) (fsTarScan, error) {
 	}
 
 	if err := errors.Join(scanErr, closeErr); err != nil {
-		return fsTarScan{}, err
+		return fsTarScan{}, errors.Join(err, scan.Close())
 	}
 
 	return scan, nil
@@ -630,9 +1342,12 @@ func scanFSTar(tarPath string) (fsTarScan, error) {
 
 func scanVerifiedFSTar(ctx context.Context, node PlannedNode) error {
 	if node.archiveView == nil || node.payloadFile == nil {
-		_, err := scanFSTar(node.TarFile)
+		scan, err := scanFSTar(ctx, node.TarFile)
+		if err != nil {
+			return err
+		}
 
-		return err
+		return scan.Close()
 	}
 
 	handle, err := node.archiveView.OpenVerifiedFile(ctx, node.payloadFile)
@@ -640,18 +1355,20 @@ func scanVerifiedFSTar(ctx context.Context, node PlannedNode) error {
 		return err
 	}
 
-	_, scanErr := scanFSTarSource(handle, node.TarFile)
+	scan, scanErr := scanFSTarSource(ctx, handle, node.TarFile)
 	verifyErr := handle.Verify(ctx)
 	closeErr := handle.Close()
+	cleanupErr := scan.Close()
 
 	return errors.Join(
 		scanErr,
 		verifyErr,
 		closeTarFileError(node.TarFile, closeErr),
+		cleanupErr,
 	)
 }
 
-func scanFSTarSource(source fsTarSource, tarPath string) (fsTarScan, error) {
+func scanFSTarSource(ctx context.Context, source fsTarSource, tarPath string) (fsTarScan, error) {
 	info, err := source.Stat()
 	if err != nil {
 		return fsTarScan{}, fmt.Errorf("inspect %s: %w", tarPath, err)
@@ -659,101 +1376,198 @@ func scanFSTarSource(source fsTarSource, tarPath string) (fsTarScan, error) {
 
 	resetAuthenticatedRead(source)
 
-	return scanFSTarReader(tar.NewReader(io.NewSectionReader(source, 0, info.Size())), tarPath)
+	return scanFSTarReader(ctx, tar.NewReader(io.NewSectionReader(source, 0, info.Size())), tarPath)
 }
 
-func scanFSTarReader(tr *tar.Reader, tarPath string) (fsTarScan, error) {
-	scan := fsTarScan{}
-	originalPaths := make(map[string]struct{})
+func scanFSTarReader(ctx context.Context, tr *tar.Reader, tarPath string) (fsTarScan, error) {
+	return scanFSTarReaderWithOptions(ctx, tr, tarPath, defaultFSTarIndexOptions())
+}
 
-	var nonRegular []fsTarNonRegularEntry
+func scanFSTarReaderWithOptions(
+	ctx context.Context,
+	tr *tar.Reader,
+	tarPath string,
+	options fsTarIndexOptions,
+) (fsTarScan, error) {
+	options = options.withDefaults()
+
+	tempDir, err := options.mkdirTemp(options.tempRoot, "d8-fs-tar-preflight-*")
+	if err != nil {
+		return fsTarScan{}, fmt.Errorf("create private filesystem tar preflight directory: %w", err)
+	}
+
+	if err := os.Chmod(tempDir, 0o700); err != nil {
+		cleanupErr := options.removeAll(tempDir)
+
+		return fsTarScan{}, errors.Join(
+			fmt.Errorf("set private permissions on filesystem tar preflight directory %s: %w", tempDir, err),
+			cleanupErr,
+		)
+	}
+
+	cleanup := func(scanErr error) (fsTarScan, error) {
+		cleanupErr := options.removeAll(tempDir)
+
+		return fsTarScan{}, errors.Join(scanErr, cleanupErr)
+	}
+
+	sequence, err := createPrivateFSTarTemp(options, tempDir, "sequence-*")
+	if err != nil {
+		return cleanup(err)
+	}
+
+	sequencePath := sequence.Name()
+	sequenceWriter := bufio.NewWriterSize(sequence, fsTarIndexBufferBytes)
+	builder := newFSTarRunBuilder(ctx, tempDir, options)
+
+	var (
+		entryCount   uint64
+		regularCount uint64
+	)
 
 	for {
+		if entryCount%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(ctx); err != nil {
+				_ = sequence.Close()
+
+				return cleanup(err)
+			}
+		}
+
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 
 		if err != nil {
-			return fsTarScan{}, fmt.Errorf("read tar entry from %s: %w", tarPath, err)
+			_ = sequence.Close()
+
+			return cleanup(fmt.Errorf("read tar entry from %s: %w", tarPath, err))
 		}
 
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
-			nonRegular = append(nonRegular, fsTarNonRegularEntry{
-				Typeflag:   hdr.Typeflag,
-				HeaderPath: hdr.Name,
-			})
+		if entryCount == fsTarMaxEntries {
+			_ = sequence.Close()
 
-			continue
+			return cleanup(fmt.Errorf("%w: filesystem tar exceeds %d entries",
+				archive.ErrInvalidFSMetadata, fsTarMaxEntries))
 		}
 
-		if originalPath, ok := hdr.PAXRecords[archive.PAXFSOriginalPath]; ok {
-			if err := validateFSUploadPath(originalPath); err != nil {
-				return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
-			}
-		}
-
-		metadata, err := archive.ParseFSMetadata(hdr)
+		digest, err := digestFSTarHeader(hdr)
 		if err != nil {
-			return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
+			_ = sequence.Close()
+
+			return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
 		}
 
-		if err := validateFSUploadPath(metadata.OriginalPath); err != nil {
-			return fsTarScan{}, fmt.Errorf("entry %q: %w", hdr.Name, err)
+		if err := writeFSTarSequenceDigest(sequenceWriter, digest); err != nil {
+			_ = sequence.Close()
+
+			return cleanup(fmt.Errorf("write filesystem tar preflight sequence: %w", err))
 		}
 
-		normalized := path.Clean(metadata.OriginalPath)
-		if _, exists := originalPaths[normalized]; exists {
-			return fsTarScan{}, fmt.Errorf("%w: duplicate normalized original path %q",
-				archive.ErrInvalidFSMetadata, normalized)
+		record := fsTarRecord{
+			Ordinal:  entryCount,
+			Typeflag: hdr.Typeflag,
 		}
 
-		originalPaths[normalized] = struct{}{}
-		scan.RegularPaths = append(scan.RegularPaths, normalized)
-	}
+		switch hdr.Typeflag {
+		case tar.TypeReg, 0:
+			if originalPath, ok := hdr.PAXRecords[archive.PAXFSOriginalPath]; ok {
+				if err := validateFSTarPathLength(originalPath); err != nil {
+					_ = sequence.Close()
 
-	entryErrs := make([]error, 0, len(nonRegular))
+					return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
+				}
 
-	for _, entry := range nonRegular {
-		if entry.Typeflag == tar.TypeDir {
-			directoryPath, err := normalizeFSTarDirectoryPath(entry.HeaderPath)
+				if err := validateFSUploadPath(originalPath); err != nil {
+					_ = sequence.Close()
+
+					return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
+				}
+			}
+
+			metadata, err := archive.ParseFSMetadata(hdr)
 			if err != nil {
-				entryErrs = append(entryErrs, fmt.Errorf("directory entry %q: %w", entry.HeaderPath, err))
+				_ = sequence.Close()
 
-				continue
+				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
 			}
 
-			if hasRegularDescendant(directoryPath, scan.RegularPaths) {
-				scan.StructuralDirectoryCount++
+			if err := validateFSTarPathLength(metadata.OriginalPath); err != nil {
+				_ = sequence.Close()
 
-				continue
+				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
 			}
 
-			entryErrs = append(entryErrs, fmt.Errorf(
-				"entry %q (directory): unsupported empty directory has no regular-file descendant",
-				directoryPath,
-			))
+			if err := validateFSUploadPath(metadata.OriginalPath); err != nil {
+				_ = sequence.Close()
 
-			continue
+				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
+			}
+
+			record.Kind = fsTarRecordRegular
+			record.Path = path.Clean(metadata.OriginalPath)
+			regularCount++
+		case tar.TypeDir:
+			directoryPath, err := normalizeFSTarDirectoryPath(hdr.Name)
+			if err != nil {
+				_ = sequence.Close()
+
+				return cleanup(fmt.Errorf("directory entry %q: %w", hdr.Name, err))
+			}
+
+			record.Kind = fsTarRecordDirectory
+			record.Path = directoryPath
+		default:
+			if err := validateFSTarPathLength(hdr.Name); err != nil {
+				_ = sequence.Close()
+
+				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
+			}
+
+			record.Kind = fsTarRecordUnsupported
+			record.Path = hdr.Name
 		}
 
-		entryErrs = append(entryErrs, fmt.Errorf(
-			"entry %q (%s): unsupported filesystem entry semantics",
-			entry.HeaderPath,
-			fsTarTypeName(entry.Typeflag),
-		))
+		if err := builder.Add(record); err != nil {
+			_ = sequence.Close()
+
+			return cleanup(err)
+		}
+
+		entryCount++
 	}
 
-	if len(entryErrs) > 0 {
-		return fsTarScan{}, fmt.Errorf("unsupported filesystem tar entries (%d): %w",
-			len(entryErrs), errors.Join(entryErrs...))
+	if err := errors.Join(sequenceWriter.Flush(), sequence.Sync(), sequence.Close()); err != nil {
+		return cleanup(fmt.Errorf("finalize filesystem tar preflight sequence: %w", err))
 	}
 
-	return scan, nil
+	sortedPath, err := builder.Finalize()
+	if err != nil {
+		return cleanup(err)
+	}
+
+	structuralDirectoryCount, err := validateSortedFSTar(ctx, sortedPath)
+	if err != nil {
+		return cleanup(err)
+	}
+
+	return fsTarScan{
+		tempDir:                  tempDir,
+		sequencePath:             sequencePath,
+		entryCount:               entryCount,
+		regularCount:             regularCount,
+		StructuralDirectoryCount: structuralDirectoryCount,
+		removeAll:                options.removeAll,
+	}, nil
 }
 
 func normalizeFSTarDirectoryPath(headerPath string) (string, error) {
 	directoryPath := strings.TrimSuffix(headerPath, "/")
+	if err := validateFSTarPathLength(directoryPath); err != nil {
+		return "", err
+	}
+
 	if err := validateFSUploadPath(directoryPath); err != nil {
 		return "", err
 	}
@@ -761,16 +1575,407 @@ func normalizeFSTarDirectoryPath(headerPath string) (string, error) {
 	return directoryPath, nil
 }
 
-func hasRegularDescendant(directoryPath string, regularPaths []string) bool {
-	prefix := directoryPath + "/"
+type fsTarDiagnosticCollector struct {
+	count    uint64
+	messages []string
+}
 
-	for _, regularPath := range regularPaths {
-		if strings.HasPrefix(regularPath, prefix) {
-			return true
+func (c *fsTarDiagnosticCollector) Add(message string) {
+	c.count++
+	if len(c.messages) < fsTarMaxDiagnostics {
+		c.messages = append(c.messages, message)
+	}
+}
+
+func (c *fsTarDiagnosticCollector) Err() error {
+	if c.count == 0 {
+		return nil
+	}
+
+	message := strings.Join(c.messages, "; ")
+	if omitted := c.count - uint64(len(c.messages)); omitted > 0 {
+		message += fmt.Sprintf("; ... %d additional entries omitted", omitted)
+	}
+
+	return fmt.Errorf("unsupported filesystem tar entries (%d): %s", c.count, message)
+}
+
+func validateSortedFSTar(ctx context.Context, sortedPath string) (int, error) {
+	diagnostics := &fsTarDiagnosticCollector{
+		messages: make([]string, 0, fsTarMaxDiagnostics),
+	}
+
+	if err := inspectSortedFSTarConflicts(ctx, sortedPath, diagnostics); err != nil {
+		return 0, err
+	}
+
+	structuralDirectoryCount, err := classifySortedFSTarDirectories(ctx, sortedPath, diagnostics)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := diagnostics.Err(); err != nil {
+		return 0, err
+	}
+
+	return structuralDirectoryCount, nil
+}
+
+func inspectSortedFSTarConflicts(
+	ctx context.Context,
+	sortedPath string,
+	diagnostics *fsTarDiagnosticCollector,
+) error {
+	file, err := os.Open(sortedPath)
+	if err != nil {
+		return fmt.Errorf("open sorted filesystem tar preflight index: %w", err)
+	}
+
+	reader := bufio.NewReaderSize(file, fsTarIndexBufferBytes)
+
+	var (
+		previousRegular   string
+		previousDirectory string
+		recordIndex       uint64
+	)
+
+	for {
+		if recordIndex%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(ctx); err != nil {
+				return errors.Join(err, closeFSTarIndex(file))
+			}
+		}
+
+		record, err := readFSTarRecord(reader)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return errors.Join(
+				fmt.Errorf("read sorted filesystem tar preflight index: %w", err),
+				closeFSTarIndex(file),
+			)
+		}
+
+		switch record.Kind {
+		case fsTarRecordRegular:
+			if record.Path == previousRegular {
+				return errors.Join(
+					fmt.Errorf("%w: duplicate normalized original path %q",
+						archive.ErrInvalidFSMetadata, record.Path),
+					closeFSTarIndex(file),
+				)
+			}
+
+			if previousRegular != "" && strings.HasPrefix(record.Path, previousRegular+"/") {
+				return errors.Join(
+					fmt.Errorf("%w: regular path %q is an ancestor of regular path %q",
+						archive.ErrInvalidFSMetadata, previousRegular, record.Path),
+					closeFSTarIndex(file),
+				)
+			}
+
+			previousRegular = record.Path
+		case fsTarRecordDirectory:
+			if record.Path == previousDirectory {
+				return errors.Join(
+					fmt.Errorf("%w: duplicate normalized directory path %q",
+						archive.ErrInvalidFSMetadata, record.Path),
+					closeFSTarIndex(file),
+				)
+			}
+
+			if previousRegular == record.Path ||
+				previousRegular != "" && strings.HasPrefix(record.Path, previousRegular+"/") {
+				return errors.Join(
+					fmt.Errorf("%w: regular path %q conflicts with directory path %q",
+						archive.ErrInvalidFSMetadata, previousRegular, record.Path),
+					closeFSTarIndex(file),
+				)
+			}
+
+			previousDirectory = record.Path
+		case fsTarRecordUnsupported:
+			diagnostics.Add(fmt.Sprintf(
+				"entry %q (%s): unsupported filesystem entry semantics",
+				record.Path,
+				fsTarTypeName(record.Typeflag),
+			))
+		default:
+			return errors.Join(
+				fmt.Errorf("%w: unknown filesystem tar index record kind %d",
+					archive.ErrInvalidFSMetadata, record.Kind),
+				closeFSTarIndex(file),
+			)
+		}
+
+		recordIndex++
+	}
+
+	return closeFSTarIndex(file)
+}
+
+type fsTarKindCursor struct {
+	ctx       context.Context
+	file      *os.File
+	reader    *bufio.Reader
+	kind      fsTarRecordKind
+	readCount uint64
+}
+
+func openFSTarKindCursor(
+	ctx context.Context,
+	sortedPath string,
+	kind fsTarRecordKind,
+) (*fsTarKindCursor, error) {
+	file, err := os.Open(sortedPath)
+	if err != nil {
+		return nil, fmt.Errorf("open sorted filesystem tar preflight index: %w", err)
+	}
+
+	return &fsTarKindCursor{
+		ctx:    ctx,
+		file:   file,
+		reader: bufio.NewReaderSize(file, fsTarIndexBufferBytes),
+		kind:   kind,
+	}, nil
+}
+
+func (c *fsTarKindCursor) Next() (fsTarRecord, error) {
+	for {
+		if c.readCount%fsTarCancellationCadence == 0 {
+			if err := checkFSTarContext(c.ctx); err != nil {
+				return fsTarRecord{}, err
+			}
+		}
+
+		record, err := readFSTarRecord(c.reader)
+		if err != nil {
+			return fsTarRecord{}, err
+		}
+
+		c.readCount++
+
+		if record.Kind == c.kind {
+			return record, nil
+		}
+	}
+}
+
+func (c *fsTarKindCursor) Close() error {
+	return closeFSTarIndex(c.file)
+}
+
+func classifySortedFSTarDirectories(
+	ctx context.Context,
+	sortedPath string,
+	diagnostics *fsTarDiagnosticCollector,
+) (int, error) {
+	directories, err := openFSTarKindCursor(ctx, sortedPath, fsTarRecordDirectory)
+	if err != nil {
+		return 0, err
+	}
+
+	regulars, err := openFSTarKindCursor(ctx, sortedPath, fsTarRecordRegular)
+	if err != nil {
+		return 0, errors.Join(err, directories.Close())
+	}
+
+	regular, regularErr := regulars.Next()
+
+	structuralDirectoryCount := 0
+
+	for {
+		directory, err := directories.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return 0, errors.Join(err, directories.Close(), regulars.Close())
+		}
+
+		prefix := directory.Path + "/"
+		for regularErr == nil && regular.Path < prefix {
+			regular, regularErr = regulars.Next()
+		}
+
+		if regularErr != nil && !errors.Is(regularErr, io.EOF) {
+			return 0, errors.Join(regularErr, directories.Close(), regulars.Close())
+		}
+
+		if regularErr == nil && strings.HasPrefix(regular.Path, prefix) {
+			structuralDirectoryCount++
+
+			continue
+		}
+
+		diagnostics.Add(fmt.Sprintf(
+			"entry %q (directory): unsupported empty directory has no regular-file descendant",
+			directory.Path,
+		))
+	}
+
+	return structuralDirectoryCount, errors.Join(directories.Close(), regulars.Close())
+}
+
+func validateFSTarPathLength(value string) error {
+	if len(value) > fsTarMaxPathBytes {
+		return fmt.Errorf("%w: tar entry path exceeds %d bytes",
+			archive.ErrInvalidFSMetadata, fsTarMaxPathBytes)
+	}
+
+	return nil
+}
+
+func writeFSTarSequenceDigest(writer io.Writer, digest [sha256.Size]byte) error {
+	if _, err := writer.Write(digest[:]); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func readFSTarSequenceDigest(reader io.Reader) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	if _, err := io.ReadFull(reader, digest[:]); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+
+	return digest, nil
+}
+
+func digestFSTarHeader(header *tar.Header) ([sha256.Size]byte, error) {
+	if header == nil {
+		return [sha256.Size]byte{}, fmt.Errorf("%w: nil tar header", archive.ErrInvalidFSMetadata)
+	}
+
+	if err := validateFSTarPathLength(header.Name); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+
+	digest := sha256.New()
+	if err := hashFSTarByte(digest, header.Typeflag); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+
+	for _, value := range []string{
+		header.Name,
+		header.Linkname,
+		header.Uname,
+		header.Gname,
+		header.ModTime.UTC().Format(time.RFC3339Nano),
+		header.AccessTime.UTC().Format(time.RFC3339Nano),
+		header.ChangeTime.UTC().Format(time.RFC3339Nano),
+	} {
+		if err := hashFSTarString(digest, value); err != nil {
+			return [sha256.Size]byte{}, err
 		}
 	}
 
-	return false
+	for _, value := range []int64{
+		header.Size,
+		header.Mode,
+		int64(header.Uid),
+		int64(header.Gid),
+		header.Devmajor,
+		header.Devminor,
+		int64(header.Format),
+	} {
+		if err := hashFSTarInt64(digest, value); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+	}
+
+	if err := hashFSTarMap(digest, header.PAXRecords); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+
+	var result [sha256.Size]byte
+	copy(result[:], digest.Sum(nil))
+
+	return result, nil
+}
+
+func hashFSTarMap(digest hash.Hash, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	if err := hashFSTarInt64(digest, int64(len(keys))); err != nil {
+		return err
+	}
+
+	for _, key := range keys {
+		if err := hashFSTarString(digest, key); err != nil {
+			return err
+		}
+
+		if err := hashFSTarString(digest, values[key]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func hashFSTarString(digest hash.Hash, value string) error {
+	if err := hashFSTarInt64(digest, int64(len(value))); err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(digest, value); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func hashFSTarInt64(digest hash.Hash, value int64) error {
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(value))
+
+	if _, err := digest.Write(encoded[:]); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func hashFSTarByte(digest hash.Hash, value byte) error {
+	if _, err := digest.Write([]byte{value}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func checkFSTarContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("filesystem tar preflight cancelled: %w", err)
+	}
+
+	return nil
+}
+
+func closeFSTarIndex(file *os.File) error {
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close filesystem tar preflight index %s: %w", file.Name(), err)
+	}
+
+	return nil
+}
+
+func closeFSTarSequence(file *os.File) error {
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close filesystem tar preflight sequence %s: %w", file.Name(), err)
+	}
+
+	return nil
 }
 
 func fsTarTypeName(typeflag byte) string {
