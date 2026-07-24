@@ -93,8 +93,29 @@ var ErrDecodedLengthMismatch = errors.New("merged block volume decoded length mi
 // verification and a full successful Commit, so the merge resumes from the
 // same chunks on the next run.
 func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, chunkSize int64, ext string) error {
+	return mergeBlockChunks(ctx, nil, chunkDir, outPath, totalSize, chunkSize, ext)
+}
+
+// MergeBlockChunksRooted merges chunks through destination's locked view.
+func MergeBlockChunksRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir, outPath string,
+	totalSize, chunkSize int64,
+	ext string,
+) error {
+	return mergeBlockChunks(ctx, destination, chunkDir, outPath, totalSize, chunkSize, ext)
+}
+
+func mergeBlockChunks(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir, outPath string,
+	totalSize, chunkSize int64,
+	ext string,
+) error {
 	if totalSize == 0 {
-		return commitEmptyBlock(ctx, chunkDir, outPath)
+		return commitEmptyBlock(ctx, destination, chunkDir, outPath)
 	}
 
 	if chunkSize <= 0 {
@@ -107,8 +128,8 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 	for i := range numChunks {
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
-		_, err := os.Stat(p)
-		if os.IsNotExist(err) {
+		_, err := blockStat(destination, p)
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("chunk %d (%s): %w", i, p, ErrMissingChunk)
 		}
 
@@ -117,7 +138,7 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 		}
 	}
 
-	aw, err := mergeByConcatenation(ctx, chunkDir, outPath, numChunks, ext)
+	aw, err := mergeByConcatenation(ctx, destination, chunkDir, outPath, numChunks, ext)
 	if err != nil {
 		return err
 	}
@@ -137,7 +158,7 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 	// Chunks remain the recovery source until the verified final artifact is
 	// durably published. A removal error therefore leaves both the verified
 	// final and the redundant chunks for the pipeline's already-merged cleanup.
-	if err := os.RemoveAll(chunkDir); err != nil {
+	if err := blockRemoveAll(destination, chunkDir); err != nil {
 		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
 	}
 
@@ -151,12 +172,13 @@ func MergeBlockChunks(ctx context.Context, chunkDir, outPath string, totalSize, 
 // commits the returned writer.
 func mergeByConcatenation(
 	ctx context.Context,
+	destination *archive.RootedDestination,
 	chunkDir string,
 	outPath string,
 	numChunks int,
 	ext string,
 ) (*archive.AtomicWriter, error) {
-	aw, err := archive.NewAtomicWriter(outPath)
+	aw, err := blockAtomicWriter(destination, outPath)
 	if err != nil {
 		return nil, fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
@@ -169,7 +191,7 @@ func mergeByConcatenation(
 
 		p := filepath.Join(chunkDir, archive.ChunkFileName(i, ext))
 
-		if err := copyFile(aw, p); err != nil {
+		if err := copyFile(destination, aw, p); err != nil {
 			aw.Abort()
 			return nil, fmt.Errorf("copy chunk %d into merged file: %w", i, err)
 		}
@@ -183,8 +205,12 @@ func mergeByConcatenation(
 // function's doc comment for the "zero frames == zero bytes" contract and why
 // verification is skipped here. Idempotent on re-run — os.RemoveAll tolerates a
 // missing chunkDir and the AtomicWriter rename replaces any prior empty file.
-func commitEmptyBlock(ctx context.Context, chunkDir, outPath string) error {
-	aw, err := archive.NewAtomicWriter(outPath)
+func commitEmptyBlock(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir, outPath string,
+) error {
+	aw, err := blockAtomicWriter(destination, outPath)
 	if err != nil {
 		return fmt.Errorf("open atomic writer for %s: %w", outPath, err)
 	}
@@ -195,7 +221,7 @@ func commitEmptyBlock(ctx context.Context, chunkDir, outPath string) error {
 		return fmt.Errorf("commit empty %s: %w", outPath, err)
 	}
 
-	if err := os.RemoveAll(chunkDir); err != nil {
+	if err := blockRemoveAll(destination, chunkDir); err != nil {
 		return fmt.Errorf("remove chunk dir %s: %w", chunkDir, err)
 	}
 
@@ -345,8 +371,8 @@ func (v *decodedLengthVerifier) Write(p []byte) (int, error) {
 }
 
 // copyFile copies the contents of src into dst.
-func copyFile(dst io.Writer, src string) error {
-	f, err := os.Open(src)
+func copyFile(destination *archive.RootedDestination, dst io.Writer, src string) error {
+	f, err := blockOpen(destination, src)
 	if err != nil {
 		return err
 	}
@@ -357,4 +383,39 @@ func copyFile(dst io.Writer, src string) error {
 	}
 
 	return nil
+}
+
+func blockStat(destination *archive.RootedDestination, path string) (os.FileInfo, error) {
+	if destination == nil {
+		return os.Stat(path)
+	}
+
+	return destination.Stat(path)
+}
+
+func blockRemoveAll(destination *archive.RootedDestination, path string) error {
+	if destination == nil {
+		return os.RemoveAll(path)
+	}
+
+	return destination.RemoveAll(path)
+}
+
+func blockAtomicWriter(
+	destination *archive.RootedDestination,
+	path string,
+) (*archive.AtomicWriter, error) {
+	if destination == nil {
+		return archive.NewAtomicWriter(path)
+	}
+
+	return archive.NewRootedAtomicWriter(destination, path)
+}
+
+func blockOpen(destination *archive.RootedDestination, path string) (*os.File, error) {
+	if destination == nil {
+		return os.Open(path)
+	}
+
+	return destination.OpenRegular(path)
 }

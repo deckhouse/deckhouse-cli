@@ -31,6 +31,79 @@ func renameDurably(oldPath, newPath string) error {
 	return moveFileDurably(oldPath, newPath, pathExists, windows.MoveFileEx)
 }
 
+func renameRootedDurably(oldRoot *os.Root, oldName string, newRoot *os.Root, newName string) error {
+	same, err := sameRootedDirectory(oldRoot, newRoot)
+	if err != nil {
+		return err
+	}
+
+	if !same {
+		return fmt.Errorf("rooted atomic rename crosses directories: %w", ErrNonRegularArchiveArtifact)
+	}
+
+	if _, err := oldRoot.Lstat(newName); err == nil {
+		return fmt.Errorf("%w: destination %s already exists", ErrAtomicReplaceUnsupported, newName)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("checking rooted replacement destination %s: %w", newName, err)
+	}
+
+	if err := oldRoot.Rename(oldName, newName); err != nil {
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_FILE_EXISTS) {
+			return fmt.Errorf(
+				"%w: destination %s won the rooted publication race: %w",
+				ErrAtomicReplaceUnsupported,
+				newName,
+				err,
+			)
+		}
+
+		return fmt.Errorf("rooted rename %s to %s: %w", oldName, newName, err)
+	}
+
+	file, err := oldRoot.Open(newName)
+	if err != nil {
+		return fmt.Errorf("open rooted published file %s for flush: %w", newName, err)
+	}
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+
+		return fmt.Errorf("flush rooted published file %s: %w", newName, err)
+	}
+
+	return file.Close()
+}
+
+func sameRootedDirectory(left, right *os.Root) (bool, error) {
+	leftFile, err := left.Open(".")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = leftFile.Close() }()
+
+	rightFile, err := right.Open(".")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rightFile.Close() }()
+
+	leftInfo, err := leftFile.Stat()
+	if err != nil {
+		return false, err
+	}
+
+	rightInfo, err := rightFile.Stat()
+	if err != nil {
+		return false, err
+	}
+
+	return os.SameFile(leftInfo, rightInfo), nil
+}
+
+func syncRootedDirectory(*os.Root) error {
+	return nil
+}
+
 func moveFileDurably(oldPath, newPath string, exists pathExistsFunc, move moveFileExFunc) error {
 	destinationExists, err := exists(newPath)
 	if err != nil {

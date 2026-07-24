@@ -81,14 +81,35 @@ type TarEntrySource func(yield func(TarEntry) error) error
 // wrapping. The staging directory is always untouched, so assembly or
 // durability confirmation can be retried.
 func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries TarEntrySource) error {
-	aw, err := archive.NewAtomicWriter(outputPath)
+	return writeTar(ctx, nil, outputPath, stagingDir, entries)
+}
+
+// WriteTarRooted assembles a tar through destination's locked view.
+func WriteTarRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	outputPath string,
+	stagingDir string,
+	entries TarEntrySource,
+) error {
+	return writeTar(ctx, destination, outputPath, stagingDir, entries)
+}
+
+func writeTar(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	outputPath string,
+	stagingDir string,
+	entries TarEntrySource,
+) error {
+	aw, err := tarAtomicWriter(destination, outputPath)
 	if err != nil {
 		return fmt.Errorf("open tar output %s: %w", outputPath, err)
 	}
 
 	tw := tar.NewWriter(aw)
 
-	if err := writeEntries(ctx, tw, stagingDir, entries); err != nil {
+	if err := writeEntries(ctx, destination, tw, stagingDir, entries); err != nil {
 		aw.Abort()
 
 		return err
@@ -119,13 +140,19 @@ func WriteTar(ctx context.Context, outputPath string, stagingDir string, entries
 	return nil
 }
 
-func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entries TarEntrySource) error {
+func writeEntries(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	tw *tar.Writer,
+	stagingDir string,
+	entries TarEntrySource,
+) error {
 	return entries(func(e TarEntry) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("tar assembly cancelled before entry %q: %w", e.RelPath, err)
 		}
 
-		if err := writeEntry(ctx, tw, stagingDir, e); err != nil {
+		if err := writeEntry(ctx, destination, tw, stagingDir, e); err != nil {
 			return err
 		}
 
@@ -133,10 +160,16 @@ func writeEntries(ctx context.Context, tw *tar.Writer, stagingDir string, entrie
 	})
 }
 
-func writeEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e TarEntry) error {
+func writeEntry(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	tw *tar.Writer,
+	stagingDir string,
+	e TarEntry,
+) error {
 	switch e.Type {
 	case "file":
-		return writeFileEntry(ctx, tw, stagingDir, e)
+		return writeFileEntry(ctx, destination, tw, stagingDir, e)
 	case "dir":
 		return writeDirEntry(tw, e)
 	case "link":
@@ -159,7 +192,13 @@ func normalizeMtime(t time.Time) time.Time {
 	return t
 }
 
-func writeFileEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e TarEntry) error {
+func writeFileEntry(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	tw *tar.Writer,
+	stagingDir string,
+	e TarEntry,
+) error {
 	metadata, err := archive.NewFSMetadata(e.Codec, e.OriginalPath, e.RawSize)
 	if err != nil {
 		return fmt.Errorf("validate metadata for tar entry %s: %w", e.RelPath, err)
@@ -182,7 +221,7 @@ func writeFileEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e Ta
 
 	srcPath := filepath.Join(stagingDir, filepath.FromSlash(e.RelPath))
 
-	f, err := os.Open(srcPath)
+	f, err := tarOpen(destination, srcPath)
 	if err != nil {
 		return fmt.Errorf("open staging file %s: %w", srcPath, err)
 	}
@@ -218,6 +257,25 @@ func writeFileEntry(ctx context.Context, tw *tar.Writer, stagingDir string, e Ta
 	}
 
 	return nil
+}
+
+func tarAtomicWriter(
+	destination *archive.RootedDestination,
+	path string,
+) (*archive.AtomicWriter, error) {
+	if destination == nil {
+		return archive.NewAtomicWriter(path)
+	}
+
+	return archive.NewRootedAtomicWriter(destination, path)
+}
+
+func tarOpen(destination *archive.RootedDestination, path string) (*os.File, error) {
+	if destination == nil {
+		return os.Open(path)
+	}
+
+	return destination.OpenRegular(path)
 }
 
 type tarContextReader struct {

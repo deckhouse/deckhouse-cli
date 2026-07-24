@@ -51,6 +51,27 @@ import (
 // The operation is idempotent: rewriting an already-present object with the same
 // kind, name, and API group is a no-op.
 func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir string, node *source.Node) error {
+	return writeNodeManifests(ctx, nil, src, nodeDir, node)
+}
+
+// WriteNodeManifestsRooted writes node manifests through destination.
+func WriteNodeManifestsRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	src source.ManifestSource,
+	nodeDir string,
+	node *source.Node,
+) error {
+	return writeNodeManifests(ctx, destination, src, nodeDir, node)
+}
+
+func writeNodeManifests(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	src source.ManifestSource,
+	nodeDir string,
+	node *source.Node,
+) error {
 	objs, err := src.FetchNodeManifests(ctx, node.Ref())
 	if err != nil {
 		return fmt.Errorf("fetch manifests for %s/%s: %w", node.Kind, node.Name, err)
@@ -63,7 +84,7 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 			continue
 		}
 
-		if err := archive.WriteManifest(nodeDir, obj); err != nil {
+		if err := writeManifest(destination, nodeDir, obj); err != nil {
 			return fmt.Errorf("write manifest %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
 	}
@@ -84,6 +105,27 @@ func WriteNodeManifests(ctx context.Context, src source.ManifestSource, nodeDir 
 //
 // Returns an error if the target PVC is not present in the fetched manifests.
 func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeDir string, volNode *source.Node) error {
+	return writeVolumeManifest(ctx, nil, src, volumeDir, volNode)
+}
+
+// WriteVolumeManifestRooted writes one volume manifest through destination.
+func WriteVolumeManifestRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	src source.ManifestSource,
+	volumeDir string,
+	volNode *source.Node,
+) error {
+	return writeVolumeManifest(ctx, destination, src, volumeDir, volNode)
+}
+
+func writeVolumeManifest(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	src source.ManifestSource,
+	volumeDir string,
+	volNode *source.Node,
+) error {
 	scopeRef := volNode.ManifestScopeRef()
 
 	objs, err := src.FetchNodeManifests(ctx, scopeRef)
@@ -103,7 +145,7 @@ func WriteVolumeManifest(ctx context.Context, src source.ManifestSource, volumeD
 			continue
 		}
 
-		return archive.WriteManifest(volumeDir, obj)
+		return writeManifest(destination, volumeDir, obj)
 	}
 
 	return fmt.Errorf("target PVC %q (uid=%q) not found in manifests of %s/%s",
@@ -146,7 +188,36 @@ func FinalizeNode(nodeDir string, node *source.Node) error {
 // the marker), so it cannot perturb the checksum just written or any later
 // VerifyNode.
 func FinalizeNodeContext(ctx context.Context, nodeDir string, node *source.Node) error {
-	checksum, err := archive.ComputeNodeChecksum(nodeDir)
+	return finalizeNodeContext(ctx, nil, nodeDir, node)
+}
+
+// FinalizeNodeRootedContext finalizes a node through destination's locked view.
+func FinalizeNodeRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+) error {
+	return finalizeNodeContext(ctx, destination, nodeDir, node)
+}
+
+func finalizeNodeContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+) error {
+	var (
+		checksum archive.NodeChecksum
+		err      error
+	)
+
+	if destination == nil {
+		checksum, err = archive.ComputeNodeChecksum(nodeDir)
+	} else {
+		checksum, err = destination.ComputeNodeChecksum(nodeDir)
+	}
+
 	if err != nil {
 		return fmt.Errorf("compute checksum for %s/%s: %w", node.Kind, node.Name, err)
 	}
@@ -163,16 +234,49 @@ func FinalizeNodeContext(ctx context.Context, nodeDir string, node *source.Node)
 		Volumes:         buildVolumesList(node),
 	}
 
-	if err := archive.WriteSnapshotYAMLContext(ctx, nodeDir, sy); err != nil {
+	if err := writeSnapshotYAML(ctx, destination, nodeDir, sy); err != nil {
 		return fmt.Errorf("write snapshot.yaml for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
 	markerPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
-	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePath(destination, markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove identity marker for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
 	return nil
+}
+
+func writeManifest(
+	destination *archive.RootedDestination,
+	nodeDir string,
+	obj unstructured.Unstructured,
+) error {
+	if destination == nil {
+		return archive.WriteManifest(nodeDir, obj)
+	}
+
+	return archive.WriteManifestRooted(destination, nodeDir, obj)
+}
+
+func writeSnapshotYAML(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	snapshot archive.SnapshotYAML,
+) error {
+	if destination == nil {
+		return archive.WriteSnapshotYAMLContext(ctx, nodeDir, snapshot)
+	}
+
+	return archive.WriteSnapshotYAMLRooted(ctx, destination, nodeDir, snapshot)
+}
+
+func removePath(destination *archive.RootedDestination, path string) error {
+	if destination == nil {
+		return os.Remove(path)
+	}
+
+	return destination.Remove(path)
 }
 
 // buildVolumesList constructs the Volumes list for snapshot.yaml from a node.

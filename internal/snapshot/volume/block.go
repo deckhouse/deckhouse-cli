@@ -131,6 +131,63 @@ func DownloadBlockChunks(
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
+	return downloadBlockChunks(
+		ctx,
+		nil,
+		log,
+		chunkDir,
+		blockURL,
+		totalSize,
+		chunkSize,
+		workers,
+		fetcher,
+		codec,
+		onProgress,
+	)
+}
+
+// DownloadBlockChunksRooted downloads chunks through destination's locked view.
+func DownloadBlockChunksRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	log *slog.Logger,
+	chunkDir string,
+	blockURL string,
+	totalSize int64,
+	chunkSize int64,
+	workers int,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	onProgress func(n int),
+) error {
+	return downloadBlockChunks(
+		ctx,
+		destination,
+		log,
+		chunkDir,
+		blockURL,
+		totalSize,
+		chunkSize,
+		workers,
+		fetcher,
+		codec,
+		onProgress,
+	)
+}
+
+func downloadBlockChunks(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	log *slog.Logger,
+	chunkDir string,
+	blockURL string,
+	totalSize int64,
+	chunkSize int64,
+	workers int,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	onProgress func(n int),
+) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -139,7 +196,7 @@ func DownloadBlockChunks(
 		workers = 1
 	}
 
-	if err := ensureChunkGeometry(log, chunkDir, chunkSize, totalSize); err != nil {
+	if err := ensureChunkGeometry(ctx, destination, log, chunkDir, chunkSize, totalSize); err != nil {
 		return fmt.Errorf("verify chunk geometry for %s: %w", chunkDir, err)
 	}
 
@@ -158,7 +215,19 @@ func DownloadBlockChunks(
 		chunkIdx := i
 
 		g.Go(func() error {
-			return downloadChunk(gctx, log, chunkDir, blockURL, chunkIdx, chunkSize, totalSize, fetcher, codec, onProgress)
+			return downloadChunk(
+				gctx,
+				destination,
+				log,
+				chunkDir,
+				blockURL,
+				chunkIdx,
+				chunkSize,
+				totalSize,
+				fetcher,
+				codec,
+				onProgress,
+			)
 		})
 	}
 
@@ -190,19 +259,25 @@ func DownloadBlockChunks(
 // the only response that keeps resume idempotent. Any OTHER ReadChunkMeta
 // error (a genuine I/O failure, e.g. EACCES) still hard-aborts, since that is
 // not a geometry problem this function can safely paper over.
-func ensureChunkGeometry(log *slog.Logger, chunkDir string, chunkSize, totalSize int64) error {
-	_, statErr := os.Stat(chunkDir)
+func ensureChunkGeometry(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	log *slog.Logger,
+	chunkDir string,
+	chunkSize, totalSize int64,
+) error {
+	_, statErr := blockPathStat(destination, chunkDir)
 
 	switch {
 	case statErr == nil:
 		// Fall through to the metadata check below.
-	case os.IsNotExist(statErr):
-		return createChunkDir(chunkDir, chunkSize, totalSize)
+	case errors.Is(statErr, os.ErrNotExist):
+		return createChunkDir(ctx, destination, chunkDir, chunkSize, totalSize)
 	default:
 		return fmt.Errorf("stat chunk dir %s: %w", chunkDir, statErr)
 	}
 
-	meta, found, err := archive.ReadChunkMeta(chunkDir)
+	meta, found, err := readChunkMeta(ctx, destination, chunkDir)
 
 	switch {
 	case err != nil && errors.Is(err, archive.ErrCorruptChunkMeta):
@@ -222,22 +297,32 @@ func ensureChunkGeometry(log *slog.Logger, chunkDir string, chunkSize, totalSize
 			slog.Int64("previous_total_size", meta.TotalSize))
 	}
 
-	if err := os.RemoveAll(chunkDir); err != nil {
+	if err := blockPathRemoveAll(destination, chunkDir); err != nil {
 		return fmt.Errorf("remove stale chunk dir %s: %w", chunkDir, err)
 	}
 
-	return createChunkDir(chunkDir, chunkSize, totalSize)
+	return createChunkDir(ctx, destination, chunkDir, chunkSize, totalSize)
 }
 
 // createChunkDir creates chunkDir and records the geometry it is being
 // created for via chunks.meta, so a later run can detect a changed
 // chunkSize/totalSize before trusting any chunk file already inside it.
-func createChunkDir(chunkDir string, chunkSize, totalSize int64) error {
-	if err := archive.EnsureDir(chunkDir); err != nil {
+func createChunkDir(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir string,
+	chunkSize, totalSize int64,
+) error {
+	if err := blockPathEnsureDir(destination, chunkDir); err != nil {
 		return fmt.Errorf("create chunk dir %s: %w", chunkDir, err)
 	}
 
-	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize}); err != nil {
+	if err := writeChunkMeta(
+		ctx,
+		destination,
+		chunkDir,
+		archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: totalSize},
+	); err != nil {
 		return fmt.Errorf("write chunk metadata for %s: %w", chunkDir, err)
 	}
 
@@ -251,6 +336,7 @@ func createChunkDir(chunkDir string, chunkSize, totalSize int64) error {
 // from multiple goroutines.
 func downloadChunk(
 	ctx context.Context,
+	destination *archive.RootedDestination,
 	log *slog.Logger,
 	chunkDir string,
 	blockURL string,
@@ -278,7 +364,7 @@ func downloadChunk(
 	// codec-compressed) file size instead would under-count and could leave
 	// the bar short of 100% even though every chunk is present; mirrors
 	// stageCompressedFile's identical skip-credit on the filesystem path.
-	if _, err := os.Stat(finalPath); err == nil {
+	if _, err := blockPathStat(destination, finalPath); err == nil {
 		log.Debug("chunk already present, skipping", slog.Int("chunk", chunkIdx))
 
 		if onProgress != nil && rawLen > 0 {
@@ -293,15 +379,27 @@ func downloadChunk(
 	// holds durable resumable progress and must survive across runs.
 	tmpPath := finalPath + ".tmp"
 
-	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+	if err := blockPathRemove(destination, tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
 
-	if err := fetchChunkRaw(ctx, log, fetcher, blockURL, partPath, chunkIdx, startByte, endByte, rawLen, onProgress); err != nil {
+	if err := fetchChunkRaw(
+		ctx,
+		destination,
+		log,
+		fetcher,
+		blockURL,
+		partPath,
+		chunkIdx,
+		startByte,
+		endByte,
+		rawLen,
+		onProgress,
+	); err != nil {
 		return err
 	}
 
-	frameBytes, err := finalizeChunkFrame(finalPath, partPath, rawLen, codec)
+	frameBytes, err := finalizeChunkFrame(destination, finalPath, partPath, rawLen, codec)
 	if err != nil {
 		return fmt.Errorf("encode chunk %d: %w", chunkIdx, err)
 	}
@@ -312,13 +410,13 @@ func downloadChunk(
 	// ever looked at again, and MergeBlockChunks removes the whole chunk
 	// directory (including any stale ".part"/".part.offset") once every final
 	// chunk is present.
-	if err := os.Remove(partPath); err != nil && !os.IsNotExist(err) {
+	if err := blockPathRemove(destination, partPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("failed to remove durable partial chunk file after finalize",
 			slog.String("path", partPath),
 			slog.String("error", err.Error()))
 	}
 
-	if err := os.Remove(partOffsetPath(partPath)); err != nil && !os.IsNotExist(err) {
+	if err := blockPathRemove(destination, partOffsetPath(partPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Warn("failed to remove durable partial offset sidecar after finalize",
 			slog.String("path", partOffsetPath(partPath)),
 			slog.String("error", err.Error()))
@@ -334,13 +432,18 @@ func downloadChunk(
 // directly into an AtomicWriter — no whole-chunk buffer is read into
 // memory here, unlike the os.ReadFile+EncodeFrame this replaces. It returns
 // the resulting frame's byte size (for logging only).
-func finalizeChunkFrame(finalPath, partPath string, rawLen int64, codec compress.Codec) (int64, error) {
-	partFile, err := os.Open(partPath)
+func finalizeChunkFrame(
+	destination *archive.RootedDestination,
+	finalPath, partPath string,
+	rawLen int64,
+	codec compress.Codec,
+) (int64, error) {
+	partFile, err := blockPathOpen(destination, partPath)
 	if err != nil {
 		return 0, fmt.Errorf("open persisted chunk: %w", err)
 	}
 
-	aw, err := archive.NewAtomicWriter(finalPath)
+	aw, err := blockPathAtomicWriter(destination, finalPath)
 	if err != nil {
 		_ = partFile.Close()
 		return 0, fmt.Errorf("create chunk writer: %w", err)
@@ -363,7 +466,7 @@ func finalizeChunkFrame(finalPath, partPath string, rawLen int64, codec compress
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 
-	info, err := os.Stat(finalPath)
+	info, err := blockPathStat(destination, finalPath)
 	if err != nil {
 		return 0, fmt.Errorf("stat finalized chunk: %w", err)
 	}
@@ -389,6 +492,7 @@ func finalizeChunkFrame(finalPath, partPath string, rawLen int64, codec compress
 // silently finalizing a truncated chunk.
 func fetchChunkRaw(
 	ctx context.Context,
+	destination *archive.RootedDestination,
 	log *slog.Logger,
 	fetcher *exporter.Fetcher,
 	blockURL string,
@@ -397,7 +501,7 @@ func fetchChunkRaw(
 	startByte, endByte, rawLen int64,
 	onProgress func(n int),
 ) error {
-	have, err := partialChunkSize(partPath, rawLen)
+	have, err := partialChunkSize(destination, partPath, rawLen)
 	if err != nil {
 		return fmt.Errorf("stat partial chunk %d: %w", chunkIdx, err)
 	}
@@ -426,12 +530,18 @@ func fetchChunkRaw(
 
 	defer func() { _ = body.Close() }()
 
-	f, err := os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := blockPathOpenAppend(destination, partPath)
 	if err != nil {
 		return fmt.Errorf("open partial chunk %d: %w", chunkIdx, err)
 	}
 
-	sw := &syncingWriter{f: f, partPath: partPath, syncInterval: partSyncInterval, durableBase: have}
+	sw := &syncingWriter{
+		f:            f,
+		destination:  destination,
+		partPath:     partPath,
+		syncInterval: partSyncInterval,
+		durableBase:  have,
+	}
 	remaining := rawLen - have
 	cr := &countingReader{r: io.LimitReader(body, remaining), onProgress: onProgress}
 
@@ -459,7 +569,7 @@ func fetchChunkRaw(
 		return fmt.Errorf("close partial chunk %d: %w", chunkIdx, closeErr)
 	}
 
-	info, statErr := os.Stat(partPath)
+	info, statErr := blockPathStat(destination, partPath)
 	if statErr != nil {
 		return fmt.Errorf("stat finalized partial chunk %d: %w", chunkIdx, statErr)
 	}
@@ -513,6 +623,38 @@ func ScanBlockChunkProgress(chunkDir, ext string) (int64, int64, error) {
 
 // ScanBlockChunkProgressContext is ScanBlockChunkProgress with prompt cancellation.
 func ScanBlockChunkProgressContext(ctx context.Context, chunkDir, ext string) (int64, int64, error) {
+	return scanBlockChunkProgressContext(ctx, nil, chunkDir, ext)
+}
+
+// ScanBlockChunkProgressRootedContext scans progress through destination.
+func ScanBlockChunkProgressRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir, ext string,
+) (int64, int64, error) {
+	return scanBlockChunkProgressContext(ctx, destination, chunkDir, ext)
+}
+
+func scanBlockChunkProgressContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	chunkDir, ext string,
+) (int64, int64, error) {
+	if destination != nil {
+		directory, err := destination.OpenPinnedDirectory(chunkDir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return 0, 0, nil
+			}
+
+			return 0, 0, fmt.Errorf("pin rooted chunk directory %s: %w", chunkDir, err)
+		}
+
+		defer func() { _ = directory.Close() }()
+
+		return scanPinnedBlockChunkProgress(ctx, directory, ext)
+	}
+
 	root, err := archive.OpenRootedSource(chunkDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -728,8 +870,12 @@ func pinnedPartialChunkSizeReadOnly(
 // same "at most the unsynced tail is lost" guarantee partSyncInterval
 // already documents for a graceful interruption, now also holding across a
 // hard kill.
-func partialChunkSize(partPath string, rawLen int64) (int64, error) {
-	trusted, info, err := trustedPartPrefix(partPath, rawLen)
+func partialChunkSize(
+	destination *archive.RootedDestination,
+	partPath string,
+	rawLen int64,
+) (int64, error) {
+	trusted, info, err := trustedPartPrefix(destination, partPath, rawLen)
 	if err != nil || info == nil {
 		return trusted, err
 	}
@@ -738,7 +884,7 @@ func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 		return trusted, nil
 	}
 
-	if err := os.Truncate(partPath, trusted); err != nil {
+	if err := blockPathTruncate(destination, partPath, trusted); err != nil {
 		return 0, fmt.Errorf("truncate partial %s to trusted offset %d: %w", partPath, trusted, err)
 	}
 
@@ -753,17 +899,21 @@ func partialChunkSize(partPath string, rawLen int64) (int64, error) {
 // without a second stat. It returns (0, nil, nil) when partPath does not
 // exist yet. It never itself truncates or removes anything — see
 // partialChunkSize for the caller that does.
-func trustedPartPrefix(partPath string, rawLen int64) (int64, os.FileInfo, error) {
-	info, err := os.Stat(partPath)
+func trustedPartPrefix(
+	destination *archive.RootedDestination,
+	partPath string,
+	rawLen int64,
+) (int64, os.FileInfo, error) {
+	info, err := blockPathStat(destination, partPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil, nil
 		}
 
 		return 0, nil, fmt.Errorf("stat %s: %w", partPath, err)
 	}
 
-	durable, err := readDurablePartOffset(partPath)
+	durable, err := readDurablePartOffset(destination, partPath)
 	if err != nil {
 		return 0, nil, fmt.Errorf("read durable offset for %s: %w", partPath, err)
 	}
@@ -786,12 +936,12 @@ func partOffsetPath(partPath string) string {
 // which makes this rare but not impossible), mirroring how
 // archive.ErrCorruptChunkMeta is handled for chunks.meta elsewhere in this
 // file: degrade to the safe default, never a hard error.
-func readDurablePartOffset(partPath string) (int64, error) {
+func readDurablePartOffset(destination *archive.RootedDestination, partPath string) (int64, error) {
 	path := partOffsetPath(partPath)
 
-	data, err := os.ReadFile(path)
+	data, err := blockPathReadFile(destination, path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return 0, nil
 		}
 
@@ -811,10 +961,18 @@ func readDurablePartOffset(partPath string) (int64, error) {
 // immediately after an fsync of partPath's data has already succeeded (see
 // syncingWriter.sync), so offset never claims more than what is already
 // proven durable.
-func writeDurablePartOffset(partPath string, offset int64) error {
+func writeDurablePartOffset(
+	destination *archive.RootedDestination,
+	partPath string,
+	offset int64,
+) error {
 	path := partOffsetPath(partPath)
 
-	if err := archive.WriteFileAtomic(path, strings.NewReader(strconv.FormatInt(offset, 10))); err != nil {
+	if err := blockPathWriteAtomic(
+		destination,
+		path,
+		strings.NewReader(strconv.FormatInt(offset, 10)),
+	); err != nil {
 		return fmt.Errorf("write durable offset %s: %w", path, err)
 	}
 
@@ -831,6 +989,7 @@ func writeDurablePartOffset(partPath string, offset int64) error {
 // ever trust on a later resume.
 type syncingWriter struct {
 	f            *os.File
+	destination  *archive.RootedDestination
 	partPath     string
 	syncInterval int64
 	// durableBase is the offset (bytes already durable before this writer's
@@ -888,9 +1047,142 @@ func (w *syncingWriter) sync() error {
 		return fmt.Errorf("sync partial chunk: %w", err)
 	}
 
-	if err := writeDurablePartOffset(w.partPath, w.durableBase+w.written); err != nil {
+	if err := writeDurablePartOffset(w.destination, w.partPath, w.durableBase+w.written); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func blockPathStat(
+	destination *archive.RootedDestination,
+	path string,
+) (os.FileInfo, error) {
+	if destination == nil {
+		return os.Stat(path)
+	}
+
+	return destination.Stat(path)
+}
+
+func blockPathRemove(destination *archive.RootedDestination, path string) error {
+	if destination == nil {
+		return os.Remove(path)
+	}
+
+	return destination.Remove(path)
+}
+
+func blockPathRemoveAll(destination *archive.RootedDestination, path string) error {
+	if destination == nil {
+		return os.RemoveAll(path)
+	}
+
+	return destination.RemoveAll(path)
+}
+
+func blockPathEnsureDir(destination *archive.RootedDestination, path string) error {
+	if destination == nil {
+		return archive.EnsureDir(path)
+	}
+
+	return destination.EnsureDir(path)
+}
+
+func blockPathOpen(
+	destination *archive.RootedDestination,
+	path string,
+) (*os.File, error) {
+	if destination == nil {
+		return os.Open(path)
+	}
+
+	return destination.OpenRegular(path)
+}
+
+func blockPathOpenAppend(
+	destination *archive.RootedDestination,
+	path string,
+) (*os.File, error) {
+	if destination == nil {
+		return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	}
+
+	return destination.OpenRegularFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+}
+
+func blockPathAtomicWriter(
+	destination *archive.RootedDestination,
+	path string,
+) (*archive.AtomicWriter, error) {
+	if destination == nil {
+		return archive.NewAtomicWriter(path)
+	}
+
+	return archive.NewRootedAtomicWriter(destination, path)
+}
+
+func blockPathTruncate(
+	destination *archive.RootedDestination,
+	path string,
+	size int64,
+) error {
+	if destination == nil {
+		return os.Truncate(path, size)
+	}
+
+	file, err := destination.OpenRegularFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+
+	truncateErr := file.Truncate(size)
+	closeErr := file.Close()
+
+	return errors.Join(truncateErr, closeErr)
+}
+
+func blockPathReadFile(destination *archive.RootedDestination, path string) ([]byte, error) {
+	if destination == nil {
+		return os.ReadFile(path)
+	}
+
+	return destination.ReadFile(path)
+}
+
+func blockPathWriteAtomic(
+	destination *archive.RootedDestination,
+	path string,
+	reader io.Reader,
+) error {
+	if destination == nil {
+		return archive.WriteFileAtomic(path, reader)
+	}
+
+	return archive.WriteFileAtomicRooted(context.Background(), destination, path, reader)
+}
+
+func readChunkMeta(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	dir string,
+) (archive.ChunkMeta, bool, error) {
+	if destination == nil {
+		return archive.ReadChunkMeta(dir)
+	}
+
+	return destination.ReadChunkMeta(ctx, dir)
+}
+
+func writeChunkMeta(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	dir string,
+	meta archive.ChunkMeta,
+) error {
+	if destination == nil {
+		return archive.WriteChunkMeta(dir, meta)
+	}
+
+	return destination.WriteChunkMeta(ctx, dir, meta)
 }

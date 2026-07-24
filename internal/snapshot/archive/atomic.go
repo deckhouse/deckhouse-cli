@@ -19,11 +19,14 @@ package archive
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 )
 
 // ErrAtomicReplaceUnsupported reports that the platform cannot provide the
@@ -43,6 +46,9 @@ type AtomicWriter struct {
 	tmpPath   string
 	f         *os.File
 	ops       atomicCommitOps
+	rooted    *RootedDestination
+	finalRel  string
+	tmpRel    string
 }
 
 type atomicCommitOps struct {
@@ -50,6 +56,1006 @@ type atomicCommitOps struct {
 	closeTemp func(*os.File) error
 	rename    func(string, string) error
 	syncDir   func(string) error
+}
+
+// MutationPhase identifies a rooted destination operation boundary. Hooks run
+// before namespace verification and before the operation can mutate the pinned
+// tree.
+type MutationPhase string
+
+const (
+	MutationCreate  MutationPhase = "create"
+	MutationMkdir   MutationPhase = "mkdir"
+	MutationRemove  MutationPhase = "remove"
+	MutationRename  MutationPhase = "rename"
+	MutationSync    MutationPhase = "sync"
+	MutationStat    MutationPhase = "stat"
+	MutationOpen    MutationPhase = "open"
+	MutationReadDir MutationPhase = "read_dir"
+)
+
+// MutationBoundaryHook makes rooted mutation races deterministic in tests.
+type MutationBoundaryHook func(phase MutationPhase, path string)
+
+// RootedDestination confines every operation to the exact archive root held by
+// a write lock. The os.Root and RootedSource handles are independently opened
+// and identity-matched once; each descendant operation then uses descriptor-
+// relative resolution and revalidates the lock binding before it can mutate.
+type RootedDestination struct {
+	source     *RootedSource
+	root       *os.Root
+	path       string
+	hook       MutationBoundaryHook
+	ownsSource bool
+
+	mu     sync.RWMutex
+	lost   error
+	onLoss func(error)
+	closed bool
+}
+
+type rootedDestinationDir struct {
+	destination *RootedDestination
+	source      *RootedSource
+	root        *os.Root
+	path        string
+	owned       bool
+	sourceChain []*RootedSource
+	rootChain   []*os.Root
+}
+
+// NewLockedRootedDestination binds a mutation view to lock's exact pinned root.
+func NewLockedRootedDestination(lock *Lock, hook MutationBoundaryHook) (*RootedDestination, error) {
+	if lock == nil {
+		return nil, errors.New("open rooted destination: lock is nil")
+	}
+
+	lock.mu.Lock()
+	source := lock.source
+	held := lock.held
+	lock.mu.Unlock()
+
+	if !held || source == nil {
+		return nil, errors.New("open rooted destination: lock is not held")
+	}
+
+	if err := lock.Verify(); err != nil {
+		return nil, fmt.Errorf("verify rooted destination lock: %w", err)
+	}
+
+	return openRootedDestination(source, false, hook)
+}
+
+// OpenRootedDestination opens an unbound rooted mutation view. Production
+// downloads use NewLockedRootedDestination; this entry point keeps archive and
+// volume unit tests independent of command lock setup.
+func OpenRootedDestination(path string, hook MutationBoundaryHook) (*RootedDestination, error) {
+	source, err := OpenRootedSource(path)
+	if err != nil {
+		return nil, err
+	}
+
+	destination, err := openRootedDestination(source, true, hook)
+	if err != nil {
+		_ = source.Close()
+
+		return nil, err
+	}
+
+	return destination, nil
+}
+
+func openRootedDestination(
+	source *RootedSource,
+	ownsSource bool,
+	hook MutationBoundaryHook,
+) (*RootedDestination, error) {
+	root, err := os.OpenRoot(source.path)
+	if err != nil {
+		return nil, fmt.Errorf("open rooted mutation view %s: %w", source.path, err)
+	}
+
+	destination := &RootedDestination{
+		source:     source,
+		root:       root,
+		path:       source.path,
+		hook:       hook,
+		ownsSource: ownsSource,
+	}
+
+	if err := destination.verifyIdentity(); err != nil {
+		_ = root.Close()
+
+		return nil, err
+	}
+
+	if err := source.verifyCurrent(); err != nil {
+		_ = root.Close()
+
+		return nil, fmt.Errorf("verify rooted mutation view %s: %w", source.path, err)
+	}
+
+	return destination, nil
+}
+
+// Path returns the diagnostic absolute path represented by destination.
+func (d *RootedDestination) Path() string {
+	if d == nil {
+		return ""
+	}
+
+	return d.path
+}
+
+// SetBindingLossHandler installs the cancellation callback used by the
+// pipeline. The first namespace-binding failure wins.
+func (d *RootedDestination) SetBindingLossHandler(handler func(error)) {
+	d.mu.Lock()
+	d.onLoss = handler
+	lost := d.lost
+	d.mu.Unlock()
+
+	if lost != nil && handler != nil {
+		handler(lost)
+	}
+}
+
+// BindingError returns the first observed destination binding failure.
+func (d *RootedDestination) BindingError() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	return d.lost
+}
+
+// Verify checks both the lock namespace and the independently pinned mutation root.
+func (d *RootedDestination) Verify() error {
+	if d == nil {
+		return errors.New("verify rooted destination: destination is nil")
+	}
+
+	d.mu.RLock()
+	closed := d.closed
+	lost := d.lost
+	d.mu.RUnlock()
+
+	if closed {
+		return errors.New("verify rooted destination: destination is closed")
+	}
+
+	if lost != nil {
+		return lost
+	}
+
+	if err := d.source.verifyCurrent(); err != nil {
+		return d.recordBindingLoss(fmt.Errorf("verify rooted destination %s: %w", d.path, err))
+	}
+
+	if err := d.verifyIdentity(); err != nil {
+		return d.recordBindingLoss(err)
+	}
+
+	return nil
+}
+
+func (d *RootedDestination) verifyIdentity() error {
+	rootFile, err := d.root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open rooted destination identity %s: %w", d.path, err)
+	}
+
+	expected, expectedErr := d.source.dir.Stat()
+	actual, actualErr := rootFile.Stat()
+
+	closeErr := rootFile.Close()
+	if expectedErr != nil || actualErr != nil || closeErr != nil {
+		return errors.Join(
+			wrapRootedDestinationError("inspect locked root", d.path, expectedErr),
+			wrapRootedDestinationError("inspect mutation root", d.path, actualErr),
+			wrapRootedDestinationError("close mutation root", d.path, closeErr),
+		)
+	}
+
+	if !os.SameFile(expected, actual) {
+		return fmt.Errorf("%s no longer identifies the locked destination: %w",
+			d.path, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+func wrapRootedDestinationError(operation, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%s %s: %w", operation, path, err)
+}
+
+func (d *RootedDestination) recordBindingLoss(err error) error {
+	if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+		err = errors.Join(err, ErrNonRegularArchiveArtifact)
+	}
+
+	d.mu.Lock()
+	if d.lost == nil {
+		d.lost = err
+	}
+
+	lost := d.lost
+	handler := d.onLoss
+	d.mu.Unlock()
+
+	if handler != nil {
+		handler(lost)
+	}
+
+	return lost
+}
+
+func (d *RootedDestination) before(phase MutationPhase, path string) error {
+	if d.hook != nil {
+		d.hook(phase, path)
+	}
+
+	return d.Verify()
+}
+
+// Relative converts an absolute destination path to a safe root-relative path.
+func (d *RootedDestination) Relative(path string) (string, error) {
+	relative, err := filepath.Rel(d.path, path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s beneath rooted destination %s: %w", path, d.path, err)
+	}
+
+	relative = filepath.Clean(relative)
+	if !filepath.IsLocal(relative) {
+		return "", fmt.Errorf("%s escapes rooted destination %s: %w",
+			path, d.path, ErrNonRegularArchiveArtifact)
+	}
+
+	return relative, nil
+}
+
+func (d *RootedDestination) cleanRelative(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return d.Relative(path)
+	}
+
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if !filepath.IsLocal(clean) {
+		return "", fmt.Errorf("invalid rooted destination path %q: %w",
+			path, ErrNonRegularArchiveArtifact)
+	}
+
+	return clean, nil
+}
+
+func (d *RootedDestination) openDirectory(path string, create bool) (*rootedDestinationDir, error) {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	current := &rootedDestinationDir{
+		destination: d,
+		source:      d.source,
+		root:        d.root,
+		path:        d.path,
+	}
+	if relative == "." {
+		return current, nil
+	}
+
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if err := validateArchiveComponent(component); err != nil {
+			current.close()
+
+			return nil, err
+		}
+
+		childPath := filepath.Join(current.path, component)
+		created := false
+
+		childSource, sourceErr := current.source.OpenDirectory(component)
+		if sourceErr != nil && create && errors.Is(sourceErr, os.ErrNotExist) {
+			if err := d.before(MutationMkdir, childPath); err != nil {
+				current.close()
+
+				return nil, err
+			}
+
+			if mkdirErr := current.root.Mkdir(component, 0o755); mkdirErr != nil &&
+				!errors.Is(mkdirErr, os.ErrExist) {
+				current.close()
+
+				return nil, fmt.Errorf("create rooted directory %s: %w", childPath, mkdirErr)
+			}
+
+			created = true
+
+			childSource, sourceErr = current.source.OpenDirectory(component)
+		}
+
+		if sourceErr != nil {
+			current.close()
+
+			return nil, sourceErr
+		}
+
+		childRoot, rootErr := current.root.OpenRoot(component)
+		if rootErr != nil {
+			_ = childSource.Close()
+
+			current.close()
+
+			return nil, fmt.Errorf("open rooted mutation directory %s: %w", childPath, rootErr)
+		}
+
+		child := &rootedDestinationDir{
+			destination: d,
+			source:      childSource,
+			root:        childRoot,
+			path:        childPath,
+			owned:       true,
+		}
+		if current.owned {
+			child.sourceChain = append(child.sourceChain, current.sourceChain...)
+			child.sourceChain = append(child.sourceChain, current.source)
+			child.rootChain = append(child.rootChain, current.rootChain...)
+			child.rootChain = append(child.rootChain, current.root)
+			current.owned = false
+		}
+
+		if err := child.verifyIdentity(); err != nil {
+			child.close()
+			current.close()
+
+			return nil, d.recordBindingLoss(err)
+		}
+
+		if created {
+			if err := d.before(MutationSync, current.path); err != nil {
+				child.close()
+				current.close()
+
+				return nil, err
+			}
+
+			if err := syncRootedDirectory(current.root); err != nil {
+				child.close()
+				current.close()
+
+				return nil, fmt.Errorf("sync rooted directory %s: %w", current.path, err)
+			}
+		}
+
+		current.close()
+		current = child
+	}
+
+	return current, nil
+}
+
+func (d *rootedDestinationDir) verifyIdentity() error {
+	file, err := d.root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open rooted directory identity %s: %w", d.path, err)
+	}
+
+	expected, expectedErr := d.source.dir.Stat()
+	actual, actualErr := file.Stat()
+
+	closeErr := file.Close()
+	if expectedErr != nil || actualErr != nil || closeErr != nil {
+		return errors.Join(
+			wrapRootedDestinationError("inspect source directory", d.path, expectedErr),
+			wrapRootedDestinationError("inspect mutation directory", d.path, actualErr),
+			wrapRootedDestinationError("close mutation directory", d.path, closeErr),
+		)
+	}
+
+	if !os.SameFile(expected, actual) {
+		return fmt.Errorf("%s changed while opening rooted mutation directory: %w",
+			d.path, ErrNonRegularArchiveArtifact)
+	}
+
+	return nil
+}
+
+func (d *rootedDestinationDir) close() {
+	if !d.owned {
+		return
+	}
+
+	_ = d.root.Close()
+	_ = d.source.Close()
+
+	for index := len(d.rootChain) - 1; index >= 0; index-- {
+		_ = d.rootChain[index].Close()
+	}
+
+	for index := len(d.sourceChain) - 1; index >= 0; index-- {
+		_ = d.sourceChain[index].Close()
+	}
+
+	d.owned = false
+}
+
+// EnsureDir creates path descriptor-relatively and confirms every containing
+// directory entry before returning.
+func (d *RootedDestination) EnsureDir(path string) error {
+	directory, err := d.openDirectory(path, true)
+	if err != nil {
+		return err
+	}
+	defer directory.close()
+
+	if err := d.before(MutationSync, directory.path); err != nil {
+		return err
+	}
+
+	if err := syncRootedDirectory(directory.root); err != nil {
+		return fmt.Errorf("sync rooted directory %s: %w", directory.path, err)
+	}
+
+	return nil
+}
+
+// OpenRegular opens a no-follow regular file beneath the locked root.
+func (d *RootedDestination) OpenRegular(path string) (*os.File, error) {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if relative == "." {
+		return nil, fmt.Errorf("open rooted regular file %s: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	if err := d.before(MutationOpen, filepath.Join(d.path, relative)); err != nil {
+		return nil, err
+	}
+
+	return d.source.OpenRegularPath(relative)
+}
+
+// ReadFile reads a no-follow regular file beneath the locked root.
+func (d *RootedDestination) ReadFile(path string) ([]byte, error) {
+	file, err := d.OpenRegular(path)
+	if err != nil {
+		return nil, err
+	}
+
+	data, readErr := io.ReadAll(file)
+
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+
+	return data, nil
+}
+
+// Stat inspects a no-follow entry beneath the locked root.
+func (d *RootedDestination) Stat(path string) (os.FileInfo, error) {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := d.before(MutationStat, filepath.Join(d.path, relative)); err != nil {
+		return nil, err
+	}
+
+	if relative == "." {
+		return d.source.dir.Stat()
+	}
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.close()
+
+	name := filepath.Base(relative)
+
+	info, err := parent.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s resolves through a link: %w",
+			filepath.Join(d.path, relative), ErrNonRegularArchiveArtifact)
+	}
+
+	if info.IsDir() {
+		child, openErr := parent.source.OpenDirectory(name)
+		if openErr != nil {
+			return nil, openErr
+		}
+
+		defer func() { _ = child.Close() }()
+
+		sourceInfo, statErr := child.dir.Stat()
+		if statErr != nil {
+			return nil, statErr
+		}
+
+		if !os.SameFile(info, sourceInfo) {
+			return nil, d.recordBindingLoss(fmt.Errorf(
+				"%s changed while inspecting rooted directory: %w",
+				filepath.Join(d.path, relative),
+				ErrNonRegularArchiveArtifact,
+			))
+		}
+
+		return sourceInfo, nil
+	}
+
+	file, openErr := parent.source.OpenRegularFile(name)
+	if openErr != nil {
+		return nil, openErr
+	}
+
+	defer func() { _ = file.Close() }()
+
+	sourceInfo, statErr := file.Stat()
+	if statErr != nil {
+		return nil, statErr
+	}
+
+	if !os.SameFile(info, sourceInfo) {
+		return nil, d.recordBindingLoss(fmt.Errorf(
+			"%s changed while inspecting rooted regular file: %w",
+			filepath.Join(d.path, relative),
+			ErrNonRegularArchiveArtifact,
+		))
+	}
+
+	return sourceInfo, nil
+}
+
+// ReadDir reads one directory beneath the locked root.
+func (d *RootedDestination) ReadDir(path string) ([]os.DirEntry, error) {
+	if err := d.before(MutationReadDir, path); err != nil {
+		return nil, err
+	}
+
+	directory, err := d.openDirectory(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer directory.close()
+
+	return directory.source.ReadDirectory()
+}
+
+// OpenPinnedDirectory opens one read-only directory through the locked source.
+func (d *RootedDestination) OpenPinnedDirectory(path string) (*PinnedDirectory, error) {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := d.before(MutationOpen, filepath.Join(d.path, relative)); err != nil {
+		return nil, err
+	}
+
+	return d.source.OpenDirectoryPath(relative)
+}
+
+// CreateExclusive creates a new regular file without following any component.
+func (d *RootedDestination) CreateExclusive(path string, perm os.FileMode) (*os.File, error) {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.close()
+
+	absolute := filepath.Join(d.path, relative)
+	if err := d.before(MutationCreate, absolute); err != nil {
+		return nil, err
+	}
+
+	file, err := parent.root.OpenFile(
+		filepath.Base(relative),
+		os.O_CREATE|os.O_EXCL|os.O_RDWR,
+		perm,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create rooted file %s: %w", absolute, err)
+	}
+
+	return file, nil
+}
+
+// OpenRegularFile opens an existing regular file for descriptor-bound reads or
+// writes. Truncation at open time is rejected because identity must be compared
+// before the first mutation; callers may call Truncate on the returned handle.
+func (d *RootedDestination) OpenRegularFile(
+	path string,
+	flag int,
+	perm os.FileMode,
+) (*os.File, error) {
+	if flag&os.O_TRUNC != 0 {
+		return nil, fmt.Errorf("rooted open with O_TRUNC is unsafe before identity comparison: %w",
+			ErrNonRegularArchiveArtifact)
+	}
+
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	expected, err := d.source.OpenRegularPath(relative)
+	if errors.Is(err, os.ErrNotExist) && flag&os.O_CREATE != 0 {
+		return d.CreateExclusive(relative, perm)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = expected.Close() }()
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.close()
+
+	absolute := filepath.Join(d.path, relative)
+	if err := d.before(MutationOpen, absolute); err != nil {
+		return nil, err
+	}
+
+	actual, err := parent.root.OpenFile(filepath.Base(relative), flag&^os.O_CREATE, perm)
+	if err != nil {
+		return nil, fmt.Errorf("open rooted regular file %s: %w", absolute, err)
+	}
+
+	expectedInfo, expectedErr := expected.Stat()
+
+	actualInfo, actualErr := actual.Stat()
+	if expectedErr != nil || actualErr != nil {
+		_ = actual.Close()
+
+		return nil, errors.Join(expectedErr, actualErr)
+	}
+
+	if !os.SameFile(expectedInfo, actualInfo) {
+		_ = actual.Close()
+
+		return nil, d.recordBindingLoss(fmt.Errorf(
+			"%s changed while opening rooted regular file: %w",
+			absolute,
+			ErrNonRegularArchiveArtifact,
+		))
+	}
+
+	return actual, nil
+}
+
+// Remove removes one entry without following links.
+func (d *RootedDestination) Remove(path string) error {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return err
+	}
+
+	if relative == "." {
+		return fmt.Errorf("refuse to remove rooted destination itself: %w", ErrNonRegularArchiveArtifact)
+	}
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if err != nil {
+		return err
+	}
+
+	defer parent.close()
+
+	absolute := filepath.Join(d.path, relative)
+	if err := d.before(MutationRemove, absolute); err != nil {
+		return err
+	}
+
+	if err := parent.root.Remove(filepath.Base(relative)); err != nil {
+		return fmt.Errorf("remove rooted entry %s: %w", absolute, err)
+	}
+
+	return nil
+}
+
+// RemoveAll recursively removes one rooted subtree without crossing a mount,
+// following a link, or reopening any absolute pathname.
+func (d *RootedDestination) RemoveAll(path string) error {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return err
+	}
+
+	if relative == "." {
+		return fmt.Errorf("refuse to remove rooted destination itself: %w", ErrNonRegularArchiveArtifact)
+	}
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	defer parent.close()
+
+	return d.removeAllEntry(parent, filepath.Base(relative))
+}
+
+func (d *RootedDestination) removeAllEntry(parent *rootedDestinationDir, name string) error {
+	absolute := filepath.Join(parent.path, name)
+
+	info, err := parent.root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("inspect rooted cleanup entry %s: %w", absolute, err)
+	}
+
+	if info.IsDir() {
+		childSource, err := parent.source.OpenDirectory(name)
+		if err != nil {
+			return err
+		}
+
+		childRoot, err := parent.root.OpenRoot(name)
+		if err != nil {
+			_ = childSource.Close()
+
+			return fmt.Errorf("open rooted cleanup directory %s: %w", absolute, err)
+		}
+
+		child := &rootedDestinationDir{
+			destination: d,
+			source:      childSource,
+			root:        childRoot,
+			path:        absolute,
+			owned:       true,
+		}
+		if err := child.verifyIdentity(); err != nil {
+			child.close()
+
+			return d.recordBindingLoss(err)
+		}
+
+		entries, err := child.source.ReadDirectory()
+		if err != nil {
+			child.close()
+
+			return err
+		}
+
+		for _, entry := range entries {
+			if err := d.removeAllEntry(child, entry.Name()); err != nil {
+				child.close()
+
+				return err
+			}
+		}
+
+		child.close()
+	}
+
+	if err := d.before(MutationRemove, absolute); err != nil {
+		return err
+	}
+
+	if err := parent.root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove rooted cleanup entry %s: %w", absolute, err)
+	}
+
+	return nil
+}
+
+// Rename atomically renames two entries beneath the same locked root.
+func (d *RootedDestination) Rename(oldPath, newPath string) error {
+	oldRelative, err := d.cleanRelative(oldPath)
+	if err != nil {
+		return err
+	}
+
+	newRelative, err := d.cleanRelative(newPath)
+	if err != nil {
+		return err
+	}
+
+	oldParent, err := d.openDirectory(filepath.Dir(oldRelative), false)
+	if err != nil {
+		return err
+	}
+	defer oldParent.close()
+
+	newParent, err := d.openDirectory(filepath.Dir(newRelative), false)
+	if err != nil {
+		return err
+	}
+	defer newParent.close()
+
+	absolute := filepath.Join(d.path, newRelative)
+	if err := d.before(MutationRename, absolute); err != nil {
+		return err
+	}
+
+	if err := renameRootedDurably(
+		oldParent.root,
+		filepath.Base(oldRelative),
+		newParent.root,
+		filepath.Base(newRelative),
+	); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SyncParent confirms the containing directory of path through its pinned handle.
+func (d *RootedDestination) SyncParent(path string) error {
+	relative, err := d.cleanRelative(path)
+	if err != nil {
+		return err
+	}
+
+	parent, err := d.openDirectory(filepath.Dir(relative), false)
+	if err != nil {
+		return err
+	}
+	defer parent.close()
+
+	if err := d.before(MutationSync, parent.path); err != nil {
+		return err
+	}
+
+	return syncRootedDirectory(parent.root)
+}
+
+// ComputeNodeChecksum hashes one node through the locked rooted view.
+func (d *RootedDestination) ComputeNodeChecksum(nodeDir string) (NodeChecksum, error) {
+	directory, err := d.openDirectory(nodeDir, false)
+	if err != nil {
+		return NodeChecksum{}, err
+	}
+	defer directory.close()
+
+	return computeNodeChecksum(directory.source)
+}
+
+// ReadSnapshotYAML reads snapshot.yaml for one node through the locked view.
+func (d *RootedDestination) ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
+	directory, err := d.openDirectory(nodeDir, false)
+	if err != nil {
+		return SnapshotYAML{}, err
+	}
+	defer directory.close()
+
+	return readSnapshotYAML(directory.source)
+}
+
+// FindBlockData classifies one node's block payload through the locked view.
+func (d *RootedDestination) FindBlockData(nodeDir string) (BlockPayload, bool, error) {
+	directory, err := d.openDirectory(nodeDir, false)
+	if err != nil {
+		return BlockPayload{}, false, err
+	}
+	defer directory.close()
+
+	return ClassifyBlockPayloadIn(directory.source)
+}
+
+// ReadChunkMeta reads bounded chunk geometry through the locked view.
+func (d *RootedDestination) ReadChunkMeta(
+	ctx context.Context,
+	dir string,
+) (ChunkMeta, bool, error) {
+	path := filepath.Join(dir, ChunkMetaFileName)
+
+	file, err := d.OpenRegular(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ChunkMeta{}, false, nil
+	}
+
+	if err != nil {
+		return ChunkMeta{}, false, err
+	}
+
+	meta, found, readErr := ReadChunkMetaFrom(ctx, file, path)
+	closeErr := file.Close()
+
+	return meta, found, errors.Join(readErr, closeErr)
+}
+
+// WriteChunkMeta writes chunk geometry atomically through the locked view.
+func (d *RootedDestination) WriteChunkMeta(
+	ctx context.Context,
+	dir string,
+	meta ChunkMeta,
+) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal chunk metadata: %w", err)
+	}
+
+	return WriteFileAtomicRooted(
+		ctx,
+		d,
+		filepath.Join(dir, ChunkMetaFileName),
+		strings.NewReader(string(data)),
+	)
+}
+
+// VerifyNode verifies one node through the locked rooted view.
+func (d *RootedDestination) VerifyNode(nodeDir string) error {
+	directory, err := d.openDirectory(nodeDir, false)
+	if err != nil {
+		return err
+	}
+	defer directory.close()
+
+	snapshot, err := readSnapshotYAML(directory.source)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
+		}
+
+		return err
+	}
+
+	checksum, err := computeNodeChecksum(directory.source)
+	if err != nil {
+		return err
+	}
+
+	if checksum.Hex != snapshot.Checksum.Hex {
+		return fmt.Errorf("node %s: stored %q computed %q: %w",
+			nodeDir, snapshot.Checksum.Hex, checksum.Hex, ErrChecksumMismatch)
+	}
+
+	return nil
+}
+
+// Close releases the mutation root. A lock-owned RootedSource remains owned by
+// its Lock and is closed only after this destination has been closed.
+func (d *RootedDestination) Close() error {
+	if d == nil {
+		return nil
+	}
+
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+
+		return nil
+	}
+
+	d.closed = true
+	d.mu.Unlock()
+
+	rootErr := d.root.Close()
+
+	var sourceErr error
+	if d.ownsSource {
+		sourceErr = d.source.Close()
+	}
+
+	return errors.Join(rootErr, sourceErr)
 }
 
 // PublicationState describes whether an AtomicWriter commit error happened
@@ -139,6 +1145,42 @@ func NewAtomicWriter(path string) (*AtomicWriter, error) {
 	}, nil
 }
 
+// NewRootedAtomicWriter creates an AtomicWriter beneath destination.
+func NewRootedAtomicWriter(destination *RootedDestination, path string) (*AtomicWriter, error) {
+	if destination == nil {
+		return nil, errors.New("open rooted atomic writer: destination is nil")
+	}
+
+	finalRel, err := destination.cleanRelative(path)
+	if err != nil {
+		return nil, err
+	}
+
+	tmpRel := finalRel + ".tmp"
+	if err := destination.Remove(tmpRel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("remove stale rooted atomic temporary %s: %w",
+			filepath.Join(destination.path, tmpRel), err)
+	}
+
+	file, err := destination.CreateExclusive(tmpRel, 0o666)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AtomicWriter{
+		finalPath: filepath.Join(destination.path, finalRel),
+		tmpPath:   filepath.Join(destination.path, tmpRel),
+		f:         file,
+		rooted:    destination,
+		finalRel:  finalRel,
+		tmpRel:    tmpRel,
+		ops: atomicCommitOps{
+			syncTemp:  (*os.File).Sync,
+			closeTemp: (*os.File).Close,
+		},
+	}, nil
+}
+
 // Write implements io.Writer.
 func (w *AtomicWriter) Write(p []byte) (int, error) {
 	return w.f.Write(p)
@@ -147,6 +1189,15 @@ func (w *AtomicWriter) Write(p []byte) (int, error) {
 // OpenTempReader opens the unpublished temporary file for validation. The
 // caller must close the returned reader before calling Commit or Abort.
 func (w *AtomicWriter) OpenTempReader() (io.ReadCloser, error) {
+	if w.rooted != nil {
+		f, err := w.rooted.OpenRegular(w.tmpRel)
+		if err != nil {
+			return nil, fmt.Errorf("opening %s for validation: %w", w.tmpPath, err)
+		}
+
+		return f, nil
+	}
+
 	f, err := os.Open(w.tmpPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s for validation: %w", w.tmpPath, err)
@@ -192,7 +1243,7 @@ func (w *AtomicWriter) CommitContext(ctx context.Context) error {
 		)
 	}
 
-	if err := w.ops.rename(w.tmpPath, w.finalPath); err != nil {
+	if err := w.rename(); err != nil {
 		w.Abort()
 
 		return newCommitError(
@@ -201,7 +1252,7 @@ func (w *AtomicWriter) CommitContext(ctx context.Context) error {
 		)
 	}
 
-	if err := runDirectorySync(ctx, filepath.Dir(w.finalPath), w.ops.syncDir); err != nil {
+	if err := w.syncParent(ctx); err != nil {
 		return newCommitError(
 			PublicationPublished,
 			fmt.Errorf("syncing parent directory for %s: %w", w.finalPath, err),
@@ -209,6 +1260,24 @@ func (w *AtomicWriter) CommitContext(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (w *AtomicWriter) rename() error {
+	if w.rooted != nil {
+		return w.rooted.Rename(w.tmpRel, w.finalRel)
+	}
+
+	return w.ops.rename(w.tmpPath, w.finalPath)
+}
+
+func (w *AtomicWriter) syncParent(ctx context.Context) error {
+	if w.rooted != nil {
+		return runDirectorySync(ctx, filepath.Dir(w.finalPath), func(string) error {
+			return w.rooted.SyncParent(w.finalRel)
+		})
+	}
+
+	return runDirectorySync(ctx, filepath.Dir(w.finalPath), w.ops.syncDir)
 }
 
 func newCommitError(state PublicationState, err error) error {
@@ -250,11 +1319,38 @@ func ConfirmFileDurability(ctx context.Context, path string) error {
 	return nil
 }
 
+// ConfirmRootedFileDurability confirms a published file through destination.
+func ConfirmRootedFileDurability(ctx context.Context, destination *RootedDestination, path string) error {
+	if err := ctx.Err(); err != nil {
+		return newCommitError(
+			PublicationPublished,
+			fmt.Errorf("confirming durability for %s cancelled before sync: %w", path, err),
+		)
+	}
+
+	if err := runDirectorySync(ctx, filepath.Dir(path), func(string) error {
+		return destination.SyncParent(path)
+	}); err != nil {
+		return newCommitError(
+			PublicationPublished,
+			fmt.Errorf("syncing rooted parent directory for published file %s: %w", path, err),
+		)
+	}
+
+	return nil
+}
+
 // Abort closes and removes the temporary file. Safe to call even if Write
 // returned an error. Errors from close/remove are intentionally suppressed
 // because the caller's original error takes precedence.
 func (w *AtomicWriter) Abort() {
 	_ = w.f.Close()
+	if w.rooted != nil {
+		_ = w.rooted.Remove(w.tmpRel)
+
+		return
+	}
+
 	_ = os.Remove(w.tmpPath)
 }
 
@@ -279,6 +1375,27 @@ func WriteFileAtomicContext(ctx context.Context, path string, r io.Reader) error
 	}
 
 	return aw.CommitContext(ctx)
+}
+
+// WriteFileAtomicRooted copies r into path beneath destination.
+func WriteFileAtomicRooted(
+	ctx context.Context,
+	destination *RootedDestination,
+	path string,
+	reader io.Reader,
+) error {
+	writer, err := NewRootedAtomicWriter(destination, path)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(writer, reader); err != nil {
+		writer.Abort()
+
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+
+	return writer.CommitContext(ctx)
 }
 
 // EnsureDir creates path and all parents with the platform durability contract.

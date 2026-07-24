@@ -161,6 +161,19 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		}
 	}()
 
+	destination, err := archive.NewLockedRootedDestination(outputLock, nil)
+	if err != nil {
+		return fmt.Errorf("open locked output destination: %w", err)
+	}
+
+	defer func() {
+		if closeErr := destination.Close(); closeErr != nil {
+			log.Warn("failed to close output destination",
+				slog.String("output_dir", outputDir),
+				slog.String("error", closeErr.Error()))
+		}
+	}()
+
 	ttl, err := cmd.Flags().GetString(flagTTL)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagTTL, err)
@@ -300,7 +313,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("verify locked output directory before download: %w", err)
 	}
 
-	runErr := pipeline.Run(ctx, cfg)
+	runErr := pipeline.RunRooted(ctx, cfg, destination)
 
 	lockErr := outputLock.Verify()
 	if runErr != nil || lockErr != nil {

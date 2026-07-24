@@ -89,6 +89,66 @@ type streamHandle struct {
 // cancellation must never turn a fully successful download into a reported
 // failure.
 func Run(ctx context.Context, cfg Config) error {
+	destination, err := archive.OpenRootedDestination(cfg.OutputDir, nil)
+	if err != nil {
+		return fmt.Errorf("open pipeline destination: %w", err)
+	}
+
+	runErr := RunRooted(ctx, cfg, destination)
+	closeErr := destination.Close()
+
+	return errors.Join(runErr, closeErr)
+}
+
+type rootedRunContext struct {
+	context.Context
+	binding context.Context
+}
+
+func (c rootedRunContext) Done() <-chan struct{} {
+	return c.binding.Done()
+}
+
+func (c rootedRunContext) Err() error {
+	if err := c.Context.Err(); err != nil {
+		return err
+	}
+
+	return c.binding.Err()
+}
+
+// RunRooted executes the pipeline through the caller's locked destination.
+func RunRooted(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+) error {
+	if destination == nil {
+		return errors.New("pipeline: rooted destination must be set")
+	}
+
+	bindingCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	destination.SetBindingLossHandler(cancel)
+	defer destination.SetBindingLossHandler(nil)
+
+	runCtx := rootedRunContext{Context: ctx, binding: bindingCtx}
+
+	err := run(runCtx, ctx, cfg, destination)
+	if bindingErr := destination.BindingError(); bindingErr != nil {
+		return errors.Join(bindingErr, err)
+	}
+
+	return err
+}
+
+func run(
+	ctx context.Context,
+	parentCtx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+) error {
 	// Generate the per-run ownership ID before applyDefaults builds the
 	// production OpenExport closure (which captures it), so every DataExport this
 	// run creates is stamped and only this run releases it (inv #10b).
@@ -116,12 +176,12 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("build snapshot tree: %w", err)
 	}
 
-	processRoot, startDir, err := resolveSubtreeRoot(root, cfg)
+	processRoot, startDir, err := resolveSubtreeRootRooted(root, cfg, destination)
 	if err != nil {
 		return err
 	}
 
-	tasks, err := collectNodeTasksContext(ctx, processRoot, startDir)
+	tasks, err := collectNodeTasksRootedContext(ctx, destination, processRoot, startDir)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
 	}
@@ -133,14 +193,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// errgroup would run them concurrently — two writers over one chunk/staging
 	// dir and snapshot.yaml, the single-writer violation the cross-process flock
 	// cannot catch inside one process (inv. #10b).
-	tasks, err = dedupeSiblingTargetDirsContext(ctx, tasks, cfg.Log)
+	tasks, err = dedupeSiblingTargetDirsRootedContext(ctx, destination, tasks, cfg.Log)
 	if err != nil {
 		return fmt.Errorf("dedupe sibling target directories: %w", err)
 	}
 
 	// Pre-create one progress stream per volume leaf before the worker errgroup
 	// starts, so every bar appears immediately (docker-pull style).
-	streams, err := precreateStreams(ctx, tasks, cfg)
+	streams, err := precreateStreams(ctx, destination, tasks, cfg)
 	if err != nil {
 		failUnsettledStreams(streams)
 
@@ -161,7 +221,7 @@ func Run(ctx context.Context, cfg Config) error {
 		task := t
 
 		g.Go(func() error {
-			if err := processNode(gctx, cfg, task, streams); err != nil {
+			if err := processNode(gctx, cfg, destination, task, streams); err != nil {
 				nodeErrsMu.Lock()
 
 				nodeErrs = append(nodeErrs, err)
@@ -203,8 +263,8 @@ func Run(ctx context.Context, cfg Config) error {
 	// already succeeded (nodeErrs empty), a cancellation that merely arrived in
 	// the window between the last node finishing and Run returning must not
 	// turn a fully successful download into a reported failure.
-	if len(nodeErrs) > 0 && ctx.Err() != nil {
-		return ctx.Err()
+	if len(nodeErrs) > 0 && parentCtx.Err() != nil {
+		return parentCtx.Err()
 	}
 
 	return errors.Join(nodeErrs...)
@@ -234,7 +294,12 @@ func failUnsettledStreams(streams map[streamKey]streamHandle) {
 // Returns nil when cfg.Progress is nil (progress disabled), which causes all
 // lookupStream calls to return a zero streamHandle (nil stream) and behave
 // as no-ops.
-func precreateStreams(ctx context.Context, tasks []nodeTask, cfg Config) (map[streamKey]streamHandle, error) {
+func precreateStreams(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	tasks []nodeTask,
+	cfg Config,
+) (map[streamKey]streamHandle, error) {
 	if cfg.Progress == nil {
 		return nil, nil
 	}
@@ -277,7 +342,7 @@ func precreateStreams(ctx context.Context, tasks []nodeTask, cfg Config) (map[st
 
 		out[key] = streamHandle{stream: s}
 
-		seeded, err := seedStreamFromDisk(ctx, cfg, s, t.nodeDir)
+		seeded, err := seedStreamFromDisk(ctx, destination, cfg, s, t.nodeDir)
 		if err != nil {
 			return out, fmt.Errorf("seed stream for %s: %w", node.DisplayLabel(), err)
 		}
@@ -326,7 +391,13 @@ func precreateStreams(ctx context.Context, tasks []nodeTask, cfg Config) (map[st
 // SAME already-committed state, so the displayed value only ever moves
 // forward from the seed onward while the final total still lands exactly on
 // the volume size.
-func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, nodeDir string) (int64, error) {
+func seedStreamFromDisk(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	cfg Config,
+	s progress.Stream,
+	nodeDir string,
+) (int64, error) {
 	ext := cfg.Compression.Ext()
 	dest := flatDest(nodeDir, ext)
 
@@ -336,7 +407,12 @@ func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, node
 		return 0, fmt.Errorf("seed resume progress: %w", err)
 	}
 
-	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgressContext(ctx, dest.chunkDir, ext)
+	blockCommitted, blockTotal, err := volume.ScanBlockChunkProgressRootedContext(
+		ctx,
+		destination,
+		dest.chunkDir,
+		ext,
+	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, fmt.Errorf("scan block resume progress: %w", err)
@@ -355,7 +431,12 @@ func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, node
 		seeded += blockCommitted
 	}
 
-	fsCommitted, err := volume.ScanFSStagingProgress(ctx, dest.fsTarStagingDir, ext)
+	fsCommitted, err := volume.ScanFSStagingProgressRooted(
+		ctx,
+		destination,
+		dest.fsTarStagingDir,
+		ext,
+	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return seeded, fmt.Errorf("scan filesystem resume progress: %w", err)
@@ -374,7 +455,12 @@ func seedStreamFromDisk(ctx context.Context, cfg Config, s progress.Stream, node
 		seeded += fsCommitted
 	}
 
-	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizes(ctx, dest.fsTarStagingDir, ext)
+	sizesTotal, stagedBytes, sizesFound, err := volume.ScanFSStagingSizesRooted(
+		ctx,
+		destination,
+		dest.fsTarStagingDir,
+		ext,
+	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return seeded, fmt.Errorf("scan filesystem sizes sidecar: %w", err)
@@ -425,14 +511,35 @@ func collectNodeTasks(root *source.Node, outputDir string) ([]nodeTask, error) {
 }
 
 func collectNodeTasksContext(ctx context.Context, root *source.Node, outputDir string) ([]nodeTask, error) {
-	rootPlan, err := archive.ScanAbsoluteContext(ctx, outputDir, nodeIdentity(root))
+	destination, err := archive.OpenRootedDestination(outputDir, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = destination.Close() }()
+
+	return collectNodeTasksRootedContext(ctx, destination, root, outputDir)
+}
+
+func collectNodeTasksRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	root *source.Node,
+	outputDir string,
+) ([]nodeTask, error) {
+	rootPlan, err := archive.ScanAbsoluteRootedContext(
+		ctx,
+		destination,
+		outputDir,
+		nodeIdentity(root),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("scan root directory %s: %w", outputDir, err)
 	}
 
 	var tasks []nodeTask
 
-	if err := collectDFS(ctx, root, rootPlan, &tasks); err != nil {
+	if err := collectDFS(ctx, destination, root, rootPlan, &tasks); err != nil {
 		return nil, err
 	}
 
@@ -441,7 +548,13 @@ func collectNodeTasksContext(ctx context.Context, root *source.Node, outputDir s
 
 // collectDFS appends a nodeTask for node and recursively visits its children.
 // plan carries the already-computed resume state and target directory for node.
-func collectDFS(ctx context.Context, node *source.Node, plan archive.NodeResumePlan, tasks *[]nodeTask) error {
+func collectDFS(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	node *source.Node,
+	plan archive.NodeResumePlan,
+	tasks *[]nodeTask,
+) error {
 	*tasks = append(*tasks, nodeTask{
 		node:     node,
 		nodeDir:  plan.TargetDir,
@@ -457,12 +570,17 @@ func collectDFS(ctx context.Context, node *source.Node, plan archive.NodeResumeP
 	snapshotsDir := filepath.Join(plan.TargetDir, archive.SnapshotsDirName)
 
 	for _, child := range node.Children {
-		childPlan, err := archive.ScanNodeContext(ctx, snapshotsDir, nodeIdentity(child))
+		childPlan, err := archive.ScanNodeRootedContext(
+			ctx,
+			destination,
+			snapshotsDir,
+			nodeIdentity(child),
+		)
 		if err != nil {
 			return fmt.Errorf("scan child %s/%s: %w", child.Kind, child.Name, err)
 		}
 
-		if err := collectDFS(ctx, child, childPlan, tasks); err != nil {
+		if err := collectDFS(ctx, destination, child, childPlan, tasks); err != nil {
 			return err
 		}
 	}
@@ -503,6 +621,26 @@ func dedupeSiblingTargetDirs(tasks []nodeTask, log *slog.Logger) ([]nodeTask, er
 }
 
 func dedupeSiblingTargetDirsContext(ctx context.Context, tasks []nodeTask, log *slog.Logger) ([]nodeTask, error) {
+	if len(tasks) == 0 {
+		return tasks, nil
+	}
+
+	destination, err := archive.OpenRootedDestination(tasks[0].nodeDir, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = destination.Close() }()
+
+	return dedupeSiblingTargetDirsRootedContext(ctx, destination, tasks, log)
+}
+
+func dedupeSiblingTargetDirsRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	tasks []nodeTask,
+	log *slog.Logger,
+) ([]nodeTask, error) {
 	firstAt := make(map[string]*source.Node, len(tasks))
 	out := make([]nodeTask, 0, len(tasks))
 
@@ -515,7 +653,7 @@ func dedupeSiblingTargetDirsContext(ctx context.Context, tasks []nodeTask, log *
 			// it with the re-scanned subtree rooted at the collision path.
 			end := subtreeEnd(tasks, i)
 
-			redirected, err := redirectDuplicateSubtree(ctx, task, first, log)
+			redirected, err := redirectDuplicateSubtreeRooted(ctx, destination, task, first, log)
 			if err != nil {
 				return nil, err
 			}
@@ -579,7 +717,13 @@ func subtreeEnd(tasks []nodeTask, i int) int {
 // identity-derived suffix); collectDFS then re-scans descendants via ScanNode so
 // the whole subtree moves WITH the redirected node instead of being stranded
 // under the first occupant's directory.
-func redirectDuplicateSubtree(ctx context.Context, task nodeTask, first *source.Node, log *slog.Logger) ([]nodeTask, error) {
+func redirectDuplicateSubtreeRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	task nodeTask,
+	first *source.Node,
+	log *slog.Logger,
+) ([]nodeTask, error) {
 	node := task.node
 	parentDir := filepath.Dir(task.nodeDir)
 	sourceName := nodeDirOf(node)
@@ -594,13 +738,36 @@ func redirectDuplicateSubtree(ctx context.Context, task nodeTask, first *source.
 		slog.String("duplicate_name", node.Name),
 		slog.String("collision_dir", collisionDir))
 
-	plan, err := archive.ScanAbsoluteContext(ctx, collisionDir, nodeIdentity(node))
+	var plan archive.NodeResumePlan
+
+	var err error
+	if destination == nil {
+		plan, err = archive.ScanAbsoluteContext(ctx, collisionDir, nodeIdentity(node))
+	} else {
+		plan, err = archive.ScanAbsoluteRootedContext(
+			ctx,
+			destination,
+			collisionDir,
+			nodeIdentity(node),
+		)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("scan collision dir %s for %s/%s: %w", collisionDir, node.Kind, node.Name, err)
 	}
 
 	var redirected []nodeTask
-	if err := collectDFS(ctx, node, plan, &redirected); err != nil {
+
+	if destination == nil {
+		destination, err = archive.OpenRootedDestination(filepath.Dir(task.nodeDir), nil)
+		if err != nil {
+			return nil, err
+		}
+
+		defer func() { _ = destination.Close() }()
+	}
+
+	if err := collectDFS(ctx, destination, node, plan, &redirected); err != nil {
 		return nil, err
 	}
 
@@ -626,7 +793,11 @@ func nodeCollisionShort(node *source.Node) string {
 // finds the node in the already-built tree, scaffolds content-free ancestor
 // directories under cfg.OutputDir so the selected node sits at its real path, and
 // returns (selectedNode, selectedNodeDir).
-func resolveSubtreeRoot(root *source.Node, cfg Config) (*source.Node, string, error) {
+func resolveSubtreeRootRooted(
+	root *source.Node,
+	cfg Config,
+	destination *archive.RootedDestination,
+) (*source.Node, string, error) {
 	if cfg.SelectedNodeKind == "" || cfg.SelectedNodeName == "" {
 		return root, cfg.OutputDir, nil
 	}
@@ -636,7 +807,12 @@ func resolveSubtreeRoot(root *source.Node, cfg Config) (*source.Node, string, er
 		return nil, "", fmt.Errorf("find node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
 	}
 
-	selectedDir, err := buildSubtreeScaffold(cfg.OutputDir, selected, ancestors)
+	selectedDir, err := buildSubtreeScaffoldRooted(
+		cfg.OutputDir,
+		selected,
+		ancestors,
+		destination,
+	)
 	if err != nil {
 		return nil, "", fmt.Errorf("scaffold for %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
 	}
@@ -662,7 +838,12 @@ func resolveSubtreeRoot(root *source.Node, cfg Config) (*source.Node, string, er
 //
 // Scaffold directories are created with archive.EnsureDir (os.MkdirAll). They hold
 // no snapshot.yaml, no manifests/, no data, and no sibling subtrees.
-func buildSubtreeScaffold(outputDir string, selected *source.Node, ancestors []*source.Node) (string, error) {
+func buildSubtreeScaffoldRooted(
+	outputDir string,
+	selected *source.Node,
+	ancestors []*source.Node,
+	destination *archive.RootedDestination,
+) (string, error) {
 	if len(ancestors) == 0 {
 		// selected IS the root; it occupies outputDir directly.
 		return outputDir, nil
@@ -674,7 +855,7 @@ func buildSubtreeScaffold(outputDir string, selected *source.Node, ancestors []*
 	for _, anc := range ancestors[1:] {
 		current = filepath.Join(current, archive.SnapshotsDirName, archive.NodeDirName(anc.Kind, nodeDirOf(anc)))
 
-		if err := archive.EnsureDir(current); err != nil {
+		if err := destination.EnsureDir(current); err != nil {
 			return "", fmt.Errorf("create scaffold dir %s: %w", current, err)
 		}
 	}
@@ -682,7 +863,7 @@ func buildSubtreeScaffold(outputDir string, selected *source.Node, ancestors []*
 	// Place the selected node inside the last ancestor's snapshots/ subdirectory.
 	selectedDir := filepath.Join(current, archive.SnapshotsDirName, archive.NodeDirName(selected.Kind, nodeDirOf(selected)))
 
-	if err := archive.EnsureDir(selectedDir); err != nil {
+	if err := destination.EnsureDir(selectedDir); err != nil {
 		return "", fmt.Errorf("create subtree root dir %s: %w", selectedDir, err)
 	}
 
@@ -702,7 +883,13 @@ func nodeDirOf(node *source.Node) string {
 // Snapshot nodes that captured their own volume (task.node.Data != nil) download that
 // volume directly into the node directory (flat layout). Aggregator snapshot nodes
 // (no own data, may have volume-leaf children) write manifests only.
-func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
+func processNode(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+	task nodeTask,
+	streams map[streamKey]streamHandle,
+) error {
 	if task.done {
 		// Streams for done nodes were already marked Done in precreateStreams.
 		cfg.Log.Info("node already complete, skipping",
@@ -718,26 +905,32 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 		slog.String("resume_state", string(task.observed)))
 
 	if task.node.IsVolumeLeaf() {
-		return processVolumeNode(ctx, cfg, task, streams)
+		return processVolumeNode(ctx, cfg, destination, task, streams)
 	}
 
 	// Snapshot node: ensure subdirs, write manifests, then download own data if present.
 	withSnapshots := len(task.node.Children) > 0
-	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), withSnapshots); err != nil {
+	if err := ensureNodeSubdirs(ctx, destination, task.nodeDir, nodeIdentity(task.node), withSnapshots); err != nil {
 		return fmt.Errorf("ensure subdirs for %s: %w", task.node.DisplayLabel(), err)
 	}
 
-	if err := volume.WriteNodeManifests(ctx, cfg.ManifestSource, task.nodeDir, task.node); err != nil {
+	if err := volume.WriteNodeManifestsRooted(
+		ctx,
+		destination,
+		cfg.ManifestSource,
+		task.nodeDir,
+		task.node,
+	); err != nil {
 		return fmt.Errorf("write manifests for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	if task.node.Data != nil {
-		if err := downloadOwnData(ctx, cfg, task.node, task.nodeDir, streams); err != nil {
+		if err := downloadOwnDataRooted(ctx, cfg, destination, task.node, task.nodeDir, streams); err != nil {
 			return fmt.Errorf("download own volume for %s: %w", task.node.DisplayLabel(), err)
 		}
 	}
 
-	if err := volume.FinalizeNodeContext(ctx, task.nodeDir, task.node); err != nil {
+	if err := volume.FinalizeNodeRootedContext(ctx, destination, task.nodeDir, task.node); err != nil {
 		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
@@ -752,23 +945,35 @@ func processNode(ctx context.Context, cfg Config, task nodeTask, streams map[str
 // It writes the captured PVC manifest, applies the block-resume guard, downloads
 // the volume data, and finalizes the node directory.
 // Volume-leaf nodes are always leaves: no snapshots/ subdirectory is created.
-func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams map[streamKey]streamHandle) error {
-	if err := ensureNodeSubdirs(task.nodeDir, nodeIdentity(task.node), false); err != nil {
+func processVolumeNode(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+	task nodeTask,
+	streams map[streamKey]streamHandle,
+) error {
+	if err := ensureNodeSubdirs(ctx, destination, task.nodeDir, nodeIdentity(task.node), false); err != nil {
 		return fmt.Errorf("ensure subdirs for %s: %w", task.node.DisplayLabel(), err)
 	}
 
-	if err := volume.WriteVolumeManifest(ctx, cfg.ManifestSource, task.nodeDir, task.node); err != nil {
+	if err := volume.WriteVolumeManifestRooted(
+		ctx,
+		destination,
+		cfg.ManifestSource,
+		task.nodeDir,
+		task.node,
+	); err != nil {
 		return fmt.Errorf("write volume manifest for %s: %w", task.node.DisplayLabel(), err)
 	}
 
 	dest := flatDest(task.nodeDir, cfg.Compression.Ext())
 
-	blockAlreadyMerged, err := confirmCompletedBlock(ctx, task.nodeDir)
+	blockAlreadyMerged, err := confirmCompletedBlock(ctx, destination, task.nodeDir)
 	if err != nil {
 		return fmt.Errorf("confirm block data in %s: %w", task.nodeDir, err)
 	}
 
-	fsTarDone, err := confirmCompletedFSTar(ctx, dest)
+	fsTarDone, err := confirmCompletedFSTar(ctx, destination, dest)
 	if err != nil {
 		return fmt.Errorf("confirm fs tar in %s: %w", task.nodeDir, err)
 	}
@@ -784,7 +989,7 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		// The final name is published only after decoded-length verification,
 		// and confirmCompletedBlock established directory durability before this
 		// branch may clean its retryable staging (inv. #1 and #13).
-		removeMergedBlockChunkDir(cfg, dest.chunkDir)
+		removeMergedBlockChunkDir(cfg, destination, dest.chunkDir)
 
 		if handle.stream != nil {
 			handle.stream.Done()
@@ -800,12 +1005,21 @@ func processVolumeNode(ctx context.Context, cfg Config, task nodeTask, streams m
 		}
 
 	default:
-		if err := downloadVolumeBinding(ctx, cfg, task.node.Ref(), task.node.DisplayLabel(), task.node.Namespace, dest, handle); err != nil {
+		if err := downloadVolumeBinding(
+			ctx,
+			cfg,
+			destination,
+			task.node.Ref(),
+			task.node.DisplayLabel(),
+			task.node.Namespace,
+			dest,
+			handle,
+		); err != nil {
 			return fmt.Errorf("download volume for %s: %w", task.node.DisplayLabel(), err)
 		}
 	}
 
-	if err := volume.FinalizeNodeContext(ctx, task.nodeDir, task.node); err != nil {
+	if err := volume.FinalizeNodeRootedContext(ctx, destination, task.nodeDir, task.node); err != nil {
 		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
 	}
 
@@ -833,11 +1047,33 @@ func downloadOwnData(
 		return nil
 	}
 
+	destination, err := archive.OpenRootedDestination(cfg.OutputDir, nil)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = destination.Close() }()
+
+	return downloadOwnDataRooted(ctx, cfg, destination, node, nodeDir, streams)
+}
+
+func downloadOwnDataRooted(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+	node *source.Node,
+	nodeDir string,
+	streams map[streamKey]streamHandle,
+) error {
+	if node.Data == nil {
+		return nil
+	}
+
 	// Flat single-volume layout: reuse the same paths as leaf volume nodes.
 	dest := flatDest(nodeDir, cfg.Compression.Ext())
 	handle := lookupStream(streams, node)
 
-	found, err := confirmCompletedBlock(ctx, nodeDir)
+	found, err := confirmCompletedBlock(ctx, destination, nodeDir)
 	if err != nil {
 		return fmt.Errorf("confirm block data in %s: %w", nodeDir, err)
 	}
@@ -850,7 +1086,7 @@ func downloadOwnData(
 		// The final name is published only after decoded-length verification,
 		// and confirmCompletedBlock established directory durability before this
 		// branch may clean its retryable staging (inv. #1 and #13).
-		removeMergedBlockChunkDir(cfg, dest.chunkDir)
+		removeMergedBlockChunkDir(cfg, destination, dest.chunkDir)
 
 		if handle.stream != nil {
 			handle.stream.Done()
@@ -859,7 +1095,7 @@ func downloadOwnData(
 		return nil
 	}
 
-	fsTarDone, err := confirmCompletedFSTar(ctx, dest)
+	fsTarDone, err := confirmCompletedFSTar(ctx, destination, dest)
 	if err != nil {
 		return fmt.Errorf("confirm fs tar in %s: %w", nodeDir, err)
 	}
@@ -876,7 +1112,16 @@ func downloadOwnData(
 		return nil
 	}
 
-	return downloadVolumeBinding(ctx, cfg, node.Ref(), node.DisplayLabel(), node.Namespace, dest, handle)
+	return downloadVolumeBinding(
+		ctx,
+		cfg,
+		destination,
+		node.Ref(),
+		node.DisplayLabel(),
+		node.Namespace,
+		dest,
+		handle,
+	)
 }
 
 // removeMergedBlockChunkDir deletes a leftover block chunk staging directory
@@ -896,8 +1141,12 @@ func downloadOwnData(
 // helper. A RemoveAll failure is logged as a WARN and swallowed, never returned:
 // the download is already complete, so losing best-effort cleanup must not fail
 // an otherwise successful node (code-style §5).
-func removeMergedBlockChunkDir(cfg Config, chunkDir string) {
-	if err := os.RemoveAll(chunkDir); err != nil {
+func removeMergedBlockChunkDir(
+	cfg Config,
+	destination *archive.RootedDestination,
+	chunkDir string,
+) {
+	if err := destination.RemoveAll(chunkDir); err != nil {
 		cfg.Log.Warn("failed to remove leftover block chunk dir after merge",
 			slog.String("dir", chunkDir),
 			slog.String("error", err.Error()))
@@ -917,12 +1166,18 @@ func removeMergedBlockChunkDir(cfg Config, chunkDir string) {
 // removes it once snapshot.yaml is durably written (and the Done scan branches
 // self-heal any crash-window leftover), so a finalized node never keeps a stray
 // identity.json.
-func ensureNodeSubdirs(nodeDir string, id archive.NodeIdentity, withSnapshots bool) error {
-	if err := archive.EnsureDir(filepath.Join(nodeDir, archive.ManifestsDirName)); err != nil {
+func ensureNodeSubdirs(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	id archive.NodeIdentity,
+	withSnapshots bool,
+) error {
+	if err := destination.EnsureDir(filepath.Join(nodeDir, archive.ManifestsDirName)); err != nil {
 		return err
 	}
 
-	if err := archive.WriteNodeIdentityMarker(nodeDir, id); err != nil {
+	if err := archive.WriteNodeIdentityMarkerRooted(ctx, destination, nodeDir, id); err != nil {
 		return fmt.Errorf("write identity marker in %s: %w", nodeDir, err)
 	}
 
@@ -930,7 +1185,7 @@ func ensureNodeSubdirs(nodeDir string, id archive.NodeIdentity, withSnapshots bo
 		return nil
 	}
 
-	return archive.EnsureDir(filepath.Join(nodeDir, archive.SnapshotsDirName))
+	return destination.EnsureDir(filepath.Join(nodeDir, archive.SnapshotsDirName))
 }
 
 // volumeDestPaths holds the resolved absolute paths for one volume's output
@@ -990,6 +1245,7 @@ func flatDest(nodeDir, ext string) volumeDestPaths {
 func downloadVolumeBinding(
 	ctx context.Context,
 	cfg Config,
+	destination *archive.RootedDestination,
 	leafRef aggapi.NodeRef,
 	displayLabel string,
 	namespace string,
@@ -1097,10 +1353,26 @@ func downloadVolumeBinding(
 
 	switch exp.VolumeMode() {
 	case "Block":
-		downloadErr = downloadBlock(ctx, cfg, dest, exp, stream, handle.seeded)
+		downloadErr = downloadBlock(
+			ctx,
+			cfg,
+			destination,
+			dest,
+			exp,
+			stream,
+			handle.seeded,
+		)
 
 	case "Filesystem":
-		downloadErr = downloadFS(ctx, cfg, dest, exp, stream, handle.seeded)
+		downloadErr = downloadFS(
+			ctx,
+			cfg,
+			destination,
+			dest,
+			exp,
+			stream,
+			handle.seeded,
+		)
 
 	default:
 		downloadErr = fmt.Errorf("unsupported volume mode %q for leaf %s", exp.VolumeMode(), displayLabel)
@@ -1117,7 +1389,15 @@ func downloadVolumeBinding(
 // re-credits those SAME already-committed bytes from the same chunkDir state
 // — does not double-count them, without ever resetting stream's displayed
 // value back to 0 (see skipSeededBytes).
-func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream, seeded int64) error {
+func downloadBlock(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+	dest volumeDestPaths,
+	exp *exporter.Export,
+	stream progress.Stream,
+	seeded int64,
+) error {
 	blockURL, err := exporter.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
@@ -1155,11 +1435,31 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 		onProgress = skipSeededBytes(seeded, stream.IncrBy)
 	}
 
-	if err := volume.DownloadBlockChunks(ctx, cfg.Log, dest.chunkDir, blockURL, totalSize, volume.DefaultChunkSize, cfg.PerVolumeConcurrency, exp.Fetcher(), cfg.Compression, onProgress); err != nil {
+	if err := volume.DownloadBlockChunksRooted(
+		ctx,
+		destination,
+		cfg.Log,
+		dest.chunkDir,
+		blockURL,
+		totalSize,
+		volume.DefaultChunkSize,
+		cfg.PerVolumeConcurrency,
+		exp.Fetcher(),
+		cfg.Compression,
+		onProgress,
+	); err != nil {
 		return fmt.Errorf("download block chunks: %w", err)
 	}
 
-	return volume.MergeBlockChunks(ctx, dest.chunkDir, dest.blockPath, totalSize, volume.DefaultChunkSize, cfg.Compression.Ext())
+	return volume.MergeBlockChunksRooted(
+		ctx,
+		destination,
+		dest.chunkDir,
+		dest.blockPath,
+		totalSize,
+		volume.DefaultChunkSize,
+		cfg.Compression.Ext(),
+	)
 }
 
 // downloadFS downloads a filesystem volume's files and assembles the tar.
@@ -1169,7 +1469,15 @@ func downloadBlock(ctx context.Context, cfg Config, dest volumeDestPaths, exp *e
 // DownloadFilesystemVolume/stageCompressedFile — which re-derives and
 // re-credits those SAME already-committed bytes once the listing completes —
 // does not double-count them.
-func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *exporter.Export, stream progress.Stream, seeded int64) error {
+func downloadFS(
+	ctx context.Context,
+	cfg Config,
+	destination *archive.RootedDestination,
+	dest volumeDestPaths,
+	exp *exporter.Export,
+	stream progress.Stream,
+	seeded int64,
+) error {
 	filesURL, err := exporter.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
@@ -1220,7 +1528,20 @@ func downloadFS(ctx context.Context, cfg Config, dest volumeDestPaths, exp *expo
 		}
 	}
 
-	return volume.DownloadFilesystemVolume(ctx, cfg.Log, dest.fsTarPath, dest.fsTarStagingDir, filesURL, cfg.PerVolumeConcurrency, volume.DefaultChunkSize, exp.Fetcher(), cfg.Compression, setTotal, onProgress)
+	return volume.DownloadFilesystemVolumeRooted(
+		ctx,
+		destination,
+		cfg.Log,
+		dest.fsTarPath,
+		dest.fsTarStagingDir,
+		filesURL,
+		cfg.PerVolumeConcurrency,
+		volume.DefaultChunkSize,
+		exp.Fetcher(),
+		cfg.Compression,
+		setTotal,
+		onProgress,
+	)
 }
 
 // skipSeededBytes wraps onProgress so that credits toward the first `seeded`
@@ -1292,24 +1613,12 @@ func nodeIdentity(node *source.Node) archive.NodeIdentity {
 	}
 }
 
-// fsTarComplete reports whether the assembled filesystem tar at tarPath already
-// exists. Returns (true, nil) when found, (false, nil) when absent, and
-// (false, err) for any other stat error.
-func fsTarComplete(tarPath string) (bool, error) {
-	_, err := os.Stat(tarPath)
-	if err == nil {
-		return true, nil
-	}
-
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-
-	return false, err
-}
-
-func confirmCompletedBlock(ctx context.Context, nodeDir string) (bool, error) {
-	payload, complete, err := archive.ClassifyBlockPayload(nodeDir)
+func confirmCompletedBlock(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+) (bool, error) {
+	payload, complete, err := destination.FindBlockData(nodeDir)
 	if err != nil {
 		return false, err
 	}
@@ -1318,15 +1627,26 @@ func confirmCompletedBlock(ctx context.Context, nodeDir string) (bool, error) {
 		return false, nil
 	}
 
-	if err := archive.ConfirmFileDurability(ctx, payload.Path); err != nil {
+	if err := archive.ConfirmRootedFileDurability(ctx, destination, payload.Path); err != nil {
 		return false, fmt.Errorf("confirm durability for %s: %w", payload.Path, err)
 	}
 
 	return true, nil
 }
 
-func confirmCompletedFSTar(ctx context.Context, dest volumeDestPaths) (bool, error) {
-	complete, err := fsTarComplete(dest.fsTarPath)
+func confirmCompletedFSTar(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	dest volumeDestPaths,
+) (bool, error) {
+	_, err := destination.Stat(dest.fsTarPath)
+
+	complete := err == nil
+	if errors.Is(err, os.ErrNotExist) {
+		complete = false
+		err = nil
+	}
+
 	if err != nil {
 		return false, err
 	}
@@ -1335,11 +1655,11 @@ func confirmCompletedFSTar(ctx context.Context, dest volumeDestPaths) (bool, err
 		return false, nil
 	}
 
-	if err := archive.ConfirmFileDurability(ctx, dest.fsTarPath); err != nil {
+	if err := archive.ConfirmRootedFileDurability(ctx, destination, dest.fsTarPath); err != nil {
 		return false, fmt.Errorf("confirm durability for %s: %w", dest.fsTarPath, err)
 	}
 
-	if err := os.RemoveAll(dest.fsTarStagingDir); err != nil {
+	if err := destination.RemoveAll(dest.fsTarStagingDir); err != nil {
 		return false, fmt.Errorf("remove stale FS staging after completed tar %s: %w", dest.fsTarStagingDir, err)
 	}
 

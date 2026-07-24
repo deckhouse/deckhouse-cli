@@ -1662,6 +1662,270 @@ func buildScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func snapshotReplacementTree(t *testing.T, root string) []string {
+	t.Helper()
+
+	var snapshot []string
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		require.NoError(t, walkErr)
+
+		relative, err := filepath.Rel(root, path)
+		require.NoError(t, err)
+
+		info, err := entry.Info()
+		require.NoError(t, err)
+
+		line := fmt.Sprintf("%s|%s|%d", relative, info.Mode(), info.Size())
+		switch {
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			line += "|" + string(data)
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			require.NoError(t, err)
+			line += "|" + target
+		}
+
+		snapshot = append(snapshot, line)
+
+		return nil
+	}))
+
+	return snapshot
+}
+
+func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.T) {
+	type boundary struct {
+		name   string
+		phase  archive.MutationPhase
+		target func(string) bool
+	}
+
+	boundaries := []boundary{
+		{
+			name:  "active-manifest-write",
+			phase: archive.MutationCreate,
+			target: func(path string) bool {
+				return strings.Contains(path, string(filepath.Separator)+archive.ManifestsDirName+string(filepath.Separator))
+			},
+		},
+		{
+			name:  "chunk-write",
+			phase: archive.MutationCreate,
+			target: func(path string) bool {
+				return strings.HasSuffix(path, ".part")
+			},
+		},
+		{
+			name:  "atomic-rename",
+			phase: archive.MutationRename,
+			target: func(path string) bool {
+				return filepath.Base(path) == archive.SnapshotYAMLName &&
+					strings.Contains(path, archive.NodeDirName(childKind, diskSnapName))
+			},
+		},
+		{
+			name:  "staging-cleanup",
+			phase: archive.MutationRemove,
+			target: func(path string) bool {
+				return filepath.Base(path) == archive.BlockChunksDirName
+			},
+		},
+	}
+
+	for _, replaceAncestor := range []bool{false, true} {
+		replacementName := "root"
+		if replaceAncestor {
+			replacementName = "ancestor"
+		}
+
+		for _, boundary := range boundaries {
+			t.Run(replacementName+"/"+boundary.name, func(t *testing.T) {
+				base := t.TempDir()
+				ancestor := filepath.Join(base, "archive-parent")
+				outputDir := filepath.Join(ancestor, "archive")
+				outsideDir := filepath.Join(base, "outside")
+				require.NoError(t, os.MkdirAll(outputDir, 0o755))
+				require.NoError(t, os.MkdirAll(outsideDir, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "sentinel"), []byte("outside"), 0o644))
+
+				rawBlock := bytes.Repeat([]byte("rooted-boundary"), 128)
+				server := makeBlockServer(t, rawBlock)
+				defer server.Close()
+
+				lock, err := archive.AcquireWriteLock(outputDir)
+				require.NoError(t, err)
+
+				var (
+					fired            atomic.Bool
+					pinnedRoot       string
+					pinnedAtBoundary []string
+					replacementTree  []string
+					outsideTree      []string
+				)
+
+				hook := func(phase archive.MutationPhase, path string) {
+					if phase != boundary.phase || !boundary.target(path) || !fired.CompareAndSwap(false, true) {
+						return
+					}
+
+					if replaceAncestor {
+						pinnedAncestor := ancestor + ".pinned"
+						require.NoError(t, os.Rename(ancestor, pinnedAncestor))
+						pinnedRoot = filepath.Join(pinnedAncestor, filepath.Base(outputDir))
+						require.NoError(t, os.MkdirAll(outputDir, 0o755))
+					} else {
+						pinnedRoot = outputDir + ".pinned"
+						require.NoError(t, os.Rename(outputDir, pinnedRoot))
+						require.NoError(t, os.MkdirAll(outputDir, 0o755))
+					}
+
+					require.NoError(t, os.WriteFile(filepath.Join(outputDir, "sentinel"), []byte("replacement"), 0o644))
+					require.NoError(t, os.Symlink(outsideDir, filepath.Join(outputDir, archive.ManifestsDirName)))
+					require.NoError(t, os.Symlink(outsideDir, filepath.Join(outputDir, archive.SnapshotsDirName)))
+
+					pinnedAtBoundary = snapshotReplacementTree(t, pinnedRoot)
+					replacementTree = snapshotReplacementTree(t, outputDir)
+					outsideTree = snapshotReplacementTree(t, outsideDir)
+
+				}
+
+				destination, err := archive.NewLockedRootedDestination(lock, hook)
+				require.NoError(t, err)
+
+				cfg := pipeline.Config{
+					Namespace:            testNS,
+					RootSnapshot:         rootSnapshot,
+					OutputDir:            outputDir,
+					Workers:              2,
+					PerVolumeConcurrency: 2,
+					KubeClient:           buildFakeClient(t),
+					ManifestSource:       testManifestSource(),
+					OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+						return exporter.NewExport(
+							namespace,
+							"de-rooted-boundary",
+							"Block",
+							server.URL,
+							exporter.NewFetcher(server.Client()),
+						), nil
+					},
+				}
+
+				runErr := pipeline.RunRooted(context.Background(), cfg, destination)
+				require.Error(t, runErr)
+				require.ErrorIs(t, runErr, archive.ErrNonRegularArchiveArtifact)
+				require.True(t, fired.Load(), "target mutation boundary was not reached")
+				require.Equal(t, pinnedAtBoundary, snapshotReplacementTree(t, pinnedRoot),
+					"no mutation may start in the pinned tree after binding loss")
+				require.Equal(t, replacementTree, snapshotReplacementTree(t, outputDir),
+					"replacement namespace must stay byte-for-byte untouched")
+				require.Equal(t, outsideTree, snapshotReplacementTree(t, outsideDir),
+					"outside symlink target must stay byte-for-byte untouched")
+
+				require.NoError(t, destination.Close())
+				require.NoError(t, lock.Unlock())
+			})
+		}
+	}
+}
+
+func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
+	base := t.TempDir()
+	firstDir := filepath.Join(base, "first")
+	secondDir := filepath.Join(base, "second")
+	require.NoError(t, os.Mkdir(firstDir, 0o755))
+	require.NoError(t, os.Mkdir(secondDir, 0o755))
+
+	firstLock, err := archive.AcquireWriteLock(firstDir)
+	require.NoError(t, err)
+	secondLock, err := archive.AcquireWriteLock(secondDir)
+	require.NoError(t, err)
+
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var (
+		blockOnce   sync.Once
+		releaseOnce sync.Once
+	)
+	defer releaseOnce.Do(func() { close(release) })
+
+	firstDestination, err := archive.NewLockedRootedDestination(
+		firstLock,
+		func(phase archive.MutationPhase, path string) {
+			if phase != archive.MutationCreate ||
+				!strings.Contains(path, string(filepath.Separator)+archive.ManifestsDirName+string(filepath.Separator)) {
+				return
+			}
+
+			blockOnce.Do(func() {
+				close(reached)
+				<-release
+			})
+		},
+	)
+	require.NoError(t, err)
+
+	secondDestination, err := archive.NewLockedRootedDestination(secondLock, nil)
+	require.NoError(t, err)
+
+	rootOnlyClient := func() client.Client {
+		root := snapObj{
+			apiVersion: storageAPIVersion,
+			kind:       "Snapshot",
+			namespace:  testNS,
+			name:       rootSnapshot,
+			uid:        "uid-root",
+			sourceRef:  namespaceSourceRefMap(testNS, "uid-ns"),
+		}.build()
+
+		return fake.NewClientBuilder().
+			WithScheme(buildScheme(t)).
+			WithObjects(root).
+			Build()
+	}
+
+	config := func(output string) pipeline.Config {
+		return pipeline.Config{
+			Namespace:      testNS,
+			RootSnapshot:   rootSnapshot,
+			OutputDir:      output,
+			Workers:        1,
+			KubeClient:     rootOnlyClient(),
+			ManifestSource: testManifestSource(),
+			OpenExport: func(context.Context, string, aggapi.NodeRef, string) (*exporter.Export, error) {
+				return nil, errors.New("root-only pipeline must not open an export")
+			},
+		}
+	}
+
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- pipeline.RunRooted(context.Background(), config(firstDir), firstDestination)
+	}()
+
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first destination did not reach the blocked manifest boundary")
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelSecond()
+	require.NoError(t, pipeline.RunRooted(secondCtx, config(secondDir), secondDestination),
+		"an independent sibling destination must complete while the first is blocked")
+
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, <-firstResult)
+
+	require.NoError(t, firstDestination.Close())
+	require.NoError(t, secondDestination.Close())
+	require.NoError(t, firstLock.Unlock())
+	require.NoError(t, secondLock.Unlock())
+}
+
 // TestPipeline_LeafTargetRef verifies that OpenExport receives the correct snapshot
 // leaf NodeRef (not a shadow VS name) when a domain snapshot node downloads its
 // OwnDataRef volume.
