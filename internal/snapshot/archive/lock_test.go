@@ -165,6 +165,120 @@ func TestArchiveLockCancellationAndCleanup(t *testing.T) {
 	defer func() { _ = lock.Unlock() }()
 }
 
+func TestArchiveWriteLockRootDurabilityFailureIsRetryable(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "output")
+	sentinel := errors.New("root durability sentinel")
+
+	lock, err := acquireLockWithRootEnsurer(
+		context.Background(),
+		root,
+		true,
+		func(_ context.Context, path string) (os.FileInfo, error) {
+			if mkdirErr := os.MkdirAll(path, 0o755); mkdirErr != nil {
+				return nil, mkdirErr
+			}
+
+			return nil, sentinel
+		},
+	)
+	if lock != nil {
+		_ = lock.Unlock()
+
+		t.Fatal("write lock returned after root durability failure")
+	}
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("write lock error = %v, want root durability sentinel", err)
+	}
+
+	if _, statErr := os.Stat(root); statErr != nil {
+		t.Fatalf("visible root must remain recoverable: %v", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lock entry exists after root durability failure: %v", statErr)
+	}
+
+	lock, err = AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("retry write lock after root durability failure: %v", err)
+	}
+
+	if err := lock.Unlock(); err != nil {
+		t.Fatalf("release retried write lock: %v", err)
+	}
+}
+
+func TestArchiveWriteLockReconfirmsExistingRoot(t *testing.T) {
+	root := t.TempDir()
+	ensureCalls := 0
+
+	lock, err := acquireLockWithRootEnsurer(
+		context.Background(),
+		root,
+		true,
+		func(ctx context.Context, path string) (os.FileInfo, error) {
+			ensureCalls++
+
+			return ensureWriteLockRoot(ctx, path)
+		},
+	)
+	if err != nil {
+		t.Fatalf("acquire existing write root: %v", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	if ensureCalls != 1 {
+		t.Fatalf("root durability confirmations = %d, want 1", ensureCalls)
+	}
+}
+
+func TestArchiveWriteLockRejectsRootReplacementAfterConfirmation(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "output")
+	displaced := filepath.Join(parent, "displaced")
+
+	lock, err := acquireLockWithRootEnsurer(
+		context.Background(),
+		root,
+		true,
+		func(_ context.Context, path string) (os.FileInfo, error) {
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				return nil, mkdirErr
+			}
+
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				return nil, statErr
+			}
+
+			if renameErr := os.Rename(path, displaced); renameErr != nil {
+				return nil, renameErr
+			}
+
+			if mkdirErr := os.Mkdir(path, 0o755); mkdirErr != nil {
+				return nil, mkdirErr
+			}
+
+			return info, nil
+		},
+	)
+	if lock != nil {
+		_ = lock.Unlock()
+
+		t.Fatal("write lock returned after confirmed root replacement")
+	}
+
+	if !errors.Is(err, ErrArchiveLockChanged) {
+		t.Fatalf("write lock error = %v, want ErrArchiveLockChanged", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(root, archiveLockFileName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("lock entry exists after root replacement: %v", statErr)
+	}
+}
+
 func TestArchiveLockSingleBindingPerRootedSource(t *testing.T) {
 	source, err := OpenRootedSource(t.TempDir())
 	if err != nil {

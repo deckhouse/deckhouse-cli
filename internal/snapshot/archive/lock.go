@@ -88,12 +88,26 @@ func AcquireRootedReadLock(ctx context.Context, source *RootedSource) (*Lock, er
 }
 
 func acquireLock(ctx context.Context, root string, exclusive bool) (*Lock, error) {
+	return acquireLockWithRootEnsurer(ctx, root, exclusive, ensureWriteLockRoot)
+}
+
+func acquireLockWithRootEnsurer(
+	ctx context.Context,
+	root string,
+	exclusive bool,
+	ensureRoot func(context.Context, string) (os.FileInfo, error),
+) (*Lock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	var durableRootInfo os.FileInfo
+
 	if exclusive {
-		if err := os.MkdirAll(root, 0o755); err != nil {
+		var err error
+
+		durableRootInfo, err = ensureRoot(ctx, root)
+		if err != nil {
 			return nil, fmt.Errorf("create archive root %s: %w", root, err)
 		}
 	}
@@ -108,6 +122,24 @@ func acquireLock(ctx context.Context, root string, exclusive bool) (*Lock, error
 		return nil, err
 	}
 
+	if durableRootInfo != nil {
+		sourceInfo, statErr := source.dir.Stat()
+		if statErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("inspect durable archive root %s: %w", root, statErr),
+				wrapArchiveLockCloseError("archive root", source.Close()),
+			)
+		}
+
+		if !os.SameFile(durableRootInfo, sourceInfo) {
+			return nil, errors.Join(
+				fmt.Errorf("archive root %s changed after durability confirmation: %w",
+					root, ErrArchiveLockChanged),
+				wrapArchiveLockCloseError("archive root", source.Close()),
+			)
+		}
+	}
+
 	lock, err := acquireSourceLock(ctx, source, exclusive, false)
 	if err != nil {
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
@@ -116,6 +148,80 @@ func acquireLock(ctx context.Context, root string, exclusive bool) (*Lock, error
 	lock.ownsSource = true
 
 	return lock, nil
+}
+
+func ensureWriteLockRoot(ctx context.Context, root string) (os.FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	durablePath, err := resolveWriteLockDurabilityPath(root)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := EnsureDir(durablePath); err != nil {
+		return nil, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	durableInfo, err := os.Stat(durablePath)
+	if err != nil {
+		return nil, fmt.Errorf("inspect confirmed archive root %s: %w", durablePath, err)
+	}
+
+	requestedInfo, err := os.Stat(root)
+	if err != nil {
+		return nil, fmt.Errorf("inspect requested archive root %s: %w", root, err)
+	}
+
+	if !os.SameFile(durableInfo, requestedInfo) {
+		return nil, fmt.Errorf("archive root %s changed during durability confirmation: %w",
+			root, ErrArchiveLockChanged)
+	}
+
+	return durableInfo, nil
+}
+
+func resolveWriteLockDurabilityPath(root string) (string, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve archive root %s: %w", root, err)
+	}
+
+	current := absolute
+	missing := make([]string, 0, 4)
+
+	for {
+		_, err := os.Lstat(current)
+		if err == nil {
+			canonical, evalErr := filepath.EvalSymlinks(current)
+			if evalErr != nil {
+				return "", fmt.Errorf("resolve archive root ancestor %s: %w", current, evalErr)
+			}
+
+			for i := len(missing) - 1; i >= 0; i-- {
+				canonical = filepath.Join(canonical, missing[i])
+			}
+
+			return canonical, nil
+		}
+
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect archive root ancestor %s: %w", current, err)
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("find existing archive root ancestor for %s: %w", root, os.ErrNotExist)
+		}
+
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func acquireSourceLock(
