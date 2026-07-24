@@ -408,7 +408,7 @@ func DiagnoseConstraintParseError(err error, flagName string, rawValues ...strin
 					"The constraint part after '@' was never received — perhaps you forgot to quote the flag value?",
 				Solutions: []string{
 					`Wrap the constraint in double quotes: --` + flagName + ` "module-name@>=1.43.2"`,
-					`Example: d8 mirror pull --license='****' --include-module "console@>=1.43.2" ./console`,
+					`Example: d8 mirror pull --license='****' --include-module console@">=1.43.2" ./console`,
 				},
 			},
 		},
