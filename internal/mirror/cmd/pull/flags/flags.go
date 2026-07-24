@@ -181,7 +181,7 @@ Use the exact-tag form (=) when you need a specific older patch unconditionally.
 
 A bare version with no operator (module-name@1.3.0) means "this version or newer within the same major line" and keeps the latest patch per minor. It expands to >=X.Y.Z <(major+1).0.0, treating major 0 like any other major: module-name@0.4.0 spans the whole 0.x line (>=0.4.0 <1.0.0), NOT just the 0.4 minor as a caret (^0.4.0 = >=0.4.0 <0.5.0) would. Prefer this bare form for step-by-step upgrades — it captures every intermediate minor and needs no shell quoting.
 
-Shell note: >= and <= contain the redirection metacharacters > and <, so an unquoted module-name@>=1.3.0 is mangled by bash/zsh (it strips the operator and redirects into a file named "=1.3.0", leaving the module with an empty version). Quote the whole value when you use these operators: --include-module 'module-name@>=1.3.0'. The bare-version form above avoids this entirely.
+Shell note: >= and <= contain the redirection metacharacters > and <, so an unquoted module-name@>=1.3.0 is mangled by bash/zsh (it strips the operator and redirects into a file named "=1.3.0", leaving the module with an empty version). Quote the whole value when you use these operators: --include-module module-name@">=1.3.0". The bare-version form above avoids this entirely.
 
 Example:
 Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1
@@ -192,9 +192,9 @@ module-name@~1.3.0 → semver ~ constraint (>=1.3.0 <1.4.0): keep latest patch p
 
 module-name@^1.3.0 → semver ^ constraint (>=1.3.0 <2.0.0): keep latest patch per minor — includes v1.3.3, v1.4.1. For a 0.x version the caret locks the minor (^0.4.0 = >=0.4.0 <0.5.0), so use the bare form instead when you want the whole 0.x line.
 
-module-name@>=1.3.0 → range constraint with explicit >= anchor (quote in shell): keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
+module-name@">=1.3.0" → range constraint with explicit >= anchor (quote in shell): keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
 
-module-name@>=1.3.0 <=1.4.0 → both anchors honoured (quote in shell): includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
+module-name@">=1.3.0 <=1.4.0" → both anchors honoured (quote in shell): includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
 
 module-name@=v1.3.0 → exact tag match: include only v1.3.0 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
 
@@ -225,7 +225,7 @@ module-name@0.4.0 → bare version, expands to >=0.4.0 <1.0.0: keep latest patch
 		nil,
 		`Whitelist specific packages for downloading. Use one flag per each package. Disables blacklisting by --exclude-package.
 
-Packages are mirrored exactly like modules (same name@version constraint dialect), but live under the packages/ registry segment with their release metadata under packages/<name>/version.`,
+Packages are mirrored exactly like modules (same name@version constraint dialect), but live under the packages/ registry segment with their release metadata under packages/<name>/version. Note that most version ranges must be put in quotes so that your shell will treat them as a single argument.`,
 	)
 	flagSet.StringArrayVar(
 		&PackagesBlacklist,
