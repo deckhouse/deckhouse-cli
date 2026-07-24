@@ -1342,6 +1342,172 @@ func TestPipeline_BlockResumeAfterMergeConfirmsDurabilityBeforeCompletion(t *tes
 	}
 }
 
+func TestPipeline_RootedDirectoryAncestryRetryBlocksPublication(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("rooted-directory-ancestry-"), 64)
+	blockServer := makeBlockServer(t, rawBlock)
+	defer blockServer.Close()
+
+	outputDir := t.TempDir()
+	nodeDir := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName),
+	)
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+	confirmationPath := filepath.Dir(nodeDir)
+	snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+	identityPath := filepath.Join(nodeDir, archive.NodeIdentityMarkerName)
+	blockPath := filepath.Join(nodeDir, archive.DataBlockName(".zst"))
+
+	lock, err := archive.AcquireWriteLock(outputDir)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, lock.Unlock()) }()
+
+	var openExportCalls atomic.Int64
+	baseConfig := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		SelectedNodeKind:     childKind,
+		SelectedNodeName:     diskSnapName,
+		KubeClient:           buildFakeClient(t),
+		ManifestSource:       testManifestSource(),
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			openExportCalls.Add(1)
+
+			return exporter.NewExport(
+				namespace,
+				"de-rooted-directory-ancestry",
+				"Block",
+				blockServer.URL,
+				exporter.NewFetcher(blockServer.Client()),
+			), nil
+		},
+	}
+
+	var confirmations atomic.Int64
+
+	runAttempt := func(
+		ctx context.Context,
+		cancel context.CancelFunc,
+		cause error,
+		sink *recordingSink,
+	) error {
+		t.Helper()
+
+		destination, destinationErr := archive.NewLockedRootedDestination(lock, nil)
+		require.NoError(t, destinationErr)
+		defer func() { require.NoError(t, destination.Close()) }()
+
+		destination.SetDirectorySyncHook(func(path string, next func() error) error {
+			if filepath.Clean(path) != filepath.Clean(confirmationPath) {
+				return next()
+			}
+
+			if _, statErr := os.Stat(chunkDir); statErr != nil {
+				if errors.Is(statErr, os.ErrNotExist) {
+					return next()
+				}
+
+				return statErr
+			}
+
+			confirmations.Add(1)
+			if cause == nil {
+				return next()
+			}
+
+			if cancel != nil {
+				cancel()
+
+				return ctx.Err()
+			}
+
+			return cause
+		})
+
+		config := baseConfig
+		config.Progress = sink
+
+		return pipeline.RunRooted(ctx, config, destination)
+	}
+
+	firstFailure := errors.New("first rooted ancestry sync failure")
+	firstProgress := &recordingSink{}
+	err = runAttempt(context.Background(), nil, firstFailure, firstProgress)
+	require.ErrorIs(t, err, firstFailure)
+	require.DirExists(t, chunkDir)
+	require.FileExists(t, identityPath)
+	require.NoFileExists(t, snapshotPath)
+	require.NoFileExists(t, blockPath)
+	require.Equal(t, int64(1), openExportCalls.Load())
+
+	identity, err := os.ReadFile(identityPath)
+	require.NoError(t, err)
+
+	assertFailedProgress := func(sink *recordingSink, wantStreams int) {
+		t.Helper()
+
+		streams := sink.snapshot()
+		require.Len(t, streams, wantStreams)
+		if len(streams) == 0 {
+			return
+		}
+
+		require.Zero(t, streams[0].Current())
+		require.Zero(t, streams[0].doneCnt)
+		require.Equal(t, 1, streams[0].failCnt)
+	}
+	assertFailedProgress(firstProgress, 1)
+
+	secondFailure := errors.New("second rooted ancestry sync failure")
+	secondProgress := &recordingSink{}
+	err = runAttempt(context.Background(), nil, secondFailure, secondProgress)
+	require.ErrorIs(t, err, secondFailure)
+	require.Equal(t, int64(1), openExportCalls.Load(), "retry must fail before reopening the export")
+	require.DirExists(t, chunkDir)
+	require.FileExists(t, identityPath)
+	require.NoFileExists(t, snapshotPath)
+	require.NoFileExists(t, blockPath)
+	assertFailedProgress(secondProgress, 0)
+
+	retainedIdentity, err := os.ReadFile(identityPath)
+	require.NoError(t, err)
+	require.Equal(t, identity, retainedIdentity)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelProgress := &recordingSink{}
+	err = runAttempt(cancelCtx, cancel, context.Canceled, cancelProgress)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, int64(1), openExportCalls.Load(), "cancelled retry must fail before reopening the export")
+	require.DirExists(t, chunkDir)
+	require.FileExists(t, identityPath)
+	require.NoFileExists(t, snapshotPath)
+	require.NoFileExists(t, blockPath)
+	assertFailedProgress(cancelProgress, 0)
+
+	retainedIdentity, err = os.ReadFile(identityPath)
+	require.NoError(t, err)
+	require.Equal(t, identity, retainedIdentity)
+
+	successProgress := &recordingSink{}
+	require.NoError(t, runAttempt(context.Background(), nil, nil, successProgress))
+	require.GreaterOrEqual(t, confirmations.Load(), int64(4))
+	require.Equal(t, int64(2), openExportCalls.Load())
+	require.NoDirExists(t, chunkDir)
+	require.NoFileExists(t, identityPath)
+	require.FileExists(t, snapshotPath)
+	require.FileExists(t, blockPath)
+
+	successStreams := successProgress.snapshot()
+	require.Len(t, successStreams, 1)
+	require.Equal(t, successStreams[0].Total(), successStreams[0].Current())
+	require.Equal(t, 1, successStreams[0].doneCnt)
+	require.Zero(t, successStreams[0].failCnt)
+}
+
 func TestPipeline_SnapshotYAMLRecoversDurabilityBeforeDone(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -1704,6 +1870,13 @@ func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.
 	}
 
 	boundaries := []boundary{
+		{
+			name:  "directory-ancestry-confirmation",
+			phase: archive.MutationSync,
+			target: func(path string) bool {
+				return filepath.Base(path) == archive.ManifestsDirName
+			},
+		},
 		{
 			name:  "active-manifest-write",
 			phase: archive.MutationCreate,

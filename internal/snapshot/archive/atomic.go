@@ -82,11 +82,12 @@ type MutationBoundaryHook func(phase MutationPhase, path string)
 // and identity-matched once; each descendant operation then uses descriptor-
 // relative resolution and revalidates the lock binding before it can mutate.
 type RootedDestination struct {
-	source     *RootedSource
-	root       *os.Root
-	path       string
-	hook       MutationBoundaryHook
-	ownsSource bool
+	source            *RootedSource
+	root              *os.Root
+	path              string
+	hook              MutationBoundaryHook
+	directorySyncHook DirectorySyncHook
+	ownsSource        bool
 
 	mu     sync.RWMutex
 	lost   error
@@ -102,6 +103,20 @@ type rootedDestinationDir struct {
 	owned       bool
 	sourceChain []*RootedSource
 	rootChain   []*os.Root
+	ancestry    []rootedDirectoryEntry
+}
+
+type rootedDirectoryEntryState uint8
+
+const (
+	rootedDirectoryEntryVisible rootedDirectoryEntryState = iota
+	rootedDirectoryEntryConfirmed
+)
+
+type rootedDirectoryEntry struct {
+	containingRoot *os.Root
+	containingPath string
+	state          rootedDirectoryEntryState
 }
 
 // NewLockedRootedDestination binds a mutation view to lock's exact pinned root.
@@ -198,6 +213,15 @@ func (d *RootedDestination) SetBindingLossHandler(handler func(error)) {
 	if lost != nil && handler != nil {
 		handler(lost)
 	}
+}
+
+// SetDirectorySyncHook installs a destination-scoped wrapper around rooted
+// directory confirmations. Tests use it to inject operation failures without
+// changing concurrent destinations.
+func (d *RootedDestination) SetDirectorySyncHook(hook DirectorySyncHook) {
+	d.mu.Lock()
+	d.directorySyncHook = hook
+	d.mu.Unlock()
 }
 
 // BindingError returns the first observed destination binding failure.
@@ -355,7 +379,6 @@ func (d *RootedDestination) openDirectory(path string, create bool) (*rootedDest
 		}
 
 		childPath := filepath.Join(current.path, component)
-		created := false
 
 		childSource, sourceErr := current.source.OpenDirectory(component)
 		if sourceErr != nil && create && errors.Is(sourceErr, os.ErrNotExist) {
@@ -371,8 +394,6 @@ func (d *RootedDestination) openDirectory(path string, create bool) (*rootedDest
 
 				return nil, fmt.Errorf("create rooted directory %s: %w", childPath, mkdirErr)
 			}
-
-			created = true
 
 			childSource, sourceErr = current.source.OpenDirectory(component)
 		}
@@ -398,6 +419,11 @@ func (d *RootedDestination) openDirectory(path string, create bool) (*rootedDest
 			root:        childRoot,
 			path:        childPath,
 			owned:       true,
+			ancestry: append(current.ancestry, rootedDirectoryEntry{
+				containingRoot: current.root,
+				containingPath: current.path,
+				state:          rootedDirectoryEntryVisible,
+			}),
 		}
 		if current.owned {
 			child.sourceChain = append(child.sourceChain, current.sourceChain...)
@@ -412,22 +438,6 @@ func (d *RootedDestination) openDirectory(path string, create bool) (*rootedDest
 			current.close()
 
 			return nil, d.recordBindingLoss(err)
-		}
-
-		if created {
-			if err := d.before(MutationSync, current.path); err != nil {
-				child.close()
-				current.close()
-
-				return nil, err
-			}
-
-			if err := syncRootedDirectory(current.root); err != nil {
-				child.close()
-				current.close()
-
-				return nil, fmt.Errorf("sync rooted directory %s: %w", current.path, err)
-			}
 		}
 
 		current.close()
@@ -482,8 +492,58 @@ func (d *rootedDestinationDir) close() {
 	d.owned = false
 }
 
-// EnsureDir creates path descriptor-relatively and confirms every containing
-// directory entry before returning.
+func (d *RootedDestination) confirmDirectory(path string, root *os.Root) error {
+	if err := d.before(MutationSync, path); err != nil {
+		return err
+	}
+
+	d.mu.RLock()
+	hook := d.directorySyncHook
+	d.mu.RUnlock()
+
+	confirm := func() error {
+		return syncRootedDirectory(root)
+	}
+
+	var err error
+	if hook == nil {
+		err = confirm()
+	} else {
+		err = hook(path, confirm)
+	}
+
+	if err != nil {
+		return fmt.Errorf("sync rooted directory %s: %w", path, err)
+	}
+
+	return nil
+}
+
+func (d *rootedDestinationDir) confirmAncestry() error {
+	if err := d.destination.confirmDirectory(d.path, d.root); err != nil {
+		return err
+	}
+
+	for index := len(d.ancestry) - 1; index >= 0; index-- {
+		entry := &d.ancestry[index]
+		if entry.state != rootedDirectoryEntryVisible {
+			continue
+		}
+
+		if err := d.destination.confirmDirectory(entry.containingPath, entry.containingRoot); err != nil {
+			return err
+		}
+
+		entry.state = rootedDirectoryEntryConfirmed
+	}
+
+	return nil
+}
+
+// EnsureDir creates path descriptor-relatively and confirms the leaf plus every
+// containing directory back to the pinned root. Every call reconstructs this
+// visible publication chain because a pre-existing entry may be residue from a
+// failed confirmation in an earlier invocation.
 func (d *RootedDestination) EnsureDir(path string) error {
 	directory, err := d.openDirectory(path, true)
 	if err != nil {
@@ -491,15 +551,7 @@ func (d *RootedDestination) EnsureDir(path string) error {
 	}
 	defer directory.close()
 
-	if err := d.before(MutationSync, directory.path); err != nil {
-		return err
-	}
-
-	if err := syncRootedDirectory(directory.root); err != nil {
-		return fmt.Errorf("sync rooted directory %s: %w", directory.path, err)
-	}
-
-	return nil
+	return directory.confirmAncestry()
 }
 
 // OpenRegular opens a no-follow regular file beneath the locked root.
