@@ -90,6 +90,8 @@ type NetworkTimeouts struct {
 	ResponseHeader time.Duration
 	WriteIdle      time.Duration
 	ReadIdle       time.Duration
+	ResponseTotal  time.Duration
+	ResponseBytes  int64
 }
 
 type idleTimer interface {
@@ -353,6 +355,8 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 		parentCtx,
 		cancelRequest,
 		c.networkTimeouts.ReadIdle,
+		c.networkTimeouts.ResponseTotal,
+		c.networkTimeouts.ResponseBytes,
 		c.idleTimerFactory,
 		c.idleNow,
 	)
@@ -533,41 +537,69 @@ func (b *progressRequestBody) isClosed() bool {
 }
 
 type progressResponseBody struct {
-	body      io.ReadCloser
-	parentCtx context.Context
-	cancel    context.CancelCauseFunc
-	watchdog  *idleWatchdog
-	closeOnce sync.Once
+	body          io.ReadCloser
+	parentCtx     context.Context
+	cancel        context.CancelCauseFunc
+	idleWatchdog  *idleWatchdog
+	totalWatchdog *idleWatchdog
+	maxBytes      int64
+	bytesRead     int64
+	limitErr      error
+	closeOnce     sync.Once
 }
 
 func newProgressResponseBody(
 	body io.ReadCloser,
 	parentCtx context.Context,
 	cancel context.CancelCauseFunc,
-	timeout time.Duration,
+	idleTimeout time.Duration,
+	totalTimeout time.Duration,
+	maxBytes int64,
 	factory idleTimerFactory,
 	now func() time.Time,
 ) *progressResponseBody {
-	watchdog := newIdleWatchdog(cancel, factory, now)
-	watchdog.arm("response body read", timeout)
+	idleWatchdog := newIdleWatchdog(cancel, factory, now)
+	idleWatchdog.arm("response body read", idleTimeout)
+
+	totalWatchdog := newIdleWatchdog(cancel, factory, now)
+	totalWatchdog.arm("response body total", totalTimeout)
 
 	return &progressResponseBody{
-		body:      body,
-		parentCtx: parentCtx,
-		cancel:    cancel,
-		watchdog:  watchdog,
+		body:          body,
+		parentCtx:     parentCtx,
+		cancel:        cancel,
+		idleWatchdog:  idleWatchdog,
+		totalWatchdog: totalWatchdog,
+		maxBytes:      maxBytes,
 	}
 }
 
 func (b *progressResponseBody) Read(p []byte) (int, error) {
 	count, err := b.body.Read(p)
-	b.watchdog.progress(count)
+	b.idleWatchdog.progress(count)
+
+	b.bytesRead += int64(count)
+	if b.maxBytes > 0 && b.limitErr == nil && b.bytesRead > b.maxBytes {
+		b.limitErr = &responseBodyLimitError{
+			limit: b.maxBytes,
+			read:  b.bytesRead,
+		}
+		b.cancel(b.limitErr)
+	}
 
 	if errors.Is(err, io.EOF) {
 		b.stop()
 	}
 
-	cause := b.watchdog.cause()
+	cause := b.limitErr
+	if cause == nil {
+		cause = b.totalWatchdog.cause()
+	}
+
+	if cause == nil {
+		cause = b.idleWatchdog.cause()
+	}
+
 	if cause == nil && b.parentCtx.Err() != nil {
 		cause = context.Cause(b.parentCtx)
 	}
@@ -595,9 +627,27 @@ func (b *progressResponseBody) Close() error {
 
 func (b *progressResponseBody) stop() {
 	b.closeOnce.Do(func() {
-		b.watchdog.stop()
+		b.idleWatchdog.stop()
+		b.totalWatchdog.stop()
 		b.cancel(nil)
 	})
+}
+
+// ErrResponseBodyLimitExceeded identifies a response body that exceeded its
+// configured finite control-response byte budget.
+var ErrResponseBodyLimitExceeded = errors.New("response body limit exceeded")
+
+type responseBodyLimitError struct {
+	limit int64
+	read  int64
+}
+
+func (e *responseBodyLimitError) Error() string {
+	return fmt.Sprintf("response body read %d bytes, limit is %d: %v", e.read, e.limit, ErrResponseBodyLimitExceeded)
+}
+
+func (e *responseBodyLimitError) Unwrap() error {
+	return ErrResponseBodyLimitExceeded
 }
 
 type httpOrigin struct {
@@ -745,9 +795,10 @@ func (c *SafeClient) SetRequestTimeout(timeout time.Duration) {
 }
 
 // SetNetworkTimeouts installs finite connection, TLS-handshake, response-header,
-// request-write-idle, and response-read-idle bounds on persistent HTTP clients.
-// WriteIdle and ReadIdle reset after every successful body read, so a healthy
-// transfer may run for arbitrarily longer than either idle budget.
+// request-write-idle, response-read-idle, and finite total response bounds on
+// persistent HTTP clients. WriteIdle and ReadIdle reset after every successful
+// body read, while ResponseTotal and ResponseBytes independently bound control
+// responses even when a peer continuously trickles bytes.
 func (c *SafeClient) SetNetworkTimeouts(timeouts NetworkTimeouts) error {
 	switch {
 	case timeouts.Connect <= 0:
@@ -760,6 +811,10 @@ func (c *SafeClient) SetNetworkTimeouts(timeouts NetworkTimeouts) error {
 		return errors.New("network write idle timeout must be positive")
 	case timeouts.ReadIdle <= 0:
 		return errors.New("network read idle timeout must be positive")
+	case timeouts.ResponseTotal <= 0:
+		return errors.New("network response total timeout must be positive")
+	case timeouts.ResponseBytes <= 0:
+		return errors.New("network response byte limit must be positive")
 	}
 
 	c.networkTimeouts = timeouts

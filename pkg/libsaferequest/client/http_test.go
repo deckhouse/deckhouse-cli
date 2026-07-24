@@ -1283,6 +1283,8 @@ func TestSafeClient_SetNetworkTimeouts_ConfiguresEveryTransportPhase(t *testing.
 		ResponseHeader: 13 * time.Second,
 		WriteIdle:      14 * time.Second,
 		ReadIdle:       15 * time.Second,
+		ResponseTotal:  16 * time.Second,
+		ResponseBytes:  17,
 	}
 
 	if err := sc.SetNetworkTimeouts(timeouts); err != nil {
@@ -1527,6 +1529,261 @@ func TestPersistentHTTPClient_ResponseDrainProgressThenStall(t *testing.T) {
 	}
 }
 
+func TestPersistentHTTPClient_ResponseDrainContinuousTrickleHitsTotalBudget(t *testing.T) {
+	t.Parallel()
+
+	readStarted := make(chan struct{}, 1)
+	releaseRead := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: &controlledTrickleBody{
+				ctx:         req.Context(),
+				readStarted: readStarted,
+				releaseRead: releaseRead,
+			},
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://upload.test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, drainErr := io.Copy(io.Discard, resp.Body)
+		result <- errors.Join(drainErr, resp.Body.Close())
+	}()
+
+	<-readStarted
+	for range 4 {
+		releaseRead <- struct{}{}
+		<-readStarted
+	}
+
+	if resets := timers.require(t, 1).resetCount(); resets < 5 {
+		t.Fatalf("read-idle timer resets = %d, want arm plus four trickled bytes", resets)
+	}
+
+	timers.advance(time.Hour)
+	timers.require(t, 2).fire()
+
+	err = <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("continuous trickle error = %v, want context.DeadlineExceeded", err)
+	}
+	if errors.Is(err, ErrResponseBodyLimitExceeded) {
+		t.Fatalf("continuous trickle hit byte limit before total duration: %v", err)
+	}
+}
+
+func TestPersistentHTTPClient_RealTransportTrickleHitsTotalBudget(t *testing.T) {
+	tests := []struct {
+		name      string
+		enableTLS bool
+		wantProto int
+	}{
+		{name: "HTTP/1.1", wantProto: 1},
+		{name: "HTTP/2", enableTLS: true, wantProto: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			emit := make(chan struct{})
+			sent := make(chan struct{})
+			handlerStarted := make(chan struct{})
+			handlerDone := make(chan struct{})
+
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				defer close(handlerDone)
+
+				flusher, ok := writer.(http.Flusher)
+				if !ok {
+					t.Error("response writer does not support flushing")
+
+					return
+				}
+
+				writer.WriteHeader(http.StatusOK)
+				flusher.Flush()
+				close(handlerStarted)
+
+				for {
+					select {
+					case <-emit:
+						if _, err := writer.Write([]byte("x")); err != nil {
+							return
+						}
+
+						flusher.Flush()
+						sent <- struct{}{}
+					case <-request.Context().Done():
+						return
+					}
+				}
+			}))
+			server.EnableHTTP2 = tc.enableTLS
+			if tc.enableTLS {
+				server.StartTLS()
+			} else {
+				server.Start()
+			}
+			t.Cleanup(server.Close)
+
+			client, timers := newManualTimeoutClient(t, server.Client().Transport)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL, nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext: %v", err)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			if resp.ProtoMajor != tc.wantProto {
+				t.Fatalf("response protocol major = %d, want %d", resp.ProtoMajor, tc.wantProto)
+			}
+
+			<-handlerStarted
+
+			bodyRead := make(chan struct{}, 4)
+			resp.Body = &signalingReadCloser{
+				ReadCloser: resp.Body,
+				read:       bodyRead,
+			}
+
+			result := make(chan error, 1)
+			go func() {
+				_, drainErr := io.Copy(io.Discard, resp.Body)
+				result <- errors.Join(drainErr, resp.Body.Close())
+			}()
+
+			for range 4 {
+				emit <- struct{}{}
+				<-sent
+				<-bodyRead
+			}
+
+			if resets := timers.require(t, 1).resetCount(); resets < 5 {
+				t.Fatalf("read-idle timer resets = %d, want arm plus four real transport bytes", resets)
+			}
+
+			timers.advance(time.Hour)
+			timers.require(t, 2).fire()
+
+			if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("real transport trickle error = %v, want context.DeadlineExceeded", err)
+			}
+
+			<-handlerDone
+		})
+	}
+}
+
+func TestPersistentHTTPClient_ResponseDrainByteBudget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		size      int
+		wantError bool
+	}{
+		{name: "just under limit", size: 16},
+		{name: "over limit", size: 17, wantError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			roundTrip := roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", tc.size))),
+					Header:     make(http.Header),
+				}, nil
+			})
+
+			client, _ := newManualTimeoutClient(t, roundTrip)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://upload.test", nil)
+			if err != nil {
+				t.Fatalf("NewRequestWithContext: %v", err)
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+
+			count, drainErr := io.Copy(io.Discard, resp.Body)
+			err = errors.Join(drainErr, resp.Body.Close())
+
+			if tc.wantError {
+				if !errors.Is(err, ErrResponseBodyLimitExceeded) {
+					t.Fatalf("drain error = %v, want ErrResponseBodyLimitExceeded", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("drain response: %v", err)
+			}
+			if count != int64(tc.size) {
+				t.Fatalf("drained bytes = %d, want %d", count, tc.size)
+			}
+		})
+	}
+}
+
+func TestPersistentHTTPClient_ResponseDrainParentCancellation(t *testing.T) {
+	t.Parallel()
+
+	readStarted := make(chan struct{}, 1)
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: &controlledTrickleBody{
+				ctx:         req.Context(),
+				readStarted: readStarted,
+				releaseRead: make(chan struct{}),
+			},
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client, _ := newManualTimeoutClient(t, roundTrip)
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://upload.test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, drainErr := io.Copy(io.Discard, resp.Body)
+		result <- errors.Join(drainErr, resp.Body.Close())
+	}()
+
+	<-readStarted
+	cancel()
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("response drain error = %v, want context.Canceled", err)
+	}
+}
+
 func TestPersistentHTTPClient_ParentCancellationPreservesCause(t *testing.T) {
 	t.Parallel()
 
@@ -1741,6 +1998,8 @@ func newManualTimeoutClient(t *testing.T, roundTrip http.RoundTripper) (*Persist
 		ResponseHeader: time.Hour,
 		WriteIdle:      time.Hour,
 		ReadIdle:       time.Hour,
+		ResponseTotal:  time.Hour,
+		ResponseBytes:  16,
 	})
 	if err != nil {
 		t.Fatalf("SetNetworkTimeouts: %v", err)
@@ -1781,6 +2040,47 @@ func (b *partialStallBody) Read(p []byte) (int, error) {
 
 func (b *partialStallBody) Close() error {
 	return nil
+}
+
+type controlledTrickleBody struct {
+	ctx         context.Context
+	readStarted chan<- struct{}
+	releaseRead <-chan struct{}
+}
+
+func (b *controlledTrickleBody) Read(p []byte) (int, error) {
+	select {
+	case b.readStarted <- struct{}{}:
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	}
+
+	select {
+	case <-b.releaseRead:
+		p[0] = 'x'
+
+		return 1, nil
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	}
+}
+
+func (b *controlledTrickleBody) Close() error {
+	return nil
+}
+
+type signalingReadCloser struct {
+	io.ReadCloser
+	read chan<- struct{}
+}
+
+func (b *signalingReadCloser) Read(p []byte) (int, error) {
+	count, err := b.ReadCloser.Read(p)
+	if count > 0 {
+		b.read <- struct{}{}
+	}
+
+	return count, err
 }
 
 type notifyingRequestBody struct {
