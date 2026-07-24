@@ -433,6 +433,14 @@ func prepareFSInventory(
 
 	summary, err := validateFSInventory(ctx, view, inventoryPath, ext, nil)
 	if err == nil {
+		if err := view.confirmFileDurability(ctx, inventoryPath); err != nil {
+			return "", fsInventorySummary{}, fmt.Errorf(
+				"confirm filesystem inventory durability %s: %w",
+				inventoryPath,
+				err,
+			)
+		}
+
 		workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
 		if removeErr := view.removeAll(workDir); removeErr != nil {
 			return "", fsInventorySummary{}, fmt.Errorf("remove stale inventory work dir %s: %w", workDir, removeErr)
@@ -486,7 +494,13 @@ func buildFSInventory(
 		return fsInventorySummary{}, fmt.Errorf("create inventory work dir %s: %w", workDir, err)
 	}
 
-	defer func() { _ = view.removeAll(workDir) }()
+	preserveWorkDir := false
+
+	defer func() {
+		if !preserveWorkDir {
+			_ = view.removeAll(workDir)
+		}
+	}()
 
 	builder := newFSRunBuilder(view, workDir, ext)
 
@@ -505,7 +519,9 @@ func buildFSInventory(
 		return fsInventorySummary{}, err
 	}
 
-	if err := writeFinalFSInventory(view, inventoryPath, finalRun, ext, summary); err != nil {
+	if err := writeFinalFSInventory(ctx, view, inventoryPath, finalRun, ext, summary); err != nil {
+		preserveWorkDir = archive.CommitPublicationState(err) == archive.PublicationPublished
+
 		return fsInventorySummary{}, err
 	}
 
@@ -961,6 +977,7 @@ func closeFSRunCursors(cursors []*fsRunCursor) {
 }
 
 func writeFinalFSInventory(
+	ctx context.Context,
 	view filesystemView,
 	path, runPath, ext string,
 	summary fsInventorySummary,
@@ -1024,7 +1041,7 @@ func writeFinalFSInventory(
 		return fmt.Errorf("write filesystem inventory footer: %w", err)
 	}
 
-	if err := aw.Commit(); err != nil {
+	if err := aw.CommitContext(ctx); err != nil {
 		return fmt.Errorf("commit filesystem inventory %s: %w", path, err)
 	}
 
