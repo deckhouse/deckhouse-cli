@@ -17,17 +17,22 @@ limitations under the License.
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -644,6 +649,250 @@ func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
 				t.Errorf("Authorization = %q, want %q", gotHeader, tc.wantHeader)
 			}
 		})
+	}
+}
+
+func TestPersistentHTTPClient_IsolatesOriginsAuthenticationAndCARoots(t *testing.T) {
+	t.Parallel()
+
+	const requestCount = 50
+
+	type serverState struct {
+		token        string
+		requests     atomic.Int64
+		wrongHeaders atomic.Int64
+	}
+
+	newServer := func(state *serverState, serial int64) *httptest.Server {
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			state.requests.Add(1)
+
+			if request.Header.Get("Authorization") != "Bearer "+state.token {
+				state.wrongHeaders.Add(1)
+				http.Error(writer, "wrong authorization", http.StatusUnauthorized)
+
+				return
+			}
+
+			writer.WriteHeader(http.StatusNoContent)
+		}))
+		server.TLS = &tls.Config{
+			Certificates: []tls.Certificate{newPersistentTestCertificate(t, serial)},
+			MinVersion:   tls.VersionTLS12,
+		}
+		server.EnableHTTP2 = true
+		server.StartTLS()
+
+		return server
+	}
+
+	firstState := &serverState{token: "first-token"}
+	secondState := &serverState{token: "second-token"}
+	firstServer := newServer(firstState, 1)
+	secondServer := newServer(secondState, 2)
+	t.Cleanup(firstServer.Close)
+	t.Cleanup(secondServer.Close)
+
+	newClient := func(server *httptest.Server, token string) *PersistentHTTPClient {
+		t.Helper()
+
+		certificate := server.Certificate()
+		if certificate == nil {
+			t.Fatal("TLS server has no certificate")
+		}
+
+		caData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+		safeClient := &SafeClient{restConfig: &rest.Config{BearerToken: token}}
+		safeClient.SetTLSCAData(caData)
+
+		httpClient, err := safeClient.NewPersistentHTTPClient()
+		if err != nil {
+			t.Fatalf("NewPersistentHTTPClient: %v", err)
+		}
+
+		return httpClient
+	}
+
+	firstClient := newClient(firstServer, firstState.token)
+	secondClient := newClient(secondServer, secondState.token)
+	t.Cleanup(firstClient.CloseIdleConnections)
+	t.Cleanup(secondClient.CloseIdleConnections)
+
+	var group sync.WaitGroup
+	group.Add(2)
+
+	errs := make(chan error, 2)
+
+	go func() {
+		defer group.Done()
+
+		for range requestCount {
+			if _, err := persistentRequest(context.Background(), firstClient, firstServer.URL); err != nil {
+				errs <- fmt.Errorf("first client request: %w", err)
+
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer group.Done()
+
+		for range requestCount {
+			if _, err := persistentRequest(context.Background(), secondClient, secondServer.URL); err != nil {
+				errs <- fmt.Errorf("second client request: %w", err)
+
+				return
+			}
+		}
+	}()
+
+	group.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+
+	if firstState.requests.Load() != requestCount || secondState.requests.Load() != requestCount {
+		t.Fatalf(
+			"request counts = (%d,%d), want (%d,%d)",
+			firstState.requests.Load(),
+			secondState.requests.Load(),
+			requestCount,
+			requestCount,
+		)
+	}
+	if firstState.wrongHeaders.Load() != 0 || secondState.wrongHeaders.Load() != 0 {
+		t.Fatalf(
+			"wrong authorization headers = (%d,%d), want (0,0)",
+			firstState.wrongHeaders.Load(),
+			secondState.wrongHeaders.Load(),
+		)
+	}
+
+	if _, err := persistentRequest(context.Background(), firstClient, secondServer.URL); err == nil {
+		t.Fatal("first client unexpectedly trusted the second origin's independent CA")
+	}
+	if _, err := persistentRequest(context.Background(), secondClient, firstServer.URL); err == nil {
+		t.Fatal("second client unexpectedly trusted the first origin's independent CA")
+	}
+
+	if firstState.requests.Load() != requestCount || secondState.requests.Load() != requestCount {
+		t.Fatal("cross-origin TLS rejection reached a server or leaked credentials")
+	}
+}
+
+func newPersistentTestCertificate(t *testing.T, serial int64) tls.Certificate {
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{byte(serial)}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: fmt.Sprintf("persistent-test-%d", serial)},
+		NotBefore:    time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	certificateDER, err := x509.CreateCertificate(
+		bytes.NewReader(bytes.Repeat([]byte{byte(serial + 16)}, 128)),
+		template,
+		template,
+		privateKey.Public(),
+		privateKey,
+	)
+	if err != nil {
+		t.Fatalf("create test certificate: %v", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{certificateDER},
+		PrivateKey:  privateKey,
+	}
+}
+
+func TestPersistentHTTPClientForOrigin_RejectsCrossOriginBeforeAuth(t *testing.T) {
+	t.Parallel()
+
+	var targetRequests atomic.Int64
+
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		targetRequests.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(target.Close)
+
+	const token = "origin-bound-token"
+
+	var wrongSourceAuth atomic.Int64
+
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			wrongSourceAuth.Add(1)
+			http.Error(writer, "wrong authorization", http.StatusUnauthorized)
+
+			return
+		}
+
+		switch request.URL.Path {
+		case "/ok":
+			writer.WriteHeader(http.StatusNoContent)
+		case "/same-origin":
+			http.Redirect(writer, request, "/ok", http.StatusTemporaryRedirect)
+		case "/cross-origin":
+			http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(source.Close)
+
+	safeClient := &SafeClient{restConfig: &rest.Config{BearerToken: token}}
+	httpClient, err := safeClient.NewPersistentHTTPClientForOrigin(source.URL)
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClientForOrigin: %v", err)
+	}
+	t.Cleanup(httpClient.CloseIdleConnections)
+
+	if _, err := persistentRequest(context.Background(), httpClient, source.URL+"/same-origin"); err != nil {
+		t.Fatalf("same-origin redirect: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, source.URL+"/cross-origin", nil)
+	if err != nil {
+		t.Fatalf("build cross-origin redirect request: %v", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("cross-origin redirect unexpectedly succeeded")
+	}
+
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatalf("build direct cross-origin request: %v", err)
+	}
+
+	resp, err = httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("direct cross-origin request unexpectedly succeeded")
+	}
+
+	if targetRequests.Load() != 0 {
+		t.Fatalf("cross-origin target requests = %d, want 0", targetRequests.Load())
+	}
+	if wrongSourceAuth.Load() != 0 {
+		t.Fatalf("wrong source authorization headers = %d, want 0", wrongSourceAuth.Load())
 	}
 }
 

@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -78,6 +80,7 @@ type PersistentHTTPClient struct {
 	ownedTransport     http.RoundTripper
 	ownedHTTPTransport *http.Transport
 	hasConfiguredAuth  bool
+	origin             *httpOrigin
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
@@ -162,6 +165,37 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 	}, nil
 }
 
+// NewPersistentHTTPClientForOrigin materializes a persistent client whose
+// credential-bearing transport can only send to rawURL's HTTP origin. Direct
+// cross-origin requests and cross-origin redirects are rejected before the auth
+// wrappers see them; same-origin redirects retain the standard ten-hop limit.
+func (c *SafeClient) NewPersistentHTTPClientForOrigin(rawURL string) (*PersistentHTTPClient, error) {
+	origin, err := parseHTTPOrigin(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("build origin-bound persistent HTTP client: %w", err)
+	}
+
+	httpClient, err := c.NewPersistentHTTPClient()
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient.origin = &origin
+	httpClient.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+
+		if !origin.matches(req.URL) {
+			return fmt.Errorf("refuse redirect from upload origin %s://%s to %s", origin.scheme, origin.authority(), req.URL)
+		}
+
+		return nil
+	}
+
+	return httpClient, nil
+}
+
 // Do sends req through the persistent authenticated transport.
 func (c *PersistentHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	return c.HTTPDo(req)
@@ -169,6 +203,15 @@ func (c *PersistentHTTPClient) Do(req *http.Request) (*http.Response, error) {
 
 // HTTPDo sends req through the persistent authenticated transport.
 func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error) {
+	if c.origin != nil && !c.origin.matches(req.URL) {
+		return nil, fmt.Errorf(
+			"persistent HTTP client origin is %s://%s, refuse request to %s",
+			c.origin.scheme,
+			c.origin.authority(),
+			req.URL,
+		)
+	}
+
 	if req.Header.Get("Authorization") == "" && !c.hasConfiguredAuth && !SupportNoAuth {
 		return nil, errors.New("No auth")
 	}
@@ -179,6 +222,69 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 	}
 
 	return resp, nil
+}
+
+type httpOrigin struct {
+	scheme string
+	host   string
+	port   string
+}
+
+func parseHTTPOrigin(rawURL string) (httpOrigin, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return httpOrigin{}, fmt.Errorf("parse origin URL: %w", err)
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return httpOrigin{}, fmt.Errorf("origin URL scheme %q is not HTTP or HTTPS", parsed.Scheme)
+	}
+
+	if parsed.Host == "" || parsed.Hostname() == "" {
+		return httpOrigin{}, errors.New("origin URL has no host")
+	}
+
+	if parsed.User != nil {
+		return httpOrigin{}, errors.New("origin URL must not contain user info")
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+
+	return httpOrigin{
+		scheme: scheme,
+		host:   strings.ToLower(parsed.Hostname()),
+		port:   port,
+	}, nil
+}
+
+func (o httpOrigin) matches(candidate *url.URL) bool {
+	if candidate == nil {
+		return false
+	}
+
+	other, err := parseHTTPOrigin(candidate.String())
+	if err != nil {
+		return false
+	}
+
+	return o == other
+}
+
+func (o httpOrigin) authority() string {
+	defaultPort := o.scheme == "http" && o.port == "80" || o.scheme == "https" && o.port == "443"
+	if defaultPort {
+		return o.host
+	}
+
+	return o.host + ":" + o.port
 }
 
 // CloseIdleConnections closes this client's privately owned idle pool.
