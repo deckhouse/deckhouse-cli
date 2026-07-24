@@ -18,9 +18,14 @@ package restorecmd
 
 import (
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/rest"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
 )
 
 func TestNewCommand_Defaults(t *testing.T) {
@@ -57,6 +62,60 @@ func TestNewCommand_Defaults(t *testing.T) {
 
 	if timeout != 10*time.Minute {
 		t.Fatalf("default --%s: got %s, want 10m", flagTimeout, timeout)
+	}
+}
+
+func TestBoundedControlPlaneConfig(t *testing.T) {
+	original := &rest.Config{
+		Host:    "https://cluster.example.test",
+		Timeout: 0,
+	}
+
+	bounded := boundedControlPlaneConfig(original)
+
+	if bounded == original {
+		t.Fatal("boundedControlPlaneConfig returned the input pointer")
+	}
+
+	if bounded.Host != original.Host {
+		t.Fatalf("bounded host = %q, want %q", bounded.Host, original.Host)
+	}
+
+	if bounded.Timeout != restore.DefaultControlPlaneTimeout {
+		t.Fatalf(
+			"bounded timeout = %s, want %s",
+			bounded.Timeout,
+			restore.DefaultControlPlaneTimeout,
+		)
+	}
+
+	if original.Timeout != 0 {
+		t.Fatalf("original timeout = %s, want zero", original.Timeout)
+	}
+
+	transport, ok := bounded.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatalf("bounded transport has type %T, want *http.Transport", transport)
+	}
+
+	if transport.DialContext == nil {
+		t.Fatal("bounded transport has no DialContext")
+	}
+
+	if transport.TLSHandshakeTimeout != restore.DefaultControlPlaneTimeout {
+		t.Errorf(
+			"TLS handshake timeout = %s, want %s",
+			transport.TLSHandshakeTimeout,
+			restore.DefaultControlPlaneTimeout,
+		)
+	}
+
+	if transport.ResponseHeaderTimeout != restore.DefaultControlPlaneTimeout {
+		t.Errorf(
+			"response header timeout = %s, want %s",
+			transport.ResponseHeaderTimeout,
+			restore.DefaultControlPlaneTimeout,
+		)
 	}
 }
 

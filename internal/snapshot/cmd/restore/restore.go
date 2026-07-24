@@ -21,18 +21,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
-	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -246,20 +250,21 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("building kube client: %w", err)
 	}
 
-	kubeClient, err := sc.NewRTClient(
-		snapshotapi.AddToScheme,
-		snapv1.AddToScheme,
-	)
+	restConfig := boundedControlPlaneConfig(sc.RESTConfig())
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
-		return fmt.Errorf("building runtime client: %w", err)
+		return fmt.Errorf("building discovery client: %w", err)
 	}
 
-	aggClient, err := aggapi.NewClientForConfig(sc.RESTConfig(), kubeClient.RESTMapper())
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(discoveryClient))
+
+	aggClient, err := aggapi.NewClientForConfig(restConfig, mapper)
 	if err != nil {
 		return fmt.Errorf("building aggregated API client: %w", err)
 	}
 
-	dynClient, err := dynamic.NewForConfig(sc.RESTConfig())
+	dynClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return fmt.Errorf("building dynamic client: %w", err)
 	}
@@ -279,7 +284,8 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		Timeout:                timeout,
 		Source:                 aggClient,
 		Dynamic:                dynClient,
-		Mapper:                 kubeClient.RESTMapper(),
+		Mapper:                 mapper,
+		ControlPlaneTimeout:    restore.DefaultControlPlaneTimeout,
 		Log:                    log,
 	}
 
@@ -298,6 +304,45 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return nil
+}
+
+func boundedControlPlaneConfig(config *rest.Config) *rest.Config {
+	bounded := rest.CopyConfig(config)
+	bounded.Timeout = restore.DefaultControlPlaneTimeout
+	previousWrap := bounded.WrapTransport
+	bounded.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if transport, ok := roundTripper.(*http.Transport); ok {
+			cloned := transport.Clone()
+			cloned.TLSHandshakeTimeout = restore.DefaultControlPlaneTimeout
+			cloned.ResponseHeaderTimeout = restore.DefaultControlPlaneTimeout
+
+			baseDialContext := cloned.DialContext
+			if baseDialContext == nil {
+				baseDialContext = (&net.Dialer{}).DialContext
+			}
+
+			cloned.DialContext = func(
+				ctx context.Context,
+				network string,
+				address string,
+			) (net.Conn, error) {
+				dialCtx, cancel := context.WithTimeout(ctx, restore.DefaultControlPlaneTimeout)
+				defer cancel()
+
+				return baseDialContext(dialCtx, network, address)
+			}
+
+			roundTripper = cloned
+		}
+
+		if previousWrap != nil {
+			return previousWrap(roundTripper)
+		}
+
+		return roundTripper
+	}
+
+	return bounded
 }
 
 // parseNodeFlag parses a "<Kind>/<name>" flag value into its components. Shared by --node
