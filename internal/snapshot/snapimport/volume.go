@@ -129,12 +129,13 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn  dynamic.Interface
-	sc   *safeClient.SafeClient
-	ttl  string
-	poll time.Duration
-	wait time.Duration
-	log  *slog.Logger
+	dyn             dynamic.Interface
+	sc              *safeClient.SafeClient
+	newUploadClient func([]byte, string) (uploadHTTPClient, error)
+	ttl             string
+	poll            time.Duration
+	wait            time.Duration
+	log             *slog.Logger
 }
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
@@ -460,10 +461,11 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	caB64, _, _ := unstructured.NestedString(di.Object, "status", "ca")
 
-	httpClient, err := c.uploadClient(caB64)
+	httpClient, err := c.uploadClient(caB64, url)
 	if err != nil {
 		return err
 	}
+	defer httpClient.CloseIdleConnections()
 
 	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, setTotal, onProgress, activate); err != nil {
 		return err
@@ -640,8 +642,10 @@ func verifyPayloadHandle(ctx context.Context, handle *archive.VerifiedHandle) er
 	return handle.Verify(ctx)
 }
 
-// uploadClient builds an isolated SafeClient that trusts the importer's status.ca.
-func (c *clusterVolumeImporter) uploadClient(caB64 string) (*safeClient.SafeClient, error) {
+// uploadClient materializes one isolated authenticated transport stack that trusts
+// the importer's status.ca. Its caller owns the result for exactly one DataImport
+// upload lifecycle and closes its private idle HTTP/1.1 and HTTP/2 pools.
+func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPClient, error) {
 	var ca []byte
 
 	if caB64 != "" {
@@ -653,10 +657,23 @@ func (c *clusterVolumeImporter) uploadClient(caB64 string) (*safeClient.SafeClie
 		ca = decoded
 	}
 
+	if c.newUploadClient != nil {
+		return c.newUploadClient(ca, rawURL)
+	}
+
+	if c.sc == nil {
+		return nil, errors.New("build DataImport upload HTTP client: no safe client")
+	}
+
 	sub := c.sc.Copy()
 	sub.SetTLSCAData(ca)
 
-	return sub, nil
+	httpClient, err := sub.NewPersistentHTTPClientForOrigin(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("build DataImport upload HTTP client: %w", err)
+	}
+
+	return httpClient, nil
 }
 
 // waitDataImportReady blocks until the DataImport reports Ready=True with a populated
@@ -758,10 +775,14 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(
 	}
 }
 
-// httpDoer is the minimal HTTP surface putBlock/postFinished need; *safeClient.SafeClient
-// satisfies it, and tests stub it.
+// httpDoer is the minimal HTTP surface putBlock/postFinished need.
 type httpDoer interface {
 	HTTPDo(req *http.Request) (*http.Response, error)
+}
+
+type uploadHTTPClient interface {
+	httpDoer
+	CloseIdleConnections()
 }
 
 type requestBodyRange struct {

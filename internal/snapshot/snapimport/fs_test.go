@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,8 +38,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // plainHTTPDoer satisfies httpDoer by delegating to http.DefaultClient so tests can
@@ -1927,6 +1933,195 @@ func TestImportFSFromTar_EmptyFileIsUploaded(t *testing.T) {
 
 	if total != 2 {
 		t.Errorf("expected 2 uploads, got %d", total)
+	}
+}
+
+func TestUploadVolumeData_FilesystemReusesOneClientAndClosesItsConnections(t *testing.T) {
+	const fileCount = 200
+
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	for index := range fileCount {
+		name := fmt.Sprintf("many/file-%03d.txt", index)
+		addTarEntryMetadata(
+			t,
+			tarWriter,
+			name,
+			name,
+			"none",
+			1,
+			[]byte{'x'},
+			0o600,
+			1000,
+			1000,
+			time.Time{},
+		)
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close many-file tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuffer.Bytes(), 0o600); err != nil {
+		t.Fatalf("write many-file tar: %v", err)
+	}
+
+	leaf := volumeSnapshotLeaf("pvc-many-files")
+	leaf.FilesystemData = true
+	leaf.TarFile = tarPath
+	leaf.DataFile = ""
+	leaf.VolumeMode = volumeModeFilesystem
+	leaf.PayloadKind = dataImportPayloadFilesystem
+	leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+	importerHandler := newFakeFileImporter()
+
+	var (
+		requests          atomic.Int64
+		newConnections    atomic.Int64
+		closedConnections atomic.Int64
+		wrongAuth         atomic.Int64
+	)
+
+	markCompleted := func() error {
+		return errors.New("completion updater is not initialized")
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+
+		if request.Header.Get("Authorization") != "Bearer upload-token" {
+			wrongAuth.Add(1)
+			http.Error(writer, "wrong authorization", http.StatusUnauthorized)
+
+			return
+		}
+
+		if request.Method == http.MethodPost {
+			if err := markCompleted(); err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+				return
+			}
+		}
+
+		importerHandler.ServeHTTP(writer, request)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			newConnections.Add(1)
+		case http.StateClosed:
+			closedConnections.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	di := readyDataImportObj(leaf, server.URL, volumeModeFilesystem, "")
+	dyn := newFakeDataImportDyn(di)
+	importer := newTestVolumeImporter(dyn)
+
+	markCompleted = func() error {
+		current, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(
+			context.Background(),
+			importer.DataImportName(leaf),
+			metav1.GetOptions{},
+		)
+		if err != nil {
+			return fmt.Errorf("get DataImport for completion: %w", err)
+		}
+
+		if err := unstructured.SetNestedSlice(current.Object, readyConditions(conditionCompleted), "status", "conditions"); err != nil {
+			return fmt.Errorf("set completed condition: %w", err)
+		}
+		if err := unstructured.SetNestedMap(
+			current.Object,
+			map[string]interface{}{"name": "vsc-many-files"},
+			"status",
+			"data",
+			"artifactRef",
+		); err != nil {
+			return fmt.Errorf("set completed artifact: %w", err)
+		}
+
+		if _, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Update(
+			context.Background(),
+			current,
+			metav1.UpdateOptions{},
+		); err != nil {
+			return fmt.Errorf("update completed DataImport: %w", err)
+		}
+
+		return nil
+	}
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: https://kubernetes.invalid
+users:
+- name: test
+  user:
+    token: upload-token
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+current-context: test
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	t.Setenv("KUBECONFIG", kubeconfigPath)
+
+	sc, err := safeClient.NewSafeClient(pflag.NewFlagSet("upload-reuse-test", pflag.ContinueOnError))
+	if err != nil {
+		t.Fatalf("NewSafeClient: %v", err)
+	}
+	importer.sc = sc
+
+	if err := importer.UploadVolumeData(
+		context.Background(),
+		leaf,
+		importer.DataImportName(leaf),
+		targetNS,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("UploadVolumeData: %v", err)
+	}
+
+	wantRequests := int64(2*fileCount + 1)
+	if requests.Load() != wantRequests {
+		t.Fatalf("HTTP requests = %d, want %d", requests.Load(), wantRequests)
+	}
+	if wrongAuth.Load() != 0 {
+		t.Fatalf("requests with wrong authorization = %d, want 0", wrongAuth.Load())
+	}
+	if newConnections.Load() > 2 {
+		t.Fatalf("new TCP connections = %d for %d requests, want at most 2", newConnections.Load(), wantRequests)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for closedConnections.Load() != newConnections.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if closedConnections.Load() != newConnections.Load() {
+		t.Fatalf(
+			"closed TCP connections = %d, want all %d upload connections closed",
+			closedConnections.Load(),
+			newConnections.Load(),
+		)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -1251,6 +1252,19 @@ type clientHTTPDoer struct {
 
 func (d clientHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
 	return d.client.Do(req)
+}
+
+type testUploadHTTPClient struct {
+	do    func(*http.Request) (*http.Response, error)
+	close func()
+}
+
+func (c *testUploadHTTPClient) HTTPDo(req *http.Request) (*http.Response, error) {
+	return c.do(req)
+}
+
+func (c *testUploadHTTPClient) CloseIdleConnections() {
+	c.close()
 }
 
 func newRoundTripDoer(roundTrip testRoundTripper) clientHTTPDoer {
@@ -3009,6 +3023,16 @@ func completedDataImportObj(namespace, name string) *unstructured.Unstructured {
 	return obj
 }
 
+func readyDataImportObj(leaf PlannedNode, rawURL, volumeMode, ca string) *unstructured.Unstructured {
+	obj := dataImportObjForLeaf(targetNS, leaf, false)
+	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionReady), "status", "conditions")
+	_ = unstructured.SetNestedField(obj.Object, rawURL, "status", "url")
+	_ = unstructured.SetNestedField(obj.Object, volumeMode, "status", "volumeMode")
+	_ = unstructured.SetNestedField(obj.Object, ca, "status", "ca")
+
+	return obj
+}
+
 func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	// DataFile is set so the block-data preflight passes; the file is never opened because
 	// the completed-import short-circuit returns before any upload.
@@ -3021,6 +3045,135 @@ func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 
 	if err := imp.UploadVolumeData(context.Background(), leaf, diName, targetNS, nil, nil, nil); err != nil {
 		t.Fatalf("UploadVolumeData on an already-completed import must be a no-op: %v", err)
+	}
+}
+
+func TestUploadVolumeData_ClosesClientAfterRequestError(t *testing.T) {
+	payload := []byte("upload request error")
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+		t.Fatalf("write block payload: %v", err)
+	}
+
+	leaf := volumeSnapshotLeaf("pvc-request-error")
+	leaf.DataFile = dataFile
+	leaf.Size = strconv.Itoa(len(payload))
+	leaf.SizeBytes = int64(len(payload))
+	leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+	ca := []byte("request-error-ca")
+	di := readyDataImportObj(leaf, "https://importer.test", volumeModeBlock, base64.StdEncoding.EncodeToString(ca))
+	importer := newTestVolumeImporter(newFakeDataImportDyn(di))
+
+	requestErr := errors.New("injected upload request error")
+
+	var (
+		builds atomic.Int64
+		closes atomic.Int64
+	)
+
+	importer.newUploadClient = func(gotCA []byte, rawURL string) (uploadHTTPClient, error) {
+		builds.Add(1)
+
+		if !bytes.Equal(gotCA, ca) {
+			t.Fatalf("decoded CA = %q, want %q", gotCA, ca)
+		}
+		if rawURL != "https://importer.test" {
+			t.Fatalf("upload client origin = %q, want https://importer.test", rawURL)
+		}
+
+		return &testUploadHTTPClient{
+			do: func(*http.Request) (*http.Response, error) {
+				return nil, requestErr
+			},
+			close: func() {
+				closes.Add(1)
+			},
+		}, nil
+	}
+
+	err := importer.UploadVolumeData(
+		context.Background(),
+		leaf,
+		importer.DataImportName(leaf),
+		targetNS,
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, requestErr) {
+		t.Fatalf("UploadVolumeData error = %v, want request error", err)
+	}
+	if builds.Load() != 1 {
+		t.Fatalf("upload client builds = %d, want 1", builds.Load())
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("upload client closes = %d, want 1", closes.Load())
+	}
+}
+
+func TestUploadVolumeData_CancellationClosesOnlyAfterInFlightRequestReturns(t *testing.T) {
+	payload := []byte("cancel upload")
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+		t.Fatalf("write block payload: %v", err)
+	}
+
+	leaf := volumeSnapshotLeaf("pvc-cancel")
+	leaf.DataFile = dataFile
+	leaf.Size = strconv.Itoa(len(payload))
+	leaf.SizeBytes = int64(len(payload))
+	leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+	di := readyDataImportObj(leaf, "https://importer.test", volumeModeBlock, "")
+	importer := newTestVolumeImporter(newFakeDataImportDyn(di))
+
+	requestStarted := make(chan struct{})
+
+	var closes atomic.Int64
+
+	importer.newUploadClient = func([]byte, string) (uploadHTTPClient, error) {
+		return &testUploadHTTPClient{
+			do: func(req *http.Request) (*http.Response, error) {
+				close(requestStarted)
+				<-req.Context().Done()
+
+				return nil, req.Context().Err()
+			},
+			close: func() {
+				closes.Add(1)
+			},
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+
+	go func() {
+		result <- importer.UploadVolumeData(
+			ctx,
+			leaf,
+			importer.DataImportName(leaf),
+			targetNS,
+			nil,
+			nil,
+			nil,
+		)
+	}()
+
+	<-requestStarted
+
+	if closes.Load() != 0 {
+		t.Fatalf("upload client closed while request was in flight: %d", closes.Load())
+	}
+
+	cancel()
+
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("UploadVolumeData error = %v, want context cancellation", err)
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("upload client closes after cancellation = %d, want 1", closes.Load())
 	}
 }
 
