@@ -115,7 +115,8 @@ type Config struct {
 
 	// SelectedNodeKind restricts the restore to a single node subtree when non-empty.
 	// The selector is resolved within Snapshot's status.childrenSnapshotRefs hierarchy
-	// by either generated snapshot-CR identity or captured status.sourceRef identity.
+	// by generated snapshot-CR identity, captured status.sourceRef identity, or the
+	// original archive identity preserved on an import-mode marker.
 	// RestoreManifestsScoped is called with the matched node's real snapshot-CR NodeRef.
 	// Preflight checks the selected node's Ready (or readyToUse for VolumeSnapshot), not
 	// the root — so a Ready child can be restored even when the root is
@@ -889,6 +890,11 @@ type nodeMatch struct {
 	obj *unstructured.Unstructured
 }
 
+type nodeIdentity struct {
+	kind string
+	name string
+}
+
 type nodeResolver struct {
 	cfg     Config
 	seen    map[string]struct{}
@@ -1001,17 +1007,41 @@ func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstr
 }
 
 func (r *nodeResolver) matchesSelector(obj *unstructured.Unstructured, ref aggapi.NodeRef) (bool, error) {
-	if ref.Kind == r.cfg.SelectedNodeKind && ref.Name == r.cfg.SelectedNodeName {
-		return true, nil
+	sourceRef, hasSourceRef, err := snapshotSourceIdentity(obj, ref)
+	if err != nil {
+		return false, err
 	}
 
+	importSourceRef, hasImportSourceRef, err := importSourceIdentity(obj, ref)
+	if err != nil {
+		return false, err
+	}
+
+	generatedMatches := ref.Kind == r.cfg.SelectedNodeKind && ref.Name == r.cfg.SelectedNodeName
+	sourceMatches := hasSourceRef && sourceRef.matches(r.cfg.SelectedNodeKind, r.cfg.SelectedNodeName)
+	importSourceMatches := hasImportSourceRef &&
+		importSourceRef.matches(r.cfg.SelectedNodeKind, r.cfg.SelectedNodeName)
+
+	return generatedMatches || sourceMatches || importSourceMatches, nil
+}
+
+func snapshotSourceIdentity(
+	obj *unstructured.Unstructured,
+	ref aggapi.NodeRef,
+) (nodeIdentity, bool, error) {
 	sourceRef, found, err := unstructured.NestedMap(obj.Object, "status", "sourceRef")
 	if err != nil {
-		return false, fmt.Errorf("%s %s/%s: status.sourceRef is not an object: %w", ref.APIVersion, ref.Kind, ref.Name, err)
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: status.sourceRef is not an object: %w",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			err,
+		)
 	}
 
 	if !found {
-		return false, nil
+		return nodeIdentity{}, false, nil
 	}
 
 	sourceAPIVersion, _ := sourceRef["apiVersion"].(string)
@@ -1019,7 +1049,7 @@ func (r *nodeResolver) matchesSelector(obj *unstructured.Unstructured, ref aggap
 	sourceName, _ := sourceRef["name"].(string)
 
 	if sourceAPIVersion == "" || sourceKind == "" || sourceName == "" {
-		return false, fmt.Errorf(
+		return nodeIdentity{}, false, fmt.Errorf(
 			"%s %s/%s: status.sourceRef is incomplete (apiVersion/kind/name required)",
 			ref.APIVersion,
 			ref.Kind,
@@ -1027,7 +1057,87 @@ func (r *nodeResolver) matchesSelector(obj *unstructured.Unstructured, ref aggap
 		)
 	}
 
-	return sourceKind == r.cfg.SelectedNodeKind && sourceName == r.cfg.SelectedNodeName, nil
+	for _, optionalField := range []string{"namespace", "uid"} {
+		if value, exists := sourceRef[optionalField]; exists {
+			if _, ok := value.(string); !ok {
+				return nodeIdentity{}, false, fmt.Errorf(
+					"%s %s/%s: status.sourceRef.%s has unexpected type %T",
+					ref.APIVersion,
+					ref.Kind,
+					ref.Name,
+					optionalField,
+					value,
+				)
+			}
+		}
+	}
+
+	return nodeIdentity{
+		kind: sourceKind,
+		name: sourceName,
+	}, true, nil
+}
+
+func importSourceIdentity(
+	obj *unstructured.Unstructured,
+	ref aggapi.NodeRef,
+) (nodeIdentity, bool, error) {
+	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+	if mode != string(snapshotapi.SnapshotModeImport) {
+		return nodeIdentity{}, false, nil
+	}
+
+	value, found := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]
+	if !found {
+		return nodeIdentity{}, false, nil
+	}
+
+	var sourceRef snapshotapi.ImportSourceRef
+	if err := json.Unmarshal([]byte(value), &sourceRef); err != nil {
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: malformed %s annotation: %w",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			snapshotapi.AnnotationImportSourceRef,
+			err,
+		)
+	}
+
+	if sourceRef.APIVersion == "" || sourceRef.Kind == "" || sourceRef.Name == "" {
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: malformed %s annotation: apiVersion, kind, and name are required",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			snapshotapi.AnnotationImportSourceRef,
+		)
+	}
+
+	canonical, err := json.Marshal(sourceRef)
+	if err != nil {
+		return nodeIdentity{}, false, fmt.Errorf("marshal import source reference: %w", err)
+	}
+
+	if string(canonical) != value {
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: non-canonical %s annotation %q",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			snapshotapi.AnnotationImportSourceRef,
+			value,
+		)
+	}
+
+	return nodeIdentity{
+		kind: sourceRef.Kind,
+		name: sourceRef.Name,
+	}, true, nil
+}
+
+func (i nodeIdentity) matches(kind, name string) bool {
+	return i.kind == kind && i.name == name
 }
 
 func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {

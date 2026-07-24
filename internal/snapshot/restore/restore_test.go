@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +43,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
 const (
@@ -376,6 +378,25 @@ func setSnapshotSourceRef(obj *unstructured.Unstructured, apiVersion, kind, name
 		"name":       name,
 		"uid":        name + "-uid",
 	}
+}
+
+func setSnapshotMode(obj *unstructured.Unstructured, mode snapshotapi.SnapshotMode) {
+	obj.Object["spec"] = map[string]interface{}{"mode": string(mode)}
+}
+
+func setImportSourceRefAnnotation(t *testing.T, obj *unstructured.Unstructured, apiVersion, kind, name string) {
+	t.Helper()
+
+	value, err := json.Marshal(snapshotapi.ImportSourceRef{
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       name,
+	})
+	if err != nil {
+		t.Fatalf("marshal test import source ref: %v", err)
+	}
+
+	obj.SetAnnotations(map[string]string{snapshotapi.AnnotationImportSourceRef: string(value)})
 }
 
 // notReadySnapshot returns a root Snapshot with Ready=False (e.g. ChildSnapshotDeleted).
@@ -2121,6 +2142,549 @@ func TestRun_SelectedNode_ResolvesWithinRootTree(t *testing.T) {
 			if src.gotRef != tc.wantRef {
 				t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, tc.wantRef)
 			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_ResolvesImportSourceAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		objects      func(*testing.T) []runtime.Object
+		selectedKind string
+		selectedName string
+		wantRef      aggapi.NodeRef
+	}{
+		{
+			name: "exact annotation match on domain import",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-imported")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(
+					t,
+					child,
+					"virtualization.deckhouse.io/v1alpha2",
+					"VirtualDisk",
+					"disk-a",
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-a",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-imported",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "renamed VolumeSnapshot import resolves original PVC",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyVolumeSnapshot("nss-vs-generated")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(t, child, "v1", "PersistentVolumeClaim", "pvc-before-import")
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "PersistentVolumeClaim",
+			selectedName: "pvc-before-import",
+			wantRef: aggapi.NodeRef{
+				APIVersion: volumeSnapshotAPIVersion,
+				Kind:       "VolumeSnapshot",
+				Name:       "nss-vs-generated",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "root import survives source namespace change",
+			objects: func(t *testing.T) []runtime.Object {
+				root := readySnapshot()
+				setSnapshotMode(root, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(t, root, "v1", "Namespace", "source-namespace")
+
+				return []runtime.Object{root}
+			},
+			selectedKind: "Namespace",
+			selectedName: "source-namespace",
+			wantRef: aggapi.NodeRef{
+				APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+				Kind:       "Snapshot",
+				Name:       testSnap,
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "preserved alias differs from current producer identity",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-reimported")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setSnapshotSourceRef(
+					child,
+					"virtualization.deckhouse.io/v1alpha3",
+					"VirtualDisk",
+					"disk-after-import",
+				)
+				setImportSourceRefAnnotation(
+					t,
+					child,
+					"virtualization.deckhouse.io/v1alpha2",
+					"VirtualDisk",
+					"disk-before-import",
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-before-import",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-reimported",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "UID and API version differences do not duplicate one node",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-one-node")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setSnapshotSourceRef(
+					child,
+					"virtualization.deckhouse.io/v1alpha3",
+					"VirtualDisk",
+					"disk-shared",
+				)
+				setImportSourceRefAnnotation(
+					t,
+					child,
+					"virtualization.deckhouse.io/v1alpha2",
+					"VirtualDisk",
+					"disk-shared",
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-shared",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-one-node",
+				Namespace:  testNS,
+			},
+		},
+		{
+			name: "capture node ignores spoofed import annotation",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-capture")
+				child.SetAnnotations(map[string]string{
+					snapshotapi.AnnotationImportSourceRef: "{not-json",
+				})
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: "nss-child-capture",
+			wantRef: aggapi.NodeRef{
+				APIVersion: domainDiskAPIVersion,
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "nss-child-capture",
+				Namespace:  testNS,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(tc.objects(t)...)
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: tc.selectedKind,
+				SelectedNodeName: tc.selectedName,
+				Source:           src,
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+				PollInterval:     time.Millisecond,
+			}
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if src.gotRef != tc.wantRef {
+				t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, tc.wantRef)
+			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_RejectsInvalidImportSourceAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		objects        func(*testing.T) []runtime.Object
+		selectedKind   string
+		selectedName   string
+		wantErrSubstrs []string
+		wantOrder      []string
+	}{
+		{
+			name: "legacy import missing annotation has no original alias",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-legacy")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "disk-before-import",
+			wantErrSubstrs: []string{"does not belong", "VirtualDisk/disk-before-import"},
+		},
+		{
+			name: "capture annotation is not an original alias",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-capture")
+				setImportSourceRefAnnotation(t, child, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "spoofed")
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "spoofed",
+			wantErrSubstrs: []string{"does not belong", "VirtualDisk/spoofed"},
+		},
+		{
+			name: "malformed annotation cannot fall back to generated identity",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-malformed")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				child.SetAnnotations(map[string]string{
+					snapshotapi.AnnotationImportSourceRef: "{not-json",
+				})
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: "nss-child-malformed",
+			wantErrSubstrs: []string{
+				"malformed",
+				snapshotapi.AnnotationImportSourceRef,
+				"nss-child-malformed",
+			},
+		},
+		{
+			name: "forbidden namespace makes annotation non-canonical",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-conflicting")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				child.SetAnnotations(map[string]string{
+					snapshotapi.AnnotationImportSourceRef: `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a","namespace":"old"}`,
+				})
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-a",
+			wantErrSubstrs: []string{
+				"non-canonical",
+				snapshotapi.AnnotationImportSourceRef,
+				"namespace",
+			},
+		},
+		{
+			name: "malformed status source ref cannot fall back to annotation",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-bad-status")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				status, _ := child.Object["status"].(map[string]interface{})
+				status["sourceRef"] = map[string]interface{}{
+					"apiVersion": "virtualization.deckhouse.io/v1alpha3",
+					"kind":       "VirtualDisk",
+				}
+				setImportSourceRefAnnotation(t, child, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "disk-a")
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "disk-a",
+			wantErrSubstrs: []string{"status.sourceRef is incomplete", "nss-child-bad-status"},
+		},
+		{
+			name: "malformed annotation cannot fall back to status source ref",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-bad-annotation")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setSnapshotSourceRef(child, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "disk-a")
+				child.SetAnnotations(map[string]string{
+					snapshotapi.AnnotationImportSourceRef: `{"apiVersion":"","kind":"VirtualDisk","name":"disk-a"}`,
+				})
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-a",
+			wantErrSubstrs: []string{
+				"malformed",
+				"apiVersion, kind, and name are required",
+				"nss-child-bad-annotation",
+			},
+		},
+		{
+			name: "status source ref rejects non-string UID",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-bad-uid")
+				setSnapshotSourceRef(child, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "disk-a")
+				status, _ := child.Object["status"].(map[string]interface{})
+				sourceRef, _ := status["sourceRef"].(map[string]interface{})
+				sourceRef["uid"] = int64(7)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "disk-a",
+			wantErrSubstrs: []string{"status.sourceRef.uid", "unexpected type int64"},
+		},
+		{
+			name: "duplicate original names across API versions are ambiguous",
+			objects: func(t *testing.T) []runtime.Object {
+				first := readyDomainDiskSnapshot("nss-child-first-import")
+				setSnapshotMode(first, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(
+					t,
+					first,
+					"virtualization.deckhouse.io/v1alpha2",
+					"VirtualDisk",
+					"disk-shared",
+				)
+
+				second := readyDomainDiskSnapshot("nss-child-second-import")
+				setSnapshotMode(second, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(
+					t,
+					second,
+					"virtualization.deckhouse.io/v1alpha3",
+					"VirtualDisk",
+					"disk-shared",
+				)
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(first.GetAPIVersion(), first.GetKind(), first.GetName()),
+					snapshotChildRef(second.GetAPIVersion(), second.GetKind(), second.GetName()),
+				)
+
+				return []runtime.Object{root, first, second}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-shared",
+			wantErrSubstrs: []string{
+				"ambiguous",
+				"nss-child-first-import",
+				"nss-child-second-import",
+				"generated snapshot-CR Kind/name",
+			},
+			wantOrder: []string{"nss-child-first-import", "nss-child-second-import"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(tc.objects(t)...)
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: tc.selectedKind,
+				SelectedNodeName: tc.selectedName,
+				Source:           src,
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+				PollInterval:     time.Millisecond,
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected selection error, got nil")
+			}
+
+			for _, substr := range tc.wantErrSubstrs {
+				if !contains(err.Error(), substr) {
+					t.Errorf("error %q does not contain %q", err.Error(), substr)
+				}
+			}
+
+			if len(tc.wantOrder) == 2 &&
+				strings.Index(err.Error(), tc.wantOrder[0]) >= strings.Index(err.Error(), tc.wantOrder[1]) {
+				t.Errorf("error %q does not preserve candidate order %v", err.Error(), tc.wantOrder)
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
+	}
+}
+
+func TestRun_SelectedNode_ClientFailureStopsTraversal(t *testing.T) {
+	t.Parallel()
+
+	errGetNode := errors.New("get selected node")
+	tests := []struct {
+		name        string
+		fail        func(context.Context, context.CancelFunc) error
+		wantErr     error
+		wantActions []string
+	}{
+		{
+			name: "fake client error",
+			fail: func(_ context.Context, _ context.CancelFunc) error {
+				return errGetNode
+			},
+			wantErr:     errGetNode,
+			wantActions: []string{testSnap, "nss-child-failing"},
+		},
+		{
+			name: "parent cancellation during child get",
+			fail: func(ctx context.Context, cancel context.CancelFunc) error {
+				cancel()
+				<-ctx.Done()
+
+				return ctx.Err()
+			},
+			wantErr:     context.Canceled,
+			wantActions: []string{testSnap, "nss-child-failing"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			grandchild := readyDomainDiskSnapshot("nss-grandchild-must-not-get")
+			child := snapshotWithChildren(
+				readyDomainDiskSnapshot("nss-child-failing"),
+				snapshotChildRef(grandchild.GetAPIVersion(), grandchild.GetKind(), grandchild.GetName()),
+			)
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+			)
+			dyn := newFakeDynamic(root, child, grandchild)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var (
+				mu      sync.Mutex
+				actions []string
+			)
+
+			wrapped := &interceptingDynamicClient{
+				Interface: dyn,
+				intercept: func(
+					requestCtx context.Context,
+					verb string,
+					_ schema.GroupVersionResource,
+					_ string,
+					name string,
+				) error {
+					if verb != "get" {
+						return nil
+					}
+
+					mu.Lock()
+					actions = append(actions, name)
+					mu.Unlock()
+
+					if name == child.GetName() {
+						return tc.fail(requestCtx, cancel)
+					}
+
+					return nil
+				},
+			}
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: "DemoVirtualDiskSnapshot",
+				SelectedNodeName: grandchild.GetName(),
+				Source:           src,
+				Dynamic:          wrapped,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+				PollInterval:     time.Millisecond,
+			}
+
+			err := Run(ctx, cfg)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Run error = %v, want errors.Is(_, %v)", err, tc.wantErr)
+			}
+
+			mu.Lock()
+			gotActions := append([]string(nil), actions...)
+			mu.Unlock()
+
+			if !slices.Equal(gotActions, tc.wantActions) {
+				t.Errorf("Get actions = %v, want %v", gotActions, tc.wantActions)
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
 		})
 	}
 }
