@@ -136,6 +136,15 @@ func TestNewCommand_NodeFlagDefault(t *testing.T) {
 	if node != "" {
 		t.Fatalf("default --node: got %q, want empty string (full-tree restore by default)", node)
 	}
+
+	apiVersion, err := cmd.Flags().GetString(flagNodeAPIVersion)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNodeAPIVersion, err)
+	}
+
+	if apiVersion != "" {
+		t.Fatalf("default --%s: got %q, want empty string", flagNodeAPIVersion, apiVersion)
+	}
 }
 
 func TestParseNodeFlag(t *testing.T) {
@@ -214,6 +223,92 @@ func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
 
 	if !strings.Contains(err.Error(), flagNode) {
 		t.Fatalf("error should mention %q, got: %v", flagNode, err)
+	}
+}
+
+func TestRun_NodeAPIVersionFlagValidation(t *testing.T) {
+	tests := []struct {
+		name              string
+		node              string
+		apiVersion        string
+		wantValidationErr string
+	}{
+		{
+			name:              "api version without node",
+			apiVersion:        "apps/v1",
+			wantValidationErr: "--node-api-version requires --node",
+		},
+		{
+			name:              "empty named group",
+			node:              "Deployment/demo",
+			apiVersion:        "/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "missing named version",
+			node:              "Deployment/demo",
+			apiVersion:        "apps/",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "too many separators",
+			node:              "Deployment/demo",
+			apiVersion:        "apps/example/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "invalid group",
+			node:              "Deployment/demo",
+			apiVersion:        "Apps/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:       "core version",
+			node:       "PersistentVolumeClaim/demo",
+			apiVersion: "v1",
+		},
+		{
+			name:       "named group version",
+			node:       "Deployment/demo",
+			apiVersion: "apps/v1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := NewCommand(slog.Default())
+
+			if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+				t.Fatalf("setting namespace flag: %v", err)
+			}
+
+			if tc.node != "" {
+				if err := cmd.Flags().Set(flagNode, tc.node); err != nil {
+					t.Fatalf("setting node flag: %v", err)
+				}
+			}
+
+			if err := cmd.Flags().Set(flagNodeAPIVersion, tc.apiVersion); err != nil {
+				t.Fatalf("setting node API version flag: %v", err)
+			}
+
+			err := Run(slog.Default(), cmd, []string{"my-snap"})
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded without a configured cluster")
+			}
+
+			if tc.wantValidationErr != "" {
+				if !strings.Contains(err.Error(), tc.wantValidationErr) {
+					t.Fatalf("Run error = %q, want validation text %q", err, tc.wantValidationErr)
+				}
+
+				return
+			}
+
+			if strings.Contains(err.Error(), "--"+flagNodeAPIVersion) {
+				t.Fatalf("valid API version unexpectedly rejected: %v", err)
+			}
+		})
 	}
 }
 
