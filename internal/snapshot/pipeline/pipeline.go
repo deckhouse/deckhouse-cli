@@ -135,6 +135,9 @@ func RunRooted(
 
 	runCtx := rootedRunContext{Context: ctx, binding: bindingCtx}
 
+	destination.SetTraversalContext(runCtx)
+	defer destination.SetTraversalContext(context.Background())
+
 	err := run(runCtx, ctx, cfg, destination)
 	if bindingErr := destination.BindingError(); bindingErr != nil {
 		return errors.Join(bindingErr, err)
