@@ -27,8 +27,22 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// AnnotationSourceRef is the annotation key that carries the source identity of a snapshot node.
-const AnnotationSourceRef = "state-snapshotter.deckhouse.io/source-ref"
+const (
+	// AnnotationSourceRef is the producer-owned annotation carrying a captured node's source identity.
+	AnnotationSourceRef = "state-snapshotter.deckhouse.io/source-ref"
+	// AnnotationImportSourceRef is the CLI-owned annotation preserving the original archive
+	// source identity on an import-mode marker.
+	AnnotationImportSourceRef = "snapshot.deckhouse.io/import-source-ref"
+)
+
+// ImportSourceRef is the canonical annotation payload preserved from snapshot.yaml.
+// Source namespace and UID are intentionally absent because the archive sourceObjectRef
+// contract identifies the source only by apiVersion, kind, and name.
+type ImportSourceRef struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+}
 
 // --- state-snapshotter.deckhouse.io/v1alpha1 ---
 

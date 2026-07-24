@@ -20,6 +20,9 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
 // assertImportMarker verifies the unified spec.mode: Import marker is present.
@@ -121,6 +124,11 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 		Kind:       "DemoVirtualDiskSnapshot",
 		Name:       "dvd-snap-1",
 		DataFile:   "/archive/snapshots/demovirtualdisksnapshot_disk-a/data.bin",
+		SourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "virtualization.deckhouse.io/v1alpha2",
+			Kind:       "VirtualDisk",
+			Name:       "disk-a",
+		},
 	}
 
 	obj, err := importMarkerCR(node, "ns")
@@ -132,10 +140,42 @@ func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
 		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
 	}
 
-	// Domain data leaves use the unified marker too; the captured-source identity is no longer
-	// mirrored onto the marker (the DataImport carries it via spec.snapshotRef
-	// (apiVersion/kind/name)).
 	assertImportMarker(t, obj)
+
+	if got := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got !=
+		`{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}` {
+		t.Errorf("%s = %q, want canonical original source reference", snapshotapi.AnnotationImportSourceRef, got)
+	}
+
+	spec, found, err := unstructured.NestedMap(obj.Object, "spec")
+	if err != nil || !found {
+		t.Fatalf("read spec: found=%t err=%v", found, err)
+	}
+
+	if len(spec) != 1 {
+		t.Errorf("marker spec = %#v, want only mode=Import", spec)
+	}
+
+	if _, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status"); err != nil || found {
+		t.Errorf("marker status must remain absent: found=%t err=%v", found, err)
+	}
+}
+
+func TestImportMarkerCR_WithoutSourceObjectRefOmitsAnnotation(t *testing.T) {
+	node := PlannedNode{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc-1",
+	}
+
+	obj, err := importMarkerCR(node, "target-ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	if _, exists := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; exists {
+		t.Errorf("marker without sourceObjectRef must not carry %s", snapshotapi.AnnotationImportSourceRef)
+	}
 }
 
 func TestPlannedNode_ClassificationRequiresExactGVK(t *testing.T) {

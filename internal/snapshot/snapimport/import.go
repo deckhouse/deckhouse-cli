@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -450,9 +452,10 @@ func preflightContext(ctx context.Context, plan []PlannedNode) error {
 
 // preflightNamespace checks, before any cluster mutation, that the target namespace
 // contains no foreign (non-import-mode) objects sharing a name with a planned node.
-// Pre-existing import-mode markers from a prior run of this import are never conflicts.
-// Conflicts are aggregated into a single actionable error. With cfg.AllowExisting true,
-// conflicts are downgraded to a warning; reconcileExistingMarker protection is unaffected.
+// Pre-existing import-mode markers are accepted only when their preserved source identity
+// is absent for legacy reconciliation or exactly matches this archive. Foreign-object
+// conflicts are aggregated into a single actionable error. With cfg.AllowExisting true,
+// those conflicts are downgraded to a warning; identity validation remains fail-closed.
 func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) error {
 	var conflicts []string
 
@@ -481,6 +484,17 @@ func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) err
 
 		if !imp {
 			conflicts = append(conflicts, fmt.Sprintf("%s %s", node.Kind, node.Name))
+
+			continue
+		}
+
+		desiredSourceRef, hasDesiredSourceRef, refErr := importSourceRefAnnotation(node)
+		if refErr != nil {
+			return refErr
+		}
+
+		if refErr := validateImportSourceRefAnnotation(obj, desiredSourceRef, hasDesiredSourceRef); refErr != nil {
+			return refErr
 		}
 	}
 
@@ -829,7 +843,7 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 			return ri.Get(requestCtx, obj.GetName(), metav1.GetOptions{})
 		})
 	if err == nil {
-		return reconcileExistingMarker(ctx, cfg, ri, existing, obj.GetOwnerReferences())
+		return reconcileExistingMarker(ctx, cfg, ri, existing, obj)
 	} else if !kubeerrors.IsNotFound(err) {
 		return "", fmt.Errorf("get: %w", err)
 	}
@@ -851,7 +865,7 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 			return "", fmt.Errorf("get after AlreadyExists: %w", gErr)
 		}
 
-		return reconcileExistingMarker(ctx, cfg, ri, got, obj.GetOwnerReferences())
+		return reconcileExistingMarker(ctx, cfg, ri, got, obj)
 	}
 
 	return created.GetUID(), nil
@@ -860,27 +874,83 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 // reconcileExistingMarker handles a pre-existing CR sharing the marker's name. It first
 // refuses to touch an object that is NOT in import mode (a capture-mode Snapshot/VolumeSnapshot
 // that merely shares the name) so importing into a populated namespace cannot mutate live
-// production objects; only then does it reconcile the child->parent ownerRefs.
+// production objects. It then validates the preserved source identity before reconciling either
+// that annotation or child->parent ownerRefs. Conflicts re-read and revalidate the latest object.
 func reconcileExistingMarker(
 	ctx context.Context,
 	cfg Config,
 	ri dynamic.ResourceInterface,
 	existing *unstructured.Unstructured,
-	desired []metav1.OwnerReference,
+	desired *unstructured.Unstructured,
 ) (types.UID, error) {
-	imp, err := isImportModeMarker(existing)
+	desiredSourceRef, hasDesiredSourceRef := desired.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]
+	desiredOwnerRefs := desired.GetOwnerReferences()
+	current := existing
+
+	var uid types.UID
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if current == nil {
+			latest, getErr := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+				func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+					return ri.Get(requestCtx, desired.GetName(), metav1.GetOptions{})
+				})
+			if getErr != nil {
+				return fmt.Errorf("get after conflict: %w", getErr)
+			}
+
+			current = latest
+		}
+
+		imp, modeErr := isImportModeMarker(current)
+		if modeErr != nil {
+			return modeErr
+		}
+
+		if !imp {
+			return fmt.Errorf("%s %s/%s already exists and is not in import mode "+
+				"(spec.mode is not %q); refusing to mutate a pre-existing "+
+				"object — import into a fresh namespace",
+				current.GetKind(), current.GetNamespace(), current.GetName(), snapshotapi.SnapshotModeImport)
+		}
+
+		candidate := current.DeepCopy()
+
+		annotationChanged, annotationErr := reconcileImportSourceRefAnnotation(
+			candidate,
+			desiredSourceRef,
+			hasDesiredSourceRef,
+		)
+		if annotationErr != nil {
+			return annotationErr
+		}
+
+		ownerRefsChanged := addOwnerRefs(candidate, desiredOwnerRefs)
+		if !annotationChanged && !ownerRefsChanged {
+			uid = current.GetUID()
+
+			return nil
+		}
+
+		updated, updateErr := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Update(requestCtx, candidate, metav1.UpdateOptions{})
+			})
+		if updateErr != nil {
+			current = nil
+
+			return updateErr
+		}
+
+		uid = updated.GetUID()
+
+		return nil
+	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("reconcile import marker metadata: %w", err)
 	}
 
-	if !imp {
-		return "", fmt.Errorf("%s %s/%s already exists and is not in import mode "+
-			"(spec.mode is not %q); refusing to mutate a pre-existing "+
-			"object — import into a fresh namespace",
-			existing.GetKind(), existing.GetNamespace(), existing.GetName(), snapshotapi.SnapshotModeImport)
-	}
-
-	return reconcileMarkerOwnerRefs(ctx, cfg, ri, existing, desired)
+	return uid, nil
 }
 
 // isImportModeMarker reports whether a live CR is an import-mode marker. Import mode is keyed
@@ -910,28 +980,109 @@ func isImportModeMarker(obj *unstructured.Unstructured) (bool, error) {
 	}
 }
 
-// reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial
-// run did not yet stamp onto the live CR, then returns its UID. It never clobbers the spec.
-func reconcileMarkerOwnerRefs(
-	ctx context.Context,
-	cfg Config,
-	ri dynamic.ResourceInterface,
-	existing *unstructured.Unstructured,
-	desired []metav1.OwnerReference,
-) (types.UID, error) {
-	if addOwnerRefs(existing, desired) {
-		updated, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
-			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
-				return ri.Update(requestCtx, existing, metav1.UpdateOptions{})
-			})
-		if err != nil {
-			return "", fmt.Errorf("ensure ownerRefs: %w", err)
-		}
-
-		existing = updated
+// reconcileImportSourceRefAnnotation adds a missing desired source identity after validating
+// that any live value is canonical and matches exactly. It preserves every unrelated annotation.
+func reconcileImportSourceRefAnnotation(
+	obj *unstructured.Unstructured,
+	desired string,
+	hasDesired bool,
+) (bool, error) {
+	if err := validateImportSourceRefAnnotation(obj, desired, hasDesired); err != nil {
+		return false, err
 	}
 
-	return existing.GetUID(), nil
+	annotations := obj.GetAnnotations()
+	if _, exists := annotations[snapshotapi.AnnotationImportSourceRef]; exists || !hasDesired {
+		return false, nil
+	}
+
+	if annotations == nil {
+		annotations = make(map[string]string)
+	} else {
+		annotations = maps.Clone(annotations)
+	}
+
+	annotations[snapshotapi.AnnotationImportSourceRef] = desired
+	obj.SetAnnotations(annotations)
+
+	return true, nil
+}
+
+func validateImportSourceRefAnnotation(
+	obj *unstructured.Unstructured,
+	desired string,
+	hasDesired bool,
+) error {
+	live, hasLive := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]
+	if !hasDesired {
+		if hasLive {
+			return fmt.Errorf(
+				"%s %s/%s has %s but the archive has no sourceObjectRef; refusing one-sided import identity",
+				obj.GetKind(),
+				obj.GetNamespace(),
+				obj.GetName(),
+				snapshotapi.AnnotationImportSourceRef,
+			)
+		}
+
+		return nil
+	}
+
+	if !hasLive {
+		return nil
+	}
+
+	var liveRef snapshotapi.ImportSourceRef
+	if err := json.Unmarshal([]byte(live), &liveRef); err != nil {
+		return fmt.Errorf(
+			"%s %s/%s has malformed %s annotation: %w",
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName(),
+			snapshotapi.AnnotationImportSourceRef,
+			err,
+		)
+	}
+
+	if liveRef.APIVersion == "" || liveRef.Kind == "" || liveRef.Name == "" {
+		return fmt.Errorf(
+			"%s %s/%s has malformed %s annotation: apiVersion, kind, and name are required",
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName(),
+			snapshotapi.AnnotationImportSourceRef,
+		)
+	}
+
+	canonical, err := json.Marshal(liveRef)
+	if err != nil {
+		return fmt.Errorf("marshal live import source reference: %w", err)
+	}
+
+	if string(canonical) != live {
+		return fmt.Errorf(
+			"%s %s/%s has non-canonical %s annotation %q",
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName(),
+			snapshotapi.AnnotationImportSourceRef,
+			live,
+		)
+	}
+
+	if live != desired {
+		return fmt.Errorf(
+			"%s %s/%s has conflicting %s annotation %q; archive requires %q",
+			obj.GetKind(),
+			obj.GetNamespace(),
+			obj.GetName(),
+			snapshotapi.AnnotationImportSourceRef,
+			live,
+			desired,
+		)
+	}
+
+	return nil
 }
 
 // addOwnerRefs reconciles obj's ownerReferences toward desired: it appends any missing ref

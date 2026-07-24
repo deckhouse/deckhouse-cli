@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -44,6 +45,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
@@ -1236,6 +1238,15 @@ func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
 		t.Errorf("domain leaf marker must set spec.mode: Import, got %q", mode)
 	}
 
+	if got := leafObj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got !=
+		`{"apiVersion":"demo.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"disk-a"}` {
+		t.Errorf("%s = %q, want archive sourceObjectRef", snapshotapi.AnnotationImportSourceRef, got)
+	}
+
+	if _, found, nestedErr := unstructured.NestedFieldNoCopy(leafObj.Object, "spec", "sourceRef"); nestedErr != nil || found {
+		t.Errorf("import marker must not write forbidden spec.sourceRef: found=%t err=%v", found, nestedErr)
+	}
+
 	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
 	refs := leafObj.GetOwnerReferences()
 	if len(refs) != 1 {
@@ -1474,6 +1485,279 @@ func TestAddOwnerRefs_NoOpWhenUnchanged(t *testing.T) {
 
 	if addOwnerRefs(obj, []metav1.OwnerReference{ownerRef("root", "uid-1")}) {
 		t.Error("addOwnerRefs should be a no-op when the desired ref already matches")
+	}
+}
+
+func domainImportMarker(sourceAnnotation *string) *unstructured.Unstructured {
+	annotations := map[string]interface{}{"unrelated.example.io/keep": "yes"}
+	if sourceAnnotation != nil {
+		annotations[snapshotapi.AnnotationImportSourceRef] = *sourceAnnotation
+	}
+
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		"kind":       "DemoVirtualDiskSnapshot",
+		"metadata": map[string]interface{}{
+			"namespace":   targetNS,
+			"name":        "dvd-snap-1",
+			"uid":         "live-marker-uid",
+			"annotations": annotations,
+			"ownerReferences": []interface{}{
+				map[string]interface{}{
+					"apiVersion": "example.io/v1",
+					"kind":       "OtherOwner",
+					"name":       "keep-owner",
+					"uid":        "keep-owner-uid",
+				},
+			},
+		},
+		"spec": map[string]interface{}{
+			"mode":        "Import",
+			"producerKey": "preserved",
+		},
+		"status": map[string]interface{}{
+			"phase": "Ready",
+		},
+	}}
+}
+
+func desiredDomainImportMarker(t *testing.T, sourceRef *archive.SourceObjectRef) *unstructured.Unstructured {
+	t.Helper()
+
+	marker, err := importMarkerCR(PlannedNode{
+		APIVersion:      "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		Kind:            "DemoVirtualDiskSnapshot",
+		Name:            "dvd-snap-1",
+		SourceObjectRef: sourceRef,
+	}, targetNS)
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	marker.SetOwnerReferences([]metav1.OwnerReference{ownerRef("root", "new-root-uid")})
+
+	return marker
+}
+
+func markerUpdateCount(dyn *dynamicfake.FakeDynamicClient) int {
+	count := 0
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "update" {
+			count++
+		}
+	}
+
+	return count
+}
+
+func TestEnsureMarker_ReconcilesLegacySourceAnnotationIdempotently(t *testing.T) {
+	existing := domainImportMarker(nil)
+	dyn := newFakeDynamicRaw(existing)
+	cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+	sourceRef := &archive.SourceObjectRef{
+		APIVersion: "virtualization.deckhouse.io/v1alpha2",
+		Kind:       "VirtualDisk",
+		Name:       "disk-a",
+	}
+	desired := desiredDomainImportMarker(t, sourceRef)
+
+	uid, err := cfg.ensureMarker(context.Background(), desired)
+	if err != nil {
+		t.Fatalf("ensureMarker: %v", err)
+	}
+
+	if uid != "live-marker-uid" {
+		t.Errorf("ensureMarker UID = %q, want live-marker-uid", uid)
+	}
+
+	live, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+		Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reconciled marker: %v", err)
+	}
+
+	wantAnnotation := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+	if got := live.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got != wantAnnotation {
+		t.Errorf("%s = %q, want %q", snapshotapi.AnnotationImportSourceRef, got, wantAnnotation)
+	}
+
+	if got := live.GetAnnotations()["unrelated.example.io/keep"]; got != "yes" {
+		t.Errorf("unrelated annotation = %q, want preserved value", got)
+	}
+
+	if value, _, _ := unstructured.NestedString(live.Object, "spec", "producerKey"); value != "preserved" {
+		t.Errorf("spec.producerKey = %q, want preserved", value)
+	}
+
+	if value, _, _ := unstructured.NestedString(live.Object, "status", "phase"); value != "Ready" {
+		t.Errorf("status.phase = %q, want preserved", value)
+	}
+
+	refs := live.GetOwnerReferences()
+	if len(refs) != 2 {
+		t.Fatalf("ownerReferences = %+v, want unrelated and desired refs", refs)
+	}
+
+	if updates := markerUpdateCount(dyn); updates != 1 {
+		t.Fatalf("marker updates = %d, want 1", updates)
+	}
+
+	if _, err := cfg.ensureMarker(context.Background(), desired); err != nil {
+		t.Fatalf("idempotent ensureMarker: %v", err)
+	}
+
+	if updates := markerUpdateCount(dyn); updates != 1 {
+		t.Errorf("marker updates after idempotent retry = %d, want 1", updates)
+	}
+}
+
+func TestEnsureMarker_RejectsInvalidSourceIdentityBeforeOwnerMutation(t *testing.T) {
+	valid := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+	conflicting := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"other-disk"}`
+	malformed := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":`
+	nonCanonical := `{ "apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+
+	tests := []struct {
+		name          string
+		live          *string
+		desired       *archive.SourceObjectRef
+		wantErrorText string
+	}{
+		{
+			name:          "malformed live value",
+			live:          &malformed,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "malformed",
+		},
+		{
+			name:          "non-canonical live value",
+			live:          &nonCanonical,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "non-canonical",
+		},
+		{
+			name:          "different live identity",
+			live:          &conflicting,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "conflicting",
+		},
+		{
+			name:          "one-sided live identity",
+			live:          &valid,
+			wantErrorText: "one-sided",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := domainImportMarker(tc.live)
+			dyn := newFakeDynamicRaw(existing)
+			cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+			desired := desiredDomainImportMarker(t, tc.desired)
+
+			_, err := cfg.ensureMarker(context.Background(), desired)
+			if err == nil {
+				t.Fatal("expected source identity validation error")
+			}
+
+			if !strings.Contains(err.Error(), tc.wantErrorText) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrorText)
+			}
+
+			if updates := markerUpdateCount(dyn); updates != 0 {
+				t.Errorf("marker updates = %d, want 0", updates)
+			}
+
+			live, getErr := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+				Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatalf("get unchanged marker: %v", getErr)
+			}
+
+			refs := live.GetOwnerReferences()
+			if len(refs) != 1 || refs[0].Name != "keep-owner" {
+				t.Errorf("ownerReferences mutated before identity validation: %+v", refs)
+			}
+		})
+	}
+}
+
+func TestEnsureMarker_RetriesConflictWithFreshIdentityValidation(t *testing.T) {
+	existing := domainImportMarker(nil)
+	dyn := newFakeDynamicRaw(existing)
+	cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+	desired := desiredDomainImportMarker(t, &archive.SourceObjectRef{
+		APIVersion: "virtualization.deckhouse.io/v1alpha2",
+		Kind:       "VirtualDisk",
+		Name:       "disk-a",
+	})
+
+	updateCalls := 0
+	dyn.PrependReactor("update", "demovirtualdisksnapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			return true, nil, kubeerrors.NewConflict(
+				schema.GroupResource{
+					Group:    demoDiskSnapGVR.Group,
+					Resource: demoDiskSnapGVR.Resource,
+				},
+				desired.GetName(),
+				errors.New("concurrent marker update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	if _, err := cfg.ensureMarker(context.Background(), desired); err != nil {
+		t.Fatalf("ensureMarker after conflict: %v", err)
+	}
+
+	if updateCalls != 2 {
+		t.Fatalf("update calls = %d, want 2", updateCalls)
+	}
+
+	live, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+		Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reconciled marker: %v", err)
+	}
+
+	if _, exists := live.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; !exists {
+		t.Errorf("reconciled marker is missing %s", snapshotapi.AnnotationImportSourceRef)
+	}
+}
+
+func TestRun_InvalidExistingSourceAnnotationCausesNoPartialMutation(t *testing.T) {
+	root := buildDomainDataLeafArchive(t)
+	malformed := `{"apiVersion":`
+	existingLeaf := domainImportMarker(&malformed)
+	dyn := newFakeDynamic(readyRootSnapshot(), existingLeaf)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected invalid existing source annotation to fail")
+	}
+
+	if !strings.Contains(err.Error(), snapshotapi.AnnotationImportSourceRef) {
+		t.Errorf("error %q does not name source annotation", err.Error())
+	}
+
+	for _, action := range dyn.Actions() {
+		switch action.GetVerb() {
+		case "create", "update", "patch", "delete", "delete-collection":
+			t.Errorf("cluster mutation %s %s occurred before source identity validation", action.GetVerb(), action.GetResource().Resource)
+		}
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("external mutations occurred: uploads=%d ensure=%d volume_uploads=%d",
+			len(up.calls), len(vol.ensure), len(vol.upload))
 	}
 }
 

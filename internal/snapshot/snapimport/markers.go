@@ -17,6 +17,7 @@ limitations under the License.
 package snapimport
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -97,5 +98,42 @@ func importMarkerCR(node PlannedNode, namespace string) (*unstructured.Unstructu
 		return nil, fmt.Errorf("set import marker: %w", err)
 	}
 
+	value, hasSourceRef, err := importSourceRefAnnotation(node)
+	if err != nil {
+		return nil, err
+	}
+
+	if hasSourceRef {
+		obj.SetAnnotations(map[string]string{
+			snapshotapi.AnnotationImportSourceRef: value,
+		})
+	}
+
 	return obj, nil
+}
+
+func importSourceRef(node PlannedNode) *snapshotapi.ImportSourceRef {
+	if node.SourceObjectRef == nil {
+		return nil
+	}
+
+	return &snapshotapi.ImportSourceRef{
+		APIVersion: node.SourceObjectRef.APIVersion,
+		Kind:       node.SourceObjectRef.Kind,
+		Name:       node.SourceObjectRef.Name,
+	}
+}
+
+func importSourceRefAnnotation(node PlannedNode) (string, bool, error) {
+	sourceRef := importSourceRef(node)
+	if sourceRef == nil {
+		return "", false, nil
+	}
+
+	value, err := json.Marshal(sourceRef)
+	if err != nil {
+		return "", false, fmt.Errorf("marshal import source reference: %w", err)
+	}
+
+	return string(value), true, nil
 }
