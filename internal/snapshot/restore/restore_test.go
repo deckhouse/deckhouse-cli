@@ -2132,6 +2132,25 @@ func testMapperWithGenerated(gvks ...schema.GroupVersionKind) meta.RESTMapper {
 	return mapper
 }
 
+type restMappingInterceptor struct {
+	meta.RESTMapper
+	intercept func(schema.GroupKind, ...string) (*meta.RESTMapping, error)
+}
+
+func (m restMappingInterceptor) RESTMapping(
+	groupKind schema.GroupKind,
+	versions ...string,
+) (*meta.RESTMapping, error) {
+	if m.intercept != nil {
+		mapping, err := m.intercept(groupKind, versions...)
+		if mapping != nil || err != nil {
+			return mapping, err
+		}
+	}
+
+	return m.RESTMapper.RESTMapping(groupKind, versions...)
+}
+
 func TestRun_SelectedNodeAPIVersionValidationPrecedesAPI(t *testing.T) {
 	t.Parallel()
 
@@ -2301,6 +2320,410 @@ func TestRun_SelectedNode_ResolvesWithinRootTree(t *testing.T) {
 			if src.gotRef != tc.wantRef {
 				t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, tc.wantRef)
 			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_HierarchyMappingsMustBeNamespaced(t *testing.T) {
+	t.Parallel()
+
+	const (
+		childName       = "generated-child"
+		aliasAPIVersion = "aliases.example.io/v1beta1"
+		aliasKind       = "AliasedSnapshot"
+	)
+
+	type testCase struct {
+		name                 string
+		apiVersion           string
+		kind                 string
+		scope                meta.RESTScope
+		refNamespace         string
+		emptyObjectNamespace bool
+		sourceAlias          bool
+		nestedChild          bool
+		wantSuccess          bool
+	}
+
+	tests := []testCase{
+		{
+			name:        "namespaced core resource",
+			apiVersion:  "v1",
+			kind:        "ConfigMap",
+			scope:       meta.RESTScopeNamespace,
+			wantSuccess: true,
+		},
+		{
+			name:        "namespaced CRD source alias",
+			apiVersion:  domainDiskAPIVersion,
+			kind:        "DemoVirtualDiskSnapshot",
+			scope:       meta.RESTScopeNamespace,
+			sourceAlias: true,
+			wantSuccess: true,
+		},
+		{
+			name:                 "namespaced CRD version alias with empty response namespace",
+			apiVersion:           aliasAPIVersion,
+			kind:                 aliasKind,
+			scope:                meta.RESTScopeNamespace,
+			emptyObjectNamespace: true,
+			wantSuccess:          true,
+		},
+		{
+			name:         "cluster-scoped core resource with legacy empty namespace",
+			apiVersion:   "v1",
+			kind:         "PersistentVolume",
+			scope:        meta.RESTScopeRoot,
+			refNamespace: "",
+		},
+		{
+			name:         "cluster-scoped CRD with foreign namespace and descendants",
+			apiVersion:   domainDiskAPIVersion,
+			kind:         "DemoVirtualDiskSnapshot",
+			scope:        meta.RESTScopeRoot,
+			refNamespace: "other",
+			nestedChild:  true,
+		},
+	}
+
+	run := func(t *testing.T, tc testCase) (string, int, *stubSource, *dynamicfake.FakeDynamicClient) {
+		t.Helper()
+
+		gvk := schema.FromAPIVersionAndKind(tc.apiVersion, tc.kind)
+		child := readyGeneratedSnapshot(tc.apiVersion, tc.kind, childName)
+		selectedAPIVersion := tc.apiVersion
+		selectedKind := tc.kind
+		selectedName := childName
+
+		if tc.sourceAlias {
+			setSnapshotSourceRef(child, "v1", "ConfigMap", "source-object")
+			selectedAPIVersion = "v1"
+			selectedKind = "ConfigMap"
+			selectedName = "source-object"
+		}
+
+		if tc.nestedChild {
+			snapshotWithChildren(
+				child,
+				snapshotChildRef(volumeSnapshotAPIVersion, "VolumeSnapshot", "must-not-traverse"),
+			)
+		}
+
+		ref := snapshotChildRef(tc.apiVersion, tc.kind, childName)
+		ref["namespace"] = tc.refNamespace
+		root := snapshotWithChildren(readySnapshot(), ref)
+		src := &stubSource{body: mustArray(t, configMapManifest("restored"))}
+
+		var mapper meta.RESTMapper
+		switch {
+		case tc.apiVersion == "v1":
+			mapper = testMapper()
+		case tc.apiVersion == domainDiskAPIVersion:
+			mapper = testMapperWithDomain()
+		default:
+			mapper = testMapperWithGenerated(gvk)
+		}
+
+		mapper.(*meta.DefaultRESTMapper).Add(gvk, tc.scope)
+
+		dyn := newFakeDynamic(root, child)
+		if tc.emptyObjectNamespace {
+			childGVR, _ := meta.UnsafeGuessKindToResource(gvk)
+			emptyNamespaceChild := child.DeepCopy()
+			emptyNamespaceChild.SetNamespace("")
+			dyn.PrependReactor("get", childGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+				getAction, ok := action.(clienttesting.GetAction)
+				if !ok || action.GetResource() != childGVR || getAction.GetName() != childName {
+					return false, nil, nil
+				}
+
+				return true, emptyNamespaceChild.DeepCopy(), nil
+			})
+		}
+
+		cfg := Config{
+			Namespace:              testNS,
+			Snapshot:               testSnap,
+			SelectedNodeKind:       selectedKind,
+			SelectedNodeName:       selectedName,
+			SelectedNodeAPIVersion: selectedAPIVersion,
+			Source:                 src,
+			Dynamic:                dyn,
+			Mapper:                 mapper,
+			Log:                    discardLogger(),
+		}
+
+		err := Run(context.Background(), cfg)
+		childGVR, _ := meta.UnsafeGuessKindToResource(gvk)
+		childGets := 0
+
+		for _, action := range dyn.Actions() {
+			getAction, ok := action.(clienttesting.GetAction)
+			if ok && action.GetResource() == childGVR && getAction.GetName() == childName {
+				childGets++
+			}
+		}
+
+		if err == nil {
+			return "", childGets, src, dyn
+		}
+
+		return err.Error(), childGets, src, dyn
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotError, childGets, src, dyn := run(t, tc)
+			if tc.wantSuccess {
+				if gotError != "" {
+					t.Fatalf("Run error = %q, want success", gotError)
+				}
+
+				if childGets != 1 {
+					t.Errorf("child GET calls = %d, want 1", childGets)
+				}
+
+				if src.calls != 1 {
+					t.Errorf("RestoreManifestsScoped calls = %d, want 1", src.calls)
+				}
+
+				return
+			}
+
+			if gotError == "" {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			for _, part := range []string{
+				tc.apiVersion,
+				tc.kind + "/" + childName,
+				"namespace-local contract",
+				"cluster-scoped",
+			} {
+				if !strings.Contains(gotError, part) {
+					t.Errorf("Run error %q does not contain %q", gotError, part)
+				}
+			}
+
+			if childGets != 0 {
+				t.Errorf("child GET calls = %d, want none before scope validation", childGets)
+			}
+
+			for _, action := range dyn.Actions() {
+				getAction, ok := action.(clienttesting.GetAction)
+				if ok && getAction.GetName() == "must-not-traverse" {
+					t.Errorf("descendant API action occurred before parent scope validation: %v", action)
+				}
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+
+			repeatedError, repeatedGets, repeatedSource, repeatedDynamic := run(t, tc)
+			if repeatedError != gotError {
+				t.Errorf("repeated error = %q, want deterministic %q", repeatedError, gotError)
+			}
+
+			if repeatedGets != 0 {
+				t.Errorf("repeated child GET calls = %d, want none", repeatedGets)
+			}
+
+			assertNoRestoreMutation(t, repeatedSource, repeatedDynamic)
+		})
+	}
+}
+
+func TestRun_SelectedNode_HierarchyMappingAndAPIErrorsFailClosed(t *testing.T) {
+	t.Parallel()
+
+	const (
+		apiVersion = "errors.example.io/v1"
+		kind       = "ErrorSnapshot"
+		childName  = "error-child"
+	)
+
+	errDiscovery := errors.New("discovery unavailable")
+	tests := []struct {
+		name          string
+		apiVersion    string
+		mapperError   error
+		apiError      error
+		wantError     error
+		wantChildGets int
+	}{
+		{
+			name:        "discovery error",
+			apiVersion:  apiVersion,
+			mapperError: errDiscovery,
+			wantError:   errDiscovery,
+		},
+		{
+			name:       "unknown GVK",
+			apiVersion: "unknown.example.io/v1",
+		},
+		{
+			name:          "child API cancellation",
+			apiVersion:    apiVersion,
+			apiError:      context.Canceled,
+			wantError:     context.Canceled,
+			wantChildGets: 1,
+		},
+		{
+			name:          "child API timeout",
+			apiVersion:    apiVersion,
+			apiError:      context.DeadlineExceeded,
+			wantError:     context.DeadlineExceeded,
+			wantChildGets: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gvk := schema.FromAPIVersionAndKind(tc.apiVersion, kind)
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(tc.apiVersion, kind, childName),
+			)
+			child := readyGeneratedSnapshot(tc.apiVersion, kind, childName)
+			src := &stubSource{body: mustArray(t, configMapManifest("restored"))}
+			dyn := newFakeDynamic(root, child)
+			mapper := testMapperWithGenerated()
+			if tc.name != "unknown GVK" {
+				mapper = testMapperWithGenerated(gvk)
+			}
+
+			if tc.mapperError != nil {
+				baseMapper := mapper
+				mapper = restMappingInterceptor{
+					RESTMapper: baseMapper,
+					intercept: func(groupKind schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+						if groupKind == gvk.GroupKind() && slices.Equal(versions, []string{gvk.Version}) {
+							return nil, tc.mapperError
+						}
+
+						return nil, nil
+					},
+				}
+			}
+
+			if tc.apiError != nil {
+				childGVR, _ := meta.UnsafeGuessKindToResource(gvk)
+				dyn.PrependReactor("get", childGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+					getAction, ok := action.(clienttesting.GetAction)
+					if !ok || action.GetResource() != childGVR || getAction.GetName() != childName {
+						return false, nil, nil
+					}
+
+					return true, nil, tc.apiError
+				})
+			}
+
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       kind,
+				SelectedNodeName:       childName,
+				SelectedNodeAPIVersion: tc.apiVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 mapper,
+				Log:                    discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			if tc.wantError != nil && !errors.Is(err, tc.wantError) {
+				t.Errorf("Run error = %v, want errors.Is(%v)", err, tc.wantError)
+			}
+
+			childGVR, _ := meta.UnsafeGuessKindToResource(gvk)
+			childGets := 0
+			for _, action := range dyn.Actions() {
+				getAction, ok := action.(clienttesting.GetAction)
+				if ok && action.GetResource() == childGVR && getAction.GetName() == childName {
+					childGets++
+				}
+			}
+
+			if childGets != tc.wantChildGets {
+				t.Errorf("child GET calls = %d, want %d", childGets, tc.wantChildGets)
+			}
+
+			if tc.mapperError != nil && !strings.Contains(err.Error(), "resolve resource") {
+				t.Errorf("Run error %q does not identify resource discovery", err)
+			}
+
+			if tc.name == "unknown GVK" && !strings.Contains(err.Error(), "no matches for kind") {
+				t.Errorf("Run error %q does not identify unknown GVK", err)
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
+	}
+}
+
+func TestRun_RootHierarchyMappingMustBeNamespaced(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		selectedRoot bool
+	}{
+		{name: "full root restore"},
+		{name: "selected root restore", selectedRoot: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mapper := testMapper()
+			rootGVK := schema.GroupVersionKind{
+				Group:   snapshotapi.StorageGroup,
+				Version: snapshotapi.Version,
+				Kind:    snapshotKind,
+			}
+			mapper.(*meta.DefaultRESTMapper).Add(rootGVK, meta.RESTScopeRoot)
+			src := &stubSource{body: mustArray(t, configMapManifest("restored"))}
+			dyn := newFakeDynamic(readySnapshot())
+			cfg := baseConfig(src, dyn)
+			cfg.Mapper = mapper
+
+			if tc.selectedRoot {
+				cfg.SelectedNodeKind = snapshotKind
+				cfg.SelectedNodeName = testSnap
+				cfg.SelectedNodeAPIVersion = rootGVK.GroupVersion().String()
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			for _, part := range []string{
+				rootGVK.GroupVersion().String(),
+				snapshotKind + "/" + testSnap,
+				"namespace-local contract",
+				"cluster-scoped",
+			} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("Run error %q does not contain %q", err, part)
+				}
+			}
+
+			for _, action := range dyn.Actions() {
+				if action.GetVerb() == "get" && action.GetResource() == snapshotGVR {
+					t.Errorf("root GET occurred before scope validation: %v", action)
+				}
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
 		})
 	}
 }
@@ -3922,7 +4345,7 @@ func TestRun_SelectedNode_MissingChildMappingFailures(t *testing.T) {
 
 				return mapper
 			},
-			wantErrParts: []string{"cannot prove absence", "namespace-local", "cluster-scoped"},
+			wantErrParts: []string{"namespace-local contract", "cluster-scoped"},
 		},
 		{
 			name:       "unserved child API version remains mapper error",
