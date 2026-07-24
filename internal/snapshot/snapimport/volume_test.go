@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -3217,7 +3218,7 @@ func TestUploadVolumeData_ClosesClientAfterRequestError(t *testing.T) {
 	leaf.SizeBytes = int64(len(payload))
 	leaf.DataImportIdentity = dataImportIdentity(leaf)
 
-	ca := []byte("request-error-ca")
+	ca := testUploadCA(t)
 	di := readyDataImportObj(leaf, "https://importer.test", volumeModeBlock, base64.StdEncoding.EncodeToString(ca))
 	importer := newTestVolumeImporter(newFakeDataImportDyn(di))
 
@@ -3281,7 +3282,8 @@ func TestUploadVolumeData_CancellationClosesOnlyAfterInFlightRequestReturns(t *t
 	leaf.SizeBytes = int64(len(payload))
 	leaf.DataImportIdentity = dataImportIdentity(leaf)
 
-	di := readyDataImportObj(leaf, "https://importer.test", volumeModeBlock, "")
+	ca := testUploadCA(t)
+	di := readyDataImportObj(leaf, "https://importer.test", volumeModeBlock, base64.StdEncoding.EncodeToString(ca))
 	importer := newTestVolumeImporter(newFakeDataImportDyn(di))
 
 	requestStarted := make(chan struct{})
@@ -3331,6 +3333,79 @@ func TestUploadVolumeData_CancellationClosesOnlyAfterInFlightRequestReturns(t *t
 	if closes.Load() != 1 {
 		t.Fatalf("upload client closes after cancellation = %d, want 1", closes.Load())
 	}
+}
+
+func TestUploadClientRejectsInvalidIdentityBeforeFactory(t *testing.T) {
+	validCA := base64.StdEncoding.EncodeToString(testUploadCA(t))
+	tests := []struct {
+		name   string
+		rawURL string
+		ca     string
+	}{
+		{
+			name:   "plaintext URL",
+			rawURL: "http://127.0.0.1:8443",
+			ca:     validCA,
+		},
+		{
+			name:   "missing CA",
+			rawURL: "https://127.0.0.1:8443",
+		},
+		{
+			name:   "invalid base64 CA",
+			rawURL: "https://127.0.0.1:8443",
+			ca:     "%%%",
+		},
+		{
+			name:   "malformed CA",
+			rawURL: "https://127.0.0.1:8443",
+			ca:     base64.StdEncoding.EncodeToString([]byte("not PEM")),
+		},
+		{
+			name:   "certificate-less CA",
+			rawURL: "https://127.0.0.1:8443",
+			ca: base64.StdEncoding.EncodeToString(
+				pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("key")}),
+			),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var factoryCalls atomic.Int64
+
+			importer := &clusterVolumeImporter{
+				newUploadClient: func([]byte, string) (uploadHTTPClient, error) {
+					factoryCalls.Add(1)
+
+					return nil, errors.New("factory must not run")
+				},
+			}
+
+			if _, err := importer.uploadClient(tc.ca, tc.rawURL); err == nil {
+				t.Fatal("uploadClient unexpectedly accepted invalid identity")
+			}
+			if factoryCalls.Load() != 0 {
+				t.Fatalf("upload client factory calls = %d, want 0", factoryCalls.Load())
+			}
+		})
+	}
+}
+
+func testUploadCA(t *testing.T) []byte {
+	t.Helper()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	certificate := server.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server has no certificate")
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
 }
 
 func TestUploadVolumeData_CompletedReuseRejectsChangedVerifiedPayload(t *testing.T) {

@@ -17,9 +17,11 @@ limitations under the License.
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -206,6 +208,22 @@ func (c *SafeClient) NewPersistentHTTPClientForOrigin(rawURL string) (*Persisten
 		return nil, fmt.Errorf("build origin-bound persistent HTTP client: %w", err)
 	}
 
+	return c.newPersistentHTTPClientForOrigin(origin)
+}
+
+// NewPersistentHTTPSClientForOrigin materializes an origin-bound client for a
+// credential-bearing HTTPS endpoint. Plaintext origins are rejected before the
+// authenticated transport stack is built.
+func (c *SafeClient) NewPersistentHTTPSClientForOrigin(rawURL string) (*PersistentHTTPClient, error) {
+	origin, err := parseHTTPSOrigin(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("build HTTPS origin-bound persistent HTTP client: %w", err)
+	}
+
+	return c.newPersistentHTTPClientForOrigin(origin)
+}
+
+func (c *SafeClient) newPersistentHTTPClientForOrigin(origin httpOrigin) (*PersistentHTTPClient, error) {
 	httpClient, err := c.NewPersistentHTTPClient()
 	if err != nil {
 		return nil, err
@@ -623,6 +641,19 @@ func parseHTTPOrigin(rawURL string) (httpOrigin, error) {
 	}, nil
 }
 
+func parseHTTPSOrigin(rawURL string) (httpOrigin, error) {
+	origin, err := parseHTTPOrigin(rawURL)
+	if err != nil {
+		return httpOrigin{}, err
+	}
+
+	if origin.scheme != "https" {
+		return httpOrigin{}, fmt.Errorf("origin URL scheme %q is not HTTPS", origin.scheme)
+	}
+
+	return origin, nil
+}
+
 func (o httpOrigin) matches(candidate *url.URL) bool {
 	if candidate == nil {
 		return false
@@ -918,6 +949,115 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 
 		return clonedTransport
 	}
+}
+
+// ValidateHTTPSIdentity requires an HTTPS origin and a strictly parseable,
+// non-empty PEM certificate bundle suitable for endpoint-specific trust.
+func ValidateHTTPSIdentity(rawURL string, caData []byte) error {
+	if _, err := parseHTTPSOrigin(rawURL); err != nil {
+		return fmt.Errorf("validate HTTPS origin: %w", err)
+	}
+
+	if _, err := parseTLSIdentityCertPool(caData); err != nil {
+		return fmt.Errorf("validate TLS identity CA: %w", err)
+	}
+
+	return nil
+}
+
+// SetTLSIdentityCAData replaces inherited server trust with the supplied
+// endpoint-specific certificate bundle. Client credentials, proxy, dial, and
+// transport wrappers remain intact, but inherited insecure verification,
+// ServerName overrides, system roots, and cluster roots cannot bypass this CA.
+func (c *SafeClient) SetTLSIdentityCAData(caData []byte) error {
+	if c == nil || c.restConfig == nil {
+		return errors.New("set TLS identity CA: no rest config")
+	}
+
+	rootCAs, err := parseTLSIdentityCertPool(caData)
+	if err != nil {
+		return fmt.Errorf("set TLS identity CA: %w", err)
+	}
+
+	c.restConfig.TLSClientConfig.CAData = nil
+	c.restConfig.TLSClientConfig.CAFile = ""
+	c.restConfig.TLSClientConfig.Insecure = false
+	c.restConfig.TLSClientConfig.ServerName = ""
+	prev := c.restConfig.WrapTransport
+
+	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
+		transport := findHTTPTransport(rt)
+		if transport == nil {
+			return tlsIdentityErrorRoundTripper{
+				err: errors.New("endpoint TLS identity requires an HTTP transport"),
+			}
+		}
+
+		tlsConfig := transport.TLSClientConfig
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+
+		tlsConfig.RootCAs = rootCAs
+		tlsConfig.InsecureSkipVerify = false
+		tlsConfig.ServerName = ""
+		transport.TLSClientConfig = tlsConfig
+
+		return rt
+	}
+
+	return nil
+}
+
+func parseTLSIdentityCertPool(caData []byte) (*x509.CertPool, error) {
+	remaining := bytes.TrimSpace(caData)
+	if len(remaining) == 0 {
+		return nil, errors.New("certificate bundle is empty")
+	}
+
+	pool := x509.NewCertPool()
+	certificates := 0
+
+	for len(remaining) > 0 {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			return nil, errors.New("certificate bundle contains malformed PEM data")
+		}
+
+		if block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("PEM block type %q is not CERTIFICATE", block.Type)
+		}
+
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse certificate: %w", err)
+		}
+
+		pool.AddCert(certificate)
+
+		certificates++
+		remaining = bytes.TrimSpace(rest)
+	}
+
+	if certificates == 0 {
+		return nil, errors.New("certificate bundle has no certificates")
+	}
+
+	return pool, nil
+}
+
+type tlsIdentityErrorRoundTripper struct {
+	err error
+}
+
+func (rt tlsIdentityErrorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, rt.err
 }
 
 // SetResponseHeaderTimeout makes this client abort a request whose server

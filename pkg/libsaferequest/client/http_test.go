@@ -554,7 +554,7 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 	}
 }
 
-func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
+func TestTLSIdentityClient_PreservesAuthenticationWrappers(t *testing.T) {
 	tests := []struct {
 		name       string
 		configure  func(t *testing.T, config *rest.Config)
@@ -615,7 +615,7 @@ func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotHeader string
 
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotHeader = r.Header.Get("Authorization")
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -626,9 +626,13 @@ func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
 
 			sc := &SafeClient{restConfig: config}
 
-			httpClient, err := sc.NewPersistentHTTPClient()
+			if err := sc.SetTLSIdentityCAData(certificatePEM(t, srv)); err != nil {
+				t.Fatalf("SetTLSIdentityCAData: %v", err)
+			}
+
+			httpClient, err := sc.NewPersistentHTTPSClientForOrigin(srv.URL)
 			if err != nil {
-				t.Fatalf("NewPersistentHTTPClient: %v", err)
+				t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
 			}
 			defer httpClient.CloseIdleConnections()
 
@@ -653,7 +657,7 @@ func TestPersistentHTTPClient_PreservesAuthenticationWrappers(t *testing.T) {
 	}
 }
 
-func TestPersistentHTTPClient_IsolatesOriginsAuthenticationAndCARoots(t *testing.T) {
+func TestTLSIdentityClient_IsolatesConcurrentOriginsAuthenticationAndCARoots(t *testing.T) {
 	t.Parallel()
 
 	const requestCount = 50
@@ -704,11 +708,14 @@ func TestPersistentHTTPClient_IsolatesOriginsAuthenticationAndCARoots(t *testing
 
 		caData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
 		safeClient := &SafeClient{restConfig: &rest.Config{BearerToken: token}}
-		safeClient.SetTLSCAData(caData)
 
-		httpClient, err := safeClient.NewPersistentHTTPClient()
+		if err := safeClient.SetTLSIdentityCAData(caData); err != nil {
+			t.Fatalf("SetTLSIdentityCAData: %v", err)
+		}
+
+		httpClient, err := safeClient.NewPersistentHTTPSClientForOrigin(server.URL)
 		if err != nil {
-			t.Fatalf("NewPersistentHTTPClient: %v", err)
+			t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
 		}
 
 		return httpClient
@@ -787,6 +794,17 @@ func TestPersistentHTTPClient_IsolatesOriginsAuthenticationAndCARoots(t *testing
 func newPersistentTestCertificate(t *testing.T, serial int64) tls.Certificate {
 	t.Helper()
 
+	return newPersistentTestCertificateForNames(t, serial, []net.IP{net.ParseIP("127.0.0.1")}, nil)
+}
+
+func newPersistentTestCertificateForNames(
+	t *testing.T,
+	serial int64,
+	ipAddresses []net.IP,
+	dnsNames []string,
+) tls.Certificate {
+	t.Helper()
+
 	seed := bytes.Repeat([]byte{byte(serial)}, ed25519.SeedSize)
 	privateKey := ed25519.NewKeyFromSeed(seed)
 	template := &x509.Certificate{
@@ -796,7 +814,8 @@ func newPersistentTestCertificate(t *testing.T, serial int64) tls.Certificate {
 		NotAfter:     time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:  ipAddresses,
+		DNSNames:     dnsNames,
 	}
 
 	certificateDER, err := x509.CreateCertificate(
@@ -897,7 +916,239 @@ func TestPersistentHTTPClientForOrigin_RejectsCrossOriginBeforeAuth(t *testing.T
 	}
 }
 
-func TestPersistentHTTPClient_PreservesCertificateAuth(t *testing.T) {
+func TestTLSIdentityClient_PinsProducerCertificateAndOrigin(t *testing.T) {
+	t.Parallel()
+
+	const token = "producer-token"
+
+	var (
+		sourceRequests atomic.Int64
+		targetRequests atomic.Int64
+	)
+
+	target := newPersistentTLSServer(t, 42, nil, &targetRequests)
+	source := newPersistentTLSServer(t, 41, func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(writer, "wrong authorization", http.StatusUnauthorized)
+
+			return
+		}
+
+		sourceRequests.Add(1)
+
+		switch request.URL.Path {
+		case "/ok":
+			writer.WriteHeader(http.StatusNoContent)
+		case "/same-origin":
+			http.Redirect(writer, request, "/ok", http.StatusTemporaryRedirect)
+		case "/cross-origin":
+			http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(writer, request)
+		}
+	}, nil)
+
+	sourceCA := certificatePEM(t, source)
+	unrelatedCA := certificatePEM(t, target)
+	safeClient := &SafeClient{restConfig: &rest.Config{
+		BearerToken: token,
+		TLSClientConfig: rest.TLSClientConfig{
+			CAData:     unrelatedCA,
+			Insecure:   true,
+			ServerName: "unrelated.invalid",
+		},
+	}}
+
+	if err := safeClient.SetTLSIdentityCAData(sourceCA); err != nil {
+		t.Fatalf("SetTLSIdentityCAData: %v", err)
+	}
+
+	httpClient, err := safeClient.NewPersistentHTTPSClientForOrigin(source.URL)
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
+	}
+	t.Cleanup(httpClient.CloseIdleConnections)
+
+	protoMajor, err := persistentRequest(context.Background(), httpClient, source.URL+"/same-origin")
+	if err != nil {
+		t.Fatalf("same-origin producer request: %v", err)
+	}
+	if protoMajor != 2 {
+		t.Fatalf("producer response protocol major = %d, want HTTP/2", protoMajor)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, source.URL+"/cross-origin", nil)
+	if err != nil {
+		t.Fatalf("build redirect request: %v", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("cross-origin redirect unexpectedly succeeded")
+	}
+
+	req, err = http.NewRequestWithContext(context.Background(), http.MethodGet, target.URL, nil)
+	if err != nil {
+		t.Fatalf("build direct request: %v", err)
+	}
+
+	resp, err = httpClient.Do(req)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("cross-origin direct request unexpectedly succeeded")
+	}
+
+	if sourceRequests.Load() != 3 {
+		t.Fatalf("source authenticated requests = %d, want 3", sourceRequests.Load())
+	}
+	if targetRequests.Load() != 0 {
+		t.Fatalf("cross-origin target requests = %d, want 0", targetRequests.Load())
+	}
+}
+
+func TestTLSIdentityClient_FailsClosed(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int64
+
+	source := newPersistentTLSServer(t, 51, nil, &requests)
+	unrelated := newPersistentTLSServer(t, 52, nil, nil)
+	wrongSAN := newPersistentTLSServer(t, 53, nil, nil, "producer.invalid")
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		caData  []byte
+		request string
+	}{
+		{
+			name:   "plaintext origin",
+			rawURL: strings.Replace(source.URL, "https://", "http://", 1),
+			caData: certificatePEM(t, source),
+		},
+		{
+			name:   "missing CA",
+			rawURL: source.URL,
+		},
+		{
+			name:   "malformed CA",
+			rawURL: source.URL,
+			caData: []byte("not a certificate"),
+		},
+		{
+			name:   "certificate-less PEM",
+			rawURL: source.URL,
+			caData: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("key")}),
+		},
+		{
+			name:    "mismatched CA despite inherited insecure and roots",
+			rawURL:  source.URL,
+			caData:  certificatePEM(t, unrelated),
+			request: source.URL,
+		},
+		{
+			name:    "wrong host SAN",
+			rawURL:  wrongSAN.URL,
+			caData:  certificatePEM(t, wrongSAN),
+			request: wrongSAN.URL,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			safeClient := &SafeClient{restConfig: &rest.Config{
+				BearerToken: "must-not-leak",
+				TLSClientConfig: rest.TLSClientConfig{
+					CAData:   certificatePEM(t, source),
+					Insecure: true,
+				},
+			}}
+
+			if err := ValidateHTTPSIdentity(tc.rawURL, tc.caData); err != nil {
+				if tc.request != "" {
+					t.Fatalf("ValidateHTTPSIdentity unexpectedly rejected request-time case: %v", err)
+				}
+
+				return
+			}
+			if tc.request == "" {
+				t.Fatal("ValidateHTTPSIdentity unexpectedly accepted invalid identity")
+			}
+
+			if err := safeClient.SetTLSIdentityCAData(tc.caData); err != nil {
+				t.Fatalf("SetTLSIdentityCAData: %v", err)
+			}
+
+			httpClient, err := safeClient.NewPersistentHTTPSClientForOrigin(tc.rawURL)
+			if err != nil {
+				t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
+			}
+			defer httpClient.CloseIdleConnections()
+
+			if _, err := persistentRequest(context.Background(), httpClient, tc.request); err == nil {
+				t.Fatal("request unexpectedly succeeded with invalid producer identity")
+			}
+		})
+	}
+
+	if requests.Load() != 0 {
+		t.Fatalf("failed identities reached authenticated source handler %d times", requests.Load())
+	}
+}
+
+func newPersistentTLSServer(
+	t *testing.T,
+	serial int64,
+	handler http.HandlerFunc,
+	requests *atomic.Int64,
+	dnsNames ...string,
+) *httptest.Server {
+	t.Helper()
+
+	if handler == nil {
+		handler = func(writer http.ResponseWriter, _ *http.Request) {
+			if requests != nil {
+				requests.Add(1)
+			}
+
+			writer.WriteHeader(http.StatusNoContent)
+		}
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	certificate := newPersistentTestCertificate(t, serial)
+	if len(dnsNames) > 0 {
+		certificate = newPersistentTestCertificateForNames(t, serial, nil, dnsNames)
+	}
+
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   tls.VersionTLS12,
+	}
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	return server
+}
+
+func certificatePEM(t *testing.T, server *httptest.Server) []byte {
+	t.Helper()
+
+	certificate := server.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server has no certificate")
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+}
+
+func TestTLSIdentityClient_PreservesCertificateAuth(t *testing.T) {
 	var receivedClientCertificate atomic.Bool
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -927,11 +1178,13 @@ func TestPersistentHTTPClient_PreservesCertificateAuth(t *testing.T) {
 			KeyData:  keyData,
 		},
 	}}
-	sc.SetTLSCAData(certData)
+	if err := sc.SetTLSIdentityCAData(certData); err != nil {
+		t.Fatalf("SetTLSIdentityCAData: %v", err)
+	}
 
-	httpClient, err := sc.NewPersistentHTTPClient()
+	httpClient, err := sc.NewPersistentHTTPSClientForOrigin(srv.URL)
 	if err != nil {
-		t.Fatalf("NewPersistentHTTPClient: %v", err)
+		t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
 	}
 	defer httpClient.CloseIdleConnections()
 
@@ -954,7 +1207,7 @@ func TestPersistentHTTPClient_PreservesCertificateAuth(t *testing.T) {
 	}
 }
 
-func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
+func TestTLSIdentityClient_PreservesProxyAndDial(t *testing.T) {
 	t.Parallel()
 
 	var (
@@ -962,7 +1215,7 @@ func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
 		dialCalls  atomic.Int64
 	)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
@@ -987,9 +1240,13 @@ func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
 		},
 	}}
 
-	httpClient, err := sc.NewPersistentHTTPClient()
+	if err := sc.SetTLSIdentityCAData(certificatePEM(t, srv)); err != nil {
+		t.Fatalf("SetTLSIdentityCAData: %v", err)
+	}
+
+	httpClient, err := sc.NewPersistentHTTPSClientForOrigin(srv.URL)
 	if err != nil {
-		t.Fatalf("NewPersistentHTTPClient: %v", err)
+		t.Fatalf("NewPersistentHTTPSClientForOrigin: %v", err)
 	}
 	defer httpClient.CloseIdleConnections()
 
