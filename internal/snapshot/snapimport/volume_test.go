@@ -2877,6 +2877,7 @@ func TestSendVolumeData_CompressedFullSkipRequiresExactDecodedSize(t *testing.T)
 		{name: "error: zstd extra", codec: "zstd", ext: ".zst", totalSize: int64(len(payload) - 1), wantErr: true},
 		{name: "error: zstd truncated", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: truncateLastByte, wantErr: true},
 		{name: "error: zstd corrupt", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: mutateFirstByte, wantErr: true},
+		{name: "error: zstd checksum after exact bytes", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: corruptZstdChecksum, wantErr: true},
 		{name: "error: zstd content size less", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), noFCS: true, wantErr: true},
 		{name: "success: gzip exact", codec: "gzip", ext: ".gz", totalSize: int64(len(payload))},
 		{name: "error: gzip short", codec: "gzip", ext: ".gz", totalSize: int64(len(payload) + 1), wantErr: true},
@@ -2961,6 +2962,13 @@ func truncateLastByte(data []byte) []byte {
 func mutateFirstByte(data []byte) []byte {
 	corrupt := append([]byte(nil), data...)
 	corrupt[0] ^= 0xFF
+
+	return corrupt
+}
+
+func corruptZstdChecksum(data []byte) []byte {
+	corrupt := append([]byte(nil), data...)
+	corrupt[len(corrupt)-1] ^= 0xFF
 
 	return corrupt
 }
@@ -3127,6 +3135,78 @@ func TestSendVolumeData_TwoRunCompressedUndercountNeverFinalizes(t *testing.T) {
 	}
 }
 
+func TestSendVolumeData_TwoRunZstdChecksumErrorNeverFinalizes(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("two-run-checksum-"), 300)
+	totalSize := int64(len(payload))
+	dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+	writeCompressedProofFixture(t, dataFile, "zstd", payload, false, corruptZstdChecksum)
+
+	var (
+		written       []byte
+		putCount      int
+		finishedCount int
+	)
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		header := http.Header{}
+
+		switch req.Method {
+		case http.MethodHead:
+			header.Set("X-Next-Offset", strconv.Itoa(len(written)))
+
+			return newTestHTTPResponse(http.StatusOK, header), nil
+		case http.MethodPut:
+			body, _ := io.ReadAll(req.Body)
+			written = append(written, body...)
+			putCount++
+			header.Set("X-Next-Offset", strconv.Itoa(len(written)))
+
+			return newTestHTTPResponse(http.StatusCreated, header), nil
+		case http.MethodPost:
+			finishedCount++
+
+			return newTestHTTPResponse(http.StatusNoContent, header), nil
+		default:
+			return newTestHTTPResponse(http.StatusMethodNotAllowed, header), nil
+		}
+	})
+
+	leaf := PlannedNode{DataFile: dataFile, Ext: ".zst", Size: strconv.FormatInt(totalSize, 10)}
+	importer := &clusterVolumeImporter{log: discardLogger()}
+
+	for run := 1; run <= 2; run++ {
+		err := importer.sendVolumeData(
+			context.Background(),
+			doer,
+			"https://importer.local",
+			volumeModeBlock,
+			leaf,
+			"namespace",
+			"data-import",
+			nil,
+			nil,
+			nil,
+		)
+		if err == nil {
+			t.Fatalf("run %d: expected terminal checksum error, got nil", run)
+		}
+	}
+
+	if !bytes.Equal(written, payload) {
+		t.Errorf("durably written bytes differ from the %d decoded bytes emitted before checksum failure", len(payload))
+	}
+
+	if putCount != 1 {
+		t.Errorf("PUT count = %d, want 1 from the first run only", putCount)
+	}
+
+	if finishedCount != 0 {
+		t.Errorf("finished POST count = %d, want 0 across both runs", finishedCount)
+	}
+}
+
 func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 	t.Parallel()
 
@@ -3135,10 +3215,12 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 	tests := []struct {
 		name      string
 		totalSize int64
+		mutate    func([]byte) []byte
 		wantErr   bool
 	}{
 		{name: "success: exact", totalSize: int64(len(payload))},
 		{name: "error: extra decoded byte", totalSize: int64(len(payload) - 1), wantErr: true},
+		{name: "error: terminal checksum after exact bytes", totalSize: int64(len(payload)), mutate: corruptZstdChecksum, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -3146,7 +3228,7 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 			t.Parallel()
 
 			dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
-			writeCompressedProofFixture(t, dataFile, "zstd", payload, false, nil)
+			writeCompressedProofFixture(t, dataFile, "zstd", payload, false, tc.mutate)
 
 			putCount := 0
 			finishedCount := 0
@@ -3232,6 +3314,246 @@ func TestCountDecodedBlock_HonorsContextAndBoundsReads(t *testing.T) {
 
 	if reader.maxRead > maxProofRead {
 		t.Errorf("largest decode-count Read buffer = %d, want <= %d", reader.maxRead, maxProofRead)
+	}
+}
+
+type cancelingProofSource struct {
+	reader     *bytes.Reader
+	cancel     context.CancelFunc
+	resetCount int
+	decodeRead bool
+	maxRead    int
+}
+
+func (s *cancelingProofSource) Read(p []byte) (int, error) {
+	s.maxRead = max(s.maxRead, len(p))
+
+	n, err := s.reader.Read(p)
+	if s.resetCount >= 2 && !s.decodeRead {
+		s.decodeRead = true
+		s.cancel()
+	}
+
+	return n, err
+}
+
+func (s *cancelingProofSource) ReadAt(p []byte, offset int64) (int, error) {
+	return s.reader.ReadAt(p, offset)
+}
+
+func (s *cancelingProofSource) Seek(offset int64, whence int) (int64, error) {
+	return s.reader.Seek(offset, whence)
+}
+
+func (s *cancelingProofSource) ResetAuthenticatedRead() {
+	s.resetCount++
+}
+
+type restoredMutationProofSource struct {
+	blockArchiveSource
+	mutate         func() (func() error, error)
+	mutationOffset int64
+	resetCount     int
+	mutated        bool
+}
+
+func (s *restoredMutationProofSource) Read(p []byte) (int, error) {
+	if s.resetCount < 2 || s.mutated {
+		return s.blockArchiveSource.Read(p)
+	}
+
+	offset, err := s.blockArchiveSource.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+
+	if s.mutationOffset < offset || s.mutationOffset >= offset+int64(len(p)) {
+		return s.blockArchiveSource.Read(p)
+	}
+
+	s.mutated = true
+
+	restore, err := s.mutate()
+	if err != nil {
+		return 0, err
+	}
+
+	n, readErr := s.blockArchiveSource.Read(p)
+	restoreErr := restore()
+
+	return n, errors.Join(readErr, restoreErr)
+}
+
+func (s *restoredMutationProofSource) ResetAuthenticatedRead() {
+	s.resetCount++
+	resetAuthenticatedRead(s.blockArchiveSource)
+}
+
+func TestPutBlockFromSource_ZstdFullSkipProofHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	payload := randomPayload(t, 2*blockDiscardBufferSize)
+	dataFile := filepath.Join(t.TempDir(), "data.bin.zst")
+	writeCompressedProofFixture(t, dataFile, "zstd", payload, false, nil)
+
+	encoded, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatalf("read zstd fixture: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	source := &cancelingProofSource{
+		reader: bytes.NewReader(encoded),
+		cancel: cancel,
+	}
+	doer := &recordingDoer{resumeOffset: int64(len(payload))}
+
+	err = putBlockFromSource(
+		ctx,
+		doer,
+		"https://importer.local/block",
+		dataFile,
+		".zst",
+		int64(len(payload)),
+		source,
+		discardLogger(),
+		nil,
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("putBlockFromSource error = %v, want context.Canceled", err)
+	}
+
+	if !source.decodeRead {
+		t.Fatal("cancellation did not occur during the terminal decoding proof")
+	}
+
+	if source.maxRead > 64*1024 {
+		t.Errorf("largest source read = %d, want <= fixed 64 KiB decoder input", source.maxRead)
+	}
+
+	if !slices.Equal(doer.methods, []string{http.MethodHead}) {
+		t.Errorf("HTTP methods = %v, want HEAD only for a full skip", doer.methods)
+	}
+}
+
+func TestVerifyCompressedBlockSize_ZstdAuthenticatedMutateUseRestore(t *testing.T) {
+	payload := randomPayload(t, 2*1024*1024+4096)
+	encodedPath := filepath.Join(t.TempDir(), "encoded.zst")
+	writeCompressedProofFixture(t, encodedPath, "zstd", payload, false, nil)
+
+	encoded, err := os.ReadFile(encodedPath)
+	if err != nil {
+		t.Fatalf("read encoded payload: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		hardlink bool
+	}{
+		{name: "same inode"},
+		{name: "external hardlink", hardlink: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				namespace:  "src",
+				blockData:  encoded,
+				blockExt:   ".zst",
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			handle, err := view.OpenVerifiedFile(context.Background(), plan[0].payloadFile)
+			if err != nil {
+				t.Fatalf("open verified payload: %v", err)
+			}
+			defer func() { _ = handle.Close() }()
+
+			payloadPath := filepath.Join(root, archive.DataBlockName(".zst"))
+			writerPath := payloadPath
+			if tc.hardlink {
+				writerPath = filepath.Join(t.TempDir(), "external-hardlink")
+				if err := os.Link(payloadPath, writerPath); err != nil {
+					t.Fatalf("create external hardlink: %v", err)
+				}
+			}
+
+			mutationOffset := int64(len(encoded) / 2)
+			source := &restoredMutationProofSource{
+				blockArchiveSource: handle,
+				mutationOffset:     mutationOffset,
+				mutate: func() (func() error, error) {
+					info, err := os.Stat(payloadPath)
+					if err != nil {
+						return nil, fmt.Errorf("inspect payload before mutation: %w", err)
+					}
+
+					writer, err := os.OpenFile(writerPath, os.O_WRONLY, 0)
+					if err != nil {
+						return nil, fmt.Errorf("open mutation writer: %w", err)
+					}
+
+					original := append([]byte(nil), encoded[mutationOffset:mutationOffset+32]...)
+					if _, err := writer.WriteAt(bytes.Repeat([]byte{0xA5}, 32), mutationOffset); err != nil {
+						_ = writer.Close()
+
+						return nil, fmt.Errorf("mutate payload: %w", err)
+					}
+
+					return func() error {
+						_, writeErr := writer.WriteAt(original, mutationOffset)
+						closeErr := writer.Close()
+						timeErr := os.Chtimes(payloadPath, info.ModTime(), info.ModTime())
+
+						return errors.Join(writeErr, closeErr, timeErr)
+					}, nil
+				},
+			}
+
+			err = verifyCompressedBlockSizeFromSource(
+				context.Background(),
+				source,
+				plan[0].DataFile,
+				".zst",
+				int64(len(payload)),
+			)
+			if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+				t.Fatalf("verifyCompressedBlockSizeFromSource error = %v, want ErrVerifiedArchiveChanged", err)
+			}
+
+			if !source.mutated {
+				t.Fatal("payload was not mutated during the terminal decoding pass")
+			}
+
+			if err := handle.Verify(context.Background()); !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+				t.Fatalf("sticky verification error after restoring bytes = %v, want ErrVerifiedArchiveChanged", err)
+			}
+		})
 	}
 }
 

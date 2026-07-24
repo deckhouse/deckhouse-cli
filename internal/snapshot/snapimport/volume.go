@@ -1531,6 +1531,23 @@ func putBlockCompressedWithPayloadLimit(
 		offset = next
 	}
 
+	// Zstd resume paths may have skipped whole compressed frames whose payload checksums
+	// were never decoded in this invocation. Re-decode the complete stream before
+	// finalisation so a frame that yielded its declared bytes before a terminal checksum
+	// error cannot be accepted on a later retry.
+	if ext == ".zst" {
+		if decodeReader != nil {
+			if closeErr := decodeReader.Close(); closeErr != nil {
+				return fmt.Errorf("%w for %s before payload verification: %w",
+					errFailedBlockDecoderClose, dataFile, closeErr)
+			}
+
+			decodeReader = nil
+		}
+
+		return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
+	}
+
 	// Safety net: totalSize came from the archive's captured metadata (leaf.Size), never
 	// from decoding, so verify it wasn't an UNDER-count. If the decode stream still has
 	// bytes left after every declared byte was sent, the archive is corrupt or was built
@@ -1561,6 +1578,8 @@ func verifyCompressedBlockSizeFromSource(ctx context.Context, source io.ReadSeek
 		return err
 	}
 
+	resetAuthenticatedRead(source)
+
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind compressed block %s for decoded-size verification: %w", dataFile, err)
 	}
@@ -1575,7 +1594,19 @@ func verifyCompressedBlockSizeFromSource(ctx context.Context, source io.ReadSeek
 			return err
 		}
 
-		return validateCompressedBlockSize(dataFile, decodedSize, totalSize)
+		if err := validateCompressedBlockSize(dataFile, decodedSize, totalSize); err != nil {
+			return err
+		}
+
+		// Frame_Content_Size is only a bounded size preflight. A zstd decoder can
+		// emit exactly that many bytes and report payload/checksum corruption only
+		// on its terminal read, so finalisation requires a fresh authenticated
+		// decoding pass through EOF.
+		resetAuthenticatedRead(source)
+
+		if _, err := source.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("rewind compressed block %s for payload verification: %w", dataFile, err)
+		}
 	}
 
 	decodeReader, err := compress.NewReader(ext, source)
