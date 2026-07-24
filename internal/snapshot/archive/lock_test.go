@@ -356,6 +356,116 @@ func TestArchiveWriteLockRejectsDurableChainReplacement(t *testing.T) {
 	}
 }
 
+func TestArchiveWriteLockReconfirmsDurableChainAfterABA(t *testing.T) {
+	boundaries := []WriteLockBoundary{
+		WriteLockBoundaryAfterDurability,
+		WriteLockBoundaryBeforeRootLock,
+	}
+
+	replacements := []struct {
+		name   string
+		target func(ancestor, parent, root string) string
+		tail   string
+	}{
+		{
+			name: "root",
+			target: func(_, _, root string) string {
+				return root
+			},
+		},
+		{
+			name: "immediate parent",
+			target: func(_, parent, _ string) string {
+				return parent
+			},
+			tail: "output",
+		},
+		{
+			name: "higher ancestor",
+			target: func(ancestor, _, _ string) string {
+				return ancestor
+			},
+			tail: filepath.Join("parent", "output"),
+		},
+	}
+
+	for _, boundary := range boundaries {
+		t.Run(boundaryName(boundary), func(t *testing.T) {
+			for _, replacement := range replacements {
+				t.Run(replacement.name, func(t *testing.T) {
+					base := t.TempDir()
+					ancestor := filepath.Join(base, "ancestor")
+					parent := filepath.Join(ancestor, "parent")
+					root := filepath.Join(parent, "output")
+					if err := os.MkdirAll(root, 0o755); err != nil {
+						t.Fatalf("create archive root: %v", err)
+					}
+
+					displaced := filepath.Join(base, "displaced")
+					abaComplete := false
+					reconfirmed := false
+
+					ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
+						if current == WriteLockBoundaryBeforeDurabilityReconfirmation && abaComplete {
+							reconfirmed = true
+
+							return
+						}
+
+						if current != boundary || abaComplete {
+							return
+						}
+
+						target := replacement.target(ancestor, parent, root)
+						replaceSyncRestoreDirectory(t, target, displaced, replacement.tail)
+						abaComplete = true
+					})
+
+					lock, err := AcquireWriteLockContext(ctx, root)
+					if err != nil {
+						t.Fatalf("acquire write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					if !abaComplete {
+						t.Fatalf("%s ABA hook was not reached", replacement.name)
+					}
+
+					if !reconfirmed {
+						t.Fatalf("%s ABA was not followed by durability reconfirmation", replacement.name)
+					}
+
+					if err := lock.Verify(); err != nil {
+						t.Fatalf("verify write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					replaceSyncRestoreDirectory(t,
+						replacement.target(ancestor, parent, root), displaced, replacement.tail)
+					if err := lock.Verify(); err != nil {
+						t.Fatalf("retain write lock after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					destination, err := NewLockedRootedDestination(lock, nil)
+					if err != nil {
+						t.Fatalf("open rooted destination after reconfirmed %s ABA: %v", replacement.name, err)
+					}
+
+					if destination.source != lock.source {
+						t.Fatalf("rooted destination changed the locked source after %s ABA", replacement.name)
+					}
+
+					if err := destination.Close(); err != nil {
+						t.Fatalf("close rooted destination after %s ABA: %v", replacement.name, err)
+					}
+
+					if err := lock.Unlock(); err != nil {
+						t.Fatalf("release write lock after %s ABA: %v", replacement.name, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestArchiveWriteLockRejectsSymlinkAliasReplacementAfterConfirmation(t *testing.T) {
 	for _, boundary := range []WriteLockBoundary{
 		WriteLockBoundaryAfterDurability,
@@ -412,12 +522,111 @@ func TestArchiveWriteLockRejectsSymlinkAliasReplacementAfterConfirmation(t *test
 	}
 }
 
+func TestArchiveWriteLockReconfirmsSymlinkAliasAfterABA(t *testing.T) {
+	for _, boundary := range []WriteLockBoundary{
+		WriteLockBoundaryAfterDurability,
+		WriteLockBoundaryBeforeRootLock,
+	} {
+		t.Run(boundaryName(boundary), func(t *testing.T) {
+			base := t.TempDir()
+			target := filepath.Join(base, "target")
+			alias := filepath.Join(base, "alias")
+			displaced := filepath.Join(base, "displaced")
+			root := filepath.Join(alias, "output")
+			if err := os.MkdirAll(filepath.Join(target, "output"), 0o755); err != nil {
+				t.Fatalf("create alias target: %v", err)
+			}
+
+			if err := os.Symlink(target, alias); err != nil {
+				t.Fatalf("create archive alias: %v", err)
+			}
+
+			abaComplete := false
+			reconfirmed := false
+
+			ctx := WithWriteLockBoundaryHook(context.Background(), func(current WriteLockBoundary) {
+				if current == WriteLockBoundaryBeforeDurabilityReconfirmation && abaComplete {
+					reconfirmed = true
+
+					return
+				}
+
+				if current != boundary || abaComplete {
+					return
+				}
+
+				if err := os.Rename(alias, displaced); err != nil {
+					t.Fatalf("displace archive alias: %v", err)
+				}
+
+				if err := os.Symlink(target, alias); err != nil {
+					t.Fatalf("create replacement archive alias: %v", err)
+				}
+
+				if err := syncDir(base); err != nil {
+					t.Fatalf("sync replacement archive alias: %v", err)
+				}
+
+				if err := os.Remove(alias); err != nil {
+					t.Fatalf("remove replacement archive alias: %v", err)
+				}
+
+				if err := os.Rename(displaced, alias); err != nil {
+					t.Fatalf("restore archive alias: %v", err)
+				}
+
+				abaComplete = true
+			})
+
+			lock, err := AcquireWriteLockContext(ctx, root)
+			if err != nil {
+				t.Fatalf("acquire write lock after reconfirmed alias ABA: %v", err)
+			}
+			defer func() { _ = lock.Unlock() }()
+
+			if !abaComplete {
+				t.Fatal("archive alias ABA hook was not reached")
+			}
+
+			if !reconfirmed {
+				t.Fatal("archive alias ABA was not followed by durability reconfirmation")
+			}
+
+			if err := lock.Verify(); err != nil {
+				t.Fatalf("verify write lock after reconfirmed alias ABA: %v", err)
+			}
+		})
+	}
+}
+
+func replaceSyncRestoreDirectory(t *testing.T, target, displaced, tail string) {
+	t.Helper()
+
+	if err := os.Rename(target, displaced); err != nil {
+		t.Fatalf("displace confirmed directory %s: %v", target, err)
+	}
+
+	if err := EnsureDir(filepath.Join(target, tail)); err != nil {
+		t.Fatalf("durably create replacement directory %s: %v", target, err)
+	}
+
+	if err := os.RemoveAll(target); err != nil {
+		t.Fatalf("remove replacement directory %s: %v", target, err)
+	}
+
+	if err := os.Rename(displaced, target); err != nil {
+		t.Fatalf("restore confirmed directory %s: %v", target, err)
+	}
+}
+
 func boundaryName(boundary WriteLockBoundary) string {
 	switch boundary {
 	case WriteLockBoundaryAfterDurability:
 		return "after durability"
 	case WriteLockBoundaryBeforeRootLock:
 		return "before rooted lock"
+	case WriteLockBoundaryBeforeDurabilityReconfirmation:
+		return "before durability reconfirmation"
 	default:
 		return "unknown"
 	}

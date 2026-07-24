@@ -62,11 +62,14 @@ type Lock struct {
 type WriteLockBoundary uint8
 
 const (
-	// WriteLockBoundaryAfterDurability runs after the final directory-confirmation pass and
-	// before its pinned root and ancestry are handed to lock acquisition.
+	// WriteLockBoundaryAfterDurability runs after the directory-creation confirmation pass
+	// and before the pinned root and ancestry receive their handoff reconfirmation.
 	WriteLockBoundaryAfterDurability WriteLockBoundary = iota + 1
 	// WriteLockBoundaryBeforeRootLock runs immediately before the rooted lock sequence starts.
 	WriteLockBoundaryBeforeRootLock
+	// WriteLockBoundaryBeforeDurabilityReconfirmation runs after an acquisition handoff and
+	// before the current exact directory chain is durably confirmed again.
+	WriteLockBoundaryBeforeDurabilityReconfirmation
 )
 
 // WriteLockBoundaryHook runs at deterministic write-lock handoffs. It supports adversarial
@@ -81,9 +84,11 @@ type durablePathEntry struct {
 }
 
 type durableWriteRoot struct {
-	source        *RootedSource
-	durablePath   []durablePathEntry
-	requestedPath []durablePathEntry
+	source            *RootedSource
+	durableRootPath   string
+	requestedRootPath string
+	durablePath       []durablePathEntry
+	requestedPath     []durablePathEntry
 }
 
 // WithWriteLockBoundaryHook returns a context that invokes hook during write-lock acquisition.
@@ -171,14 +176,14 @@ func acquireLockWithRootEnsurer(
 	if durableRoot != nil {
 		runWriteLockBoundaryHook(ctx, WriteLockBoundaryBeforeRootLock)
 
-		if err := durableRoot.verify(); err != nil {
+		if err := durableRoot.reconfirm(ctx); err != nil {
 			return nil, errors.Join(
 				fmt.Errorf("verify durable archive root %s before locking: %w", root, err),
 				wrapArchiveLockCloseError("archive root", source.Close()),
 			)
 		}
 
-		verifyRootIdentity = durableRoot.verify
+		verifyRootIdentity = durableRoot.reconfirmCurrent
 	}
 
 	lock, err := acquireSourceLock(ctx, source, exclusive, false, verifyRootIdentity)
@@ -230,9 +235,11 @@ func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, e
 	}
 
 	confirmed := &durableWriteRoot{
-		source:        source,
-		durablePath:   durableIdentity,
-		requestedPath: requestedIdentity,
+		source:            source,
+		durableRootPath:   durablePath,
+		requestedRootPath: absolute,
+		durablePath:       durableIdentity,
+		requestedPath:     requestedIdentity,
 	}
 
 	// The first pass creates and confirms the visible chain. The descriptor and every
@@ -252,7 +259,7 @@ func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, e
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
 	}
 
-	if err := confirmed.verify(); err != nil {
+	if err := confirmed.reconfirm(ctx); err != nil {
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
 	}
 
@@ -318,6 +325,95 @@ func (r *durableWriteRoot) verify() error {
 	}
 
 	return nil
+}
+
+func (r *durableWriteRoot) reconfirm(ctx context.Context) error {
+	if r == nil {
+		return fmt.Errorf("durable archive root identity is absent: %w", ErrArchiveLockChanged)
+	}
+
+	runWriteLockBoundaryHook(ctx, WriteLockBoundaryBeforeDurabilityReconfirmation)
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// A restored inode can satisfy every later SameFile check even when its latest
+	// insertion was never persisted. Confirm the current chain first, so equality
+	// proves that the captured identity received this invocation's fsync provenance.
+	if err := reconfirmDurableDirectories(ctx, r.durablePath); err != nil {
+		return fmt.Errorf("reconfirm durable archive root %s: %w", r.durableRootPath, err)
+	}
+
+	if filepath.Clean(r.requestedRootPath) != filepath.Clean(r.durableRootPath) {
+		if err := reconfirmRequestedSymlinks(ctx, r.requestedPath); err != nil {
+			return err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return r.verify()
+}
+
+func reconfirmDurableDirectories(ctx context.Context, identity []durablePathEntry) error {
+	if err := verifyDurablePath(identity); err != nil {
+		return err
+	}
+
+	for index := 1; index < len(identity); index++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		parent := identity[index-1].path
+		if err := syncDir(parent); err != nil {
+			return fmt.Errorf("reconfirm durable archive entry %s in %s: %w",
+				identity[index].path, parent, err)
+		}
+	}
+
+	if len(identity) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		leaf := identity[len(identity)-1].path
+		if err := syncDir(leaf); err != nil {
+			return fmt.Errorf("reconfirm durable archive leaf %s: %w", leaf, err)
+		}
+	}
+
+	return verifyDurablePath(identity)
+}
+
+func reconfirmRequestedSymlinks(ctx context.Context, identity []durablePathEntry) error {
+	if err := verifyDurablePath(identity); err != nil {
+		return err
+	}
+
+	for _, entry := range identity {
+		if entry.info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		parent := filepath.Dir(entry.path)
+		if err := syncDir(parent); err != nil {
+			return fmt.Errorf("reconfirm requested archive symlink %s in %s: %w", entry.path, parent, err)
+		}
+	}
+
+	return verifyDurablePath(identity)
+}
+
+func (r *durableWriteRoot) reconfirmCurrent() error {
+	return r.reconfirm(context.Background())
 }
 
 func verifyDurablePath(identity []durablePathEntry) error {
