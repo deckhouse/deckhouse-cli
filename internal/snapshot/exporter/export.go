@@ -155,44 +155,49 @@ func OpenExport(
 	), nil
 }
 
-// buildSubClients creates exactly two persistent, isolated HTTP clients and
-// merges the DataExport's internal CA (base64-encoded PEM) into their trust
-// pools. Ordinary data calls retain the short response-header timeout and
-// progress-based body watchdog. Source-hash HEAD requests get a separate
-// transport ceiling because the producer computes their response header by
-// synchronously reading the complete file; SourceMD5 applies the tighter
-// size-derived request deadline.
+// buildSubClients creates exactly two persistent, isolated HTTP clients pinned
+// to the DataExport's internal HTTPS origin and status.ca. Ordinary data calls
+// retain the short response-header timeout and progress-based body watchdog.
+// Source-hash HEAD requests get a separate transport ceiling because the
+// producer computes their response header by synchronously reading the complete
+// file; SourceMD5 applies the tighter size-derived request deadline.
 func buildSubClients(
 	sc *safeClient.SafeClient,
 	de *deapi.DataExport,
 ) (*safeClient.PersistentHTTPClient, *safeClient.PersistentHTTPClient, error) {
-	var caBytes []byte
+	caBytes, err := base64.StdEncoding.DecodeString(de.Status.CA)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode DataExport status.ca: %w", err)
+	}
 
-	if de.Status.CA != "" {
-		decoded, err := base64.StdEncoding.DecodeString(de.Status.CA)
-		if err != nil {
-			return nil, nil, fmt.Errorf("decode CA from DataExport: %w", err)
-		}
-
-		caBytes = decoded
+	if err := safeClient.ValidateHTTPSIdentity(de.Status.URL, caBytes); err != nil {
+		return nil, nil, fmt.Errorf("validate DataExport download identity: %w", err)
 	}
 
 	sub := sc.Copy()
-	sub.SetTLSCAData(caBytes)
-	// Apply the response-header timeout AFTER SetTLSCAData so it chains onto the
-	// CA-injecting WrapTransport rather than replacing it (both must apply).
+
+	if err := sub.SetTLSIdentityCAData(caBytes); err != nil {
+		return nil, nil, fmt.Errorf("configure ordinary data TLS identity: %w", err)
+	}
+
 	sub.SetResponseHeaderTimeout(dataPlaneResponseHeaderTimeout)
 
-	dataHTTPClient, err := sub.NewPersistentHTTPClient()
+	dataHTTPClient, err := sub.NewPersistentHTTPSClientForOrigin(de.Status.URL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build ordinary data HTTP client: %w", err)
 	}
 
 	sourceHashSub := sc.Copy()
-	sourceHashSub.SetTLSCAData(caBytes)
+
+	if err := sourceHashSub.SetTLSIdentityCAData(caBytes); err != nil {
+		dataHTTPClient.CloseIdleConnections()
+
+		return nil, nil, fmt.Errorf("configure source-hash TLS identity: %w", err)
+	}
+
 	sourceHashSub.SetResponseHeaderTimeout(sourceHashTimeoutCeiling)
 
-	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPClient()
+	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPSClientForOrigin(de.Status.URL)
 	if err != nil {
 		dataHTTPClient.CloseIdleConnections()
 
