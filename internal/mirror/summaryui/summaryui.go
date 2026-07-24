@@ -40,8 +40,9 @@ const (
 	NameWidth = 30
 	// SizeWidth right-aligns bundle artifact sizes.
 	SizeWidth = 10
-	// layoutNameWidth left-aligns the "Modules" label in the moved-path warning.
-	layoutNameWidth = 10
+	// layoutNameWidth left-aligns the "Root Segment:" and "Modules" labels in the
+	// moved-path warning so their values share one column.
+	layoutNameWidth = 13
 )
 
 // Semantic accent colours for the summary. fatih/color disables them when
@@ -138,13 +139,17 @@ func HumanSize(n int64) string {
 //
 // The block is wrapped in blank lines to set it apart.
 //
+// Root Segment names the registry base the modules path is rooted at, so the
+// moved path reads as root + suffix against the default root + modules.
+//
 // Example output for --modules-path-suffix mymods (colour stripped; the warning
 // header and the Modules path are yellow):
 //
 //	║
 //	║ Warning: modules use a non-default path (--modules-path-suffix)
-//	║   Modules    registry.deckhouse.io/deckhouse/ee/mymods
-//	║              default: registry.deckhouse.io/deckhouse/ee/modules
+//	║   Root Segment: registry.deckhouse.io/deckhouse/ee
+//	║   Modules      registry.deckhouse.io/deckhouse/ee/mymods
+//	║                default: registry.deckhouse.io/deckhouse/ee/modules
 //	║
 func WriteModulesPathWarning(b *strings.Builder, m mirror.ModulesPathReport, transferred bool) {
 	if !m.Moved || !transferred {
@@ -157,6 +162,9 @@ func WriteModulesPathWarning(b *strings.Builder, m mirror.ModulesPathReport, tra
 	// Call it out in plain text, not by colour alone (colour is lost in piped
 	// logs and to colour-blind readers).
 	fmt.Fprintf(b, "%s %s\n", Bar(), Warn("Warning: modules use a non-default path (--modules-path-suffix)"))
+
+	rootLabel := fmt.Sprintf("%-*s", layoutNameWidth, "Root Segment:")
+	fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(rootLabel), m.Root)
 
 	name := fmt.Sprintf("%-*s", layoutNameWidth, "Modules")
 	fmt.Fprintf(b, "%s   %s %s\n", Bar(), Label(name), Warn(m.Path))

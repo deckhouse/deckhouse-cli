@@ -433,6 +433,7 @@ func TestRenderPullSummary(t *testing.T) {
 			verbose: false,
 			contains: []string{
 				"Warning: modules use a non-default path (--modules-path-suffix)",
+				"Root Segment: registry.deckhouse.io/deckhouse/ee",
 				"default: registry.deckhouse.io/deckhouse/ee/modules",
 			},
 			// Only the moved modules path: no full layout, no other component paths.

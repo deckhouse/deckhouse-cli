@@ -66,6 +66,8 @@ func TestWriteModulesPathWarning_MovedWithModules(t *testing.T) {
 	out := renderWarning(t, mirror.BuildModulesPathReport(layoutRoot, "/"), true)
 
 	require.Contains(t, out, "Warning: modules use a non-default path (--modules-path-suffix)")
+	require.Contains(t, out, "Root Segment:")
+	require.Contains(t, out, layoutRoot)
 	require.Contains(t, out, "Modules")
 	require.Contains(t, out, "default: "+layoutRoot+"/modules")
 

@@ -45,6 +45,7 @@ func TestBuildModulesPathReport(t *testing.T) {
 
 			assert.Equal(t, tt.wantPath, report.Path)
 			assert.Equal(t, tt.wantMoved, report.Moved)
+			assert.Equal(t, root, report.Root)
 			assert.Equal(t, root+"/modules", report.DefaultPath)
 		})
 	}
@@ -54,6 +55,7 @@ func TestBuildModulesPathReport_TrimsRootSlash(t *testing.T) {
 	report := BuildModulesPathReport("registry.example.com/deckhouse/ee/", "/")
 
 	assert.Equal(t, "registry.example.com/deckhouse/ee", report.Path)
+	assert.Equal(t, "registry.example.com/deckhouse/ee", report.Root)
 	assert.Equal(t, "registry.example.com/deckhouse/ee/modules", report.DefaultPath)
 	assert.True(t, report.Moved)
 }

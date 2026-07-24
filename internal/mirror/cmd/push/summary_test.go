@@ -67,6 +67,7 @@ func TestRenderPushSummary(t *testing.T) {
 			},
 			contains: []string{
 				"Warning: modules use a non-default path (--modules-path-suffix)",
+				"Root Segment: " + root,
 				"Modules", root,
 				"default: " + root + "/modules",
 				"Installer:", "not present", // no installer.tar in this push

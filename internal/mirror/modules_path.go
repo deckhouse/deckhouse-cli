@@ -32,6 +32,9 @@ type ModulesPathReport struct {
 	// Moved is true when the modules path differs from the standard "modules"
 	// segment (i.e. --modules-path-suffix took effect).
 	Moved bool
+	// Root is the registry base repo the modules path is rooted at: the edition
+	// root (pull) or the target repo (push), without the modules segment.
+	Root string
 	// Path is the full registry path modules were read from (pull) or written to
 	// (push).
 	Path string
@@ -52,6 +55,7 @@ func BuildModulesPathReport(root, modulesPathSuffix string) ModulesPathReport {
 
 	return ModulesPathReport{
 		Moved:       modulesPath != internal.ModulesSegment,
+		Root:        root,
 		Path:        path.Join(root, modulesPath),
 		DefaultPath: path.Join(root, internal.ModulesSegment),
 	}
