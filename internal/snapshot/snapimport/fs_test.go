@@ -2695,3 +2695,148 @@ func TestSendVolumeData_AllServerSkippedFSStillRejectsReplacement(t *testing.T) 
 		t.Fatalf("requests after all-server skip: PUT=%d finished=%d, want zero", putCount, finished)
 	}
 }
+
+func TestSendVolumeData_FSMutateUseRestoreDuringPUTIsRejected(t *testing.T) {
+	content := randomPayload(t, 2*1024*1024+4096)
+
+	tests := []struct {
+		name         string
+		codec        string
+		resumeOffset int64
+		hardlink     bool
+	}{
+		{name: "raw same inode", codec: "none"},
+		{name: "raw external hardlink partial resume", codec: "none", resumeOffset: 512*1024 + 17, hardlink: true},
+		{name: "zstd same inode", codec: "zstd"},
+		{name: "zstd external hardlink", codec: "zstd", hardlink: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tarFixture := writeSingleEntryFSTar(t, tc.codec, content)
+			tarData, err := os.ReadFile(tarFixture)
+			if err != nil {
+				t.Fatalf("read tar fixture: %v", err)
+			}
+
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				namespace:  "src",
+				tarData:    tarData,
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(content))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			payloadPath := filepath.Join(root, archive.FsTarName)
+			writerPath := payloadPath
+			if tc.hardlink {
+				writerPath = filepath.Join(t.TempDir(), "external-hardlink")
+				if err := os.Link(payloadPath, writerPath); err != nil {
+					t.Fatalf("create external hardlink: %v", err)
+				}
+			}
+
+			const mutationOffset = 1024*1024 + 17
+
+			var (
+				finished int
+				received []byte
+				methods  []string
+			)
+
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				methods = append(methods, req.Method)
+
+				switch req.Method {
+				case http.MethodHead:
+					if tc.resumeOffset > 0 {
+						header := http.Header{}
+						header.Set("X-Next-Offset", strconv.FormatInt(tc.resumeOffset, 10))
+
+						return newTestHTTPResponse(http.StatusOK, header), nil
+					}
+
+					return newTestHTTPResponse(http.StatusNotFound, nil), nil
+				case http.MethodPut:
+					readData, readErr := readBodyDuringRestoredMutation(
+						t,
+						req.Body,
+						payloadPath,
+						writerPath,
+						tarData,
+						mutationOffset,
+					)
+					received = append(received, readData...)
+
+					if readErr != nil {
+						return nil, readErr
+					}
+
+					header := http.Header{}
+					header.Set("X-Next-Offset", strconv.Itoa(len(content)))
+
+					return newTestHTTPResponse(http.StatusCreated, header), nil
+				case http.MethodPost:
+					finished++
+
+					return newTestHTTPResponse(http.StatusOK, nil), nil
+				default:
+					t.Fatalf("unexpected request method %s", req.Method)
+
+					return nil, nil
+				}
+			})
+
+			importer := &clusterVolumeImporter{log: discardLogger()}
+			err = importer.sendVolumeData(
+				context.Background(),
+				doer,
+				"https://importer.local",
+				volumeModeFilesystem,
+				plan[0],
+				targetNS,
+				"di-pvc-1",
+				nil,
+				nil,
+				nil,
+			)
+			if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+				t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+			}
+
+			expectedStart := int(tc.resumeOffset)
+			expectedEnd := expectedStart + len(received)
+			if expectedEnd > len(content) || !bytes.Equal(received, content[expectedStart:expectedEnd]) {
+				t.Fatalf("PUT received %d bytes that are not an authenticated original payload prefix", len(received))
+			}
+
+			if finished != 0 {
+				t.Fatalf("finished POSTs = %d, want 0", finished)
+			}
+
+			if len(methods) != 2 || methods[0] != http.MethodHead || methods[1] != http.MethodPut {
+				t.Fatalf("HTTP methods = %v, want HEAD then PUT only", methods)
+			}
+		})
+	}
+}

@@ -444,6 +444,8 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 		return fmt.Errorf("inspect %s: %w", tarPath, err)
 	}
 
+	resetAuthenticatedRead(source)
+
 	section := io.NewSectionReader(source, 0, info.Size())
 	tr := tar.NewReader(section)
 	regularIndex := 0
@@ -600,6 +602,8 @@ func scanFSTarSource(source fsTarSource, tarPath string) (fsTarScan, error) {
 	if err != nil {
 		return fsTarScan{}, fmt.Errorf("inspect %s: %w", tarPath, err)
 	}
+
+	resetAuthenticatedRead(source)
 
 	return scanFSTarReader(tar.NewReader(io.NewSectionReader(source, 0, info.Size())), tarPath)
 }
@@ -780,6 +784,8 @@ func tarEntryBodyFactoryFromSource(source io.ReaderAt, tarPath, ext string, payl
 			return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", payloadStart, offset)
 		}
 
+		resetAuthenticatedRead(source)
+
 		if ext == "" {
 			section := io.NewSectionReader(source, payloadStart+offset, size)
 
@@ -816,6 +822,8 @@ func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, ta
 
 		return nil
 	}
+
+	resetAuthenticatedRead(source)
 
 	stored := io.NewSectionReader(source, payloadStart, storedSize)
 
