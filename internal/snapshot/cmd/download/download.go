@@ -148,7 +148,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("resolving output path: %w", err)
 	}
 
-	outputLock, err := acquireOutputLock(outputDir)
+	outputLock, err := acquireOutputLockContext(ctx, outputDir)
 	if err != nil {
 		return err
 	}
@@ -294,10 +294,22 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		slog.String("output_dir", outputDir),
 	)
 
-	if err := pipeline.Run(ctx, cfg); err != nil {
+	if err := outputLock.Verify(); err != nil {
 		sink.Wait()
 
-		return fmt.Errorf("snapshot download failed: %w", err)
+		return fmt.Errorf("verify locked output directory before download: %w", err)
+	}
+
+	runErr := pipeline.Run(ctx, cfg)
+
+	lockErr := outputLock.Verify()
+	if runErr != nil || lockErr != nil {
+		sink.Wait()
+
+		return errors.Join(
+			wrapDownloadError(runErr),
+			wrapOutputLockVerifyError(lockErr),
+		)
 	}
 
 	sink.Wait()
@@ -314,7 +326,7 @@ const downloadLockFileName = ".d8-snapshot-download.lock"
 var ErrOutputDirLocked = errors.New("output directory is locked by another d8 snapshot download run")
 
 // acquireOutputLock takes a non-blocking advisory exclusive lock on a fixed
-// lock file inside outputDir and returns the held *flock.Flock; the caller
+// lock file inside outputDir and returns the held archive lock; the caller
 // must Unlock it (typically via defer) once the download finishes, fails, or
 // is cancelled.
 //
@@ -324,8 +336,8 @@ var ErrOutputDirLocked = errors.New("output directory is locked by another d8 sn
 // each other's progress. Rather than block a second invocation indefinitely,
 // acquireOutputLock fails fast with ErrOutputDirLocked naming the directory.
 //
-// Stale-lock policy: the lock is a plain flock(2) (LockFileEx on Windows, via
-// gofrs/flock — cross-platform, no shell-out required). The OS releases an
+// Stale-lock policy: the lock uses flock(2) on supported Unix systems and
+// LockFileEx on Windows. The OS releases an
 // flock automatically when the holding process exits for ANY reason,
 // including a hard kill or crash, so a lock FILE left behind by a dead
 // process is harmless — the very next TryLock succeeds because the kernel
@@ -337,7 +349,11 @@ var ErrOutputDirLocked = errors.New("output directory is locked by another d8 sn
 // deletion race lets it forget); it persists as a tiny fixture in the output
 // directory.
 func acquireOutputLock(outputDir string) (*archive.Lock, error) {
-	lock, err := archive.AcquireWriteLock(outputDir)
+	return acquireOutputLockContext(context.Background(), outputDir)
+}
+
+func acquireOutputLockContext(ctx context.Context, outputDir string) (*archive.Lock, error) {
+	lock, err := archive.AcquireWriteLockContext(ctx, outputDir)
 	if err != nil {
 		if errors.Is(err, archive.ErrArchiveLocked) {
 			return nil, fmt.Errorf(
@@ -350,6 +366,22 @@ func acquireOutputLock(outputDir string) (*archive.Lock, error) {
 	}
 
 	return lock, nil
+}
+
+func wrapDownloadError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("snapshot download failed: %w", err)
+}
+
+func wrapOutputLockVerifyError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("verify locked output directory after download: %w", err)
 }
 
 // validateVolumeCompression builds the requested volume Codec, restricting the

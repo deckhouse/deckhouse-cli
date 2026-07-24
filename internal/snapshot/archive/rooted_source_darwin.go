@@ -36,6 +36,10 @@ func openArchiveRegularAt(parent *os.File, name, path string) (*os.File, error) 
 	return openArchiveAtUnix(parent, name, path, false, readDarwinArchiveMountStat)
 }
 
+func verifyArchiveLockMount(parent, lock *os.File, path string) error {
+	return verifySameArchiveMount(parent, lock, path, readDarwinArchiveMountStat)
+}
+
 func readDarwinArchiveMountStat(fd int) (any, error) {
 	var stat unix.Statfs_t
 	if err := unix.Fstatfs(fd, &stat); err != nil {

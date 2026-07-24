@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	sigsyaml "sigs.k8s.io/yaml"
@@ -188,20 +189,28 @@ func WriteSnapshotYAMLContext(ctx context.Context, nodeDir string, sy SnapshotYA
 // already-validated archive directory fails closed instead of silently continuing through a
 // detached tree.
 type RootedSource struct {
-	dir    *os.File
-	path   string
-	parent *RootedSource
-	name   string
-	hook   OpenBoundaryHook
+	dir         *os.File
+	path        string
+	parent      *RootedSource
+	name        string
+	hook        OpenBoundaryHook
+	lockBinding *rootedLockBinding
 }
 
 // PinnedDirectory is a descriptor-relative directory beneath a RootedSource.
 // It remains confined to the originally opened root even if path components are
 // replaced after opening.
 type PinnedDirectory struct {
-	dir  *os.File
-	path string
-	hook OpenBoundaryHook
+	dir           *os.File
+	path          string
+	hook          OpenBoundaryHook
+	verifyBinding func() error
+}
+
+type rootedLockBinding struct {
+	mu      sync.RWMutex
+	claimed bool
+	verify  func() error
 }
 
 // OpenBoundaryHook runs immediately before a rooted descendant or enumeration open. It exists
@@ -221,7 +230,12 @@ func OpenRootedSourceWithHook(path string, hook OpenBoundaryHook) (*RootedSource
 		return nil, err
 	}
 
-	source := &RootedSource{dir: dir, path: path, hook: hook}
+	source := &RootedSource{
+		dir:         dir,
+		path:        path,
+		hook:        hook,
+		lockBinding: &rootedLockBinding{},
+	}
 	if err := source.verifyCurrent(); err != nil {
 		_ = dir.Close()
 
@@ -260,7 +274,14 @@ func (s *RootedSource) OpenDirectory(name string) (*RootedSource, error) {
 		return nil, err
 	}
 
-	return &RootedSource{dir: dir, path: path, parent: s, name: name, hook: s.hook}, nil
+	return &RootedSource{
+		dir:         dir,
+		path:        path,
+		parent:      s,
+		name:        name,
+		hook:        s.hook,
+		lockBinding: s.lockBinding,
+	}, nil
 }
 
 // OpenDirectoryPath securely descends through a relative directory path while
@@ -320,7 +341,12 @@ func (s *RootedSource) OpenDirectoryPath(path string) (*PinnedDirectory, error) 
 		parent = child
 	}
 
-	return &PinnedDirectory{dir: owned, path: currentPath, hook: s.hook}, nil
+	return &PinnedDirectory{
+		dir:           owned,
+		path:          currentPath,
+		hook:          s.hook,
+		verifyBinding: s.verifyCurrent,
+	}, nil
 }
 
 // ReadDirectory reads source through a fresh descriptor so repeated enumeration is stable.
@@ -410,6 +436,10 @@ func (d *PinnedDirectory) Path() string {
 func (d *PinnedDirectory) ReadDirectory(count int) ([]os.DirEntry, error) {
 	d.runHook(d.path)
 
+	if err := d.verifyCurrentBinding(); err != nil {
+		return nil, err
+	}
+
 	entries, err := d.dir.ReadDir(count)
 	if err != nil {
 		return entries, fmt.Errorf("read directory %s: %w", d.path, err)
@@ -427,12 +457,21 @@ func (d *PinnedDirectory) OpenDirectory(name string) (*PinnedDirectory, error) {
 	path := filepath.Join(d.path, name)
 	d.runHook(path)
 
+	if err := d.verifyCurrentBinding(); err != nil {
+		return nil, err
+	}
+
 	dir, err := openArchiveDirectoryAt(d.dir, name, path)
 	if err != nil {
 		return nil, err
 	}
 
-	return &PinnedDirectory{dir: dir, path: path, hook: d.hook}, nil
+	return &PinnedDirectory{
+		dir:           dir,
+		path:          path,
+		hook:          d.hook,
+		verifyBinding: d.verifyBinding,
+	}, nil
 }
 
 // OpenRegularFile opens one regular child without following links.
@@ -444,6 +483,10 @@ func (d *PinnedDirectory) OpenRegularFile(name string) (*os.File, error) {
 	path := filepath.Join(d.path, name)
 	d.runHook(path)
 
+	if err := d.verifyCurrentBinding(); err != nil {
+		return nil, err
+	}
+
 	return openArchiveRegularAt(d.dir, name, path)
 }
 
@@ -454,11 +497,19 @@ func (d *PinnedDirectory) runHook(path string) {
 }
 
 func (s *RootedSource) verifyCurrent() error {
+	if err := s.verifyNamespaceCurrent(); err != nil {
+		return err
+	}
+
+	return s.lockBinding.verifyCurrent()
+}
+
+func (s *RootedSource) verifyNamespaceCurrent() error {
 	if s.parent == nil {
 		return verifyArchiveRoot(s.path, s.dir)
 	}
 
-	if err := s.parent.verifyCurrent(); err != nil {
+	if err := s.parent.verifyNamespaceCurrent(); err != nil {
 		return err
 	}
 
@@ -484,6 +535,64 @@ func (s *RootedSource) verifyCurrent() error {
 	}
 
 	return nil
+}
+
+func (s *RootedSource) claimLock() error {
+	s.lockBinding.mu.Lock()
+	defer s.lockBinding.mu.Unlock()
+
+	if s.lockBinding.claimed {
+		return errors.New("archive root already has a bound lock")
+	}
+
+	s.lockBinding.claimed = true
+
+	return nil
+}
+
+func (s *RootedSource) bindLock(verify func() error) error {
+	s.lockBinding.mu.Lock()
+	defer s.lockBinding.mu.Unlock()
+
+	if !s.lockBinding.claimed || s.lockBinding.verify != nil {
+		return errors.New("archive root lock claim is invalid")
+	}
+
+	s.lockBinding.verify = verify
+
+	return nil
+}
+
+func (s *RootedSource) unbindLock() {
+	s.lockBinding.mu.Lock()
+	s.lockBinding.claimed = false
+	s.lockBinding.verify = nil
+	s.lockBinding.mu.Unlock()
+}
+
+func (b *rootedLockBinding) verifyCurrent() error {
+	b.mu.RLock()
+	claimed := b.claimed
+	verify := b.verify
+	b.mu.RUnlock()
+
+	if !claimed {
+		return nil
+	}
+
+	if verify == nil {
+		return fmt.Errorf("%w: lock acquisition is incomplete", ErrArchiveLockChanged)
+	}
+
+	return verify()
+}
+
+func (d *PinnedDirectory) verifyCurrentBinding() error {
+	if d.verifyBinding == nil {
+		return nil
+	}
+
+	return d.verifyBinding()
 }
 
 func (s *RootedSource) runHook(path string) {

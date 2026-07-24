@@ -461,6 +461,27 @@ func TestAcquireOutputLock_ReacquireAfterRelease(t *testing.T) {
 	defer func() { _ = second.Unlock() }()
 }
 
+func TestAcquireOutputLock_CancelledContextDoesNotLeak(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	lock, err := acquireOutputLockContext(ctx, dir)
+	if lock != nil {
+		_ = lock.Unlock()
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquireOutputLockContext error = %v, want context.Canceled", err)
+	}
+
+	lock, err = acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("acquire after cancellation: %v", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+}
+
 func TestAcquireOutputLock_ConflictsWithUploadReader(t *testing.T) {
 	dir := t.TempDir()
 

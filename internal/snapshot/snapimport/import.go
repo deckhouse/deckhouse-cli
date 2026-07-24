@@ -110,6 +110,7 @@ type Config struct {
 }
 
 type archiveRaceHooks struct {
+	afterLock   func()
 	afterPlan   func()
 	afterVerify func()
 }
@@ -143,30 +144,35 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	archiveLock, err := archive.AcquireReadLock(cfg.InputDir)
-	if err != nil {
-		return fmt.Errorf("acquire snapshot archive read lock: %w", err)
-	}
-
 	view, err := archive.OpenVerifiedArchive(cfg.InputDir)
 	if err != nil {
+		return fmt.Errorf("open pinned snapshot archive: %w", err)
+	}
+
+	archiveLock, err := archive.AcquireRootedReadLock(ctx, view.RootSource())
+	if err != nil {
 		return errors.Join(
-			fmt.Errorf("open pinned snapshot archive: %w", err),
-			wrapArchiveUnlockError(archiveLock.Unlock()),
+			fmt.Errorf("acquire rooted snapshot archive read lock: %w", err),
+			wrapArchiveViewCloseError(view.Close()),
 		)
 	}
 
 	// Ownership is strictly nested: worker payload handles close inside runVerifiedArchive,
-	// then the rooted archive descriptor closes, and only then is the cooperative read lock
-	// released. This prevents a writer from starting while any verified handle is still live.
+	// then the descriptor-relative lock is released, and only then does the rooted archive
+	// descriptor close. This keeps every verified handle in the same lock domain without
+	// making unlock depend on an already-closed root.
+	if cfg.testHooks != nil && cfg.testHooks.afterLock != nil {
+		cfg.testHooks.afterLock()
+	}
+
 	runErr := runVerifiedArchive(ctx, cfg, view)
-	closeErr := view.Close()
 	unlockErr := archiveLock.Unlock()
+	closeErr := view.Close()
 
 	return errors.Join(
 		runErr,
-		wrapArchiveViewCloseError(closeErr),
 		wrapArchiveUnlockError(unlockErr),
+		wrapArchiveViewCloseError(closeErr),
 	)
 }
 
