@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -662,6 +663,74 @@ func TestRun_CancellationReleasesArchiveReadLock(t *testing.T) {
 		t.Fatalf("archive read lock leaked after cancellation: %v", err)
 	}
 	defer func() { _ = writer.Unlock() }()
+}
+
+func TestRun_ArchiveRootReplacementFailsBeforeParsingOrMutation(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows denies root replacement while the rooted lock is held")
+	}
+
+	root := buildTwoLevelArchive(t)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterLock: func() {
+			displaced := root + ".locked-original"
+			if err := os.Rename(root, displaced); err != nil {
+				t.Fatalf("rename locked archive root: %v", err)
+			}
+
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatalf("create replacement archive root: %v", err)
+			}
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("root replacement reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_ArchiveLockEntryReplacementFailsBeforeParsingOrMutation(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows denies lock-entry replacement while its handle is held")
+	}
+
+	root := buildTwoLevelArchive(t)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterLock: func() {
+			lockPath := filepath.Join(root, ".d8-snapshot-download.lock")
+			if err := os.Rename(lockPath, lockPath+".locked-original"); err != nil {
+				t.Fatalf("rename held archive lock entry: %v", err)
+			}
+
+			if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+				t.Fatalf("create replacement archive lock entry: %v", err)
+			}
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrArchiveLockChanged) {
+		t.Fatalf("Run error = %v, want ErrArchiveLockChanged", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("lock replacement reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
 }
 
 func TestRun_ManifestChangedAfterPlanningFailsBeforeMutation(t *testing.T) {

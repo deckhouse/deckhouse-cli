@@ -17,72 +17,328 @@ limitations under the License.
 package archive
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/gofrs/flock"
+	"sync"
 )
 
 const archiveLockFileName = ".d8-snapshot-download.lock"
 
 // ErrArchiveLocked is returned when an incompatible archive reader or writer owns the lock.
-var ErrArchiveLocked = errors.New("snapshot archive is locked")
+var (
+	ErrArchiveLocked      = errors.New("snapshot archive is locked")
+	ErrArchiveLockChanged = errors.New("snapshot archive lock binding changed")
+)
 
-// Lock is a held cooperative archive lock. Callers must Unlock it.
+// Lock is a held cooperative archive lock bound to one pinned archive root and lock inode.
+// Callers must Unlock it. A lock acquired from an existing RootedSource does not close that
+// source; a path-based acquisition owns and closes its internally opened source.
 type Lock struct {
-	file *flock.Flock
+	mu         sync.Mutex
+	source     *RootedSource
+	anchor     *os.File
+	file       *os.File
+	path       string
+	ownsSource bool
+	bound      bool
+	held       bool
 }
 
 // AcquireReadLock takes a non-blocking shared lock. Multiple uploads may coexist, while an
 // upload and a download writer exclude one another.
 func AcquireReadLock(root string) (*Lock, error) {
-	return acquireLock(root, false)
+	return AcquireReadLockContext(context.Background(), root)
 }
 
 // AcquireWriteLock takes a non-blocking exclusive lock used by archive writers.
 func AcquireWriteLock(root string) (*Lock, error) {
-	return acquireLock(root, true)
+	return AcquireWriteLockContext(context.Background(), root)
 }
 
-func acquireLock(root string, exclusive bool) (*Lock, error) {
+// AcquireReadLockContext is AcquireReadLock with cancellation propagated through acquisition.
+func AcquireReadLockContext(ctx context.Context, root string) (*Lock, error) {
+	return acquireLock(ctx, root, false)
+}
+
+// AcquireWriteLockContext is AcquireWriteLock with cancellation propagated through acquisition.
+func AcquireWriteLockContext(ctx context.Context, root string) (*Lock, error) {
+	return acquireLock(ctx, root, true)
+}
+
+// AcquireRootedReadLock takes a shared lock through source's already-pinned root descriptor.
+// The source and lock become one namespace-bound view until Unlock returns.
+func AcquireRootedReadLock(ctx context.Context, source *RootedSource) (*Lock, error) {
+	if source == nil {
+		return nil, errors.New("acquire rooted archive read lock: source is nil")
+	}
+
+	return acquireSourceLock(ctx, source, false, false)
+}
+
+func acquireLock(ctx context.Context, root string, exclusive bool) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if exclusive {
 		if err := os.MkdirAll(root, 0o755); err != nil {
 			return nil, fmt.Errorf("create archive root %s: %w", root, err)
 		}
 	}
 
-	lockPath := filepath.Join(root, archiveLockFileName)
-	file := flock.New(lockPath)
-
-	var (
-		locked bool
-		err    error
-	)
-
-	if exclusive {
-		locked, err = file.TryLock()
-	} else {
-		locked, err = file.TryRLock()
-	}
-
+	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("lock snapshot archive %s: %w", root, err)
+		return nil, fmt.Errorf("resolve archive root %s: %w", root, err)
 	}
 
-	if !locked {
-		return nil, fmt.Errorf("%w: %s", ErrArchiveLocked, root)
+	source, err := OpenRootedSource(absolute)
+	if err != nil {
+		return nil, err
 	}
 
-	return &Lock{file: file}, nil
+	lock, err := acquireSourceLock(ctx, source, exclusive, false)
+	if err != nil {
+		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
+	}
+
+	lock.ownsSource = true
+
+	return lock, nil
 }
 
-// Unlock releases the held archive lock.
+func acquireSourceLock(
+	ctx context.Context,
+	source *RootedSource,
+	exclusive bool,
+	ownsSource bool,
+) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := source.verifyNamespaceCurrent(); err != nil {
+		return nil, err
+	}
+
+	if err := source.claimLock(); err != nil {
+		return nil, err
+	}
+
+	bound := false
+
+	defer func() {
+		if !bound {
+			source.unbindLock()
+		}
+	}()
+
+	anchor, err := openArchiveLockAnchor(source)
+	if err != nil {
+		return nil, fmt.Errorf("open archive namespace lock anchor for %s: %w", source.path, err)
+	}
+
+	anchorLocked, err := tryArchiveAnchorLock(anchor, exclusive)
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("lock archive namespace anchor for %s: %w", source.path, err),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	if !anchorLocked {
+		return nil, errors.Join(
+			fmt.Errorf("%w: %s", ErrArchiveLocked, source.path),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	rootLocked, err := tryArchiveRootLock(source.dir, exclusive)
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("lock pinned archive root %s: %w", source.path, err),
+			wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	if !rootLocked {
+		return nil, errors.Join(
+			fmt.Errorf("%w: %s", ErrArchiveLocked, source.path),
+			wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	lockPath := filepath.Join(source.path, archiveLockFileName)
+
+	file, err := openArchiveLockAt(source.dir, archiveLockFileName, lockPath)
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("open rooted archive lock %s: %w", lockPath, err),
+			wrapArchiveLockCloseError("archive root lock", unlockArchiveRootLock(source.dir)),
+			wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	fileLocked, err := tryArchiveFileLock(file, exclusive)
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("lock rooted archive entry %s: %w", lockPath, err),
+			wrapArchiveLockCloseError(lockPath, file.Close()),
+			wrapArchiveLockCloseError("archive root lock", unlockArchiveRootLock(source.dir)),
+			wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	if !fileLocked {
+		return nil, errors.Join(
+			fmt.Errorf("%w: %s", ErrArchiveLocked, source.path),
+			wrapArchiveLockCloseError(lockPath, file.Close()),
+			wrapArchiveLockCloseError("archive root lock", unlockArchiveRootLock(source.dir)),
+			wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
+			wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
+		)
+	}
+
+	lock := &Lock{
+		source:     source,
+		anchor:     anchor,
+		file:       file,
+		path:       lockPath,
+		ownsSource: ownsSource,
+		held:       true,
+	}
+
+	if err := source.bindLock(lock.verifyLockEntry); err != nil {
+		return nil, errors.Join(err, lock.Unlock())
+	}
+
+	lock.bound = true
+	bound = true
+
+	if err := lock.Verify(); err != nil {
+		return nil, errors.Join(err, lock.Unlock())
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, lock.Unlock())
+	}
+
+	return lock, nil
+}
+
+// Verify proves that the current root name and lock entry still identify the pinned handles.
+func (l *Lock) Verify() error {
+	if l == nil {
+		return errors.New("verify archive lock: lock is nil")
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.held || l.source == nil || l.file == nil {
+		return errors.New("verify archive lock: lock is not held")
+	}
+
+	if err := l.source.verifyNamespaceCurrent(); err != nil {
+		return fmt.Errorf("verify locked archive root: %w", err)
+	}
+
+	return l.verifyLockEntryLocked()
+}
+
+func (l *Lock) verifyLockEntry() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.held {
+		return fmt.Errorf("%w: lock is no longer held", ErrArchiveLockChanged)
+	}
+
+	return l.verifyLockEntryLocked()
+}
+
+func (l *Lock) verifyLockEntryLocked() error {
+	current, err := openArchiveRegularAt(l.source.dir, archiveLockFileName, l.path)
+	if err != nil {
+		return fmt.Errorf("verify current archive lock %s: %w",
+			l.path, errors.Join(ErrArchiveLockChanged, err))
+	}
+
+	defer func() { _ = current.Close() }()
+
+	expectedInfo, err := l.file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect pinned archive lock %s: %w", l.path, err)
+	}
+
+	currentInfo, err := current.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect current archive lock %s: %w", l.path, err)
+	}
+
+	if !os.SameFile(expectedInfo, currentInfo) {
+		return fmt.Errorf("%s no longer names the locked file: %w",
+			l.path, errors.Join(ErrArchiveLockChanged, ErrNonRegularArchiveArtifact))
+	}
+
+	return nil
+}
+
+// Unlock releases the lock entry, then the root lock, and closes every owned handle. It is
+// idempotent. The harmless regular lock file remains in the archive for future processes.
 func (l *Lock) Unlock() error {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return nil
 	}
 
-	return l.file.Unlock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.held {
+		return nil
+	}
+
+	l.held = false
+	if l.bound {
+		l.source.unbindLock()
+		l.bound = false
+	}
+
+	unlockFileErr := unlockArchiveFileLock(l.file)
+	closeFileErr := l.file.Close()
+	unlockRootErr := unlockArchiveRootLock(l.source.dir)
+	unlockAnchorErr := unlockArchiveAnchorLock(l.anchor)
+	closeAnchorErr := closeArchiveLockAnchor(l.anchor)
+
+	var closeSourceErr error
+	if l.ownsSource {
+		closeSourceErr = l.source.Close()
+	}
+
+	l.file = nil
+	l.anchor = nil
+	l.source = nil
+
+	return errors.Join(
+		wrapArchiveLockCloseError("archive lock entry", unlockFileErr),
+		wrapArchiveLockCloseError("archive lock entry", closeFileErr),
+		wrapArchiveLockCloseError("archive root lock", unlockRootErr),
+		wrapArchiveLockCloseError("archive namespace lock", unlockAnchorErr),
+		wrapArchiveLockCloseError("archive namespace anchor", closeAnchorErr),
+		wrapArchiveLockCloseError("archive root", closeSourceErr),
+	)
+}
+
+func wrapArchiveLockCloseError(resource string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("release %s: %w", resource, err)
 }

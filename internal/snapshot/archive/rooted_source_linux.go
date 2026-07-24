@@ -60,6 +60,10 @@ func openArchiveRegularAt(parent *os.File, name, path string) (*os.File, error) 
 	return openArchiveAtLinux(parent, name, path, false, unix.Openat2, unix.Openat, readLinuxMountID)
 }
 
+func verifyArchiveLockMount(parent, lock *os.File, path string) error {
+	return verifyLinuxArchiveMount(parent, lock, path, readLinuxMountID)
+}
+
 func openArchiveAtLinux(
 	parent *os.File,
 	name string,
