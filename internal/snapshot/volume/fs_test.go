@@ -401,8 +401,11 @@ func TestDownloadFilesystemVolume_RecoversPublishedTarDurabilityBeforeCleanup(t 
 	syncCalls := 0
 
 	ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		if path != nodeDir {
+			return next()
+		}
+
 		syncCalls++
-		require.Equal(t, nodeDir, path)
 		require.DirExists(t, stagingDir, "staging must survive until directory durability is confirmed")
 
 		switch syncCalls {
@@ -460,6 +463,103 @@ func TestDownloadFilesystemVolume_RecoversPublishedTarDurabilityBeforeCleanup(t 
 	recovered, err := os.ReadFile(tarPath)
 	require.NoError(t, err)
 	require.Equal(t, published, recovered, "recovered tar must remain byte-identical")
+}
+
+func TestDownloadFilesystemVolume_RecoversPublishedInventoryDurabilityBeforeCleanup(t *testing.T) {
+	srv := newLargeLinkInventoryServer(t, 1, false)
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	metaDir := filepath.Join(stagingDir, volume.FSMetaDirName)
+	inventoryPath := filepath.Join(metaDir, "inventory.jsonl")
+	workDir := filepath.Join(metaDir, "inventory.work")
+	initialSyncErr := errors.New("initial inventory parent sync sentinel")
+	retrySyncErr := errors.New("retry inventory parent sync sentinel")
+	initialCtx, cancelInitial := context.WithCancel(context.Background())
+	initialCtx = archive.WithDirectorySyncHook(initialCtx, func(path string, _ func() error) error {
+		require.Equal(t, metaDir, path)
+		require.DirExists(t, workDir)
+		cancelInitial()
+
+		return initialSyncErr
+	})
+
+	err := volume.DownloadFilesystemVolume(
+		initialCtx,
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, initialSyncErr)
+	require.NotErrorIs(t, err, context.Canceled, "post-publication durability result must win over cancellation")
+	require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+	require.FileExists(t, inventoryPath)
+	require.NoFileExists(t, inventoryPath+".tmp")
+	require.DirExists(t, workDir, "published-but-unconfirmed inventory must retain its recovery source")
+	require.NoFileExists(t, tarPath)
+
+	published, err := os.ReadFile(inventoryPath)
+	require.NoError(t, err)
+
+	retryCtx := archive.WithDirectorySyncHook(context.Background(), func(path string, _ func() error) error {
+		require.Equal(t, metaDir, path)
+		require.DirExists(t, workDir)
+
+		return retrySyncErr
+	})
+	err = volume.DownloadFilesystemVolume(
+		retryCtx,
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, retrySyncErr)
+	require.Equal(t, archive.PublicationPublished, archive.CommitPublicationState(err))
+	require.DirExists(t, workDir, "failed confirmation retry must preserve recovery state")
+	require.NoFileExists(t, inventoryPath+".tmp")
+
+	afterFailedRetry, err := os.ReadFile(inventoryPath)
+	require.NoError(t, err)
+	require.Equal(t, published, afterFailedRetry, "confirmation retry must not rewrite inventory bytes")
+
+	var confirmed atomic.Bool
+	recoveryCtx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		if path == metaDir && !confirmed.Swap(true) {
+			require.DirExists(t, workDir, "recovery state must exist until inventory durability is confirmed")
+		}
+
+		return next()
+	})
+	require.NoError(t, volume.DownloadFilesystemVolume(
+		recoveryCtx,
+		slog.Default(),
+		tarPath,
+		stagingDir,
+		srv.URL+"/files/",
+		1,
+		0,
+		newFSFetcher(srv),
+		mustCodec(t, "none"),
+		nil,
+		nil,
+	))
+	require.True(t, confirmed.Load(), "retry must confirm the visible inventory before reuse")
+	require.NoDirExists(t, stagingDir, "successful recovery may clean staging only after confirmation")
+	require.FileExists(t, tarPath)
 }
 
 func TestDownloadFilesystemVolume_CleansStaleTmp(t *testing.T) {
