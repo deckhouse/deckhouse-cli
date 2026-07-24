@@ -234,10 +234,17 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 }
 
 type dynamicRequestInterceptor func(context.Context, string, schema.GroupVersionResource, string, string) error
+type dynamicListInterceptor func(
+	context.Context,
+	schema.GroupVersionResource,
+	string,
+	metav1.ListOptions,
+) (*unstructured.UnstructuredList, bool, error)
 
 type interceptingDynamicClient struct {
 	dynamic.Interface
-	intercept dynamicRequestInterceptor
+	intercept     dynamicRequestInterceptor
+	interceptList dynamicListInterceptor
 }
 
 func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
@@ -247,13 +254,15 @@ func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dy
 		NamespaceableResourceInterface: resource,
 		gvr:                            gvr,
 		intercept:                      c.intercept,
+		interceptList:                  c.interceptList,
 	}
 }
 
 type interceptingNamespaceableResource struct {
 	dynamic.NamespaceableResourceInterface
-	gvr       schema.GroupVersionResource
-	intercept dynamicRequestInterceptor
+	gvr           schema.GroupVersionResource
+	intercept     dynamicRequestInterceptor
+	interceptList dynamicListInterceptor
 }
 
 func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.ResourceInterface {
@@ -262,6 +271,7 @@ func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.
 		gvr:               r.gvr,
 		namespace:         namespace,
 		intercept:         r.intercept,
+		interceptList:     r.interceptList,
 	}
 }
 
@@ -271,8 +281,10 @@ func (r *interceptingNamespaceableResource) Get(
 	opts metav1.GetOptions,
 	subresources ...string,
 ) (*unstructured.Unstructured, error) {
-	if err := r.intercept(ctx, "get", r.gvr, "", name); err != nil {
-		return nil, err
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "get", r.gvr, "", name); err != nil {
+			return nil, err
+		}
 	}
 
 	return r.NamespaceableResourceInterface.Get(ctx, name, opts, subresources...)
@@ -282,8 +294,17 @@ func (r *interceptingNamespaceableResource) List(
 	ctx context.Context,
 	opts metav1.ListOptions,
 ) (*unstructured.UnstructuredList, error) {
-	if err := r.intercept(ctx, "list", r.gvr, "", ""); err != nil {
-		return nil, err
+	if r.interceptList != nil {
+		result, handled, err := r.interceptList(ctx, r.gvr, "", opts)
+		if handled {
+			return result, err
+		}
+	}
+
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "list", r.gvr, "", ""); err != nil {
+			return nil, err
+		}
 	}
 
 	return r.NamespaceableResourceInterface.List(ctx, opts)
@@ -291,9 +312,10 @@ func (r *interceptingNamespaceableResource) List(
 
 type interceptingResource struct {
 	dynamic.ResourceInterface
-	gvr       schema.GroupVersionResource
-	namespace string
-	intercept dynamicRequestInterceptor
+	gvr           schema.GroupVersionResource
+	namespace     string
+	intercept     dynamicRequestInterceptor
+	interceptList dynamicListInterceptor
 }
 
 func (r *interceptingResource) Get(
@@ -302,8 +324,10 @@ func (r *interceptingResource) Get(
 	opts metav1.GetOptions,
 	subresources ...string,
 ) (*unstructured.Unstructured, error) {
-	if err := r.intercept(ctx, "get", r.gvr, r.namespace, name); err != nil {
-		return nil, err
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "get", r.gvr, r.namespace, name); err != nil {
+			return nil, err
+		}
 	}
 
 	return r.ResourceInterface.Get(ctx, name, opts, subresources...)
@@ -313,8 +337,17 @@ func (r *interceptingResource) List(
 	ctx context.Context,
 	opts metav1.ListOptions,
 ) (*unstructured.UnstructuredList, error) {
-	if err := r.intercept(ctx, "list", r.gvr, r.namespace, ""); err != nil {
-		return nil, err
+	if r.interceptList != nil {
+		result, handled, err := r.interceptList(ctx, r.gvr, r.namespace, opts)
+		if handled {
+			return result, err
+		}
+	}
+
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "list", r.gvr, r.namespace, ""); err != nil {
+			return nil, err
+		}
 	}
 
 	return r.ResourceInterface.List(ctx, opts)
@@ -346,8 +379,9 @@ func readySnapshot() *unstructured.Unstructured {
 		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      testSnap,
+			"namespace":       testNS,
+			"name":            testSnap,
+			"resourceVersion": "100",
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "snapcontent-1",
@@ -377,6 +411,19 @@ func snapshotChildRef(apiVersion, kind, name string) map[string]interface{} {
 		"kind":       kind,
 		"name":       name,
 	}
+}
+
+func snapshotListPage(continueToken string, items ...*unstructured.Unstructured) *unstructured.UnstructuredList {
+	page := &unstructured.UnstructuredList{
+		Items: make([]unstructured.Unstructured, 0, len(items)),
+	}
+	page.SetContinue(continueToken)
+
+	for _, item := range items {
+		page.Items = append(page.Items, *item.DeepCopy())
+	}
+
+	return page
 }
 
 func setSnapshotSourceRef(obj *unstructured.Unstructured, apiVersion, kind, name string) {
@@ -425,8 +472,9 @@ func readyDomainDiskSnapshot(name string) *unstructured.Unstructured {
 		"apiVersion": domainDiskAPIVersion,
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      name,
+			"namespace":       testNS,
+			"name":            name,
+			"resourceVersion": "101",
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-disk-1",
@@ -442,8 +490,9 @@ func readyGeneratedSnapshot(apiVersion, kind, name string) *unstructured.Unstruc
 		"apiVersion": apiVersion,
 		"kind":       kind,
 		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      name,
+			"namespace":       testNS,
+			"name":            name,
+			"resourceVersion": "101",
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-" + name,
@@ -461,8 +510,9 @@ func readyVolumeSnapshot(name string) *unstructured.Unstructured {
 		"apiVersion": volumeSnapshotAPIVersion,
 		"kind":       "VolumeSnapshot",
 		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      name,
+			"namespace":       testNS,
+			"name":            name,
+			"resourceVersion": "101",
 		},
 		"status": map[string]interface{}{
 			"readyToUse": true,
@@ -3218,6 +3268,767 @@ func TestRun_SelectedNode_RootNotReady_ChildReadyProceeds(t *testing.T) {
 
 	if src.calls != 1 {
 		t.Fatalf("expected RestoreManifests call, got %d", src.calls)
+	}
+}
+
+func TestRun_SelectedNode_MissingChildOutcomes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		liveName    = "nss-child-live"
+		missingName = "nss-child-missing"
+	)
+
+	tests := []struct {
+		name           string
+		objects        func() []runtime.Object
+		selectedKind   string
+		selectedName   string
+		wantSuccess    bool
+		wantErrSubstrs []string
+		rejectErr      string
+	}{
+		{
+			name: "authoritative direct missing generated ref",
+			objects: func() []runtime.Object {
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+
+				return []runtime.Object{root}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: missingName,
+			wantErrSubstrs: []string{
+				"belongs to Snapshot",
+				"generated child ref",
+				domainDiskAPIVersion,
+				"deleted",
+			},
+			rejectErr: "does not belong",
+		},
+		{
+			name: "authoritative nested missing generated ref",
+			objects: func() []runtime.Object {
+				parent := snapshotWithChildren(
+					readyDomainDiskSnapshot("nss-parent"),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(parent.GetAPIVersion(), parent.GetKind(), parent.GetName()),
+				)
+
+				return []runtime.Object{root, parent}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: missingName,
+			wantErrSubstrs: []string{
+				"belongs to Snapshot",
+				"generated child ref",
+				missingName,
+				"deleted",
+			},
+			rejectErr: "does not belong",
+		},
+		{
+			name: "live generated target tolerates unrelated missing sibling",
+			objects: func() []runtime.Object {
+				live := readyDomainDiskSnapshot(liveName)
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(live.GetAPIVersion(), live.GetKind(), live.GetName()),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+
+				return []runtime.Object{root, live}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: liveName,
+			wantSuccess:  true,
+		},
+		{
+			name: "original alias cannot prove uniqueness in incomplete graph",
+			objects: func() []runtime.Object {
+				live := readyDomainDiskSnapshot(liveName)
+				setSnapshotSourceRef(live, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "disk-a")
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(live.GetAPIVersion(), live.GetKind(), live.GetName()),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+
+				return []runtime.Object{root, live}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-a",
+			wantErrSubstrs: []string{
+				"cannot prove",
+				"original-source selector",
+				"hierarchy is incomplete",
+				"--node DemoVirtualDiskSnapshot/" + liveName,
+				"--node-api-version " + domainDiskAPIVersion,
+			},
+			rejectErr: "does not belong",
+		},
+		{
+			name: "no match in incomplete graph is not non-membership",
+			objects: func() []runtime.Object {
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+
+				return []runtime.Object{root}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "unknown-original-alias",
+			wantErrSubstrs: []string{
+				"cannot prove whether",
+				"hierarchy is incomplete",
+				missingName,
+			},
+			rejectErr: "does not belong",
+		},
+		{
+			name: "no match in complete graph proves non-membership",
+			objects: func() []runtime.Object {
+				return []runtime.Object{readySnapshot()}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "unknown-original-alias",
+			wantErrSubstrs: []string{"does not belong"},
+		},
+		{
+			name: "legacy parent without resource version cannot prove absence",
+			objects: func() []runtime.Object {
+				root := snapshotWithChildren(
+					notReadySnapshot(),
+					snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+				)
+				root.SetResourceVersion("")
+
+				return []runtime.Object{root}
+			},
+			selectedKind: "DemoVirtualDiskSnapshot",
+			selectedName: missingName,
+			wantErrSubstrs: []string{
+				"cannot prove absence",
+				"parent",
+				"metadata.resourceVersion",
+			},
+			rejectErr: "deleted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(tc.objects()...)
+			cfg := Config{
+				Namespace:        testNS,
+				Snapshot:         testSnap,
+				SelectedNodeKind: tc.selectedKind,
+				SelectedNodeName: tc.selectedName,
+				Source:           src,
+				Dynamic:          dyn,
+				Mapper:           testMapperWithDomain(),
+				Log:              discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if tc.wantSuccess {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+
+				if src.calls != 1 {
+					t.Fatalf("RestoreManifestsScoped calls = %d, want 1", src.calls)
+				}
+
+				return
+			}
+
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			for _, substr := range tc.wantErrSubstrs {
+				if !strings.Contains(err.Error(), substr) {
+					t.Errorf("Run error %q does not contain %q", err, substr)
+				}
+			}
+
+			if tc.rejectErr != "" && strings.Contains(err.Error(), tc.rejectErr) {
+				t.Errorf("Run error %q unexpectedly contains %q", err, tc.rejectErr)
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
+	}
+}
+
+func TestRun_SelectedNode_MissingChildProofAPIFailures(t *testing.T) {
+	t.Parallel()
+
+	const missingName = "nss-child-missing"
+
+	errTransient := errors.New("transient list failure")
+	errGetForbidden := kubeerrors.NewForbidden(
+		schema.GroupResource{
+			Group:    domainDiskGVR.Group,
+			Resource: domainDiskGVR.Resource,
+		},
+		missingName,
+		errors.New("get denied"),
+	)
+	errListForbidden := kubeerrors.NewForbidden(
+		schema.GroupResource{
+			Group:    domainDiskGVR.Group,
+			Resource: domainDiskGVR.Resource,
+		},
+		"",
+		errors.New("list denied"),
+	)
+
+	tests := []struct {
+		name           string
+		ctx            func() (context.Context, context.CancelFunc)
+		intercept      dynamicRequestInterceptor
+		interceptList  dynamicListInterceptor
+		wantIs         error
+		wantForbidden  bool
+		wantErrSubstrs []string
+	}{
+		{
+			name: "forbidden child get remains fatal",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			intercept: func(
+				_ context.Context,
+				verb string,
+				gvr schema.GroupVersionResource,
+				_ string,
+				name string,
+			) error {
+				if verb == "get" && gvr == domainDiskGVR && name == missingName {
+					return errGetForbidden
+				}
+
+				return nil
+			},
+			wantIs:         errGetForbidden,
+			wantForbidden:  true,
+			wantErrSubstrs: []string{"get snapshot child", "get denied"},
+		},
+		{
+			name: "transient list error is not absence",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				_ context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return nil, true, errTransient
+			},
+			wantIs:         errTransient,
+			wantErrSubstrs: []string{"prove absence", "transient list failure"},
+		},
+		{
+			name: "forbidden list is not absence",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				_ context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return nil, true, errListForbidden
+			},
+			wantIs:         errListForbidden,
+			wantForbidden:  true,
+			wantErrSubstrs: []string{"prove absence", "list denied"},
+		},
+		{
+			name: "cancellation during list remains causal",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				ctx context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return nil, true, context.Canceled
+			},
+			wantIs:         context.Canceled,
+			wantErrSubstrs: []string{"prove absence", "context canceled"},
+		},
+		{
+			name: "deadline during list remains causal",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			},
+			interceptList: func(
+				ctx context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return nil, true, ctx.Err()
+			},
+			wantIs:         context.DeadlineExceeded,
+			wantErrSubstrs: []string{"prove absence", "context deadline exceeded"},
+		},
+		{
+			name: "incomplete final page is not absence",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				_ context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				remaining := int64(1)
+				page := snapshotListPage("")
+				page.SetRemainingItemCount(&remaining)
+
+				return page, true, nil
+			},
+			wantErrSubstrs: []string{"incomplete final page", "remainingItemCount=1"},
+		},
+		{
+			name: "repeated continue token is not absence",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				_ context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return snapshotListPage("same-token"), true, nil
+			},
+			wantErrSubstrs: []string{"repeated continue token", "same-token"},
+		},
+		{
+			name: "child appearing in list exposes deletion race",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			interceptList: func(
+				_ context.Context,
+				gvr schema.GroupVersionResource,
+				_ string,
+				_ metav1.ListOptions,
+			) (*unstructured.UnstructuredList, bool, error) {
+				if gvr != domainDiskGVR {
+					return nil, false, nil
+				}
+
+				return snapshotListPage("", readyDomainDiskSnapshot(missingName)), true, nil
+			},
+			wantErrSubstrs: []string{"appeared in the collection", "hierarchy changed", "retry"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := snapshotWithChildren(
+				notReadySnapshot(),
+				snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+			)
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			baseDynamic := newFakeDynamic(root)
+			dyn := &interceptingDynamicClient{
+				Interface:     baseDynamic,
+				intercept:     tc.intercept,
+				interceptList: tc.interceptList,
+			}
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       "DemoVirtualDiskSnapshot",
+				SelectedNodeName:       missingName,
+				SelectedNodeAPIVersion: domainDiskAPIVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 testMapperWithDomain(),
+				Log:                    discardLogger(),
+			}
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			err := Run(ctx, cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Errorf("Run error = %v, want errors.Is(_, %v)", err, tc.wantIs)
+			}
+
+			if tc.wantForbidden && !kubeerrors.IsForbidden(err) {
+				t.Errorf("Run error = %v, want forbidden classification", err)
+			}
+
+			for _, substr := range tc.wantErrSubstrs {
+				if !strings.Contains(err.Error(), substr) {
+					t.Errorf("Run error %q does not contain %q", err, substr)
+				}
+			}
+
+			assertNoRestoreMutation(t, src, baseDynamic)
+
+			for _, action := range baseDynamic.Actions() {
+				if action.GetVerb() == "watch" {
+					t.Errorf("absence proof unexpectedly used a watch: %v", action)
+				}
+			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_MissingChildProofPagination(t *testing.T) {
+	t.Parallel()
+
+	const (
+		liveName    = "nss-child-live"
+		missingName = "nss-child-missing"
+	)
+
+	live := readyDomainDiskSnapshot(liveName)
+	root := snapshotWithChildren(
+		notReadySnapshot(),
+		snapshotChildRef(live.GetAPIVersion(), live.GetKind(), live.GetName()),
+		snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+	)
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	baseDynamic := newFakeDynamic(root, live)
+
+	var listOptions []metav1.ListOptions
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		interceptList: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			namespace string,
+			opts metav1.ListOptions,
+		) (*unstructured.UnstructuredList, bool, error) {
+			if gvr != domainDiskGVR {
+				return nil, false, nil
+			}
+
+			if namespace != testNS {
+				return nil, true, fmt.Errorf("list namespace = %q, want %q", namespace, testNS)
+			}
+
+			listOptions = append(listOptions, opts)
+			if len(listOptions) == 1 {
+				return snapshotListPage("next-page"), true, nil
+			}
+
+			return snapshotListPage(""), true, nil
+		},
+	}
+	cfg := Config{
+		Namespace:              testNS,
+		Snapshot:               testSnap,
+		SelectedNodeKind:       live.GetKind(),
+		SelectedNodeName:       live.GetName(),
+		SelectedNodeAPIVersion: live.GetAPIVersion(),
+		Source:                 src,
+		Dynamic:                dyn,
+		Mapper:                 testMapperWithDomain(),
+		Log:                    discardLogger(),
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if src.calls != 1 {
+		t.Fatalf("RestoreManifestsScoped calls = %d, want 1", src.calls)
+	}
+
+	if len(listOptions) != 2 {
+		t.Fatalf("List calls = %d, want 2", len(listOptions))
+	}
+
+	first := listOptions[0]
+	if first.ResourceVersion != root.GetResourceVersion() ||
+		first.ResourceVersionMatch != metav1.ResourceVersionMatchNotOlderThan {
+		t.Errorf(
+			"first List resource-version options = (%q, %q), want (%q, %q)",
+			first.ResourceVersion,
+			first.ResourceVersionMatch,
+			root.GetResourceVersion(),
+			metav1.ResourceVersionMatchNotOlderThan,
+		)
+	}
+
+	if first.Continue != "" || first.Limit != missingChildProofPageLimit {
+		t.Errorf("first List pagination = continue %q limit %d", first.Continue, first.Limit)
+	}
+
+	second := listOptions[1]
+	if second.Continue != "next-page" || second.Limit != missingChildProofPageLimit {
+		t.Errorf("second List pagination = continue %q limit %d", second.Continue, second.Limit)
+	}
+
+	if second.ResourceVersion != "" || second.ResourceVersionMatch != "" {
+		t.Errorf(
+			"continued List unexpectedly reset snapshot options: resourceVersion=%q match=%q",
+			second.ResourceVersion,
+			second.ResourceVersionMatch,
+		)
+	}
+
+	wantSelector := "metadata.name=" + missingName
+	if first.FieldSelector != wantSelector || second.FieldSelector != wantSelector {
+		t.Errorf(
+			"List field selectors = %q, %q, want %q",
+			first.FieldSelector,
+			second.FieldSelector,
+			wantSelector,
+		)
+	}
+}
+
+func TestRun_SelectedNode_LiveAndMissingGeneratedCollisionIsAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	const (
+		kind           = "SharedSnapshot"
+		name           = "shared"
+		liveVersion    = "shared.example.io/v1alpha1"
+		missingVersion = "shared.example.io/v1beta1"
+	)
+
+	live := readyGeneratedSnapshot(liveVersion, kind, name)
+	root := snapshotWithChildren(
+		notReadySnapshot(),
+		snapshotChildRef(liveVersion, kind, name),
+		snapshotChildRef(missingVersion, kind, name),
+	)
+	src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+	baseDynamic := newFakeDynamic(root, live)
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		interceptList: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			_ string,
+			_ metav1.ListOptions,
+		) (*unstructured.UnstructuredList, bool, error) {
+			if gvr.Group != "shared.example.io" || gvr.Version != "v1beta1" {
+				return nil, false, nil
+			}
+
+			return snapshotListPage(""), true, nil
+		},
+	}
+	cfg := Config{
+		Namespace:        testNS,
+		Snapshot:         testSnap,
+		SelectedNodeKind: kind,
+		SelectedNodeName: name,
+		Source:           src,
+		Dynamic:          dyn,
+		Mapper: testMapperWithGenerated(
+			schema.FromAPIVersionAndKind(liveVersion, kind),
+			schema.FromAPIVersionAndKind(missingVersion, kind),
+		),
+		Log: discardLogger(),
+	}
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run unexpectedly succeeded")
+	}
+
+	for _, text := range []string{
+		"ambiguous within incomplete Snapshot",
+		"live " + liveVersion,
+		"deleted " + missingVersion,
+		"--node-api-version " + liveVersion,
+		"--node-api-version " + missingVersion,
+	} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("Run error %q does not contain %q", err, text)
+		}
+	}
+
+	assertNoRestoreMutation(t, src, baseDynamic)
+}
+
+func TestRun_SelectedNode_MissingChildMappingFailures(t *testing.T) {
+	t.Parallel()
+
+	const missingName = "nss-child-missing"
+
+	tests := []struct {
+		name         string
+		apiVersion   string
+		mapper       func(string) meta.RESTMapper
+		wantErrParts []string
+	}{
+		{
+			name:       "cluster scope cannot prove namespace-local absence",
+			apiVersion: domainDiskAPIVersion,
+			mapper: func(apiVersion string) meta.RESTMapper {
+				gv := schema.FromAPIVersionAndKind(apiVersion, "DemoVirtualDiskSnapshot")
+				mapper := testMapperWithGenerated(gv)
+				mapper.(*meta.DefaultRESTMapper).Add(gv, meta.RESTScopeRoot)
+
+				return mapper
+			},
+			wantErrParts: []string{"cannot prove absence", "namespace-local", "cluster-scoped"},
+		},
+		{
+			name:       "unserved child API version remains mapper error",
+			apiVersion: "missing.example.io/v1alpha1",
+			mapper: func(_ string) meta.RESTMapper {
+				mapper := testMapperWithGenerated(
+					schema.GroupVersionKind{
+						Group:   "missing.example.io",
+						Version: "v1beta1",
+						Kind:    "DemoVirtualDiskSnapshot",
+					},
+				)
+
+				return mapper
+			},
+			wantErrParts: []string{"resolve resource", "no matches for kind", "v1alpha1"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := snapshotWithChildren(
+				notReadySnapshot(),
+				snapshotChildRef(tc.apiVersion, "DemoVirtualDiskSnapshot", missingName),
+			)
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(root)
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       "DemoVirtualDiskSnapshot",
+				SelectedNodeName:       missingName,
+				SelectedNodeAPIVersion: tc.apiVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 tc.mapper(tc.apiVersion),
+				Log:                    discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			for _, part := range tc.wantErrParts {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("Run error %q does not contain %q", err, part)
+				}
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
+	}
+}
+
+func TestRun_SelectedNode_IncompleteAliasOutcomeIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	const (
+		liveName    = "nss-child-live"
+		missingName = "nss-child-missing"
+	)
+
+	orders := [][]map[string]interface{}{
+		{
+			snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", liveName),
+			snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+		},
+		{
+			snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", missingName),
+			snapshotChildRef(domainDiskAPIVersion, "DemoVirtualDiskSnapshot", liveName),
+		},
+	}
+
+	var wantError string
+	for i, refs := range orders {
+		live := readyDomainDiskSnapshot(liveName)
+		setSnapshotSourceRef(live, "virtualization.deckhouse.io/v1alpha2", "VirtualDisk", "disk-a")
+		root := snapshotWithChildren(notReadySnapshot(), refs...)
+		src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+		dyn := newFakeDynamic(root, live)
+		cfg := Config{
+			Namespace:        testNS,
+			Snapshot:         testSnap,
+			SelectedNodeKind: "VirtualDisk",
+			SelectedNodeName: "disk-a",
+			Source:           src,
+			Dynamic:          dyn,
+			Mapper:           testMapperWithDomain(),
+			Log:              discardLogger(),
+		}
+
+		err := Run(context.Background(), cfg)
+		if err == nil {
+			t.Fatalf("order %d: Run unexpectedly succeeded", i)
+		}
+
+		if i == 0 {
+			wantError = err.Error()
+		} else if err.Error() != wantError {
+			t.Errorf("order %d error = %q, want deterministic %q", i, err, wantError)
+		}
+
+		assertNoRestoreMutation(t, src, dyn)
 	}
 }
 
