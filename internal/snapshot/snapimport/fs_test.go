@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,7 +62,19 @@ func (d *failOnHTTPDoer) HTTPDo(*http.Request) (*http.Response, error) {
 type fileHTTPDoer func(*http.Request) (*http.Response, error)
 
 func (d fileHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
-	return d(req)
+	resp, requestErr := d(req)
+	if req.Body == nil {
+		return resp, requestErr
+	}
+
+	_, drainErr := io.Copy(io.Discard, req.Body)
+	if errors.Is(drainErr, http.ErrBodyReadAfterClose) {
+		drainErr = nil
+	}
+
+	closeErr := req.Body.Close()
+
+	return resp, errors.Join(requestErr, drainErr, closeErr)
 }
 
 func fileHTTPResponse(status int, header http.Header) *http.Response {
@@ -299,7 +312,8 @@ func TestDoFileChunk_StrictStatusesAndOffsets(t *testing.T) {
 			doer := fileHTTPDoer(func(*http.Request) (*http.Response, error) {
 				return fileHTTPResponse(tc.status, tc.header), nil
 			})
-			req, err := http.NewRequest(http.MethodPut, "https://import.example/file", http.NoBody)
+			body := bytes.Repeat([]byte("x"), int(tc.requestEnd-tc.offset))
+			req, err := http.NewRequest(http.MethodPut, "https://import.example/file", bytes.NewReader(body))
 			if err != nil {
 				t.Fatalf("build request: %v", err)
 			}
@@ -2836,6 +2850,135 @@ func TestSendVolumeData_FSMutateUseRestoreDuringPUTIsRejected(t *testing.T) {
 
 			if len(methods) != 2 || methods[0] != http.MethodHead || methods[1] != http.MethodPut {
 				t.Fatalf("HTTP methods = %v, want HEAD then PUT only", methods)
+			}
+		})
+	}
+}
+
+func TestSendVolumeData_FSWaitsForExactBodyCompletion(t *testing.T) {
+	content := bytes.Repeat([]byte("attested-filesystem-payload-"), 4096)
+
+	for _, codec := range []string{"none", "zstd"} {
+		t.Run(codec, func(t *testing.T) {
+			tarFixture := writeSingleEntryFSTar(t, codec, content)
+			tarData, err := os.ReadFile(tarFixture)
+			if err != nil {
+				t.Fatalf("read tar fixture: %v", err)
+			}
+
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "pvc-1",
+				namespace:  "src",
+				tarData:    tarData,
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(content))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			putBody := make(chan io.ReadCloser, 1)
+
+			var (
+				progressed atomic.Int64
+				finished   atomic.Int64
+			)
+
+			doer := newRoundTripDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodHead:
+					return newTestHTTPResponse(http.StatusNotFound, nil), nil
+				case http.MethodPut:
+					putBody <- req.Body
+
+					header := http.Header{}
+					header.Set("X-Next-Offset", strconv.Itoa(len(content)))
+
+					return newTestHTTPResponse(http.StatusCreated, header), nil
+				case http.MethodPost:
+					finished.Add(1)
+
+					return newTestHTTPResponse(http.StatusOK, nil), nil
+				default:
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
+			})
+
+			result := make(chan error, 1)
+			go func() {
+				importer := &clusterVolumeImporter{log: discardLogger()}
+				result <- importer.sendVolumeData(
+					context.Background(),
+					doer,
+					"https://importer.local",
+					volumeModeFilesystem,
+					plan[0],
+					targetNS,
+					"di-pvc-1",
+					nil,
+					func(count int) { progressed.Add(int64(count)) },
+					nil,
+				)
+			}()
+
+			body := <-putBody
+
+			select {
+			case err := <-result:
+				t.Fatalf("upload returned before body completion: %v", err)
+			default:
+			}
+
+			if got := progressed.Load(); got != 0 {
+				t.Fatalf("progress before body completion = %d, want 0", got)
+			}
+			if got := finished.Load(); got != 0 {
+				t.Fatalf("finished POSTs before body completion = %d, want 0", got)
+			}
+
+			received, err := io.ReadAll(body)
+			if err != nil {
+				t.Fatalf("finish asynchronous body read: %v", err)
+			}
+
+			select {
+			case err := <-result:
+				t.Fatalf("upload returned before delayed body close: %v", err)
+			default:
+			}
+
+			if err := body.Close(); err != nil {
+				t.Fatalf("finish asynchronous body close: %v", err)
+			}
+			if !bytes.Equal(received, content) {
+				t.Fatalf("received %d bytes, want exact %d-byte content", len(received), len(content))
+			}
+
+			if err := <-result; err != nil {
+				t.Fatalf("sendVolumeData: %v", err)
+			}
+			if got := progressed.Load(); got != int64(len(content)) {
+				t.Fatalf("progress after attestation = %d, want %d", got, len(content))
+			}
+			if got := finished.Load(); got != 1 {
+				t.Fatalf("finished POSTs after attestation = %d, want 1", got)
 			}
 		})
 	}

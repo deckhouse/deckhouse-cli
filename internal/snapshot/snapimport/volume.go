@@ -18,9 +18,11 @@ package snapimport
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -761,6 +764,222 @@ func (c *clusterVolumeImporter) waitDataImportCompleted(
 // satisfies it, and tests stub it.
 type httpDoer interface {
 	HTTPDo(req *http.Request) (*http.Response, error)
+}
+
+type requestBodyRange struct {
+	start int64
+	end   int64
+}
+
+type requestBodyReport struct {
+	bodyRange requestBodyRange
+	expected  int64
+	consumed  int64
+	digest    [sha256.Size]byte
+	readErr   error
+	closeErr  error
+	closed    bool
+}
+
+func (r requestBodyReport) lifecycleError() error {
+	return errors.Join(r.readErr, r.closeErr)
+}
+
+func (r requestBodyReport) validateExact() error {
+	var validationErr error
+
+	rangeSize := r.bodyRange.end - r.bodyRange.start
+	if r.bodyRange.start < 0 || rangeSize < 0 || rangeSize != r.expected {
+		validationErr = fmt.Errorf(
+			"request body range [%d,%d) has size %d, want declared size %d",
+			r.bodyRange.start,
+			r.bodyRange.end,
+			rangeSize,
+			r.expected,
+		)
+	}
+
+	if r.consumed != r.expected {
+		validationErr = errors.Join(
+			validationErr,
+			fmt.Errorf(
+				"request body range [%d,%d) consumed %d bytes, want exactly %d",
+				r.bodyRange.start,
+				r.bodyRange.end,
+				r.consumed,
+				r.expected,
+			),
+		)
+	}
+
+	if !r.closed {
+		validationErr = errors.Join(validationErr, errors.New("request body did not close"))
+	}
+
+	return errors.Join(validationErr, r.lifecycleError())
+}
+
+type attestedRequestBody struct {
+	mu        sync.Mutex
+	body      io.ReadCloser
+	bodyRange requestBodyRange
+	expected  int64
+	digest    hash.Hash
+	consumed  int64
+	readErr   error
+	closeErr  error
+	closed    bool
+	closeOnce sync.Once
+	done      chan struct{}
+}
+
+func newAttestedRequestBody(body io.ReadCloser, bodyRange requestBodyRange, expected int64) *attestedRequestBody {
+	return &attestedRequestBody{
+		body:      body,
+		bodyRange: bodyRange,
+		expected:  expected,
+		digest:    sha256.New(),
+		done:      make(chan struct{}),
+	}
+}
+
+func (b *attestedRequestBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+
+	if b.closed {
+		b.mu.Unlock()
+
+		return 0, http.ErrBodyReadAfterClose
+	}
+
+	count, err := b.body.Read(p)
+	if count < 0 || count > len(p) {
+		readerErr := fmt.Errorf("request body reader returned invalid byte count %d for buffer length %d", count, len(p))
+		b.readErr = errors.Join(b.readErr, readerErr)
+		b.mu.Unlock()
+
+		return 0, readerErr
+	}
+
+	if count > 0 {
+		_, _ = b.digest.Write(p[:count])
+		b.consumed += int64(count)
+
+		if b.consumed > b.expected {
+			b.readErr = errors.Join(
+				b.readErr,
+				fmt.Errorf("request body consumed %d bytes, exceeding declared size %d", b.consumed, b.expected),
+			)
+		}
+	}
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		b.readErr = errors.Join(b.readErr, err)
+	}
+
+	b.mu.Unlock()
+
+	return count, err
+}
+
+func (b *attestedRequestBody) Close() error {
+	b.closeOnce.Do(func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+
+		b.closeErr = b.body.Close()
+		b.closed = true
+		close(b.done)
+	})
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.closeErr
+}
+
+func (b *attestedRequestBody) wait(ctx context.Context) (requestBodyReport, error) {
+	select {
+	case <-b.done:
+		return b.report(), nil
+	default:
+	}
+
+	select {
+	case <-b.done:
+		return b.report(), nil
+	case <-ctx.Done():
+		closeErr := b.Close()
+
+		return b.report(), errors.Join(ctx.Err(), closeErr)
+	}
+}
+
+func (b *attestedRequestBody) report() requestBodyReport {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	report := requestBodyReport{
+		bodyRange: b.bodyRange,
+		expected:  b.expected,
+		consumed:  b.consumed,
+		readErr:   b.readErr,
+		closeErr:  b.closeErr,
+		closed:    b.closed,
+	}
+	copy(report.digest[:], b.digest.Sum(nil))
+
+	return report
+}
+
+func doAttestedRequest(
+	client httpDoer,
+	req *http.Request,
+	bodyRange requestBodyRange,
+) (*http.Response, requestBodyReport, error) {
+	if req.ContentLength <= 0 {
+		resp, err := client.HTTPDo(req)
+		responseErr := drainAndCloseResponseBody(resp)
+		report := requestBodyReport{
+			bodyRange: bodyRange,
+			expected:  req.ContentLength,
+			digest:    sha256.Sum256(nil),
+			closed:    true,
+		}
+
+		return resp, report, errors.Join(err, responseErr)
+	}
+
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil, requestBodyReport{}, fmt.Errorf(
+			"request range [%d,%d) declares %d body bytes but has no body",
+			bodyRange.start,
+			bodyRange.end,
+			req.ContentLength,
+		)
+	}
+
+	body := newAttestedRequestBody(req.Body, bodyRange, req.ContentLength)
+	req.Body = body
+	req.GetBody = nil
+
+	resp, requestErr := client.HTTPDo(req)
+	responseErr := drainAndCloseResponseBody(resp)
+	report, waitErr := body.wait(req.Context())
+
+	return resp, report, errors.Join(requestErr, responseErr, waitErr, report.lifecycleError())
+}
+
+func drainAndCloseResponseBody(resp *http.Response) error {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+
+	_, drainErr := io.Copy(io.Discard, resp.Body)
+	closeErr := resp.Body.Close()
+	resp.Body = http.NoBody
+
+	return errors.Join(drainErr, closeErr)
 }
 
 // ErrRawBlockSizeMismatch is returned by blockTotalSize when a raw (codec
@@ -1534,15 +1753,18 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, to
 		return 0, false, fmt.Errorf("invalid PUT range [%d,%d)", offset, requestEnd)
 	}
 
-	resp, err := httpClient.HTTPDo(req)
+	resp, bodyReport, err := doAttestedRequest(httpClient, req, requestBodyRange{start: offset, end: requestEnd})
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+
 	if err != nil {
 		return 0, false, err
 	}
 
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	if resp == nil {
+		return 0, false, errors.New("PUT returned neither a response nor an error")
+	}
 
 	if resp.StatusCode == http.StatusConflict {
 		expectedStr := resp.Header.Get("X-Expected-Offset")
@@ -1568,6 +1790,10 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, to
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+	}
+
+	if err := bodyReport.validateExact(); err != nil {
+		return 0, false, fmt.Errorf("attest successful PUT body: %w", err)
 	}
 
 	wantStatus := http.StatusNoContent
