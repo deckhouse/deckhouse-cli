@@ -1091,31 +1091,6 @@ func TestPullerValidatePlatformAccess(t *testing.T) {
 	assert.Contains(t, err.Error(), "Source registry is not accessible")
 }
 
-func TestPullerValidateModulesAccess(t *testing.T) {
-	closedAddr := closedLocalAddr(t)
-
-	accessValidator := validation.NewRemoteRegistryAccessValidator()
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-
-	puller := &Puller{
-		cmd: cmd,
-		params: &params.PullParams{
-			BaseParams: params.BaseParams{
-				DeckhouseRegistryRepo: closedAddr + "/deckhouse/ee",
-				ModulesPathSuffix:     "/modules",
-			},
-		},
-		accessValidator: accessValidator,
-		validationOpts:  []validation.Option{validation.WithInsecure(true)},
-	}
-
-	err := puller.validateModulesAccess()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "Source registry is not accessible")
-}
-
 func TestPullerCreateModuleFilter(t *testing.T) {
 	// Save original global variables
 	originalWhitelist := pullflags.ModulesWhitelist

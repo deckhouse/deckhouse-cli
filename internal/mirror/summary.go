@@ -141,6 +141,10 @@ type PullSummary struct {
 	// registry path. Empty for a custom registry with no edition segment, in
 	// which case the summary omits the Edition line.
 	Edition string
+	// ModulesPath is where modules were read from in the source registry. The
+	// summary warns about it only when the path was moved off the default and
+	// modules were actually pulled. Filled by the CLI.
+	ModulesPath ModulesPathReport
 	// Elapsed is the wall-clock duration of the pull, filled by the CLI.
 	Elapsed time.Duration
 
@@ -152,4 +156,34 @@ type PullSummary struct {
 
 	// Bundle is populated by the CLI from the bundle directory (real pull only).
 	Bundle BundleStats
+}
+
+// PushSummary is the end-of-push accounting handed to the renderer. Push has no
+// per-image or version detail, so it reports which components the bundle carried
+// and how many module/package repositories and security databases were pushed.
+type PushSummary struct {
+	// Cancelled marks a graceful interrupt (Ctrl+C); the summary reflects what
+	// completed before it.
+	Cancelled bool
+	// Failed marks a hard-error abort. The summary still renders, in a FAILED
+	// state. Mutually exclusive with Cancelled.
+	Failed bool
+	// ModulesPath is where modules were written in the target registry. The
+	// summary warns about it only when the path was moved off the default and
+	// modules were actually pushed. Filled by PushService.
+	ModulesPath ModulesPathReport
+	// Elapsed is the wall-clock duration of the push, filled by the CLI.
+	Elapsed time.Duration
+
+	// PlatformPushed is true when platform layouts were pushed: the root images,
+	// release channels, or the install / install-standalone installers.
+	PlatformPushed bool
+	// InstallerPushed is true when the standalone installer repo was pushed.
+	InstallerPushed bool
+	// SecurityDatabases is the number of security database layouts pushed.
+	SecurityDatabases int
+	// Modules is the number of module repositories pushed.
+	Modules int
+	// Packages is the number of package repositories pushed.
+	Packages int
 }

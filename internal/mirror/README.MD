@@ -62,7 +62,7 @@ d8 mirror pull <images-bundle-path> [flags]
 |------|-------|-------------|
 | `--include-module` | `-i` | Whitelist specific modules. Use one flag per module. Disables `--exclude-module`. See [Module Filtering](#module-filtering) for format details |
 | `--exclude-module` | `-e` | Blacklist specific modules. Format: `module-name[@version]`. Use one flag per module. Overridden by `--include-module` |
-| `--modules-path-suffix` | | Suffix to append to source repo path to locate modules (default: `/modules`) |
+| `--modules-path-suffix` | | Registry path suffix to read modules from, relative to the source repo. Use `/` to read modules from the repo root (default: `/modules`) |
 
 #### Component Selection
 
@@ -306,6 +306,12 @@ The pull command creates a bundle with the following structure:
 
 If `--gost-digest` is specified, `.gostsum` files are created alongside each `.tar` file.
 
+### Summary
+
+After a pull, `d8 mirror` prints a framed summary of what was pulled (platform, installer, security databases, modules, packages) and the bundle size.
+
+When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pulled, the summary warns about the non-default modules path, highlighting it with a hint of the standard path so a non-standard layout is easy to spot. A default path, or a moved path that no module went through, produces no warning.
+
 ---
 
 ## d8 mirror push
@@ -346,7 +352,7 @@ d8 mirror push <images-bundle-path> <registry> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--modules-path-suffix` | Suffix to append to source repo path to locate modules (default: `/modules`) |
+| `--modules-path-suffix` | Registry path suffix to push modules to, relative to the target repo. Use `/` to push modules to the repo root (default: `/modules`) |
 
 ### Examples
 
@@ -366,6 +372,12 @@ d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse \
   --registry-password secretpassword \
   --tmp-dir /mnt/large-disk/tmp
 ```
+
+### Summary
+
+After a push, `d8 mirror` prints a framed summary of what was written to the target registry (platform, installer, security databases, module and package counts).
+
+When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pushed, the summary warns about the non-default modules path, highlighting it with a hint of the standard path. A default path, or a moved path that no module went through, produces no warning.
 
 ### Environment Variables
 

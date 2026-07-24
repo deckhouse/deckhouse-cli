@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -261,6 +260,9 @@ func (p *Puller) Execute(ctx context.Context) error {
 	_, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
 	summary.Edition = string(edition)
 
+	// Modules path for the summary warning; honors --modules-path-suffix.
+	summary.ModulesPath = mirror.BuildModulesPathReport(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+
 	// pullErr is nil for success and for a graceful Ctrl+C (which still renders a
 	// partial summary); non-nil for a hard failure (which also renders, then
 	// propagates so the exit code is non-zero).
@@ -366,7 +368,8 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 		edition = pkg.NoEdition
 	}
 
-	// Scope to the registry path and modules suffix
+	// Scope to the registry path. The modules path suffix is applied in
+	// NewService below, via WithModulesPathSuffix.
 	if p.params.RegistryPath != "" {
 		c = c.WithSegment(p.params.RegistryPath)
 	}
@@ -384,7 +387,9 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 	}
 
 	svc := mirror.NewPullService(
-		registryservice.NewService(c, edition, logger),
+		registryservice.NewService(c, edition, logger,
+			registryservice.WithModulesPathSuffix(p.params.ModulesPathSuffix),
+		),
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
@@ -451,20 +456,6 @@ func (p *Puller) validatePlatformAccess() error {
 
 	if accessErr != nil {
 		return fmt.Errorf("Source registry is not accessible: %w", accessErr)
-	}
-
-	return nil
-}
-
-// validateModulesAccess validates access to the modules registry
-func (p *Puller) validateModulesAccess() error {
-	modulesRepo := path.Join(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
-
-	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
-	defer cancel()
-
-	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
-		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
 
 	return nil

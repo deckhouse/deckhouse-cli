@@ -217,7 +217,7 @@ module-name@0.4.0 → bare version, expands to >=0.4.0 <1.0.0: keep latest patch
 		&ModulesPathSuffix,
 		"modules-path-suffix",
 		"/modules",
-		"Suffix to append to source repo path to locate modules.",
+		"Registry path suffix to read modules from, relative to the source repo. Use \"/\" to read modules from the repo root.",
 	)
 	flagSet.StringArrayVar(
 		&PackagesWhitelist,

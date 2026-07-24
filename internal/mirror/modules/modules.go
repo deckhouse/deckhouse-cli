@@ -109,8 +109,14 @@ type Service struct {
 	// See modulePullStat for what each field holds and when it is filled.
 	moduleStats map[moduleName]modulePullStat
 
-	// rootURL is the base registry URL for modules images
+	// rootURL is the edition root registry URL (without the modules segment).
 	rootURL string
+
+	// modulesPath is the registry path where modules live, relative to rootURL.
+	// Matches the scope of modulesService (default "modules", empty when modules
+	// are at the edition root, may be multi-segment like "my/mods"). Set from
+	// --modules-path-suffix.
+	modulesPath string
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -138,10 +144,9 @@ func NewService(
 	}
 
 	// rootURL must include the edition segment (e.g. .../deckhouse/fe) so that
-	// per-module references like <rootURL>/modules/<name>:<tag> resolve to the
-	// same path served by registryService.ModuleService(). registryService.GetRoot()
-	// would return the non-edition root and produce <root>/modules/<name>:<tag>,
-	// which mismatches the actual ModulesService scope.
+	// per-module references like <rootURL>/<modules-segment>/<name>:<tag> resolve
+	// to the same path served by registryService.ModuleService(). registryService.GetRoot()
+	// would return the non-edition root and mismatch the actual ModulesService scope.
 	rootURL := registryService.GetEditionRoot()
 
 	return &Service{
@@ -151,10 +156,35 @@ func NewService(
 		pullerService:       puller.NewPullerService(logger, userLogger),
 		options:             options,
 		rootURL:             rootURL,
+		modulesPath:         registryService.GetModulesPath(),
 		moduleStats:         make(map[moduleName]modulePullStat),
 		logger:              logger,
 		userLogger:          userLogger,
 	}
+}
+
+// moduleRegistryPath builds a source-registry reference under the modules path,
+// joining rootURL, modulesPath and elem with "/". An empty modulesPath
+// (--modules-path-suffix "/") places modules at the edition root. Elements are
+// path components; append ":<tag>" to the result separately.
+//
+// With rootURL "registry.example.com/deckhouse/ee":
+//   - modulesPath "modules" (default):
+//     moduleRegistryPath("csi")            -> ".../deckhouse/ee/modules/csi"
+//     moduleRegistryPath("csi", "release") -> ".../deckhouse/ee/modules/csi/release"
+//   - modulesPath "" (suffix "/"):
+//     moduleRegistryPath("csi")            -> ".../deckhouse/ee/csi"
+func (svc *Service) moduleRegistryPath(elem ...string) string {
+	parts := make([]string, 0, len(elem)+2)
+	parts = append(parts, svc.rootURL)
+
+	if svc.modulesPath != "" {
+		parts = append(parts, svc.modulesPath)
+	}
+
+	parts = append(parts, elem...)
+
+	return strings.Join(parts, "/")
 }
 
 // PullModules pulls the Deckhouse modules
@@ -237,7 +267,7 @@ func (svc *Service) pullModules(ctx context.Context) error {
 	for _, moduleName := range moduleNames {
 		mod := &Module{
 			Name:         moduleName,
-			RegistryPath: filepath.Join(svc.rootURL, "modules", moduleName),
+			RegistryPath: svc.moduleRegistryPath(moduleName),
 		}
 		if svc.options.Filter.Match(mod) {
 			filteredModules = append(filteredModules, moduleData{
@@ -365,7 +395,7 @@ func isContextErr(err error) bool {
 }
 
 func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) error {
-	downloadList := NewImageDownloadList(filepath.Join(svc.rootURL, "modules", module.name))
+	downloadList := NewImageDownloadList(svc.moduleRegistryPath(module.name))
 	svc.modulesDownloadList.list[module.name] = downloadList
 
 	channelVersions, err := svc.discoverChannelVersions(ctx, module.name, downloadList)
@@ -394,7 +424,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		// are not resolved in dry-run (they require a real pull), so the
 		// per-module count stays "release channels + versions".
 		for _, version := range moduleVersions {
-			downloadList.Module[svc.rootURL+"/modules/"+module.name+":"+version] = nil
+			downloadList.Module[svc.moduleRegistryPath(module.name)+":"+version] = nil
 		}
 
 		return nil
@@ -429,12 +459,12 @@ func (svc *Service) discoverChannelVersions(ctx context.Context, moduleName stri
 	}
 
 	for _, channel := range internal.GetAllDefaultReleaseChannels() {
-		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+channel] = nil
+		downloadList.ModuleReleaseChannels[svc.moduleRegistryPath(moduleName, "release")+":"+channel] = nil
 	}
 
 	// Add LTS channel if it exists
 	if err := svc.modulesService.Module(moduleName).ReleaseChannels().CheckImageExists(ctx, internal.LTSChannel); err == nil {
-		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+internal.LTSChannel] = nil
+		downloadList.ModuleReleaseChannels[svc.moduleRegistryPath(moduleName, "release")+":"+internal.LTSChannel] = nil
 	}
 
 	if !svc.options.DryRun {
@@ -597,7 +627,7 @@ func (svc *Service) printDryRunPlan(moduleName string, downloadList *ImageDownlo
 	}
 
 	for _, version := range versions {
-		svc.userLogger.InfoLn("  " + svc.rootURL + "/modules/" + moduleName + ":" + version)
+		svc.userLogger.InfoLn("  " + svc.moduleRegistryPath(moduleName) + ":" + version)
 	}
 
 	if len(versions) > 0 {
@@ -614,7 +644,7 @@ func (svc *Service) pullModuleImages(ctx context.Context, moduleName string, ver
 	}
 
 	for _, version := range versions {
-		downloadList.Module[svc.rootURL+"/modules/"+moduleName+":"+version] = nil
+		downloadList.Module[svc.moduleRegistryPath(moduleName)+":"+version] = nil
 	}
 
 	config := puller.PullConfig{
@@ -642,8 +672,8 @@ func (svc *Service) pullReleaseVersionImages(ctx context.Context, moduleName str
 
 	releaseVersionSet := make(map[string]*puller.ImageMeta)
 	for _, version := range versions {
-		releaseVersionSet[svc.rootURL+"/modules/"+moduleName+"/release:"+version] = nil
-		downloadList.ModuleReleaseChannels[svc.rootURL+"/modules/"+moduleName+"/release:"+version] = nil
+		releaseVersionSet[svc.moduleRegistryPath(moduleName, "release")+":"+version] = nil
+		downloadList.ModuleReleaseChannels[svc.moduleRegistryPath(moduleName, "release")+":"+version] = nil
 	}
 
 	config := puller.PullConfig{
@@ -921,7 +951,7 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 			}
 
 			// Extra images go under: modules/<name>/extra/<extra-name>:<tag>
-			fullImagePath := svc.rootURL + "/modules/" + moduleName + "/extra/" + imageName + ":" + imageTag
+			fullImagePath := svc.moduleRegistryPath(moduleName, "extra", imageName) + ":" + imageTag
 
 			extraImages[imageName] = append(extraImages[imageName], extraImageInfo{
 				Name:    imageName,
@@ -970,7 +1000,7 @@ func (svc *Service) extractInternalDigestImages(ctx context.Context, moduleName 
 
 	var digestRefs []string
 
-	moduleRepo := svc.rootURL + "/modules/" + moduleName
+	moduleRepo := svc.moduleRegistryPath(moduleName)
 
 	for _, version := range versions {
 		// Skip digest references
