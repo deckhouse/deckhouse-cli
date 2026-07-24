@@ -19,6 +19,7 @@ package restore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -218,6 +219,93 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	addSSAReactor(dyn)
 
 	return dyn
+}
+
+type dynamicRequestInterceptor func(context.Context, string, schema.GroupVersionResource, string, string) error
+
+type interceptingDynamicClient struct {
+	dynamic.Interface
+	intercept dynamicRequestInterceptor
+}
+
+func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	resource := c.Interface.Resource(gvr)
+
+	return &interceptingNamespaceableResource{
+		NamespaceableResourceInterface: resource,
+		gvr:                            gvr,
+		intercept:                      c.intercept,
+	}
+}
+
+type interceptingNamespaceableResource struct {
+	dynamic.NamespaceableResourceInterface
+	gvr       schema.GroupVersionResource
+	intercept dynamicRequestInterceptor
+}
+
+func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.ResourceInterface {
+	return &interceptingResource{
+		ResourceInterface: r.NamespaceableResourceInterface.Namespace(namespace),
+		gvr:               r.gvr,
+		namespace:         namespace,
+		intercept:         r.intercept,
+	}
+}
+
+func (r *interceptingNamespaceableResource) Get(
+	ctx context.Context,
+	name string,
+	opts metav1.GetOptions,
+	subresources ...string,
+) (*unstructured.Unstructured, error) {
+	if err := r.intercept(ctx, "get", r.gvr, "", name); err != nil {
+		return nil, err
+	}
+
+	return r.NamespaceableResourceInterface.Get(ctx, name, opts, subresources...)
+}
+
+func (r *interceptingNamespaceableResource) List(
+	ctx context.Context,
+	opts metav1.ListOptions,
+) (*unstructured.UnstructuredList, error) {
+	if err := r.intercept(ctx, "list", r.gvr, "", ""); err != nil {
+		return nil, err
+	}
+
+	return r.NamespaceableResourceInterface.List(ctx, opts)
+}
+
+type interceptingResource struct {
+	dynamic.ResourceInterface
+	gvr       schema.GroupVersionResource
+	namespace string
+	intercept dynamicRequestInterceptor
+}
+
+func (r *interceptingResource) Get(
+	ctx context.Context,
+	name string,
+	opts metav1.GetOptions,
+	subresources ...string,
+) (*unstructured.Unstructured, error) {
+	if err := r.intercept(ctx, "get", r.gvr, r.namespace, name); err != nil {
+		return nil, err
+	}
+
+	return r.ResourceInterface.Get(ctx, name, opts, subresources...)
+}
+
+func (r *interceptingResource) List(
+	ctx context.Context,
+	opts metav1.ListOptions,
+) (*unstructured.UnstructuredList, error) {
+	if err := r.intercept(ctx, "list", r.gvr, r.namespace, ""); err != nil {
+		return nil, err
+	}
+
+	return r.ResourceInterface.List(ctx, opts)
 }
 
 func discardLogger() *slog.Logger {
@@ -625,6 +713,10 @@ func TestRun_WaitTimeout(t *testing.T) {
 	if !contains(err.Error(), "Bound") {
 		t.Errorf("error %q does not mention Bound", err.Error())
 	}
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %q does not wrap context.DeadlineExceeded", err.Error())
+	}
 }
 
 // TestRun_Wait_WFFCHealthyStates verifies the only two accepted WFFC states:
@@ -658,7 +750,7 @@ func TestRun_Wait_WFFCHealthyStates(t *testing.T) {
 			cfg := baseConfig(src, dyn)
 			cfg.Log = slog.New(capture)
 			cfg.Wait = true
-			cfg.Timeout = time.Nanosecond
+			cfg.Timeout = time.Second
 
 			if err := Run(context.Background(), cfg); err != nil {
 				t.Fatalf("Run with a healthy WFFC PVC in phase %s: %v", tc.phase, err)
@@ -812,11 +904,8 @@ func TestRun_Wait_InvalidPVCStatesFailClosed(t *testing.T) {
 }
 
 // TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited seeds one WFFC-Pending PVC
-// ahead of one already-Bound Immediate PVC in the manifest array and uses a
-// microscopic timeout: under the pre-fix behavior, waitOnePVCBound would poll the WFFC
-// PVC first, exhaust the whole (tiny) shared deadline on it, and never even reach the
-// Immediate PVC. The fix must skip the WFFC PVC without touching the deadline, leaving
-// the full budget available for the Immediate PVC's (already-satisfied) check.
+// ahead of one already-Bound Immediate PVC. The WFFC PVC must be checked once without
+// polling, leaving the shared remaining budget available for the Immediate PVC.
 func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 	wffcSC := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
 	immediateSC := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
@@ -838,7 +927,7 @@ func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
-	cfg.Timeout = time.Millisecond
+	cfg.Timeout = time.Second
 
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run with a mixed WFFC/Immediate PVC set: %v", err)
@@ -858,7 +947,7 @@ func TestRun_Wait_EmptyStorageClassName_ResolvesDefault(t *testing.T) {
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
-	cfg.Timeout = time.Nanosecond
+	cfg.Timeout = time.Second
 
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run with an empty storageClassName resolving to a WFFC default: %v", err)
@@ -908,6 +997,260 @@ func TestRun_Wait_BindingModeCachedPerStorageClass(t *testing.T) {
 
 	if scCalls != 1 {
 		t.Errorf("expected exactly 1 StorageClass API call for 2 PVCs on the same class, got %d", scCalls)
+	}
+}
+
+func TestRun_WaitBlockedAPICallsHonorTimeout(t *testing.T) {
+	tests := []struct {
+		name             string
+		storageClassName string
+		bindingMode      string
+		blockGVR         schema.GroupVersionResource
+		blockVerb        string
+		wantError        string
+	}{
+		{
+			name:             "StorageClass Get",
+			storageClassName: "blocked-sc",
+			blockGVR:         scGVR,
+			blockVerb:        "get",
+			wantError:        "StorageClass \"blocked-sc\"",
+		},
+		{
+			name:      "default StorageClass List",
+			blockGVR:  scGVR,
+			blockVerb: "list",
+			wantError: "listing StorageClasses",
+		},
+		{
+			name:             "WFFC PVC Get",
+			storageClassName: "wffc-sc",
+			bindingMode:      volumeBindingModeWFC,
+			blockGVR:         pvcGVR,
+			blockVerb:        "get",
+			wantError:        "PVC default/pvc-blocked",
+		},
+		{
+			name:             "Immediate PVC Get",
+			storageClassName: "immediate-sc",
+			bindingMode:      volumeBindingModeImmediate,
+			blockGVR:         pvcGVR,
+			blockVerb:        "get",
+			wantError:        "PVC default/pvc-blocked",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := []runtime.Object{readySnapshot(), readyVolumeSnapshot("vs-1")}
+			if tc.bindingMode != "" {
+				objects = append(objects, storageClassObj(tc.storageClassName, tc.bindingMode, false))
+			}
+
+			baseDynamic := newFakeDynamic(objects...)
+			entered := make(chan struct{})
+			returned := make(chan struct{})
+			var enterOnce sync.Once
+			var returnOnce sync.Once
+
+			dyn := &interceptingDynamicClient{
+				Interface: baseDynamic,
+				intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, _ string) error {
+					if verb != tc.blockVerb || gvr != tc.blockGVR {
+						return nil
+					}
+
+					enterOnce.Do(func() {
+						close(entered)
+					})
+					defer returnOnce.Do(func() {
+						close(returned)
+					})
+
+					<-ctx.Done()
+
+					return ctx.Err()
+				},
+			}
+
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-blocked", pvcPhasePending, tc.storageClassName))}
+			cfg := baseConfig(src, dyn)
+			cfg.Wait = true
+			cfg.Timeout = 150 * time.Millisecond
+
+			result := make(chan error, 1)
+			go func() {
+				result <- Run(context.Background(), cfg)
+			}()
+
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("wait API request did not reach the blocking interceptor")
+			}
+
+			var err error
+
+			select {
+			case err = <-result:
+			case <-time.After(5 * time.Second):
+				t.Fatal("restore did not return after its wait timeout")
+			}
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if !contains(err.Error(), tc.wantError) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantError)
+			}
+
+			select {
+			case <-returned:
+			default:
+				t.Fatal("blocked API call did not return before Run completed")
+			}
+		})
+	}
+}
+
+func TestRun_WaitParentCancellationPreservesCause(t *testing.T) {
+	baseDynamic := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+	entered := make(chan struct{})
+	returned := make(chan struct{})
+	var enterOnce sync.Once
+	var returnOnce sync.Once
+
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, _ string) error {
+			if verb != "get" || gvr != scGVR {
+				return nil
+			}
+
+			enterOnce.Do(func() {
+				close(entered)
+			})
+			defer returnOnce.Do(func() {
+				close(returned)
+			})
+
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+	}
+
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-canceled", pvcPhasePending, "blocked-sc"))}
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Hour
+
+	parentCtx, cancel := context.WithCancelCause(context.Background())
+	result := make(chan error, 1)
+
+	go func() {
+		result <- Run(parentCtx, cfg)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait API request did not reach the blocking interceptor")
+	}
+
+	parentCause := errors.New("operator canceled restore")
+	cancel(parentCause)
+
+	var err error
+
+	select {
+	case err = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore did not return after parent cancellation")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error = %v, want context.Canceled", err)
+	}
+
+	if !errors.Is(err, parentCause) {
+		t.Errorf("Run error = %v, want parent cancellation cause", err)
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run error = %v, do not want context.DeadlineExceeded", err)
+	}
+
+	select {
+	case <-returned:
+	default:
+		t.Fatal("blocked API call did not return before Run completed")
+	}
+}
+
+func TestRun_WaitMultiplePVCsShareOneDeadline(t *testing.T) {
+	firstSC := storageClassObj("first-sc", volumeBindingModeImmediate, false)
+	secondSC := storageClassObj("second-sc", volumeBindingModeImmediate, false)
+	firstPVC := restoredPVCObject("pvc-first", pvcPhaseBound, "first-sc", false)
+	secondPVC := restoredPVCObject("pvc-second", pvcPhaseBound, "second-sc", false)
+	baseDynamic := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		firstSC,
+		secondSC,
+		firstPVC,
+		secondPVC,
+	)
+
+	var (
+		deadlineMu sync.Mutex
+		deadlines  []time.Time
+	)
+
+	dyn := &interceptingDynamicClient{
+		Interface: baseDynamic,
+		intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, _ string) error {
+			if verb != "get" || (gvr != scGVR && gvr != pvcGVR) {
+				return nil
+			}
+
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("wait API request has no deadline")
+			}
+
+			deadlineMu.Lock()
+			deadlines = append(deadlines, deadline)
+			deadlineMu.Unlock()
+
+			return nil
+		},
+	}
+
+	src := &stubSource{body: mustArray(t,
+		pvcManifestSC("pvc-first", "", "first-sc"),
+		pvcManifestSC("pvc-second", "", "second-sc"),
+	)}
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Minute
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with two Bound PVCs: %v", err)
+	}
+
+	deadlineMu.Lock()
+	defer deadlineMu.Unlock()
+
+	if len(deadlines) != 4 {
+		t.Fatalf("wait API deadline count = %d, want 4", len(deadlines))
+	}
+
+	for i := 1; i < len(deadlines); i++ {
+		if !deadlines[i].Equal(deadlines[0]) {
+			t.Errorf("wait API deadline %d = %s, want shared deadline %s", i, deadlines[i], deadlines[0])
+		}
 	}
 }
 

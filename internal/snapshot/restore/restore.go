@@ -32,6 +32,7 @@ package restore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -53,6 +54,7 @@ import (
 const (
 	snapshotKind = "Snapshot"
 	pvcKind      = "PersistentVolumeClaim"
+	pvcResource  = "persistentvolumeclaims"
 
 	// fieldManager is the SSA field manager name used for all restore applies.
 	fieldManager = "d8-snapshot-restore"
@@ -67,10 +69,10 @@ const (
 	// determined by status.readyToUse (bool), not by conditions.
 	volumeSnapshotGroup = "snapshot.storage.k8s.io"
 
-	// storageClassKind and storageClassGroup identify the cluster-scoped
-	// StorageClass resource used to resolve a PVC's effective volumeBindingMode.
-	storageClassKind  = "StorageClass"
-	storageClassGroup = "storage.k8s.io"
+	// storageClassGroup and storageClassResource identify the cluster-scoped
+	// StorageClass API used to resolve a PVC's effective volumeBindingMode.
+	storageClassGroup    = "storage.k8s.io"
+	storageClassResource = "storageclasses"
 
 	// volumeBindingModeWFC marks a StorageClass whose PVCs are, by design, left
 	// Pending until a Pod schedules against them: provisioning does not even
@@ -618,19 +620,14 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		return nil
 	}
 
-	gvr, _, err := cfg.resourceFor(schema.GroupVersionKind{Version: "v1", Kind: pvcKind})
-	if err != nil {
-		return fmt.Errorf("resolve PersistentVolumeClaim resource: %w", err)
-	}
+	waitCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 
-	scGVR, _, err := cfg.resourceFor(schema.GroupVersionKind{Group: storageClassGroup, Version: "v1", Kind: storageClassKind})
-	if err != nil {
-		return fmt.Errorf("resolve StorageClass resource: %w", err)
-	}
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
+	scGVR := schema.GroupVersionResource{Group: storageClassGroup, Version: "v1", Resource: storageClassResource}
 
 	cfg.Log.Info("waiting for restored PVCs to bind", slog.Int("count", len(pvcs)))
 
-	deadline := time.Now().Add(cfg.Timeout)
 	bindingModes := make(map[string]string)
 
 	var (
@@ -639,13 +636,13 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	)
 
 	for _, ref := range pvcs {
-		mode, err := resolveVolumeBindingMode(ctx, cfg, scGVR, ref.storageClassName, bindingModes)
+		mode, err := resolveVolumeBindingMode(waitCtx, cfg, scGVR, ref.storageClassName, bindingModes)
 		if err != nil {
 			return fmt.Errorf("resolve volume binding mode for PVC %s/%s: %w", ref.namespace, ref.name, err)
 		}
 
 		if mode == volumeBindingModeWFC {
-			if err := checkWFFCPVCOnce(ctx, cfg, gvr, ref); err != nil {
+			if err := checkWFFCPVCOnce(waitCtx, cfg, gvr, ref); err != nil {
 				return err
 			}
 
@@ -654,7 +651,7 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 			continue
 		}
 
-		if err := waitOnePVCBound(ctx, cfg, gvr, ref, deadline); err != nil {
+		if err := waitOnePVCBound(waitCtx, cfg, gvr, ref); err != nil {
 			return err
 		}
 
@@ -692,6 +689,10 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 	if className != "" {
 		sc, err = cfg.Dynamic.Resource(scGVR).Get(ctx, className, metav1.GetOptions{})
 		if err != nil {
+			if ctxErr := waitContextError(ctx, fmt.Sprintf("getting StorageClass %q", className)); ctxErr != nil {
+				return "", ctxErr
+			}
+
 			return "", fmt.Errorf("get StorageClass %q: %w", className, err)
 		}
 	} else {
@@ -725,6 +726,10 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.GroupVersionResource) (*unstructured.Unstructured, error) {
 	list, err := cfg.Dynamic.Resource(scGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
+		if ctxErr := waitContextError(ctx, "listing StorageClasses to resolve the default"); ctxErr != nil {
+			return nil, ctxErr
+		}
+
 		return nil, fmt.Errorf("list StorageClasses: %w", err)
 	}
 
@@ -767,8 +772,8 @@ func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionRe
 }
 
 // waitOnePVCBound polls a single non-terminating Pending PVC until it is Bound or the
-// shared deadline passes. Every other observed state is terminal for restore waiting.
-func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef, deadline time.Time) error {
+// shared wait context expires. Every other observed state is terminal for restore waiting.
+func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) error {
 	for {
 		phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
 		if err != nil {
@@ -784,12 +789,11 @@ func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 			return nil
 		}
 
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for PVC %s/%s to become Bound; observed phase %q", ref.namespace, ref.name, phase)
-		}
-
 		if !sleepCtx(ctx, cfg.PollInterval) {
-			return ctx.Err()
+			return waitContextError(
+				ctx,
+				fmt.Sprintf("waiting for PVC %s/%s to become Bound; observed phase %q", ref.namespace, ref.name, phase),
+			)
 		}
 	}
 }
@@ -801,6 +805,10 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 	}
 
 	if err != nil {
+		if ctxErr := waitContextError(ctx, fmt.Sprintf("getting restored PVC %s/%s", ref.namespace, ref.name)); ctxErr != nil {
+			return "", ctxErr
+		}
+
 		return "", fmt.Errorf("get restored PVC %s/%s: %w", ref.namespace, ref.name, err)
 	}
 
@@ -834,6 +842,24 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 	default:
 		return "", fmt.Errorf("restored PVC %s/%s has unrecognized phase %q", ref.namespace, ref.name, phase)
 	}
+}
+
+func waitContextError(ctx context.Context, phase string) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("restore wait timeout while %s: %w", phase, err)
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil && !errors.Is(cause, err) {
+		err = errors.Join(err, cause)
+	}
+
+	return fmt.Errorf("restore wait canceled while %s: %w", phase, err)
 }
 
 // resourceFor resolves a GVK to its resource and whether it is namespaced.
@@ -1144,10 +1170,13 @@ func decodeManifestArray(data []byte) ([]unstructured.Unstructured, error) {
 
 // sleepCtx sleeps for d or returns false if ctx is cancelled first.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	}
 }
