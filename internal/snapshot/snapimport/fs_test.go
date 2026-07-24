@@ -32,11 +32,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -110,6 +112,17 @@ func (zeroReader) Read(p []byte) (int, error) {
 	clear(p)
 
 	return len(p), nil
+}
+
+func countOpenFSTarTestDescriptors() (int, bool) {
+	for _, descriptorPath := range []string{"/dev/fd", "/proc/self/fd"} {
+		entries, err := os.ReadDir(descriptorPath)
+		if err == nil {
+			return len(entries), true
+		}
+	}
+
+	return 0, false
 }
 
 func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
@@ -1137,17 +1150,458 @@ func TestScanFSTar_AcceptsStructuralDirectoryChain(t *testing.T) {
 		t.Fatalf("write data.tar: %v", err)
 	}
 
-	scan, err := scanFSTar(tarPath)
+	scan, err := scanFSTar(context.Background(), tarPath)
 	if err != nil {
 		t.Fatalf("scanFSTar: %v", err)
 	}
 
-	if got, want := scan.RegularPaths, []string{"dir/nested/file.txt"}; !slices.Equal(got, want) {
-		t.Errorf("regular paths = %v, want %v", got, want)
+	t.Cleanup(func() {
+		if err := scan.Close(); err != nil {
+			t.Errorf("close scan: %v", err)
+		}
+	})
+
+	if scan.regularCount != 1 {
+		t.Errorf("regular count = %d, want 1", scan.regularCount)
 	}
 
 	if scan.StructuralDirectoryCount != 2 {
 		t.Errorf("structural directory count = %d, want 2", scan.StructuralDirectoryCount)
+	}
+}
+
+func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *testing.T) {
+	const entryCount = 1_000_000
+	const structuralDirectoryCount = entryCount / 2
+
+	tempDir, err := os.MkdirTemp(t.TempDir(), "inventory-*")
+	if err != nil {
+		t.Fatalf("create inventory directory: %v", err)
+	}
+
+	options := defaultFSTarIndexOptions()
+	builder := newFSTarRunBuilder(context.Background(), tempDir, options)
+
+	baselineFDs, fdCountSupported := countOpenFSTarTestDescriptors()
+
+	var peakFDs atomic.Int64
+	stopSampling := make(chan struct{})
+	samplingDone := make(chan struct{})
+	var stopSamplingOnce sync.Once
+
+	if fdCountSupported {
+		go func() {
+			defer close(samplingDone)
+
+			ticker := time.NewTicker(time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-stopSampling:
+					return
+				case <-ticker.C:
+					if count, ok := countOpenFSTarTestDescriptors(); ok {
+						for {
+							current := peakFDs.Load()
+							if int64(count) <= current || peakFDs.CompareAndSwap(current, int64(count)) {
+								break
+							}
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	stopDescriptorSampling := func() {
+		if !fdCountSupported {
+			return
+		}
+
+		stopSamplingOnce.Do(func() {
+			close(stopSampling)
+			<-samplingDone
+		})
+	}
+	t.Cleanup(stopDescriptorSampling)
+
+	var retainedAfterSmall uint64
+	for i := range entryCount {
+		group := structuralDirectoryCount - i/2
+		record := fsTarRecord{
+			Ordinal: uint64(i),
+		}
+		if i%2 == 0 {
+			record.Path = fmt.Sprintf("tree/%09d", group)
+			record.Kind = fsTarRecordDirectory
+		} else {
+			record.Path = fmt.Sprintf("tree/%09d/file", group)
+			record.Kind = fsTarRecordRegular
+		}
+
+		if err := builder.Add(record); err != nil {
+			t.Fatalf("add record %d: %v", i, err)
+		}
+
+		if i == 19_999 {
+			runtime.GC()
+
+			var memory runtime.MemStats
+			runtime.ReadMemStats(&memory)
+			retainedAfterSmall = memory.HeapAlloc
+		}
+	}
+
+	runtime.GC()
+
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+
+	const maxCountDependentHeapGrowth = 8 << 20
+	if memory.HeapAlloc > retainedAfterSmall+maxCountDependentHeapGrowth {
+		t.Fatalf("retained heap grew by %d bytes from 20k to 1m entries, want at most %d",
+			memory.HeapAlloc-retainedAfterSmall, maxCountDependentHeapGrowth)
+	}
+
+	sortedPath, err := builder.Finalize()
+	if err != nil {
+		t.Fatalf("finalize million-entry inventory: %v", err)
+	}
+
+	gotStructuralDirectories, err := validateSortedFSTar(context.Background(), sortedPath)
+	if err != nil {
+		t.Fatalf("validate million-entry inventory: %v", err)
+	}
+
+	if gotStructuralDirectories != structuralDirectoryCount {
+		t.Fatalf("structural directory count = %d, want %d",
+			gotStructuralDirectories, structuralDirectoryCount)
+	}
+
+	if fdCountSupported {
+		stopDescriptorSampling()
+
+		const maxAdditionalFDs = fsTarMergeFanIn + 3
+		if additional := int(peakFDs.Load()) - baselineFDs; additional > maxAdditionalFDs {
+			t.Fatalf("peak additional descriptors = %d, want at most %d", additional, maxAdditionalFDs)
+		}
+	}
+
+	runtime.GC()
+
+	var regressionBaseline runtime.MemStats
+	runtime.ReadMemStats(&regressionBaseline)
+
+	const regressionEntryCount = 250_000
+	regressionMap := make(map[string]struct{}, regressionEntryCount)
+	regressionSlice := make([]string, 0, regressionEntryCount)
+	for i := range regressionEntryCount {
+		entryPath := fmt.Sprintf("regression/%09d/file", i)
+		regressionMap[entryPath] = struct{}{}
+		regressionSlice = append(regressionSlice, entryPath)
+	}
+
+	runtime.GC()
+
+	var regressionMemory runtime.MemStats
+	runtime.ReadMemStats(&regressionMemory)
+	runtime.KeepAlive(regressionMap)
+	runtime.KeepAlive(regressionSlice)
+
+	regressionHeapGrowth := int64(regressionMemory.HeapAlloc) - int64(regressionBaseline.HeapAlloc)
+	if regressionHeapGrowth <= maxCountDependentHeapGrowth {
+		t.Fatalf("map+slice regression retained only %d bytes; heap assertion is not discriminating",
+			regressionHeapGrowth)
+	}
+}
+
+func TestFSTarPreflightInventory_DetectsConflictsAcrossSortRuns(t *testing.T) {
+	tests := []struct {
+		name      string
+		firstPath string
+		lastPath  string
+		firstKind fsTarRecordKind
+		lastKind  fsTarRecordKind
+		want      string
+	}{
+		{
+			name:      "duplicate regular path",
+			firstPath: "conflict",
+			lastPath:  "conflict",
+			firstKind: fsTarRecordRegular,
+			lastKind:  fsTarRecordRegular,
+			want:      `duplicate normalized original path "conflict"`,
+		},
+		{
+			name:      "regular path prefix conflict",
+			firstPath: "conflict",
+			lastPath:  "conflict/child",
+			firstKind: fsTarRecordRegular,
+			lastKind:  fsTarRecordRegular,
+			want:      `regular path "conflict" is an ancestor`,
+		},
+		{
+			name:      "regular path conflicts with descendant directory",
+			firstPath: "conflict",
+			lastPath:  "conflict/child",
+			firstKind: fsTarRecordRegular,
+			lastKind:  fsTarRecordDirectory,
+			want:      `regular path "conflict" conflicts with directory path "conflict/child"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir, err := os.MkdirTemp(t.TempDir(), "inventory-*")
+			if err != nil {
+				t.Fatalf("create inventory directory: %v", err)
+			}
+
+			builder := newFSTarRunBuilder(context.Background(), tempDir, defaultFSTarIndexOptions())
+			for i := range fsTarRunMaxRecords + 2 {
+				recordPath := fmt.Sprintf("middle/%08d", i)
+				recordKind := fsTarRecordRegular
+				if i == 0 {
+					recordPath = tc.firstPath
+					recordKind = tc.firstKind
+				}
+
+				if i == fsTarRunMaxRecords+1 {
+					recordPath = tc.lastPath
+					recordKind = tc.lastKind
+				}
+
+				if err := builder.Add(fsTarRecord{
+					Path:    recordPath,
+					Ordinal: uint64(i),
+					Kind:    recordKind,
+				}); err != nil {
+					t.Fatalf("add record %d: %v", i, err)
+				}
+			}
+
+			sortedPath, err := builder.Finalize()
+			if err != nil {
+				t.Fatalf("finalize inventory: %v", err)
+			}
+
+			_, err = validateSortedFSTar(context.Background(), sortedPath)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateSortedFSTar error = %v, want ErrInvalidFSMetadata containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFSTarPreflightInventory_PrivatePermissionsAndCleanup(t *testing.T) {
+	tarPath := writeSingleEntryFSTar(t, "none", []byte("private inventory"))
+
+	scan, err := scanFSTar(context.Background(), tarPath)
+	if err != nil {
+		t.Fatalf("scanFSTar: %v", err)
+	}
+
+	tempDir := scan.tempDir
+	info, err := os.Stat(tempDir)
+	if err != nil {
+		t.Fatalf("stat inventory directory: %v", err)
+	}
+
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("inventory directory permissions = %04o, want 0700", got)
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("read inventory directory: %v", err)
+	}
+
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatalf("stat inventory file %s: %v", entry.Name(), err)
+		}
+
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("inventory file %s permissions = %04o, want 0600", entry.Name(), got)
+		}
+	}
+
+	if err := scan.Close(); err != nil {
+		t.Fatalf("close scan: %v", err)
+	}
+
+	if _, err := os.Stat(tempDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inventory directory remains after Close: %v", err)
+	}
+
+	if err := scan.Close(); err != nil {
+		t.Fatalf("second Close is not idempotent: %v", err)
+	}
+}
+
+func TestFSTarPreflightInventory_TempFailuresCleanUp(t *testing.T) {
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryMetadata(t, tarWriter, "file", "file", "none", 0, nil, 0o600, 0, 0, time.Time{})
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		options func(string) fsTarIndexOptions
+	}{
+		{
+			name: "temp file creation",
+			options: func(root string) fsTarIndexOptions {
+				options := defaultFSTarIndexOptions()
+				options.tempRoot = root
+				options.createTemp = func(string, string) (*os.File, error) {
+					return nil, syscall.ENOSPC
+				}
+
+				return options
+			},
+		},
+		{
+			name: "sort run write",
+			options: func(root string) fsTarIndexOptions {
+				options := defaultFSTarIndexOptions()
+				options.tempRoot = root
+				options.writeRecord = func(io.Writer, fsTarRecord) error {
+					return syscall.ENOSPC
+				}
+
+				return options
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			_, err := scanFSTarReaderWithOptions(
+				context.Background(),
+				tar.NewReader(bytes.NewReader(tarBuffer.Bytes())),
+				"data.tar",
+				tc.options(root),
+			)
+			if !errors.Is(err, syscall.ENOSPC) {
+				t.Fatalf("scan error = %v, want ENOSPC", err)
+			}
+
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatalf("read temp root: %v", err)
+			}
+
+			if len(entries) != 0 {
+				t.Fatalf("temporary inventory leaked after failure: %v", entries)
+			}
+		})
+	}
+}
+
+func TestFSTarPreflightInventory_CancellationCleansUpBeforeHTTP(t *testing.T) {
+	tarPath := writeSingleEntryFSTar(t, "none", []byte("cancelled"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	doer := &failOnHTTPDoer{}
+	err := importFSFromTar(ctx, doer, "https://import.invalid", tarPath, discardLogger(), nil, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("importFSFromTar error = %v, want context.Canceled", err)
+	}
+
+	if doer.called {
+		t.Fatal("cancelled preflight issued an HTTP request")
+	}
+}
+
+func TestFSTarPreflightInventory_RejectsOversizedPathBeforeHTTP(t *testing.T) {
+	oversized := strings.Repeat("x", fsTarMaxPathBytes+1)
+
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryRawPAX(t, tarWriter, oversized, oversized, "none", 0, nil)
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuffer.Bytes(), 0o600); err != nil {
+		t.Fatalf("write tar: %v", err)
+	}
+
+	doer := &failOnHTTPDoer{}
+	err := importFSFromTar(
+		context.Background(),
+		doer,
+		"https://import.invalid",
+		tarPath,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, archive.ErrInvalidFSMetadata) ||
+		!strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", fsTarMaxPathBytes)) {
+		t.Fatalf("importFSFromTar error = %v, want oversized-path ErrInvalidFSMetadata", err)
+	}
+
+	if doer.called {
+		t.Fatal("oversized path preflight issued an HTTP request")
+	}
+}
+
+func TestFSTarPreflightInventory_RejectsMalformedPAXBeforeHTTP(t *testing.T) {
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryRawPAX(t, tarWriter, "file", "file", "none", 0, nil)
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	tarData := tarBuffer.Bytes()
+	keyOffset := bytes.Index(tarData, []byte(archive.PAXFSCodec+"=none\n"))
+	if keyOffset < 0 {
+		t.Fatal("PAX codec record not found in fixture")
+	}
+
+	recordStart := keyOffset
+	for recordStart > 0 && tarData[recordStart-1] != '\n' && tarData[recordStart-1] != 0 {
+		recordStart--
+	}
+
+	tarData[recordStart] = 'x'
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarData, 0o600); err != nil {
+		t.Fatalf("write malformed PAX tar: %v", err)
+	}
+
+	doer := &failOnHTTPDoer{}
+	err := importFSFromTar(
+		context.Background(),
+		doer,
+		"https://import.invalid",
+		tarPath,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "PAX") {
+		t.Fatalf("importFSFromTar error = %v, want malformed PAX failure", err)
+	}
+
+	if doer.called {
+		t.Fatal("malformed PAX preflight issued an HTTP request")
 	}
 }
 
@@ -1264,6 +1718,242 @@ func TestImportFSFromTar_RejectsUnsupportedEntriesBeforeHTTP(t *testing.T) {
 
 			if doer.called {
 				t.Fatal("unsupported full-tar preflight must run before HTTP")
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_PreflightPreservesArchiveOrderAcrossSortRuns(t *testing.T) {
+	const entryCount = fsTarRunMaxRecords + 257
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	tarFile, err := os.OpenFile(tarPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("create tar: %v", err)
+	}
+
+	tarWriter := tar.NewWriter(tarFile)
+	for i := range entryCount {
+		originalPath := fmt.Sprintf("files/%05d", entryCount-i)
+		addTarEntryMetadata(t, tarWriter, originalPath, originalPath, "none", 0, nil, 0o600, 1, 2, time.Time{})
+	}
+
+	if err := errors.Join(tarWriter.Close(), tarFile.Close()); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	requestIndex := 0
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodHead {
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+
+		wantPath := fmt.Sprintf("/api/v1/files/files/%05d", entryCount-requestIndex)
+		if req.URL.Path != wantPath {
+			return nil, fmt.Errorf("request %d path = %q, want %q", requestIndex, req.URL.Path, wantPath)
+		}
+
+		requestIndex++
+
+		response := fileHTTPResponse(http.StatusOK, nil)
+		response.ContentLength = 0
+
+		return response, nil
+	})
+
+	if err := importFSFromTar(
+		context.Background(),
+		doer,
+		"https://import.example",
+		tarPath,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	if requestIndex != entryCount {
+		t.Fatalf("HEAD request count = %d, want %d", requestIndex, entryCount)
+	}
+}
+
+func TestImportFSFromTar_CorruptPreflightSequenceFailsBeforeHTTPAndCleansUp(t *testing.T) {
+	tarPath := writeSingleEntryFSTar(t, "none", []byte("corrupt inventory"))
+
+	source, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar: %v", err)
+	}
+	defer func() { _ = source.Close() }()
+
+	scan, err := scanFSTarSource(context.Background(), source, tarPath)
+	if err != nil {
+		t.Fatalf("scanFSTarSource: %v", err)
+	}
+
+	tempDir := scan.tempDir
+	if err := os.Truncate(scan.sequencePath, 1); err != nil {
+		t.Fatalf("truncate preflight sequence: %v", err)
+	}
+
+	doer := &failOnHTTPDoer{}
+	uploadErr := uploadFSTarFromScan(
+		context.Background(),
+		doer,
+		"https://import.invalid",
+		tarPath,
+		source,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+		&scan,
+	)
+	if uploadErr == nil || !strings.Contains(uploadErr.Error(), "preflight sequence") {
+		t.Fatalf("uploadFSTarFromScan error = %v, want corrupt preflight sequence failure", uploadErr)
+	}
+
+	if doer.called {
+		t.Fatal("corrupt preflight sequence issued an HTTP request")
+	}
+
+	if err := scan.Close(); err != nil {
+		t.Fatalf("close scan: %v", err)
+	}
+
+	if _, err := os.Stat(tempDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inventory directory remains after corrupt sequence failure: %v", err)
+	}
+}
+
+type switchingFSTarSource struct {
+	data    [][]byte
+	current int
+	info    os.FileInfo
+}
+
+func (s *switchingFSTarSource) ReadAt(p []byte, offset int64) (int, error) {
+	current := s.current
+	if current < 0 {
+		current = 0
+	}
+
+	if current >= len(s.data) {
+		current = len(s.data) - 1
+	}
+
+	return bytes.NewReader(s.data[current]).ReadAt(p, offset)
+}
+
+func (s *switchingFSTarSource) Stat() (os.FileInfo, error) {
+	return s.info, nil
+}
+
+func (s *switchingFSTarSource) ResetAuthenticatedRead() {
+	s.current++
+}
+
+type fsTarDriftEntry struct {
+	path string
+	mode int64
+}
+
+func buildFSTarDriftFixture(t *testing.T, entries []fsTarDriftEntry) []byte {
+	t.Helper()
+
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	for _, entry := range entries {
+		addTarEntryMetadata(
+			t,
+			tarWriter,
+			entry.path,
+			entry.path,
+			"none",
+			0,
+			nil,
+			entry.mode,
+			0,
+			0,
+			time.Time{},
+		)
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close drift tar: %v", err)
+	}
+
+	return tarBuffer.Bytes()
+}
+
+func TestImportFSFromTar_SecondPassDetectsIdentityOrderAndCountDrift(t *testing.T) {
+	tests := []struct {
+		name   string
+		before []fsTarDriftEntry
+		after  []fsTarDriftEntry
+	}{
+		{
+			name:   "order",
+			before: []fsTarDriftEntry{{path: "a", mode: 0o600}, {path: "b", mode: 0o600}},
+			after:  []fsTarDriftEntry{{path: "b", mode: 0o600}, {path: "a", mode: 0o600}},
+		},
+		{
+			name:   "header identity",
+			before: []fsTarDriftEntry{{path: "a", mode: 0o600}},
+			after:  []fsTarDriftEntry{{path: "a", mode: 0o640}},
+		},
+		{
+			name:   "entry count",
+			before: []fsTarDriftEntry{{path: "a", mode: 0o600}},
+			after:  []fsTarDriftEntry{{path: "a", mode: 0o600}, {path: "b", mode: 0o600}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := buildFSTarDriftFixture(t, tc.before)
+			after := buildFSTarDriftFixture(t, tc.after)
+			size := max(len(before), len(after))
+			before = append(before, make([]byte, size-len(before))...)
+			after = append(after, make([]byte, size-len(after))...)
+
+			statPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(statPath, make([]byte, size), 0o600); err != nil {
+				t.Fatalf("write stat fixture: %v", err)
+			}
+
+			info, err := os.Stat(statPath)
+			if err != nil {
+				t.Fatalf("stat fixture: %v", err)
+			}
+
+			source := &switchingFSTarSource{
+				data:    [][]byte{before, after},
+				current: -1,
+				info:    info,
+			}
+			doer := &failOnHTTPDoer{}
+
+			err = importFSFromTarSource(
+				context.Background(),
+				doer,
+				"https://import.invalid",
+				statPath,
+				source,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+				t.Fatalf("importFSFromTarSource error = %v, want ErrInvalidFSMetadata", err)
+			}
+
+			if doer.called {
+				t.Fatal("second-pass archive drift issued an HTTP request")
 			}
 		})
 	}
@@ -2996,10 +3686,11 @@ func assertHighCardinalityAuthenticationBound(
 ) {
 	t.Helper()
 
-	// Preflight and upload each traverse the tar once. Entry bodies, compressed proofs, and
+	// Inventory, pre-mutation identity revalidation, and upload each traverse the tar once.
+	// Entry bodies, compressed proofs, and
 	// boundary overlap have four additional archive-sized passes of headroom. The allowance is
 	// independent of entry count and intentionally far below one 1 MiB reload per tiny file.
-	const maxTraversalFactor = int64(6)
+	const maxTraversalFactor = int64(7)
 
 	maxBytes := maxTraversalFactor*archiveSize + 2*stats.ChunkSize
 	if stats.SourceBytes > maxBytes || stats.HashedBytes > maxBytes {
@@ -3018,8 +3709,8 @@ func assertHighCardinalityAuthenticationBound(
 			stats.ChunkLoads, maxLoads, chunks)
 	}
 
-	if stats.Resets != 2 {
-		t.Fatalf("authenticated cache resets = %d, want exactly preflight and upload pass resets", stats.Resets)
+	if stats.Resets != 3 {
+		t.Fatalf("authenticated cache resets = %d, want exactly inventory, identity, and upload pass resets", stats.Resets)
 	}
 }
 
@@ -3142,13 +3833,13 @@ func TestImportFSFromTarSource_ConflictReplayWorkIsBounded(t *testing.T) {
 			}
 
 			stats := handle.AuthenticatedReadStats()
-			maxAuthenticatedBytes := 2 * int64(len(tarData))
+			maxAuthenticatedBytes := 3 * int64(len(tarData))
 			if stats.SourceBytes > maxAuthenticatedBytes || stats.HashedBytes > maxAuthenticatedBytes {
-				t.Errorf("authenticated replay work = %+v, want at most two encoded traversals (%d bytes)",
+				t.Errorf("authenticated replay work = %+v, want at most three encoded traversals (%d bytes)",
 					stats, maxAuthenticatedBytes)
 			}
-			if stats.ChunkLoads > 2 {
-				t.Errorf("authenticated chunk loads = %d, want at most 2", stats.ChunkLoads)
+			if stats.ChunkLoads > 3 {
+				t.Errorf("authenticated chunk loads = %d, want at most 3", stats.ChunkLoads)
 			}
 
 			assertHighCardinalityAuthenticationBound(
