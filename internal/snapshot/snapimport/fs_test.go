@@ -1170,6 +1170,325 @@ func TestScanFSTar_AcceptsStructuralDirectoryChain(t *testing.T) {
 	}
 }
 
+func TestCompareFSTarPaths_PreservesComponentRelations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		left               string
+		right              string
+		want               int
+		leftIsAncestor     bool
+		rawComparatorFails bool
+	}{
+		{
+			name:           "ancestor precedes descendant",
+			left:           "a",
+			right:          "a/b",
+			want:           -1,
+			leftIsAncestor: true,
+		},
+		{
+			name:               "subtree precedes hyphen sibling",
+			left:               "a/file",
+			right:              "a-foo",
+			want:               -1,
+			rawComparatorFails: true,
+		},
+		{
+			name:               "subtree precedes dotted sibling",
+			left:               "a/file",
+			right:              "a.b",
+			want:               -1,
+			rawComparatorFails: true,
+		},
+		{
+			name:               "deep subtree precedes component prefix sibling",
+			left:               "root/branch/deep",
+			right:              "root/branch-foo",
+			want:               -1,
+			rawComparatorFails: true,
+		},
+		{
+			name:               "unicode subtree uses byte-stable components",
+			left:               "目录/文件",
+			right:              "目录-副本",
+			want:               -1,
+			rawComparatorFails: true,
+		},
+		{
+			name:  "backslash is not a host separator",
+			left:  "a/b",
+			right: `a\b`,
+			want:  -1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := compareFSTarPaths(tc.left, tc.right); got != tc.want {
+				t.Fatalf("compareFSTarPaths(%q, %q) = %d, want %d", tc.left, tc.right, got, tc.want)
+			}
+
+			if got := compareFSTarPaths(tc.right, tc.left); got != -tc.want {
+				t.Fatalf("reverse compareFSTarPaths(%q, %q) = %d, want %d",
+					tc.right, tc.left, got, -tc.want)
+			}
+
+			if got := isFSTarPathAncestor(tc.left, tc.right); got != tc.leftIsAncestor {
+				t.Fatalf("isFSTarPathAncestor(%q, %q) = %t, want %t",
+					tc.left, tc.right, got, tc.leftIsAncestor)
+			}
+
+			if tc.rawComparatorFails && strings.Compare(tc.left, tc.right) == tc.want {
+				t.Fatalf("raw comparator unexpectedly preserves component relation for %q and %q",
+					tc.left, tc.right)
+			}
+		})
+	}
+}
+
+func TestScanFSTar_AcceptsStructuralSiblingComponents(t *testing.T) {
+	t.Parallel()
+
+	type fixtureEntry struct {
+		path        string
+		isDirectory bool
+	}
+
+	tests := []struct {
+		name    string
+		entries []fixtureEntry
+	}{
+		{
+			name: "punctuation siblings with interleaved descendants",
+			entries: []fixtureEntry{
+				{path: "a/", isDirectory: true},
+				{path: "a-foo/file"},
+				{path: "a.b/", isDirectory: true},
+				{path: "a/file"},
+				{path: "a-foo/", isDirectory: true},
+				{path: "a.b/file"},
+			},
+		},
+		{
+			name: "unicode siblings in reverse archive order",
+			entries: []fixtureEntry{
+				{path: "目录-副本/文件"},
+				{path: "目录-副本/", isDirectory: true},
+				{path: "目录/文件"},
+				{path: "目录/", isDirectory: true},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuffer bytes.Buffer
+
+			tarWriter := tar.NewWriter(&tarBuffer)
+			directoryCount := 0
+
+			for _, entry := range tc.entries {
+				if entry.isDirectory {
+					if err := tarWriter.WriteHeader(&tar.Header{
+						Typeflag: tar.TypeDir,
+						Name:     entry.path,
+						Mode:     0o755,
+					}); err != nil {
+						t.Fatalf("write directory %q: %v", entry.path, err)
+					}
+
+					directoryCount++
+
+					continue
+				}
+
+				addTarEntryMetadata(
+					t,
+					tarWriter,
+					entry.path,
+					entry.path,
+					"none",
+					1,
+					[]byte("x"),
+					0o600,
+					0,
+					0,
+					time.Time{},
+				)
+			}
+
+			if err := tarWriter.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			scan, err := scanFSTarReader(
+				context.Background(),
+				tar.NewReader(bytes.NewReader(tarBuffer.Bytes())),
+				"data.tar",
+			)
+			if err != nil {
+				t.Fatalf("scanFSTarReader: %v", err)
+			}
+
+			t.Cleanup(func() {
+				if err := scan.Close(); err != nil {
+					t.Errorf("close scan: %v", err)
+				}
+			})
+
+			if scan.StructuralDirectoryCount != directoryCount {
+				t.Fatalf("structural directory count = %d, want %d",
+					scan.StructuralDirectoryCount, directoryCount)
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_ComponentConflictsBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	type fixtureEntry struct {
+		path        string
+		isDirectory bool
+		rawPAX      bool
+	}
+
+	tests := []struct {
+		name    string
+		entries []fixtureEntry
+		want    string
+	}{
+		{
+			name: "hyphen sibling cannot hide file ancestor",
+			entries: []fixtureEntry{
+				{path: "a"},
+				{path: "a-foo"},
+				{path: "a/b"},
+			},
+			want: `regular path "a" is an ancestor`,
+		},
+		{
+			name: "deep dotted sibling cannot hide file ancestor",
+			entries: []fixtureEntry{
+				{path: "root/branch"},
+				{path: "root/branch.child"},
+				{path: "root/branch/deep/file"},
+			},
+			want: `regular path "root/branch" is an ancestor`,
+		},
+		{
+			name: "unicode sibling cannot hide file ancestor",
+			entries: []fixtureEntry{
+				{path: "目录"},
+				{path: "目录-副本"},
+				{path: "目录/文件"},
+			},
+			want: `regular path "目录" is an ancestor`,
+		},
+		{
+			name: "directory slash normalizes to regular path",
+			entries: []fixtureEntry{
+				{path: "alias/path"},
+				{path: "alias/path/", isDirectory: true},
+			},
+			want: `regular path "alias/path" conflicts with directory path "alias/path"`,
+		},
+		{
+			name: "file cannot be directory parent",
+			entries: []fixtureEntry{
+				{path: "parent"},
+				{path: "parent-foo/child"},
+				{path: "parent/child/", isDirectory: true},
+			},
+			want: `regular path "parent" conflicts with directory path "parent/child"`,
+		},
+		{
+			name: "host backslash separator is rejected",
+			entries: []fixtureEntry{
+				{path: `parent\child`, rawPAX: true},
+			},
+			want: "portable slash-relative path",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuffer bytes.Buffer
+
+			tarWriter := tar.NewWriter(&tarBuffer)
+			for _, entry := range tc.entries {
+				if entry.isDirectory {
+					if err := tarWriter.WriteHeader(&tar.Header{
+						Typeflag: tar.TypeDir,
+						Name:     entry.path,
+						Mode:     0o755,
+					}); err != nil {
+						t.Fatalf("write directory %q: %v", entry.path, err)
+					}
+
+					continue
+				}
+
+				if entry.rawPAX {
+					addTarEntryRawPAX(t, tarWriter, "stored", entry.path, "none", 1, []byte("x"))
+
+					continue
+				}
+
+				addTarEntryMetadata(
+					t,
+					tarWriter,
+					entry.path,
+					entry.path,
+					"none",
+					1,
+					[]byte("x"),
+					0o600,
+					0,
+					0,
+					time.Time{},
+				)
+			}
+
+			if err := tarWriter.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuffer.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			doer := &failOnHTTPDoer{}
+			err := importFSFromTar(
+				context.Background(),
+				doer,
+				"https://import.invalid",
+				tarPath,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			)
+			if !errors.Is(err, archive.ErrInvalidFSMetadata) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("importFSFromTar error = %v, want ErrInvalidFSMetadata containing %q", err, tc.want)
+			}
+
+			if doer.called {
+				t.Fatal("component conflict preflight issued an HTTP request")
+			}
+		})
+	}
+}
+
 func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *testing.T) {
 	const entryCount = 1_000_000
 	const structuralDirectoryCount = entryCount / 2
@@ -1226,7 +1545,10 @@ func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *test
 	}
 	t.Cleanup(stopDescriptorSampling)
 
-	var retainedAfterSmall uint64
+	sampleCardinalities := [...]int{20_000, 100_000, 500_000, entryCount}
+	var retainedHeap [len(sampleCardinalities)]uint64
+	sampleIndex := 0
+
 	for i := range entryCount {
 		group := structuralDirectoryCount - i/2
 		record := fsTarRecord{
@@ -1244,24 +1566,48 @@ func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *test
 			t.Fatalf("add record %d: %v", i, err)
 		}
 
-		if i == 19_999 {
+		if len(builder.records) > fsTarRunMaxRecords || builder.pathBytes > fsTarRunMaxPathBytes {
+			t.Fatalf("builder retained %d records and %d path bytes at entry %d",
+				len(builder.records), builder.pathBytes, i+1)
+		}
+
+		for level := range builder.levels {
+			if len(builder.levels[level]) >= fsTarMergeFanIn {
+				t.Fatalf("builder retained %d runs at level %d after entry %d",
+					len(builder.levels[level]), level, i+1)
+			}
+		}
+
+		if i+1 == sampleCardinalities[sampleIndex] {
 			runtime.GC()
 
 			var memory runtime.MemStats
 			runtime.ReadMemStats(&memory)
-			retainedAfterSmall = memory.HeapAlloc
+			retainedHeap[sampleIndex] = memory.HeapAlloc
+			sampleIndex++
 		}
 	}
 
-	runtime.GC()
+	minRetainedHeap := retainedHeap[0]
+	maxRetainedHeap := retainedHeap[0]
+	for _, heap := range retainedHeap[1:] {
+		minRetainedHeap = min(minRetainedHeap, heap)
+		maxRetainedHeap = max(maxRetainedHeap, heap)
+	}
 
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
+	const maxCountDependentHeapSpread = 4 << 20
+	if maxRetainedHeap > minRetainedHeap+maxCountDependentHeapSpread {
+		t.Fatalf("retained heap samples %v span %d bytes, want at most %d",
+			retainedHeap, maxRetainedHeap-minRetainedHeap, maxCountDependentHeapSpread)
+	}
 
-	const maxCountDependentHeapGrowth = 8 << 20
-	if memory.HeapAlloc > retainedAfterSmall+maxCountDependentHeapGrowth {
-		t.Fatalf("retained heap grew by %d bytes from 20k to 1m entries, want at most %d",
-			memory.HeapAlloc-retainedAfterSmall, maxCountDependentHeapGrowth)
+	const maxMonotonicHeapSlope = 2 << 20
+	if retainedHeap[0] < retainedHeap[1] &&
+		retainedHeap[1] < retainedHeap[2] &&
+		retainedHeap[2] < retainedHeap[3] &&
+		retainedHeap[3] > retainedHeap[0]+maxMonotonicHeapSlope {
+		t.Fatalf("retained heap samples %v grow monotonically by %d bytes, want constant retained state",
+			retainedHeap, retainedHeap[3]-retainedHeap[0])
 	}
 
 	sortedPath, err := builder.Finalize()
@@ -1310,73 +1656,101 @@ func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *test
 	runtime.KeepAlive(regressionSlice)
 
 	regressionHeapGrowth := int64(regressionMemory.HeapAlloc) - int64(regressionBaseline.HeapAlloc)
-	if regressionHeapGrowth <= maxCountDependentHeapGrowth {
+	if regressionHeapGrowth <= maxCountDependentHeapSpread {
 		t.Fatalf("map+slice regression retained only %d bytes; heap assertion is not discriminating",
 			regressionHeapGrowth)
 	}
 }
 
-func TestFSTarPreflightInventory_DetectsConflictsAcrossSortRuns(t *testing.T) {
+func TestFSTarPreflightInventory_ComponentRelationsAcrossSortRuns(t *testing.T) {
+	type placedRecord struct {
+		index  int
+		record fsTarRecord
+	}
+
 	tests := []struct {
-		name      string
-		firstPath string
-		lastPath  string
-		firstKind fsTarRecordKind
-		lastKind  fsTarRecordKind
-		want      string
+		name                      string
+		records                   []placedRecord
+		want                      string
+		wantStructuralDirectories int
 	}{
 		{
-			name:      "duplicate regular path",
-			firstPath: "conflict",
-			lastPath:  "conflict",
-			firstKind: fsTarRecordRegular,
-			lastKind:  fsTarRecordRegular,
-			want:      `duplicate normalized original path "conflict"`,
+			name: "valid punctuation siblings cross four runs",
+			records: []placedRecord{
+				{index: 0, record: fsTarRecord{Path: "a", Kind: fsTarRecordDirectory}},
+				{index: fsTarRunMaxRecords - 1, record: fsTarRecord{Path: "a/file", Kind: fsTarRecordRegular}},
+				{index: fsTarRunMaxRecords, record: fsTarRecord{Path: "a-foo", Kind: fsTarRecordDirectory}},
+				{index: 2*fsTarRunMaxRecords - 1, record: fsTarRecord{Path: "a-foo/file", Kind: fsTarRecordRegular}},
+				{index: 2 * fsTarRunMaxRecords, record: fsTarRecord{Path: "a.b", Kind: fsTarRecordDirectory}},
+				{index: 3 * fsTarRunMaxRecords, record: fsTarRecord{Path: "a.b/file", Kind: fsTarRecordRegular}},
+			},
+			wantStructuralDirectories: 3,
 		},
 		{
-			name:      "regular path prefix conflict",
-			firstPath: "conflict",
-			lastPath:  "conflict/child",
-			firstKind: fsTarRecordRegular,
-			lastKind:  fsTarRecordRegular,
-			want:      `regular path "conflict" is an ancestor`,
+			name: "punctuation sibling cannot hide regular ancestor",
+			records: []placedRecord{
+				{index: 0, record: fsTarRecord{Path: "a", Kind: fsTarRecordRegular}},
+				{index: fsTarRunMaxRecords, record: fsTarRecord{Path: "a-foo", Kind: fsTarRecordRegular}},
+				{index: 2 * fsTarRunMaxRecords, record: fsTarRecord{Path: "a/b", Kind: fsTarRecordRegular}},
+			},
+			want: `regular path "a" is an ancestor`,
 		},
 		{
-			name:      "regular path conflicts with descendant directory",
-			firstPath: "conflict",
-			lastPath:  "conflict/child",
-			firstKind: fsTarRecordRegular,
-			lastKind:  fsTarRecordDirectory,
-			want:      `regular path "conflict" conflicts with directory path "conflict/child"`,
+			name: "deep punctuation sibling cannot hide regular ancestor",
+			records: []placedRecord{
+				{index: fsTarRunMaxRecords - 1, record: fsTarRecord{Path: "root/branch", Kind: fsTarRecordRegular}},
+				{index: fsTarRunMaxRecords, record: fsTarRecord{Path: "root/branch-foo", Kind: fsTarRecordRegular}},
+				{index: 3 * fsTarRunMaxRecords, record: fsTarRecord{Path: "root/branch/deep/file", Kind: fsTarRecordRegular}},
+			},
+			want: `regular path "root/branch" is an ancestor`,
+		},
+		{
+			name: "duplicate normalized regular path",
+			records: []placedRecord{
+				{index: 0, record: fsTarRecord{Path: "duplicate/path", Kind: fsTarRecordRegular}},
+				{index: 3 * fsTarRunMaxRecords, record: fsTarRecord{Path: "duplicate/path", Kind: fsTarRecordRegular}},
+			},
+			want: `duplicate normalized original path "duplicate/path"`,
+		},
+		{
+			name: "regular and directory normalization alias",
+			records: []placedRecord{
+				{index: fsTarRunMaxRecords - 1, record: fsTarRecord{Path: "alias/path", Kind: fsTarRecordRegular}},
+				{index: 2 * fsTarRunMaxRecords, record: fsTarRecord{Path: "alias/path", Kind: fsTarRecordDirectory}},
+			},
+			want: `regular path "alias/path" conflicts with directory path "alias/path"`,
+		},
+		{
+			name: "file parent conflicts with descendant directory",
+			records: []placedRecord{
+				{index: 0, record: fsTarRecord{Path: "parent", Kind: fsTarRecordRegular}},
+				{index: fsTarRunMaxRecords, record: fsTarRecord{Path: "parent-foo", Kind: fsTarRecordRegular}},
+				{index: 3 * fsTarRunMaxRecords, record: fsTarRecord{Path: "parent/child", Kind: fsTarRecordDirectory}},
+			},
+			want: `regular path "parent" conflicts with directory path "parent/child"`,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tempDir, err := os.MkdirTemp(t.TempDir(), "inventory-*")
-			if err != nil {
-				t.Fatalf("create inventory directory: %v", err)
+			recordsByIndex := make(map[int]fsTarRecord, len(tc.records))
+			for _, placed := range tc.records {
+				placed.record.Ordinal = uint64(placed.index)
+				recordsByIndex[placed.index] = placed.record
 			}
 
-			builder := newFSTarRunBuilder(context.Background(), tempDir, defaultFSTarIndexOptions())
-			for i := range fsTarRunMaxRecords + 2 {
-				recordPath := fmt.Sprintf("middle/%08d", i)
-				recordKind := fsTarRecordRegular
-				if i == 0 {
-					recordPath = tc.firstPath
-					recordKind = tc.firstKind
+			builder := newFSTarRunBuilder(context.Background(), t.TempDir(), defaultFSTarIndexOptions())
+			for i := range 3*fsTarRunMaxRecords + 1 {
+				record, ok := recordsByIndex[i]
+				if !ok {
+					record = fsTarRecord{
+						Path:    fmt.Sprintf("zz/filler-%08d", i),
+						Ordinal: uint64(i),
+						Kind:    fsTarRecordRegular,
+					}
 				}
 
-				if i == fsTarRunMaxRecords+1 {
-					recordPath = tc.lastPath
-					recordKind = tc.lastKind
-				}
-
-				if err := builder.Add(fsTarRecord{
-					Path:    recordPath,
-					Ordinal: uint64(i),
-					Kind:    recordKind,
-				}); err != nil {
+				if err := builder.Add(record); err != nil {
 					t.Fatalf("add record %d: %v", i, err)
 				}
 			}
@@ -1386,7 +1760,20 @@ func TestFSTarPreflightInventory_DetectsConflictsAcrossSortRuns(t *testing.T) {
 				t.Fatalf("finalize inventory: %v", err)
 			}
 
-			_, err = validateSortedFSTar(context.Background(), sortedPath)
+			structuralDirectoryCount, err := validateSortedFSTar(context.Background(), sortedPath)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("validateSortedFSTar: %v", err)
+				}
+
+				if structuralDirectoryCount != tc.wantStructuralDirectories {
+					t.Fatalf("structural directory count = %d, want %d",
+						structuralDirectoryCount, tc.wantStructuralDirectories)
+				}
+
+				return
+			}
+
 			if !errors.Is(err, archive.ErrInvalidFSMetadata) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("validateSortedFSTar error = %v, want ErrInvalidFSMetadata containing %q", err, tc.want)
 			}

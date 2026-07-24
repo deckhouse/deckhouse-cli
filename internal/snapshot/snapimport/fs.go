@@ -636,17 +636,7 @@ func (b *fsTarRunBuilder) flush() error {
 	}
 
 	sort.Slice(b.records, func(i, j int) bool {
-		left, right := b.records[i], b.records[j]
-
-		if left.Path != right.Path {
-			return left.Path < right.Path
-		}
-
-		if left.Kind != right.Kind {
-			return left.Kind < right.Kind
-		}
-
-		return left.Ordinal < right.Ordinal
+		return lessFSTarRecord(b.records[i], b.records[j])
 	})
 
 	run, err := createPrivateFSTarTemp(b.options, b.tempDir, "run-*")
@@ -855,8 +845,8 @@ func closeFSTarRunReaders(readers []fsTarRunReader) error {
 }
 
 func lessFSTarRecord(left, right fsTarRecord) bool {
-	if left.Path != right.Path {
-		return left.Path < right.Path
+	if pathOrder := compareFSTarPaths(left.Path, right.Path); pathOrder != 0 {
+		return pathOrder < 0
 	}
 
 	if left.Kind != right.Kind {
@@ -864,6 +854,62 @@ func lessFSTarRecord(left, right fsTarRecord) bool {
 	}
 
 	return left.Ordinal < right.Ordinal
+}
+
+// compareFSTarPaths orders slash-delimited component sequences so every path's
+// descendants form one contiguous range before the next sibling component.
+// Comparing UTF-8 bytes and a literal slash keeps the index independent of host
+// path conventions and locale.
+func compareFSTarPaths(left, right string) int {
+	for {
+		leftComponent, leftRest, leftHasSeparator := strings.Cut(left, "/")
+		rightComponent, rightRest, rightHasSeparator := strings.Cut(right, "/")
+
+		if leftComponent < rightComponent {
+			return -1
+		}
+
+		if leftComponent > rightComponent {
+			return 1
+		}
+
+		if leftHasSeparator != rightHasSeparator {
+			if leftHasSeparator {
+				return 1
+			}
+
+			return -1
+		}
+
+		if !leftHasSeparator {
+			return 0
+		}
+
+		left = leftRest
+		right = rightRest
+	}
+}
+
+func isFSTarPathAncestor(ancestor, descendant string) bool {
+	for {
+		ancestorComponent, ancestorRest, ancestorHasSeparator := strings.Cut(ancestor, "/")
+		descendantComponent, descendantRest, descendantHasSeparator := strings.Cut(descendant, "/")
+
+		if ancestorComponent != descendantComponent {
+			return false
+		}
+
+		if !ancestorHasSeparator {
+			return descendantHasSeparator
+		}
+
+		if !descendantHasSeparator {
+			return false
+		}
+
+		ancestor = ancestorRest
+		descendant = descendantRest
+	}
 }
 
 func createPrivateFSTarTemp(options fsTarIndexOptions, dir, pattern string) (*os.File, error) {
@@ -1668,7 +1714,7 @@ func inspectSortedFSTarConflicts(
 				)
 			}
 
-			if previousRegular != "" && strings.HasPrefix(record.Path, previousRegular+"/") {
+			if previousRegular != "" && isFSTarPathAncestor(previousRegular, record.Path) {
 				return errors.Join(
 					fmt.Errorf("%w: regular path %q is an ancestor of regular path %q",
 						archive.ErrInvalidFSMetadata, previousRegular, record.Path),
@@ -1687,7 +1733,7 @@ func inspectSortedFSTarConflicts(
 			}
 
 			if previousRegular == record.Path ||
-				previousRegular != "" && strings.HasPrefix(record.Path, previousRegular+"/") {
+				previousRegular != "" && isFSTarPathAncestor(previousRegular, record.Path) {
 				return errors.Join(
 					fmt.Errorf("%w: regular path %q conflicts with directory path %q",
 						archive.ErrInvalidFSMetadata, previousRegular, record.Path),
@@ -1796,8 +1842,7 @@ func classifySortedFSTarDirectories(
 			return 0, errors.Join(err, directories.Close(), regulars.Close())
 		}
 
-		prefix := directory.Path + "/"
-		for regularErr == nil && regular.Path < prefix {
+		for regularErr == nil && compareFSTarPaths(regular.Path, directory.Path) <= 0 {
 			regular, regularErr = regulars.Next()
 		}
 
@@ -1805,7 +1850,7 @@ func classifySortedFSTarDirectories(
 			return 0, errors.Join(regularErr, directories.Close(), regulars.Close())
 		}
 
-		if regularErr == nil && strings.HasPrefix(regular.Path, prefix) {
+		if regularErr == nil && isFSTarPathAncestor(directory.Path, regular.Path) {
 			structuralDirectoryCount++
 
 			continue
