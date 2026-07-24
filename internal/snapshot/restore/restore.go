@@ -265,6 +265,10 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	if err := preflightManifestNamespaces(ctx, cfg, objs); err != nil {
+		return err
+	}
+
 	// Preflight: verify every PVC data-source leaf exists and is ready before
 	// applying anything. The API server does not validate cross-object existence
 	// of spec.dataSourceRef at admission, so an absent leaf causes a PVC to stay
@@ -350,6 +354,74 @@ func validate(cfg Config) error {
 	default:
 		return ValidateNodeAPIVersion(cfg.SelectedNodeAPIVersion)
 	}
+}
+
+// preflightManifestNamespaces rejects namespaced objects that escape the restore
+// target. Empty namespaces are normalized only after every object is validated.
+func preflightManifestNamespaces(ctx context.Context, cfg Config, objs []unstructured.Unstructured) error {
+	namespaced := make([]bool, len(objs))
+
+	for i := range objs {
+		if err := manifestNamespaceContextError(ctx); err != nil {
+			return err
+		}
+
+		obj := &objs[i]
+
+		_, isNamespaced, err := cfg.resourceFor(obj.GroupVersionKind())
+		if err != nil {
+			return fmt.Errorf(
+				"resolve namespace scope for restore manifest apiVersion=%q kind=%q name=%q: %w",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+				err,
+			)
+		}
+
+		namespaced[i] = isNamespaced
+		if !isNamespaced {
+			continue
+		}
+
+		namespace := obj.GetNamespace()
+		if namespace != "" && namespace != cfg.Namespace {
+			return fmt.Errorf(
+				"restore manifest apiVersion=%q kind=%q name=%q has namespace %q, but required namespace is %q",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+				namespace,
+				cfg.Namespace,
+			)
+		}
+	}
+
+	if err := manifestNamespaceContextError(ctx); err != nil {
+		return err
+	}
+
+	for i := range objs {
+		if namespaced[i] && objs[i].GetNamespace() == "" {
+			objs[i].SetNamespace(cfg.Namespace)
+		}
+	}
+
+	return nil
+}
+
+func manifestNamespaceContextError(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil && !errors.Is(cause, err) {
+		err = errors.Join(err, cause)
+	}
+
+	return fmt.Errorf("validate restore manifest namespaces: %w", err)
 }
 
 // ValidateNodeAPIVersion validates the canonical apiVersion syntax accepted by
