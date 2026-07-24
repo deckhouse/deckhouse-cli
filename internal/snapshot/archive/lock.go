@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -47,48 +46,14 @@ var (
 // RootedSource does not close that source; a path-based acquisition owns and closes its
 // internally opened source.
 type Lock struct {
-	mu                 sync.Mutex
-	source             *RootedSource
-	anchor             *os.File
-	file               *os.File
-	path               string
-	verifyRootIdentity func() error
-	ownsSource         bool
-	bound              bool
-	held               bool
-}
-
-// WriteLockBoundary identifies a deterministic archive write-lock acquisition handoff.
-type WriteLockBoundary uint8
-
-const (
-	// WriteLockBoundaryAfterDurability runs after the final directory-confirmation pass and
-	// before its pinned root and ancestry are handed to lock acquisition.
-	WriteLockBoundaryAfterDurability WriteLockBoundary = iota + 1
-	// WriteLockBoundaryBeforeRootLock runs immediately before the rooted lock sequence starts.
-	WriteLockBoundaryBeforeRootLock
-)
-
-// WriteLockBoundaryHook runs at deterministic write-lock handoffs. It supports adversarial
-// replacement tests through the real acquisition path; ordinary callers do not install one.
-type WriteLockBoundaryHook func(WriteLockBoundary)
-
-type writeLockBoundaryHookKey struct{}
-
-type durablePathEntry struct {
-	path string
-	info os.FileInfo
-}
-
-type durableWriteRoot struct {
-	source        *RootedSource
-	durablePath   []durablePathEntry
-	requestedPath []durablePathEntry
-}
-
-// WithWriteLockBoundaryHook returns a context that invokes hook during write-lock acquisition.
-func WithWriteLockBoundaryHook(ctx context.Context, hook WriteLockBoundaryHook) context.Context {
-	return context.WithValue(ctx, writeLockBoundaryHookKey{}, hook)
+	mu         sync.Mutex
+	source     *RootedSource
+	anchor     *os.File
+	file       *os.File
+	path       string
+	ownsSource bool
+	bound      bool
+	held       bool
 }
 
 // AcquireReadLock takes a non-blocking shared lock. Multiple uploads may coexist, while an
@@ -119,7 +84,7 @@ func AcquireRootedReadLock(ctx context.Context, source *RootedSource) (*Lock, er
 		return nil, errors.New("acquire rooted archive read lock: source is nil")
 	}
 
-	return acquireSourceLock(ctx, source, false, false, nil)
+	return acquireSourceLock(ctx, source, false, false)
 }
 
 func acquireLock(ctx context.Context, root string, exclusive bool) (*Lock, error) {
@@ -130,58 +95,52 @@ func acquireLockWithRootEnsurer(
 	ctx context.Context,
 	root string,
 	exclusive bool,
-	ensureRoot func(context.Context, string) (*durableWriteRoot, error),
+	ensureRoot func(context.Context, string) (os.FileInfo, error),
 ) (*Lock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	var (
-		source      *RootedSource
-		durableRoot *durableWriteRoot
-	)
+	var durableRootInfo os.FileInfo
 
 	if exclusive {
 		var err error
 
-		durableRoot, err = ensureRoot(ctx, root)
+		durableRootInfo, err = ensureRoot(ctx, root)
 		if err != nil {
 			return nil, fmt.Errorf("create archive root %s: %w", root, err)
 		}
-
-		if durableRoot == nil || durableRoot.source == nil {
-			return nil, fmt.Errorf("create archive root %s: durable root identity is absent", root)
-		}
-
-		source = durableRoot.source
-	} else {
-		absolute, err := filepath.Abs(root)
-		if err != nil {
-			return nil, fmt.Errorf("resolve archive root %s: %w", root, err)
-		}
-
-		source, err = OpenRootedSource(absolute)
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	var verifyRootIdentity func() error
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve archive root %s: %w", root, err)
+	}
 
-	if durableRoot != nil {
-		runWriteLockBoundaryHook(ctx, WriteLockBoundaryBeforeRootLock)
+	source, err := OpenRootedSource(absolute)
+	if err != nil {
+		return nil, err
+	}
 
-		if err := durableRoot.verify(); err != nil {
+	if durableRootInfo != nil {
+		sourceInfo, statErr := source.dir.Stat()
+		if statErr != nil {
 			return nil, errors.Join(
-				fmt.Errorf("verify durable archive root %s before locking: %w", root, err),
+				fmt.Errorf("inspect durable archive root %s: %w", root, statErr),
 				wrapArchiveLockCloseError("archive root", source.Close()),
 			)
 		}
 
-		verifyRootIdentity = durableRoot.verify
+		if !os.SameFile(durableRootInfo, sourceInfo) {
+			return nil, errors.Join(
+				fmt.Errorf("archive root %s changed after durability confirmation: %w",
+					root, ErrArchiveLockChanged),
+				wrapArchiveLockCloseError("archive root", source.Close()),
+			)
+		}
 	}
 
-	lock, err := acquireSourceLock(ctx, source, exclusive, false, verifyRootIdentity)
+	lock, err := acquireSourceLock(ctx, source, exclusive, false)
 	if err != nil {
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
 	}
@@ -191,7 +150,7 @@ func acquireLockWithRootEnsurer(
 	return lock, nil
 }
 
-func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, error) {
+func ensureWriteLockRoot(ctx context.Context, root string) (os.FileInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -209,139 +168,22 @@ func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, e
 		return nil, err
 	}
 
-	absolute, err := filepath.Abs(root)
+	durableInfo, err := os.Stat(durablePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve archive root %s: %w", root, err)
+		return nil, fmt.Errorf("inspect confirmed archive root %s: %w", durablePath, err)
 	}
 
-	source, err := OpenRootedSource(absolute)
+	requestedInfo, err := os.Stat(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inspect requested archive root %s: %w", root, err)
 	}
 
-	durableIdentity, err := captureDurablePath(ctx, durablePath)
-	if err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
+	if !os.SameFile(durableInfo, requestedInfo) {
+		return nil, fmt.Errorf("archive root %s changed during durability confirmation: %w",
+			root, ErrArchiveLockChanged)
 	}
 
-	requestedIdentity, err := captureDurablePath(ctx, absolute)
-	if err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	confirmed := &durableWriteRoot{
-		source:        source,
-		durablePath:   durableIdentity,
-		requestedPath: requestedIdentity,
-	}
-
-	// The first pass creates and confirms the visible chain. The descriptor and every
-	// component identity are then pinned before this second pass, so only that exact
-	// rooted identity can inherit the final durability confirmation.
-	if err := ctx.Err(); err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	if err := EnsureDir(durablePath); err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	runWriteLockBoundaryHook(ctx, WriteLockBoundaryAfterDurability)
-
-	if err := ctx.Err(); err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	if err := confirmed.verify(); err != nil {
-		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	return confirmed, nil
-}
-
-func captureDurablePath(ctx context.Context, path string) ([]durablePathEntry, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive path %s: %w", path, err)
-	}
-
-	volume := filepath.VolumeName(absolute)
-	rootPath := volume + string(filepath.Separator)
-
-	relative, err := filepath.Rel(rootPath, absolute)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive path components for %s: %w", path, err)
-	}
-
-	paths := []string{rootPath}
-	if relative != "." {
-		current := rootPath
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
-			current = filepath.Join(current, component)
-			paths = append(paths, current)
-		}
-	}
-
-	identity := make([]durablePathEntry, 0, len(paths))
-	for _, current := range paths {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		info, statErr := os.Lstat(current)
-		if statErr != nil {
-			return nil, fmt.Errorf("inspect durable archive path component %s: %w", current, statErr)
-		}
-
-		identity = append(identity, durablePathEntry{path: current, info: info})
-	}
-
-	return identity, nil
-}
-
-func (r *durableWriteRoot) verify() error {
-	if r == nil || r.source == nil {
-		return fmt.Errorf("durable archive root identity is absent: %w", ErrArchiveLockChanged)
-	}
-
-	if err := verifyDurablePath(r.durablePath); err != nil {
-		return err
-	}
-
-	if err := verifyDurablePath(r.requestedPath); err != nil {
-		return err
-	}
-
-	if err := r.source.verifyNamespaceCurrent(); err != nil {
-		return fmt.Errorf("verify descriptor-confirmed archive root: %w",
-			errors.Join(ErrArchiveLockChanged, err))
-	}
-
-	return nil
-}
-
-func verifyDurablePath(identity []durablePathEntry) error {
-	for _, expected := range identity {
-		current, err := os.Lstat(expected.path)
-		if err != nil {
-			return fmt.Errorf("inspect current durable archive path component %s: %w",
-				expected.path, errors.Join(ErrArchiveLockChanged, err))
-		}
-
-		if current.Mode().Type() != expected.info.Mode().Type() || !os.SameFile(current, expected.info) {
-			return fmt.Errorf("durable archive path component %s changed after confirmation: %w",
-				expected.path, ErrArchiveLockChanged)
-		}
-	}
-
-	return nil
-}
-
-func runWriteLockBoundaryHook(ctx context.Context, boundary WriteLockBoundary) {
-	hook, _ := ctx.Value(writeLockBoundaryHookKey{}).(WriteLockBoundaryHook)
-	if hook != nil {
-		hook(boundary)
-	}
+	return durableInfo, nil
 }
 
 func resolveWriteLockDurabilityPath(root string) (string, error) {
@@ -387,16 +229,9 @@ func acquireSourceLock(
 	source *RootedSource,
 	exclusive bool,
 	ownsSource bool,
-	verifyRootIdentity func() error,
 ) (*Lock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-
-	if verifyRootIdentity != nil {
-		if err := verifyRootIdentity(); err != nil {
-			return nil, err
-		}
 	}
 
 	if err := source.verifyNamespaceCurrent(); err != nil {
@@ -455,17 +290,6 @@ func acquireSourceLock(
 		)
 	}
 
-	if verifyRootIdentity != nil {
-		if err := verifyRootIdentity(); err != nil {
-			return nil, errors.Join(
-				err,
-				wrapArchiveLockCloseError("archive root lock", unlockArchiveRootLock(source.dir)),
-				wrapArchiveLockCloseError("archive namespace lock", unlockArchiveAnchorLock(anchor)),
-				wrapArchiveLockCloseError("archive namespace anchor", closeArchiveLockAnchor(anchor)),
-			)
-		}
-	}
-
 	lockPath := filepath.Join(source.path, archiveLockFileName)
 
 	file, err := openArchiveLockAt(source.dir, archiveLockFileName, lockPath)
@@ -500,13 +324,12 @@ func acquireSourceLock(
 	}
 
 	lock := &Lock{
-		source:             source,
-		anchor:             anchor,
-		file:               file,
-		path:               lockPath,
-		verifyRootIdentity: verifyRootIdentity,
-		ownsSource:         ownsSource,
-		held:               true,
+		source:     source,
+		anchor:     anchor,
+		file:       file,
+		path:       lockPath,
+		ownsSource: ownsSource,
+		held:       true,
 	}
 
 	if err := source.bindLock(lock.verifyLockEntry); err != nil {
@@ -539,12 +362,6 @@ func (l *Lock) Verify() error {
 
 	if !l.held || l.source == nil || l.file == nil {
 		return errors.New("verify archive lock: lock is not held")
-	}
-
-	if l.verifyRootIdentity != nil {
-		if err := l.verifyRootIdentity(); err != nil {
-			return fmt.Errorf("verify durable archive root identity: %w", err)
-		}
 	}
 
 	if err := l.source.verifyNamespaceCurrent(); err != nil {
@@ -654,7 +471,6 @@ func (l *Lock) Unlock() error {
 	l.file = nil
 	l.anchor = nil
 	l.source = nil
-	l.verifyRootIdentity = nil
 
 	return errors.Join(
 		wrapArchiveLockCloseError("archive lock entry", unlockFileErr),
