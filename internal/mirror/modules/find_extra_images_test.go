@@ -17,13 +17,17 @@ limitations under the License.
 package modules
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -124,6 +128,40 @@ func TestFindExtraImages_FailsOnPersistentError(t *testing.T) {
 }
 
 // =============================================================================
+// Tests: extractExtraImagesJSON reads layers directly
+// =============================================================================
+
+// A layer read failure (a network stream error) must surface as a real error,
+// not collapse into errExtraImagesJSONNotFound. This is the regression that
+// img.Extract() (mutate.Extract) hid by flushing a clean io.EOF on such errors.
+func TestExtractExtraImagesJSON_LayerReadErrorIsNotSkipped(t *testing.T) {
+	img := layersImage{layers: []v1.Layer{failingLayer{}}}
+
+	_, err := extractExtraImagesJSON(img)
+
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, errExtraImagesJSONNotFound),
+		"a layer read failure must not be classified as a clean 'not found' skip")
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+// A version whose layer reads in full but has no extra_images.json is a clean
+// skip.
+func TestExtractExtraImagesJSON_AbsentFileIsNotFound(t *testing.T) {
+	_, err := extractExtraImagesJSON(versionImage("v1.0.0")) // carries only version.json
+
+	assert.ErrorIs(t, err, errExtraImagesJSONNotFound)
+}
+
+// The happy path still yields the declared extra images.
+func TestExtractExtraImagesJSON_PresentFileIsParsed(t *testing.T) {
+	got, err := extractExtraImagesJSON(extraImagesImage(`{"scanner":"v1.2.3"}`))
+
+	require.NoError(t, err)
+	assert.Equal(t, "v1.2.3", got["scanner"])
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
@@ -200,3 +238,27 @@ func (c *getImageErrClient) GetImage(ctx context.Context, tag string, opts ...dk
 
 	return c.Client.GetImage(ctx, tag, opts...)
 }
+
+// layersImage is a minimal stand-in for what extractExtraImagesJSON consumes:
+// a value that yields image layers.
+type layersImage struct {
+	layers []v1.Layer
+}
+
+func (l layersImage) Layers() ([]v1.Layer, error) { return l.layers, nil }
+
+// failingLayer is a v1.Layer whose content read aborts mid-stream, standing in
+// for a registry connection dropped while reading the layer.
+type failingLayer struct{}
+
+func (failingLayer) Uncompressed() (io.ReadCloser, error) {
+	// A partial tar header, then an abrupt stream error.
+	r := io.MultiReader(bytes.NewReader([]byte("partial tar header")), iotest.ErrReader(io.ErrUnexpectedEOF))
+	return io.NopCloser(r), nil
+}
+
+func (failingLayer) Compressed() (io.ReadCloser, error)  { return nil, nil }
+func (failingLayer) Digest() (v1.Hash, error)            { return v1.Hash{}, nil }
+func (failingLayer) DiffID() (v1.Hash, error)            { return v1.Hash{}, nil }
+func (failingLayer) Size() (int64, error)                { return 0, nil }
+func (failingLayer) MediaType() (types.MediaType, error) { return types.DockerLayer, nil }
