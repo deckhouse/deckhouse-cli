@@ -69,6 +69,12 @@ const (
 	blockPutPayloadLimit         = 32 * 1024 * 1024
 	maxConsecutiveBlockConflicts = 8
 
+	uploadConnectTimeout        = 30 * time.Second
+	uploadTLSHandshakeTimeout   = 10 * time.Second
+	uploadResponseHeaderTimeout = 30 * time.Second
+	uploadWriteIdleTimeout      = 30 * time.Second
+	uploadReadIdleTimeout       = 15 * time.Second
+
 	dataImportIdentityVersion  = "v1"
 	dataImportIdentityIDLength = 16
 	dataImportNameMaxLength    = 63
@@ -129,13 +135,15 @@ type VolumeImporter interface {
 // CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
-	dyn             dynamic.Interface
-	sc              *safeClient.SafeClient
-	newUploadClient func([]byte, string) (uploadHTTPClient, error)
-	ttl             string
-	poll            time.Duration
-	wait            time.Duration
-	log             *slog.Logger
+	dyn               dynamic.Interface
+	sc                *safeClient.SafeClient
+	newUploadClient   func([]byte, string) (uploadHTTPClient, error)
+	ttl               string
+	poll              time.Duration
+	wait              time.Duration
+	requestTimeout    time.Duration
+	newRequestContext requestContextFactory
+	log               *slog.Logger
 }
 
 // NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
@@ -153,7 +161,16 @@ func NewClusterVolumeImporter(
 		log = slog.Default()
 	}
 
-	return &clusterVolumeImporter{dyn: dyn, sc: sc, ttl: ttl, poll: poll, wait: wait, log: log}
+	return &clusterVolumeImporter{
+		dyn:               dyn,
+		sc:                sc,
+		ttl:               ttl,
+		poll:              poll,
+		wait:              wait,
+		requestTimeout:    DefaultControlRequestTimeout,
+		newRequestContext: context.WithTimeout,
+		log:               log,
+	}
 }
 
 // DataImportName returns the deterministic identity-qualified DataImport name for the leaf.
@@ -234,7 +251,10 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	// an AlreadyExists on create (lost race) loops back to re-read and re-evaluate Expired
 	// rather than blindly treating the pre-existing object as good.
 	for attempt := 0; attempt < 3; attempt++ {
-		existing, err := ri.Get(ctx, name, metav1.GetOptions{})
+		existing, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Get(requestCtx, name, metav1.GetOptions{})
+			})
 		if err == nil {
 			if matchErr := validateDataImport(existing, leaf); matchErr != nil {
 				return "", fmt.Errorf("reuse DataImport %s/%s: %w", namespace, name, matchErr)
@@ -259,7 +279,11 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 			return "", fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 		}
 
-		if _, err := ri.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+		_, err = runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Create(requestCtx, obj, metav1.CreateOptions{})
+			})
+		if err != nil {
 			if kubeerrors.IsAlreadyExists(err) {
 				continue
 			}
@@ -385,7 +409,11 @@ func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynam
 		return fmt.Errorf("set DataImport ttl: %w", err)
 	}
 
-	if _, err := ri.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+	_, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return ri.Update(requestCtx, updated, metav1.UpdateOptions{})
+		})
+	if err != nil {
 		return fmt.Errorf("patch DataImport %s/%s ttl: %w", existing.GetNamespace(), existing.GetName(), err)
 	}
 
@@ -398,14 +426,22 @@ func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynam
 // deleteDataImportAndWait deletes the named DataImport and blocks until it is gone (bounded
 // by the importer wait budget), so a fresh one can be created under the same name.
 func (c *clusterVolumeImporter) deleteDataImportAndWait(ctx context.Context, ri dynamic.ResourceInterface, name string) error {
-	if err := ri.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !kubeerrors.IsNotFound(err) {
+	err := runControlRequestNoResult(ctx, c.requestTimeout, c.newRequestContext,
+		func(requestCtx context.Context) error {
+			return ri.Delete(requestCtx, name, metav1.DeleteOptions{})
+		})
+	if err != nil && !kubeerrors.IsNotFound(err) {
 		return fmt.Errorf("delete expired DataImport %s: %w", name, err)
 	}
 
 	deadline := time.Now().Add(c.wait)
 
 	for {
-		if _, err := ri.Get(ctx, name, metav1.GetOptions{}); kubeerrors.IsNotFound(err) {
+		_, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Get(requestCtx, name, metav1.GetOptions{})
+			})
+		if kubeerrors.IsNotFound(err) {
 			return nil
 		} else if err != nil {
 			return fmt.Errorf("await deletion of DataImport %s: %w", name, err)
@@ -666,7 +702,18 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 	}
 
 	sub := c.sc.Copy()
+	sub.SetRequestTimeout(0)
 	sub.SetTLSCAData(ca)
+
+	if err := sub.SetNetworkTimeouts(safeClient.NetworkTimeouts{
+		Connect:        uploadConnectTimeout,
+		TLSHandshake:   uploadTLSHandshakeTimeout,
+		ResponseHeader: uploadResponseHeaderTimeout,
+		WriteIdle:      uploadWriteIdleTimeout,
+		ReadIdle:       uploadReadIdleTimeout,
+	}); err != nil {
+		return nil, fmt.Errorf("configure DataImport upload network timeouts: %w", err)
+	}
 
 	httpClient, err := sub.NewPersistentHTTPClientForOrigin(rawURL)
 	if err != nil {
@@ -686,7 +733,11 @@ func (c *clusterVolumeImporter) waitDataImportReady(
 	deadline := time.Now().Add(c.wait)
 
 	for {
-		di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		di, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return c.dyn.Resource(dataImportGVR).Namespace(namespace).
+					Get(requestCtx, name, metav1.GetOptions{})
+			})
 		if err != nil {
 			return nil, fmt.Errorf("get DataImport %s/%s: %w", namespace, name, err)
 		}
@@ -726,7 +777,11 @@ func (c *clusterVolumeImporter) dataImportCompleted(
 	leaf PlannedNode,
 	name, namespace string,
 ) (bool, error) {
-	di, err := c.dyn.Resource(dataImportGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	di, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return c.dyn.Resource(dataImportGVR).Namespace(namespace).
+				Get(requestCtx, name, metav1.GetOptions{})
+		})
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
 			return false, nil
@@ -911,6 +966,17 @@ func (b *attestedRequestBody) Close() error {
 	defer b.mu.Unlock()
 
 	return b.closeErr
+}
+
+// NetworkStall records the persistent transport's progress-idle cause and
+// closes the body so asynchronous body-completion attestation cannot outlive
+// the watchdog that canceled the request.
+func (b *attestedRequestBody) NetworkStall(err error) {
+	b.mu.Lock()
+	b.readErr = errors.Join(b.readErr, err)
+	b.mu.Unlock()
+
+	_ = b.Close()
 }
 
 func (b *attestedRequestBody) wait(ctx context.Context) (requestBodyReport, error) {
@@ -1718,10 +1784,9 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 		return 0, err
 	}
 
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	if err := drainAndCloseResponseBody(resp); err != nil {
+		return 0, fmt.Errorf("drain HEAD %s response: %w", url, err)
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -1872,10 +1937,9 @@ func postFinished(ctx context.Context, httpClient httpDoer, baseURL string) erro
 		return err
 	}
 
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	if err := drainAndCloseResponseBody(resp); err != nil {
+		return fmt.Errorf("drain finished response: %w", err)
+	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("finished returned status %d (%s)", resp.StatusCode, resp.Status)

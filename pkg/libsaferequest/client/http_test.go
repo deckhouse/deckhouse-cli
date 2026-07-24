@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1013,6 +1014,529 @@ func TestPersistentHTTPClient_PreservesProxyAndDial(t *testing.T) {
 	if dialCalls.Load() == 0 {
 		t.Error("configured dial function was not called")
 	}
+}
+
+func TestSafeClient_SetNetworkTimeouts_ConfiguresEveryTransportPhase(t *testing.T) {
+	t.Parallel()
+
+	sc := &SafeClient{restConfig: &rest.Config{}}
+	timeouts := NetworkTimeouts{
+		Connect:        11 * time.Second,
+		TLSHandshake:   12 * time.Second,
+		ResponseHeader: 13 * time.Second,
+		WriteIdle:      14 * time.Second,
+		ReadIdle:       15 * time.Second,
+	}
+
+	if err := sc.SetNetworkTimeouts(timeouts); err != nil {
+		t.Fatalf("SetNetworkTimeouts: %v", err)
+	}
+
+	transport, ok := sc.RESTConfig().WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("wrapped transport is not an *http.Transport")
+	}
+
+	if transport.DialContext == nil {
+		t.Fatal("DialContext is nil")
+	}
+
+	if transport.TLSHandshakeTimeout != timeouts.TLSHandshake {
+		t.Errorf("TLSHandshakeTimeout = %v, want %v", transport.TLSHandshakeTimeout, timeouts.TLSHandshake)
+	}
+
+	if transport.ResponseHeaderTimeout != timeouts.ResponseHeader {
+		t.Errorf("ResponseHeaderTimeout = %v, want %v", transport.ResponseHeaderTimeout, timeouts.ResponseHeader)
+	}
+
+	persistent, err := sc.NewPersistentHTTPClient()
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClient: %v", err)
+	}
+	t.Cleanup(persistent.CloseIdleConnections)
+
+	if persistent.networkTimeouts != timeouts {
+		t.Errorf("persistent network timeouts = %+v, want %+v", persistent.networkTimeouts, timeouts)
+	}
+}
+
+func TestPersistentHTTPClient_RequestBodyProgressResetsWriteIdleDeadline(t *testing.T) {
+	t.Parallel()
+
+	progress := make(chan struct{}, 4)
+	continueRead := make(chan struct{}, 4)
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		defer func() { _ = req.Body.Close() }()
+
+		buf := make([]byte, 1)
+		for {
+			count, err := req.Body.Read(buf)
+			if count > 0 {
+				progress <- struct{}{}
+			}
+
+			if err != nil {
+				return nil, err
+			}
+
+			select {
+			case <-continueRead:
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
+		}
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	body := io.NopCloser(bytes.NewReader([]byte("progress")))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://upload.test", body)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	req.ContentLength = int64(len("progress"))
+
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := client.Do(req)
+		result <- requestErr
+	}()
+
+	<-progress
+	timer := timers.require(t, 0)
+
+	timers.advance(50 * time.Minute)
+	continueRead <- struct{}{}
+	<-progress
+
+	timers.advance(10 * time.Minute)
+	timer.fire()
+
+	select {
+	case err := <-result:
+		t.Fatalf("active body progress did not reset the old idle deadline: %v", err)
+	default:
+	}
+
+	for range 2 {
+		continueRead <- struct{}{}
+		<-progress
+	}
+
+	if resets := timer.resetCount(); resets < 4 {
+		t.Fatalf("write-idle timer resets = %d, want at least 4 successful body reads", resets)
+	}
+
+	timers.advance(time.Hour)
+	timer.fire()
+
+	err = <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write stall error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestPersistentHTTPClient_EarlyResponseReportsLateBodyStall(t *testing.T) {
+	t.Parallel()
+
+	progress := make(chan struct{})
+	bodyReaderDone := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		go func() {
+			defer close(bodyReaderDone)
+
+			buf := make([]byte, 1)
+			_, _ = req.Body.Read(buf)
+			close(progress)
+			<-req.Context().Done()
+			_ = req.Body.Close()
+		}()
+
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+		}, nil
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	body := &notifyingRequestBody{
+		Reader:  bytes.NewReader([]byte("partial body")),
+		stalled: make(chan error, 1),
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://upload.test", body)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	req.ContentLength = int64(len("partial body"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+
+	<-progress
+	timers.advance(time.Hour)
+	timers.require(t, 0).fire()
+
+	stallErr := <-body.stalled
+	if !errors.Is(stallErr, context.DeadlineExceeded) {
+		t.Fatalf("late request-body stall = %v, want context.DeadlineExceeded", stallErr)
+	}
+
+	<-bodyReaderDone
+}
+
+func TestPersistentHTTPClient_ResponseHeaderStallUsesDeadlineCause(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+
+		return nil, req.Context().Err()
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodHead, "https://upload.test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := client.Do(req)
+		result <- requestErr
+	}()
+
+	<-started
+	timers.advance(time.Hour)
+	timers.require(t, 0).fire()
+
+	err = <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("header stall error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestPersistentHTTPClient_ResponseDrainProgressThenStall(t *testing.T) {
+	t.Parallel()
+
+	readBlocked := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: &partialStallBody{
+				ctx:     req.Context(),
+				blocked: readBlocked,
+			},
+			Header: make(http.Header),
+		}, nil
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://upload.test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, drainErr := io.Copy(io.Discard, resp.Body)
+		result <- errors.Join(drainErr, resp.Body.Close())
+	}()
+
+	<-readBlocked
+
+	readTimer := timers.require(t, 1)
+	if resets := readTimer.resetCount(); resets < 2 {
+		t.Fatalf("read-idle timer resets = %d, want arm plus partial-body progress", resets)
+	}
+
+	timers.advance(time.Hour)
+	readTimer.fire()
+
+	err = <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("response drain stall error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestPersistentHTTPClient_ParentCancellationPreservesCause(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+
+		return nil, req.Context().Err()
+	})
+
+	client, _ := newManualTimeoutClient(t, roundTrip)
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://upload.test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, requestErr := client.Do(req)
+		result <- requestErr
+	}()
+
+	<-started
+	cancel()
+
+	err = <-result
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cancellation error = %v, unexpectedly reports a stall deadline", err)
+	}
+}
+
+func TestPersistentHTTPClient_ConcurrentStreamTimeoutIsolation(t *testing.T) {
+	t.Parallel()
+
+	stalledStarted := make(chan struct{})
+	roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/stalled" {
+			close(stalledStarted)
+			<-req.Context().Done()
+
+			return nil, req.Context().Err()
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("healthy")),
+		}, nil
+	})
+
+	client, timers := newManualTimeoutClient(t, roundTrip)
+	stalledResult := make(chan error, 1)
+	go func() {
+		_, err := persistentRequest(context.Background(), client, "https://upload.test/stalled")
+		stalledResult <- err
+	}()
+
+	<-stalledStarted
+	stalledTimer := timers.require(t, 0)
+
+	if _, err := persistentRequest(context.Background(), client, "https://upload.test/healthy"); err != nil {
+		t.Fatalf("healthy concurrent request: %v", err)
+	}
+
+	timers.advance(time.Hour)
+	stalledTimer.fire()
+
+	err := <-stalledResult
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalled request error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type manualIdleTimer struct {
+	mu       sync.Mutex
+	callback func()
+	active   bool
+	resets   int
+}
+
+func (t *manualIdleTimer) Reset(time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	wasActive := t.active
+	t.active = true
+	t.resets++
+
+	return wasActive
+}
+
+func (t *manualIdleTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	wasActive := t.active
+	t.active = false
+
+	return wasActive
+}
+
+func (t *manualIdleTimer) fire() {
+	t.mu.Lock()
+	if !t.active {
+		t.mu.Unlock()
+
+		return
+	}
+
+	t.active = false
+	callback := t.callback
+	t.mu.Unlock()
+
+	callback()
+}
+
+func (t *manualIdleTimer) resetCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.resets
+}
+
+func (t *manualIdleTimer) isActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.active
+}
+
+type manualTimerSet struct {
+	mu     sync.Mutex
+	timers []*manualIdleTimer
+	now    time.Time
+}
+
+func (s *manualTimerSet) new(_ time.Duration, callback func()) idleTimer {
+	timer := &manualIdleTimer{callback: callback, active: true, resets: 1}
+
+	s.mu.Lock()
+	s.timers = append(s.timers, timer)
+	s.mu.Unlock()
+
+	return timer
+}
+
+func (s *manualTimerSet) require(t *testing.T, index int) *manualIdleTimer {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if index >= len(s.timers) {
+		t.Fatalf("timer index %d is absent; have %d timer(s)", index, len(s.timers))
+	}
+
+	return s.timers[index]
+}
+
+func (s *manualTimerSet) currentTime() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.now
+}
+
+func (s *manualTimerSet) advance(elapsed time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.now = s.now.Add(elapsed)
+}
+
+func (s *manualTimerSet) requireAllStopped(t *testing.T) {
+	t.Helper()
+
+	s.mu.Lock()
+	timers := append([]*manualIdleTimer(nil), s.timers...)
+	s.mu.Unlock()
+
+	for index, timer := range timers {
+		if timer.isActive() {
+			t.Errorf("idle timer %d remained active after request completion", index)
+		}
+	}
+}
+
+func newManualTimeoutClient(t *testing.T, roundTrip http.RoundTripper) (*PersistentHTTPClient, *manualTimerSet) {
+	t.Helper()
+
+	timers := &manualTimerSet{}
+	sc := &SafeClient{
+		restConfig:       &rest.Config{Transport: roundTrip},
+		idleTimerFactory: timers.new,
+		idleNow:          timers.currentTime,
+	}
+
+	err := sc.SetNetworkTimeouts(NetworkTimeouts{
+		Connect:        time.Hour,
+		TLSHandshake:   time.Hour,
+		ResponseHeader: time.Hour,
+		WriteIdle:      time.Hour,
+		ReadIdle:       time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("SetNetworkTimeouts: %v", err)
+	}
+
+	client, err := sc.NewPersistentHTTPClient()
+	if err != nil {
+		t.Fatalf("NewPersistentHTTPClient: %v", err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	t.Cleanup(func() {
+		timers.requireAllStopped(t)
+	})
+
+	return client, timers
+}
+
+type partialStallBody struct {
+	ctx      context.Context
+	blocked  chan struct{}
+	sentByte bool
+	once     sync.Once
+}
+
+func (b *partialStallBody) Read(p []byte) (int, error) {
+	if !b.sentByte {
+		b.sentByte = true
+		p[0] = 'x'
+
+		return 1, nil
+	}
+
+	b.once.Do(func() { close(b.blocked) })
+	<-b.ctx.Done()
+
+	return 0, b.ctx.Err()
+}
+
+func (b *partialStallBody) Close() error {
+	return nil
+}
+
+type notifyingRequestBody struct {
+	*bytes.Reader
+	stalled chan error
+}
+
+func (b *notifyingRequestBody) Close() error {
+	return nil
+}
+
+func (b *notifyingRequestBody) NetworkStall(err error) {
+	b.stalled <- err
 }
 
 type persistentClientResult struct {
