@@ -303,9 +303,9 @@ func setFileHeaders(req *http.Request, totalSize, offset int64, attrs fileAttrs)
 // Returns (offset, done, size) where done=true means the final file already exists and
 // the upload should be skipped entirely; size is that final file's exact on-disk
 // (decompressed) byte count, read from the HEAD response's Content-Length, and is only
-// meaningful when done is true — it lets a caller credit progress for a skipped file
-// without decompressing it. offset is the number of bytes already written to the
-// server's temp file when done is false; 0 if no partial upload exists.
+// meaningful when done is true — it lets a caller validate the completed size and credit
+// progress after the entry's terminal codec proof. offset is the number of bytes already
+// written to the server's temp file when done is false; 0 if no partial upload exists.
 func headFileOffset(ctx context.Context, client httpDoer, fileURL string, totalSize int64) (int64, bool, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
 	if err != nil {
@@ -999,8 +999,8 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // directories without listing archive-controlled paths. Empty directories and every other
 // non-regular entry are rejected by the preflight because the importer cannot reproduce them.
 // onProgress, when non-nil, is called with the decompressed byte count after each file is
-// successfully uploaded (or, for an already-fully-uploaded entry, credited without any
-// decompression at all).
+// successfully uploaded or after an already-fully-uploaded entry passes its terminal codec
+// proof without activating a transfer.
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
 // called with a running sum of exact PAX raw sizes as entries are walked.
@@ -1311,6 +1311,13 @@ func uploadFSTarFromScan(
 				return errors.Join(
 					fmt.Errorf("probe upload state for %s: completed size %d differs from PAX raw size %d",
 						relPath, doneSize, metadata.RawSize),
+					closeFSTarSequence(sequence),
+				)
+			}
+
+			if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
+				return errors.Join(
+					fmt.Errorf("verify completed payload for %s: %w", relPath, err),
 					closeFSTarSequence(sequence),
 				)
 			}
