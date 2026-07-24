@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -351,6 +352,67 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	}
 
 	return nil
+}
+
+const categoryShellRedirect = "Invalid version constraint (possible shell redirection)"
+
+// DiagnoseConstraintParseError checks whether an "empty constraint" error from
+// modules.ParseVersionConstraint or modules.NewFilter was most likely caused by
+// the shell eating part of the flag value because the user forgot to quote it.
+//
+// When a user types:
+//
+//	d8 mirror pull ... --include-module console@>=1.43.2 ./bundle
+//
+// the shell interprets '>' as output redirection and '=1.43.2' as the target
+// file name, so cobra receives the flag value "console@" — a name with an
+// empty constraint. The resulting "empty constraint" error gives no hint as to what went wrong.
+//
+// This function recognises that pattern by combining two signals:
+//  1. The error message contains "empty constraint".
+//  2. At least one raw flag value ends with '@' (the version separator), which
+//     means the constraint part was empty before parsing even began.
+//
+// flagName is the CLI flag name used in the suggestion text (e.g. "include-module").
+// rawValues are the exact strings cobra stored for that flag.
+//
+// Returns nil when neither signal is present, so callers can fall through to
+// their normal error path without double-wrapping.
+func DiagnoseConstraintParseError(err error, flagName string, rawValues ...string) *diagnostic.HelpfulError {
+	if err == nil {
+		return nil
+	}
+
+	if !strings.Contains(err.Error(), "empty constraint") {
+		return nil
+	}
+
+	looksLikeRedirect := false
+	for _, v := range rawValues {
+		if strings.HasSuffix(strings.TrimSpace(v), "@") {
+			looksLikeRedirect = true
+			break
+		}
+	}
+
+	if !looksLikeRedirect {
+		return nil
+	}
+
+	return &diagnostic.HelpfulError{
+		Category:    categoryShellRedirect,
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause: "The shell interpreted '>' as output redirection instead of passing it to d8.\n" +
+					"The constraint part after '@' was never received — perhaps you forgot to quote the flag value?",
+				Solutions: []string{
+					`Wrap the constraint in double quotes: --` + flagName + ` "module-name@>=1.43.2"`,
+					`Example: d8 mirror pull --license='****' --include-module "console@>=1.43.2" ./console`,
+				},
+			},
+		},
+	}
 }
 
 // --- detection functions ---
