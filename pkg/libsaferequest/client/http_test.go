@@ -343,28 +343,25 @@ func TestPersistentHTTPClient_ReusesAndClosesConnections(t *testing.T) {
 func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 	t.Parallel()
 
-	var (
-		newConnections    atomic.Int64
-		closedConnections atomic.Int64
-	)
-
-	activeStarted := make(chan struct{})
+	newConnections := make(chan net.Conn, 2)
+	closedConnections := make(chan net.Conn, 2)
+	activeStarted := make(chan struct{}, 2)
 	releaseActive := make(chan struct{}, 1)
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/active" {
-			close(activeStarted)
+			activeStarted <- struct{}{}
 			<-releaseActive
 		}
 
 		_, _ = io.WriteString(w, "ok")
 	}))
 	srv.EnableHTTP2 = true
-	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+	srv.Config.ConnState = func(conn net.Conn, state http.ConnState) {
 		switch state {
 		case http.StateNew:
-			newConnections.Add(1)
+			newConnections <- conn
 		case http.StateClosed:
-			closedConnections.Add(1)
+			closedConnections <- conn
 		}
 	}
 	srv.StartTLS()
@@ -402,7 +399,8 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 		}
 	})
 
-	for _, httpClient := range clients {
+	connections := make([]net.Conn, len(clients))
+	for index, httpClient := range clients {
 		for range 10 {
 			protoMajor, err := persistentRequest(context.Background(), httpClient, srv.URL)
 			if err != nil {
@@ -413,10 +411,8 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 				t.Fatalf("response protocol major = %d, want HTTP/2", protoMajor)
 			}
 		}
-	}
 
-	if got := newConnections.Load(); got != 2 {
-		t.Fatalf("new connections = %d, want one private HTTP/2 connection per client", got)
+		connections[index] = requireConnectionStateEvent(t, newConnections, "new")
 	}
 
 	activeResult := make(chan error, 1)
@@ -428,9 +424,10 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 	<-activeStarted
 	clients[0].CloseIdleConnections()
 
-	requireEventually(t, time.Second, func() bool {
-		return closedConnections.Load() == 1
-	})
+	closed := requireConnectionStateEvent(t, closedConnections, "closed after first client cleanup")
+	if closed != connections[0] {
+		t.Fatalf("first cleanup closed connection %p, want first client's connection %p", closed, connections[0])
+	}
 
 	select {
 	case err := <-activeResult:
@@ -453,15 +450,58 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 		t.Fatalf("surviving response protocol major = %d, want HTTP/2", protoMajor)
 	}
 
-	if got := newConnections.Load(); got != 2 {
-		t.Fatalf("surviving client opened a new connection after other client cleanup: %d", got)
+	select {
+	case conn := <-newConnections:
+		t.Fatalf("surviving client opened a new connection %p after other client cleanup", conn)
+	default:
 	}
 
-	clients[1].CloseIdleConnections()
+	finalActiveResult := make(chan error, 1)
+	go func() {
+		_, requestErr := persistentRequest(context.Background(), clients[1], srv.URL+"/active")
+		finalActiveResult <- requestErr
+	}()
 
-	requireEventually(t, time.Second, func() bool {
-		return closedConnections.Load() == newConnections.Load()
-	})
+	<-activeStarted
+
+	finalCleanupDone := make(chan struct{})
+	go func() {
+		clients[1].CloseIdleConnections()
+		close(finalCleanupDone)
+	}()
+
+	<-clients[1].lifecycle.closingStarted
+
+	select {
+	case <-finalCleanupDone:
+		t.Fatal("final cleanup returned before its in-flight request joined")
+	default:
+	}
+
+	select {
+	case conn := <-closedConnections:
+		t.Fatalf("final cleanup closed active connection %p before request join", conn)
+	default:
+	}
+
+	releaseActive <- struct{}{}
+
+	if err := <-finalActiveResult; err != nil {
+		t.Fatalf("active request during final cleanup: %v", err)
+	}
+
+	<-finalCleanupDone
+
+	closed = requireConnectionStateEvent(t, closedConnections, "closed after surviving client cleanup")
+	if closed != connections[1] {
+		t.Fatalf("final cleanup closed connection %p, want surviving client's connection %p", closed, connections[1])
+	}
+
+	select {
+	case conn := <-closedConnections:
+		t.Fatalf("observed unexpected extra closed connection %p", conn)
+	default:
+	}
 }
 
 func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) {
@@ -2209,4 +2249,20 @@ func requireEventually(t *testing.T, timeout time.Duration, condition func() boo
 	}
 
 	t.Fatal("condition was not satisfied before timeout")
+}
+
+func requireConnectionStateEvent(t *testing.T, events <-chan net.Conn, description string) net.Conn {
+	t.Helper()
+
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case conn := <-events:
+		return conn
+	case <-timer.C:
+		t.Fatalf("timed out waiting for connection state event: %s", description)
+
+		return nil
+	}
 }

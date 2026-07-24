@@ -108,11 +108,141 @@ type PersistentHTTPClient struct {
 	client             *http.Client
 	ownedTransport     http.RoundTripper
 	ownedHTTPTransport *http.Transport
+	lifecycle          *ownedTransportLifecycle
 	hasConfiguredAuth  bool
 	origin             *httpOrigin
 	networkTimeouts    NetworkTimeouts
 	idleTimerFactory   idleTimerFactory
 	idleNow            func() time.Time
+}
+
+type ownedTransportLifecycle struct {
+	mu             sync.Mutex
+	cond           *sync.Cond
+	connections    map[*ownedConnection]struct{}
+	closingStarted chan struct{}
+	inFlight       int
+	closing        bool
+}
+
+func newOwnedTransportLifecycle() *ownedTransportLifecycle {
+	lifecycle := &ownedTransportLifecycle{
+		connections:    make(map[*ownedConnection]struct{}),
+		closingStarted: make(chan struct{}),
+	}
+	lifecycle.cond = sync.NewCond(&lifecycle.mu)
+
+	return lifecycle
+}
+
+func (l *ownedTransportLifecycle) trackDials(transport *http.Transport) {
+	if transport == nil || transport.DialContext == nil {
+		return
+	}
+
+	dialContext := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+
+		return l.trackConnection(conn), nil
+	}
+}
+
+func (l *ownedTransportLifecycle) trackConnection(conn net.Conn) net.Conn {
+	tracked := &ownedConnection{
+		Conn:      conn,
+		lifecycle: l,
+	}
+
+	l.mu.Lock()
+	if l.closing {
+		l.mu.Unlock()
+
+		_ = tracked.Close()
+
+		return tracked
+	}
+
+	l.connections[tracked] = struct{}{}
+	l.mu.Unlock()
+
+	return tracked
+}
+
+func (l *ownedTransportLifecycle) beginRequest() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.closing {
+		return errors.New("persistent HTTP client is closed")
+	}
+
+	l.inFlight++
+
+	return nil
+}
+
+func (l *ownedTransportLifecycle) endRequest() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.inFlight--
+	if l.inFlight == 0 {
+		l.cond.Broadcast()
+	}
+}
+
+func (l *ownedTransportLifecycle) waitForRequests() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.closing {
+		l.closing = true
+		close(l.closingStarted)
+	}
+
+	for l.inFlight > 0 {
+		l.cond.Wait()
+	}
+}
+
+func (l *ownedTransportLifecycle) closeConnections() {
+	l.mu.Lock()
+
+	connections := make([]*ownedConnection, 0, len(l.connections))
+	for conn := range l.connections {
+		connections = append(connections, conn)
+	}
+	l.mu.Unlock()
+
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+}
+
+func (l *ownedTransportLifecycle) removeConnection(conn *ownedConnection) {
+	l.mu.Lock()
+	delete(l.connections, conn)
+	l.mu.Unlock()
+}
+
+type ownedConnection struct {
+	net.Conn
+	lifecycle *ownedTransportLifecycle
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (c *ownedConnection) Close() error {
+	c.closeOnce.Do(func() {
+		c.closeErr = c.Conn.Close()
+		c.lifecycle.removeConnection(c)
+	})
+
+	return c.closeErr
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
@@ -140,6 +270,7 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 
 	config := rest.CopyConfig(c.restConfig)
 	prev := config.WrapTransport
+	lifecycle := newOwnedTransportLifecycle()
 
 	var (
 		ownedTransport     http.RoundTripper
@@ -181,6 +312,8 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 			utilnet.SetTransportDefaults(ownedHTTPTransport)
 		}
 
+		lifecycle.trackDials(ownedHTTPTransport)
+
 		return rt
 	}
 
@@ -193,6 +326,7 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		client:             httpClient,
 		ownedTransport:     ownedTransport,
 		ownedHTTPTransport: ownedHTTPTransport,
+		lifecycle:          lifecycle,
 		hasConfiguredAuth:  hasConfiguredAuth(config),
 		networkTimeouts:    c.networkTimeouts,
 		idleTimerFactory:   c.idleTimerFactory,
@@ -267,6 +401,19 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 		return nil, errors.New("No auth")
 	}
 
+	if err := c.lifecycle.beginRequest(); err != nil {
+		return nil, err
+	}
+
+	var lifecycleParts atomic.Int32
+	lifecycleParts.Store(1)
+
+	completeLifecyclePart := func() {
+		if lifecycleParts.Add(-1) == 0 {
+			c.lifecycle.endRequest()
+		}
+	}
+
 	parentCtx := req.Context()
 	requestCtx, cancelRequest := context.WithCancelCause(parentCtx)
 	watchdog := newIdleWatchdog(cancelRequest, c.idleTimerFactory, c.idleNow)
@@ -279,6 +426,8 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 	)
 
 	if request.Body != nil && request.Body != http.NoBody && request.ContentLength != 0 {
+		lifecycleParts.Add(1)
+
 		if notifier, ok := request.Body.(networkStallNotifier); ok {
 			watchdog.setNotifier(notifier.NetworkStall)
 		}
@@ -288,6 +437,8 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 			ReadCloser: request.Body,
 			onProgress: watchdog.progress,
 			onClose: func() {
+				defer completeLifecyclePart()
+
 				if headersReceived.Load() {
 					watchdog.stop()
 
@@ -323,6 +474,7 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 		}
 
 		cancelRequest(nil)
+		completeLifecyclePart()
 
 		return nil, fmt.Errorf("persistent HTTP client do request: %w", errors.Join(err, cause))
 	}
@@ -330,6 +482,7 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 	if resp == nil {
 		watchdog.stop()
 		cancelRequest(nil)
+		completeLifecyclePart()
 
 		return nil, errors.New("persistent HTTP client returned a nil response without an error")
 	}
@@ -347,6 +500,8 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 			cancelRequest(nil)
 		}
 
+		completeLifecyclePart()
+
 		return resp, nil
 	}
 
@@ -359,6 +514,7 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 		c.networkTimeouts.ResponseBytes,
 		c.idleTimerFactory,
 		c.idleNow,
+		completeLifecyclePart,
 	)
 
 	return resp, nil
@@ -545,6 +701,7 @@ type progressResponseBody struct {
 	maxBytes      int64
 	bytesRead     int64
 	limitErr      error
+	onDone        func()
 	closeOnce     sync.Once
 }
 
@@ -557,6 +714,7 @@ func newProgressResponseBody(
 	maxBytes int64,
 	factory idleTimerFactory,
 	now func() time.Time,
+	onDone func(),
 ) *progressResponseBody {
 	idleWatchdog := newIdleWatchdog(cancel, factory, now)
 	idleWatchdog.arm("response body read", idleTimeout)
@@ -571,6 +729,7 @@ func newProgressResponseBody(
 		idleWatchdog:  idleWatchdog,
 		totalWatchdog: totalWatchdog,
 		maxBytes:      maxBytes,
+		onDone:        onDone,
 	}
 }
 
@@ -630,6 +789,7 @@ func (b *progressResponseBody) stop() {
 		b.idleWatchdog.stop()
 		b.totalWatchdog.stop()
 		b.cancel(nil)
+		b.onDone()
 	})
 }
 
@@ -726,17 +886,21 @@ func (o httpOrigin) authority() string {
 	return o.host + ":" + o.port
 }
 
-// CloseIdleConnections closes this client's privately owned idle pool.
+// CloseIdleConnections stops new requests, waits for owned request bodies to
+// quiesce, and closes this client's privately owned connection pool.
 func (c *PersistentHTTPClient) CloseIdleConnections() {
 	if c == nil {
 		return
 	}
 
+	c.lifecycle.waitForRequests()
 	utilnet.CloseIdleConnectionsFor(c.ownedTransport)
 
 	if c.ownedHTTPTransport != nil {
 		c.ownedHTTPTransport.CloseIdleConnections()
 	}
+
+	c.lifecycle.closeConnections()
 }
 
 func findHTTPTransport(rt http.RoundTripper) *http.Transport {
