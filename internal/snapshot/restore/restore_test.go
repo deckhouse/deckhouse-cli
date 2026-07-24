@@ -88,6 +88,37 @@ func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRe
 	return s.body, s.err
 }
 
+type typedControlPlaneError struct {
+	cause error
+}
+
+func (e *typedControlPlaneError) Error() string {
+	return "blocked control-plane call: " + e.cause.Error()
+}
+
+func (e *typedControlPlaneError) Unwrap() error {
+	return e.cause
+}
+
+type blockingSource struct {
+	entered  chan struct{}
+	returned chan struct{}
+}
+
+func (s *blockingSource) RestoreManifestsScoped(
+	ctx context.Context,
+	_ aggapi.NodeRef,
+	_ string,
+	_ aggapi.RestoreScopeOptions,
+) ([]byte, error) {
+	close(s.entered)
+	defer close(s.returned)
+
+	<-ctx.Done()
+
+	return nil, &typedControlPlaneError{cause: ctx.Err()}
+}
+
 func assertNoRestoreMutation(t *testing.T, src *stubSource, dyn *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 
@@ -325,6 +356,23 @@ func (r *interceptingNamespaceableResource) List(
 	return r.NamespaceableResourceInterface.List(ctx, opts)
 }
 
+func (r *interceptingNamespaceableResource) Patch(
+	ctx context.Context,
+	name string,
+	patchType types.PatchType,
+	data []byte,
+	opts metav1.PatchOptions,
+	subresources ...string,
+) (*unstructured.Unstructured, error) {
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "patch", r.gvr, "", name); err != nil {
+			return nil, err
+		}
+	}
+
+	return r.NamespaceableResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
+}
+
 type interceptingResource struct {
 	dynamic.ResourceInterface
 	gvr           schema.GroupVersionResource
@@ -366,6 +414,23 @@ func (r *interceptingResource) List(
 	}
 
 	return r.ResourceInterface.List(ctx, opts)
+}
+
+func (r *interceptingResource) Patch(
+	ctx context.Context,
+	name string,
+	patchType types.PatchType,
+	data []byte,
+	opts metav1.PatchOptions,
+	subresources ...string,
+) (*unstructured.Unstructured, error) {
+	if r.intercept != nil {
+		if err := r.intercept(ctx, "patch", r.gvr, r.namespace, name); err != nil {
+			return nil, err
+		}
+	}
+
+	return r.ResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
 }
 
 func discardLogger() *slog.Logger {
@@ -624,6 +689,416 @@ func baseConfig(src Source, dyn dynamic.Interface) Config {
 		Mapper:       testMapper(),
 		Log:          discardLogger(),
 		PollInterval: time.Millisecond,
+	}
+}
+
+func awaitBlockedRun(t *testing.T, cfg Config, entered <-chan struct{}) error {
+	t.Helper()
+
+	result := make(chan error, 1)
+	go func() {
+		result <- Run(context.Background(), cfg)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("control-plane call was not reached")
+	}
+
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore did not return after the control-plane request timeout")
+
+		return nil
+	}
+}
+
+func assertReturnedBeforeRun(t *testing.T, returned <-chan struct{}) {
+	t.Helper()
+
+	select {
+	case <-returned:
+	default:
+		t.Fatal("blocked control-plane call did not return before Run completed")
+	}
+}
+
+func TestRun_ControlPlaneSourceTimeoutPreservesType(t *testing.T) {
+	source := &blockingSource{
+		entered:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(source, dyn)
+	cfg.ControlPlaneTimeout = 250 * time.Millisecond
+
+	err := awaitBlockedRun(t, cfg, source.entered)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+	}
+
+	var typedErr *typedControlPlaneError
+	if !errors.As(err, &typedErr) {
+		t.Fatalf("Run error = %v, want typedControlPlaneError", err)
+	}
+
+	for _, want := range []string{"fetching restore manifests", "Snapshot default/my-snap"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	assertNoPatchActions(t, dyn)
+	assertReturnedBeforeRun(t, source.returned)
+}
+
+func TestRun_ControlPlaneTimeoutsBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		verb      string
+		gvr       schema.GroupVersionResource
+		object    string
+		wantPhase string
+		configure func(*dynamicfake.FakeDynamicClient) Config
+	}{
+		{
+			name:      "root Get",
+			verb:      "get",
+			gvr:       snapshotGVR,
+			object:    testSnap,
+			wantPhase: "getting snapshot node Snapshot default/my-snap",
+			configure: func(base *dynamicfake.FakeDynamicClient) Config {
+				return baseConfig(&stubSource{body: mustArray(t, configMapManifest("unused"))}, base)
+			},
+		},
+		{
+			name:      "selected child Get",
+			verb:      "get",
+			gvr:       domainDiskGVR,
+			object:    "selected-child",
+			wantPhase: "getting snapshot child DemoVirtualDiskSnapshot default/selected-child",
+			configure: func(base *dynamicfake.FakeDynamicClient) Config {
+				cfg := baseConfig(&stubSource{body: mustArray(t, configMapManifest("unused"))}, base)
+				cfg.Mapper = testMapperWithDomain()
+				cfg.SelectedNodeKind = "DemoVirtualDiskSnapshot"
+				cfg.SelectedNodeName = "selected-child"
+
+				return cfg
+			},
+		},
+		{
+			name:      "missing child List",
+			verb:      "list",
+			gvr:       snapshotGVR,
+			wantPhase: "listing snapshot child Snapshot default/missing-child to prove absence",
+			configure: func(base *dynamicfake.FakeDynamicClient) Config {
+				cfg := baseConfig(&stubSource{body: mustArray(t, configMapManifest("unused"))}, base)
+				cfg.SelectedNodeKind = "ConfigMap"
+				cfg.SelectedNodeName = "unrelated"
+
+				return cfg
+			},
+		},
+		{
+			name:      "leaf Get",
+			verb:      "get",
+			gvr:       vsGVR,
+			object:    "vs-1",
+			wantPhase: "getting volume-snapshot leaf VolumeSnapshot default/vs-1",
+			configure: func(base *dynamicfake.FakeDynamicClient) Config {
+				return baseConfig(&stubSource{body: mustArray(t, pvcManifest("blocked-pvc", ""))}, base)
+			},
+		},
+		{
+			name:      "dry-run Patch",
+			verb:      "patch",
+			gvr:       cmGVR,
+			object:    "blocked-config",
+			wantPhase: `dry-run applying v1/ConfigMap "blocked-config"`,
+			configure: func(base *dynamicfake.FakeDynamicClient) Config {
+				return baseConfig(&stubSource{body: mustArray(t, configMapManifest("blocked-config"))}, base)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entered := make(chan struct{})
+			returned := make(chan struct{})
+			base := newFakeDynamic(controlPlaneTimeoutObjects(tc.name)...)
+
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				intercept: func(
+					ctx context.Context,
+					verb string,
+					gvr schema.GroupVersionResource,
+					_ string,
+					name string,
+				) error {
+					if verb != tc.verb || gvr != tc.gvr || (tc.object != "" && name != tc.object) {
+						return nil
+					}
+
+					close(entered)
+					defer close(returned)
+
+					<-ctx.Done()
+
+					return ctx.Err()
+				},
+			}
+
+			cfg := tc.configure(base)
+			cfg.Dynamic = dyn
+			cfg.ControlPlaneTimeout = 250 * time.Millisecond
+
+			err := awaitBlockedRun(t, cfg, entered)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if !contains(err.Error(), tc.wantPhase) {
+				t.Errorf("Run error = %q, want phase %q", err, tc.wantPhase)
+			}
+
+			assertNoPatchActions(t, base)
+			assertReturnedBeforeRun(t, returned)
+		})
+	}
+}
+
+func controlPlaneTimeoutObjects(testName string) []runtime.Object {
+	root := readySnapshot()
+
+	switch testName {
+	case "selected child Get":
+		child := readyDomainDiskSnapshot("selected-child")
+		snapshotWithChildren(
+			root,
+			snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+		)
+
+		return []runtime.Object{root, child}
+	case "missing child List":
+		snapshotWithChildren(
+			root,
+			snapshotChildRef(root.GetAPIVersion(), root.GetKind(), "missing-child"),
+		)
+
+		return []runtime.Object{root}
+	default:
+		return []runtime.Object{root, readyVolumeSnapshot("vs-1")}
+	}
+}
+
+func TestRun_ControlPlaneRESTMappingTimeout(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	mapper := restMappingInterceptor{
+		RESTMapper: testMapper(),
+		intercept: func(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+			close(entered)
+			defer close(returned)
+
+			<-release
+
+			return nil, errors.New("released mapper")
+		},
+	}
+
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(&stubSource{body: mustArray(t, configMapManifest("unused"))}, dyn)
+	cfg.Mapper = mapper
+	cfg.ControlPlaneTimeout = 250 * time.Millisecond
+
+	err := awaitBlockedRun(t, cfg, entered)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+	}
+
+	if !contains(err.Error(), "resolving snapshot hierarchy node Snapshot default/my-snap") {
+		t.Fatalf("Run error = %q, want active RESTMapping phase", err)
+	}
+
+	assertNoPatchActions(t, dyn)
+
+	close(release)
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed-out RESTMapping goroutine did not stop after discovery returned")
+	}
+}
+
+func TestRun_ControlPlaneOuterCancellationPreservesCause(t *testing.T) {
+	source := &blockingSource{
+		entered:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(source, dyn)
+	cfg.ControlPlaneTimeout = time.Hour
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- Run(ctx, cfg)
+	}()
+
+	select {
+	case <-source.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Source call was not reached")
+	}
+
+	cause := errors.New("operator stopped restore")
+	cancel(cause)
+
+	var err error
+	select {
+	case err = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore did not return after outer cancellation")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error = %v, want context.Canceled", err)
+	}
+
+	if !errors.Is(err, cause) {
+		t.Errorf("Run error = %v, want outer cancellation cause", err)
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run error = %v, do not want context.DeadlineExceeded", err)
+	}
+
+	assertNoPatchActions(t, dyn)
+	assertReturnedBeforeRun(t, source.returned)
+}
+
+func TestRun_RealApplyTimeoutReportsPartialMutation(t *testing.T) {
+	base := newFakeDynamic(readySnapshot())
+	entered := make(chan struct{})
+	returned := make(chan struct{})
+	patchCalls := 0
+
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		intercept: func(
+			ctx context.Context,
+			verb string,
+			gvr schema.GroupVersionResource,
+			_ string,
+			_ string,
+		) error {
+			if verb != "patch" || gvr != cmGVR {
+				return nil
+			}
+
+			patchCalls++
+			if patchCalls != 4 {
+				return nil
+			}
+
+			close(entered)
+			defer close(returned)
+
+			<-ctx.Done()
+
+			return ctx.Err()
+		},
+	}
+
+	source := &stubSource{body: mustArray(t,
+		configMapManifest("first-config"),
+		configMapManifest("second-config"),
+	)}
+	cfg := baseConfig(source, dyn)
+	cfg.ControlPlaneTimeout = 250 * time.Millisecond
+
+	err := awaitBlockedRun(t, cfg, entered)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context.DeadlineExceeded", err)
+	}
+
+	for _, want := range []string{
+		"restore apply stopped after 1 of 2 objects completed",
+		"cluster may be partially applied",
+		`applying v1/ConfigMap "second-config"`,
+		"active object's outcome is unknown",
+	} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	if patchCalls != 4 {
+		t.Errorf("Patch attempts = %d, want 4 (two dry-run and two real)", patchCalls)
+	}
+
+	assertReturnedBeforeRun(t, returned)
+}
+
+func TestRun_ControlPlaneTimeoutIsRenewedPerRequest(t *testing.T) {
+	base := newFakeDynamic(readySnapshot())
+	deadlines := make([]time.Time, 0, 4)
+
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		intercept: func(
+			ctx context.Context,
+			verb string,
+			gvr schema.GroupVersionResource,
+			_ string,
+			_ string,
+		) error {
+			if verb != "patch" || gvr != cmGVR {
+				return nil
+			}
+
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("Patch context has no deadline")
+			}
+
+			deadlines = append(deadlines, deadline)
+
+			return nil
+		},
+	}
+
+	source := &stubSource{body: mustArray(t,
+		configMapManifest("first-config"),
+		configMapManifest("second-config"),
+	)}
+	cfg := baseConfig(source, dyn)
+	cfg.ControlPlaneTimeout = time.Minute
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(deadlines) != 4 {
+		t.Fatalf("Patch deadline count = %d, want 4", len(deadlines))
+	}
+
+	for i := 1; i < len(deadlines); i++ {
+		if !deadlines[i].After(deadlines[i-1]) {
+			t.Errorf(
+				"Patch deadline %d = %s, want later than request %d deadline %s",
+				i,
+				deadlines[i],
+				i-1,
+				deadlines[i-1],
+			)
+		}
 	}
 }
 
@@ -1283,7 +1758,7 @@ func TestRun_Wait_BindingModeCachedPerStorageClass(t *testing.T) {
 	}
 }
 
-func TestRun_WaitBlockedAPICallsHonorTimeout(t *testing.T) {
+func TestRun_WaitBlockedAPICallsHonorControlPlaneTimeout(t *testing.T) {
 	tests := []struct {
 		name             string
 		storageClassName string
@@ -1359,7 +1834,8 @@ func TestRun_WaitBlockedAPICallsHonorTimeout(t *testing.T) {
 			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-blocked", pvcPhasePending, tc.storageClassName))}
 			cfg := baseConfig(src, dyn)
 			cfg.Wait = true
-			cfg.Timeout = 150 * time.Millisecond
+			cfg.Timeout = time.Hour
+			cfg.ControlPlaneTimeout = 250 * time.Millisecond
 
 			result := make(chan error, 1)
 			go func() {
@@ -1518,6 +1994,7 @@ func TestRun_WaitMultiplePVCsShareOneDeadline(t *testing.T) {
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
 	cfg.Timeout = time.Minute
+	cfg.ControlPlaneTimeout = 2 * time.Minute
 
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run with two Bound PVCs: %v", err)

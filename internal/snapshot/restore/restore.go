@@ -100,6 +100,9 @@ const (
 
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
+
+	// DefaultControlPlaneTimeout bounds one restore control-plane call.
+	DefaultControlPlaneTimeout = 30 * time.Second
 )
 
 // leafRef identifies a volume-snapshot leaf referenced by a PVC's spec.dataSourceRef
@@ -170,6 +173,9 @@ type Config struct {
 	Timeout time.Duration
 	// PollInterval is the Bound polling cadence (only used when Wait is true).
 	PollInterval time.Duration
+	// ControlPlaneTimeout bounds each Source, discovery, Get, List, and Patch call
+	// independently. It is not a deadline for the complete restore.
+	ControlPlaneTimeout time.Duration
 
 	// Source fetches the apply-ready manifests (manifests-with-data-restoration).
 	Source Source
@@ -239,12 +245,19 @@ func Run(ctx context.Context, cfg Config) error {
 		targetRef = ref
 	}
 
-	raw, err := cfg.Source.RestoreManifestsScoped(ctx, targetRef, cfg.Namespace, aggapi.RestoreScopeOptions{
-		Scope:            cfg.Scope,
-		FilterKind:       cfg.FilterKind,
-		FilterName:       cfg.FilterName,
-		FilterAPIVersion: cfg.FilterAPIVersion,
-	})
+	raw, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("fetching restore manifests for %s %s/%s", targetRef.Kind, targetRef.Namespace, targetRef.Name),
+		func(requestCtx context.Context) ([]byte, error) {
+			return cfg.Source.RestoreManifestsScoped(requestCtx, targetRef, cfg.Namespace, aggapi.RestoreScopeOptions{
+				Scope:            cfg.Scope,
+				FilterKind:       cfg.FilterKind,
+				FilterName:       cfg.FilterName,
+				FilterAPIVersion: cfg.FilterAPIVersion,
+			})
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("fetch restore manifests for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
@@ -290,7 +303,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// --dry-run because this is then the only apply pass the user sees output from.
 	dryRunCfg.silenceApplyLog = !cfg.DryRun
 
-	if _, err := applyAll(ctx, dryRunCfg, objs); err != nil {
+	if _, _, err := applyAll(ctx, dryRunCfg, objs); err != nil {
 		return fmt.Errorf("dry-run preflight: %w", err)
 	}
 
@@ -305,9 +318,14 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
-	pvcs, err := applyAll(ctx, cfg, objs)
+	pvcs, applied, err := applyAll(ctx, cfg, objs)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"restore apply stopped after %d of %d objects completed; the cluster may be partially applied and the active object's outcome is unknown: %w",
+			applied,
+			len(objs),
+			err,
+		)
 	}
 
 	if !cfg.Wait {
@@ -327,11 +345,23 @@ func applyDefaults(cfg Config) Config {
 		cfg.PollInterval = defaultPollInterval
 	}
 
+	if cfg.ControlPlaneTimeout <= 0 {
+		cfg.ControlPlaneTimeout = DefaultControlPlaneTimeout
+	}
+
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
 
 	return cfg
+}
+
+func (cfg Config) controlPlaneTimeout() time.Duration {
+	if cfg.ControlPlaneTimeout <= 0 {
+		return DefaultControlPlaneTimeout
+	}
+
+	return cfg.ControlPlaneTimeout
 }
 
 // validate checks that all required dependencies and identifiers are set.
@@ -368,7 +398,16 @@ func preflightManifestNamespaces(ctx context.Context, cfg Config, objs []unstruc
 
 		obj := &objs[i]
 
-		_, isNamespaced, err := cfg.resourceFor(obj.GroupVersionKind())
+		_, isNamespaced, err := cfg.resourceFor(
+			ctx,
+			obj.GroupVersionKind(),
+			fmt.Sprintf(
+				"resolving namespace scope for restore manifest apiVersion=%q kind=%q name=%q",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+			),
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"resolve namespace scope for restore manifest apiVersion=%q kind=%q name=%q: %w",
@@ -422,6 +461,129 @@ func manifestNamespaceContextError(ctx context.Context) error {
 	}
 
 	return fmt.Errorf("validate restore manifest namespaces: %w", err)
+}
+
+func controlPlaneRequest[T any](
+	ctx context.Context,
+	timeout time.Duration,
+	phase string,
+	call func(context.Context) (T, error),
+) (T, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	value, err := call(requestCtx)
+	if err != nil {
+		var zero T
+
+		return zero, controlPlaneRequestError(ctx, requestCtx, timeout, phase, err)
+	}
+
+	return value, nil
+}
+
+func controlPlaneRequestError(
+	ctx context.Context,
+	requestCtx context.Context,
+	timeout time.Duration,
+	phase string,
+	requestErr error,
+) error {
+	if outerErr := contextCauseError(ctx); outerErr != nil {
+		return fmt.Errorf("restore canceled while %s: %w", phase, errors.Join(requestErr, outerErr))
+	}
+
+	if errors.Is(requestCtx.Err(), context.DeadlineExceeded) ||
+		errors.Is(requestErr, context.DeadlineExceeded) {
+		if !errors.Is(requestErr, context.DeadlineExceeded) {
+			requestErr = errors.Join(requestErr, context.DeadlineExceeded)
+		}
+
+		return fmt.Errorf(
+			"restore control-plane request timed out after %s while %s: %w",
+			timeout,
+			phase,
+			requestErr,
+		)
+	}
+
+	return fmt.Errorf("restore control-plane request failed while %s: %w", phase, requestErr)
+}
+
+func contextCauseError(ctx context.Context) error {
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+
+	cause := context.Cause(ctx)
+	if cause != nil && !errors.Is(cause, err) {
+		return errors.Join(err, cause)
+	}
+
+	return err
+}
+
+type restMappingResult struct {
+	mapping *meta.RESTMapping
+	err     error
+}
+
+func (cfg Config) restMapping(
+	ctx context.Context,
+	phase string,
+	groupKind schema.GroupKind,
+	versions ...string,
+) (*meta.RESTMapping, error) {
+	timeout := cfg.controlPlaneTimeout()
+
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resultCh := make(chan restMappingResult, 1)
+
+	go func() {
+		mapping, err := cfg.Mapper.RESTMapping(groupKind, versions...)
+		resultCh <- restMappingResult{mapping: mapping, err: err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			return nil, controlPlaneRequestError(
+				ctx,
+				requestCtx,
+				timeout,
+				phase,
+				result.err,
+			)
+		}
+
+		return result.mapping, nil
+	case <-requestCtx.Done():
+		select {
+		case result := <-resultCh:
+			if result.err != nil {
+				return nil, controlPlaneRequestError(
+					ctx,
+					requestCtx,
+					timeout,
+					phase,
+					result.err,
+				)
+			}
+
+			return result.mapping, nil
+		default:
+			return nil, controlPlaneRequestError(
+				ctx,
+				requestCtx,
+				timeout,
+				phase,
+				requestCtx.Err(),
+			)
+		}
+	}
 }
 
 // ValidateNodeAPIVersion validates the canonical apiVersion syntax accepted by
@@ -522,12 +684,21 @@ func preflightLeaves(ctx context.Context, cfg Config, objs []unstructured.Unstru
 		return nil
 	}
 
-	var errs []string
+	var errs preflightLeafErrors
 
 	for _, ref := range refs {
-		gvr, namespaced, err := cfg.resourceForGroupKind(ref.group, ref.kind)
+		gvr, namespaced, err := cfg.resourceForGroupKind(
+			ctx,
+			ref.group,
+			ref.kind,
+			fmt.Sprintf("resolving volume-snapshot leaf %s/%s", ref.kind, ref.name),
+		)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s/%s: cannot resolve resource: %v", ref.kind, ref.name, err))
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("%s/%s: cannot resolve resource: %w", ref.kind, ref.name, err)
+			}
+
+			errs = append(errs, fmt.Errorf("%s/%s: cannot resolve resource: %w", ref.kind, ref.name, err))
 
 			continue
 		}
@@ -539,21 +710,32 @@ func preflightLeaves(ctx context.Context, cfg Config, objs []unstructured.Unstru
 			ri = cfg.Dynamic.Resource(gvr)
 		}
 
-		obj, getErr := ri.Get(ctx, ref.name, metav1.GetOptions{})
+		obj, getErr := controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("getting volume-snapshot leaf %s %s/%s", ref.kind, cfg.Namespace, ref.name),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Get(requestCtx, ref.name, metav1.GetOptions{})
+			},
+		)
 		if kubeerrors.IsNotFound(getErr) {
-			errs = append(errs, fmt.Sprintf("%s/%s: missing", ref.kind, ref.name))
+			errs = append(errs, fmt.Errorf("%s/%s: missing: %w", ref.kind, ref.name, getErr))
 
 			continue
 		}
 
 		if getErr != nil {
-			errs = append(errs, fmt.Sprintf("%s/%s: get error: %v", ref.kind, ref.name, getErr))
+			if errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
+				return fmt.Errorf("%s/%s: get error: %w", ref.kind, ref.name, getErr)
+			}
+
+			errs = append(errs, fmt.Errorf("%s/%s: get error: %w", ref.kind, ref.name, getErr))
 
 			continue
 		}
 
 		if !isLeafReady(obj, ref) {
-			errs = append(errs, fmt.Sprintf("%s/%s: not ready", ref.kind, ref.name))
+			errs = append(errs, fmt.Errorf("%s/%s: not ready", ref.kind, ref.name))
 		}
 	}
 
@@ -561,7 +743,22 @@ func preflightLeaves(ctx context.Context, cfg Config, objs []unstructured.Unstru
 		return nil
 	}
 
-	return fmt.Errorf("volume-snapshot leaves not ready: %s", strings.Join(errs, "; "))
+	return fmt.Errorf("volume-snapshot leaves not ready: %w", errs)
+}
+
+type preflightLeafErrors []error
+
+func (errs preflightLeafErrors) Error() string {
+	messages := make([]string, 0, len(errs))
+	for _, err := range errs {
+		messages = append(messages, err.Error())
+	}
+
+	return strings.Join(messages, "; ")
+}
+
+func (errs preflightLeafErrors) Unwrap() []error {
+	return errs
 }
 
 // collectLeafRefs scans decoded objects for PVCs and returns the distinct volume-snapshot
@@ -625,7 +822,7 @@ func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
 }
 
 // applyAll upserts every object in order and returns the refs of restored PVCs.
-func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured) ([]pvcRef, error) {
+func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured) ([]pvcRef, int, error) {
 	var pvcs []pvcRef
 
 	for i := range objs {
@@ -633,7 +830,7 @@ func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured)
 
 		ns, err := applyObject(ctx, cfg, obj)
 		if err != nil {
-			return nil, fmt.Errorf("apply %s/%s %q: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), err)
+			return nil, i, fmt.Errorf("apply %s/%s %q: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), err)
 		}
 
 		if obj.GetKind() == pvcKind {
@@ -642,7 +839,7 @@ func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured)
 		}
 	}
 
-	return pvcs, nil
+	return pvcs, len(objs), nil
 }
 
 // applyObject applies a single object to the cluster using Server-Side Apply (SSA).
@@ -650,7 +847,16 @@ func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured)
 // webhooks) are not touched. Namespaced objects without a namespace inherit the target
 // namespace. It returns the effective namespace the object was applied into.
 func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured) (string, error) {
-	gvr, namespaced, err := cfg.resourceFor(obj.GroupVersionKind())
+	phase := "applying"
+	if cfg.DryRun {
+		phase = "dry-run applying"
+	}
+
+	gvr, namespaced, err := cfg.resourceFor(
+		ctx,
+		obj.GroupVersionKind(),
+		fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -693,7 +899,15 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		patchOpts.DryRun = []string{metav1.DryRunAll}
 	}
 
-	if _, patchErr := ri.Patch(ctx, obj.GetName(), types.ApplyPatchType, jsonBytes, patchOpts); patchErr != nil {
+	_, patchErr := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return ri.Patch(requestCtx, obj.GetName(), types.ApplyPatchType, jsonBytes, patchOpts)
+		},
+	)
+	if patchErr != nil {
 		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
 		// surface an actionable error instead of a raw API rejection.
 		if kubeerrors.IsInvalid(patchErr) {
@@ -807,7 +1021,14 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 	)
 
 	if className != "" {
-		sc, err = cfg.Dynamic.Resource(scGVR).Get(ctx, className, metav1.GetOptions{})
+		sc, err = controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("getting StorageClass %q", className),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return cfg.Dynamic.Resource(scGVR).Get(requestCtx, className, metav1.GetOptions{})
+			},
+		)
 		if err != nil {
 			if ctxErr := waitContextError(ctx, fmt.Sprintf("getting StorageClass %q", className)); ctxErr != nil {
 				return "", ctxErr
@@ -844,7 +1065,14 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 // storageclass.kubernetes.io/is-default-class: "true"), or nil if none carries the
 // annotation.
 func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.GroupVersionResource) (*unstructured.Unstructured, error) {
-	list, err := cfg.Dynamic.Resource(scGVR).List(ctx, metav1.ListOptions{})
+	list, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		"listing StorageClasses to resolve the default",
+		func(requestCtx context.Context) (*unstructured.UnstructuredList, error) {
+			return cfg.Dynamic.Resource(scGVR).List(requestCtx, metav1.ListOptions{})
+		},
+	)
 	if err != nil {
 		if ctxErr := waitContextError(ctx, "listing StorageClasses to resolve the default"); ctxErr != nil {
 			return nil, ctxErr
@@ -919,7 +1147,14 @@ func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 }
 
 func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) (string, error) {
-	pvc, err := cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
+	pvc, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("getting restored PVC %s/%s", ref.namespace, ref.name),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(requestCtx, ref.name, metav1.GetOptions{})
+		},
+	)
 	if kubeerrors.IsNotFound(err) {
 		return "", fmt.Errorf("restored PVC %s/%s was not found after apply: %w", ref.namespace, ref.name, err)
 	}
@@ -983,8 +1218,12 @@ func waitContextError(ctx context.Context, phase string) error {
 }
 
 // resourceFor resolves a GVK to its resource and whether it is namespaced.
-func (cfg Config) resourceFor(gvk schema.GroupVersionKind) (schema.GroupVersionResource, bool, error) {
-	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+func (cfg Config) resourceFor(
+	ctx context.Context,
+	gvk schema.GroupVersionKind,
+	phase string,
+) (schema.GroupVersionResource, bool, error) {
+	mapping, err := cfg.restMapping(ctx, phase, gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
 	}
@@ -995,8 +1234,13 @@ func (cfg Config) resourceFor(gvk schema.GroupVersionKind) (schema.GroupVersionR
 // resourceForGroupKind resolves a GroupKind to its preferred-version resource without
 // requiring a known version. Used by preflightLeaves where only apiGroup+kind are known
 // (spec.dataSourceRef / spec.dataSource do not carry the API version).
-func (cfg Config) resourceForGroupKind(group, kind string) (schema.GroupVersionResource, bool, error) {
-	mapping, err := cfg.Mapper.RESTMapping(schema.GroupKind{Group: group, Kind: kind})
+func (cfg Config) resourceForGroupKind(
+	ctx context.Context,
+	group string,
+	kind string,
+	phase string,
+) (schema.GroupVersionResource, bool, error) {
+	mapping, err := cfg.restMapping(ctx, phase, schema.GroupKind{Group: group, Kind: kind})
 	if err != nil {
 		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s/%s: %w", group, kind, err)
 	}
@@ -1715,12 +1959,19 @@ func (i nodeIdentity) matches(kind, name, apiVersion string) bool {
 }
 
 func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {
-	resource, err := cfg.snapshotResource(ref)
+	resource, err := cfg.snapshotResource(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
 
-	obj, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
+	obj, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("getting snapshot node %s %s/%s", ref.Kind, ref.Namespace, ref.Name),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return resource.Get(requestCtx, ref.Name, metav1.GetOptions{})
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1734,12 +1985,19 @@ func (cfg Config) getSnapshotChild(
 	parent *unstructured.Unstructured,
 	ref aggapi.NodeRef,
 ) (*unstructured.Unstructured, bool, error) {
-	resource, err := cfg.snapshotResource(ref)
+	resource, err := cfg.snapshotResource(ctx, ref)
 	if err != nil {
 		return nil, false, err
 	}
 
-	obj, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
+	obj, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("getting snapshot child %s %s/%s", ref.Kind, ref.Namespace, ref.Name),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return resource.Get(requestCtx, ref.Name, metav1.GetOptions{})
+		},
+	)
 	if err == nil {
 		return obj, false, nil
 	}
@@ -1761,7 +2019,13 @@ func (cfg Config) getSnapshotChild(
 		)
 	}
 
-	if err := proveMissingSnapshotChild(ctx, resource, parentResourceVersion, ref); err != nil {
+	if err := proveMissingSnapshotChild(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		resource,
+		parentResourceVersion,
+		ref,
+	); err != nil {
 		return nil, false, err
 	}
 
@@ -1769,6 +2033,7 @@ func (cfg Config) getSnapshotChild(
 }
 
 func (cfg Config) snapshotResource(
+	ctx context.Context,
 	ref aggapi.NodeRef,
 ) (dynamic.ResourceInterface, error) {
 	gv, err := schema.ParseGroupVersion(ref.APIVersion)
@@ -1782,7 +2047,12 @@ func (cfg Config) snapshotResource(
 		Kind:    ref.Kind,
 	}
 
-	mapping, err := cfg.Mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	mapping, err := cfg.restMapping(
+		ctx,
+		fmt.Sprintf("resolving snapshot hierarchy node %s %s/%s", ref.Kind, ref.Namespace, ref.Name),
+		gvk.GroupKind(),
+		gvk.Version,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
 	}
@@ -1814,6 +2084,7 @@ func (cfg Config) snapshotResource(
 
 func proveMissingSnapshotChild(
 	ctx context.Context,
+	controlPlaneTimeout time.Duration,
 	resource dynamic.ResourceInterface,
 	parentResourceVersion string,
 	ref aggapi.NodeRef,
@@ -1833,7 +2104,19 @@ func proveMissingSnapshotChild(
 			options.ResourceVersionMatch = metav1.ResourceVersionMatchNotOlderThan
 		}
 
-		page, err := resource.List(ctx, options)
+		page, err := controlPlaneRequest(
+			ctx,
+			controlPlaneTimeout,
+			fmt.Sprintf(
+				"listing snapshot child %s %s/%s to prove absence",
+				ref.Kind,
+				ref.Namespace,
+				ref.Name,
+			),
+			func(requestCtx context.Context) (*unstructured.UnstructuredList, error) {
+				return resource.List(requestCtx, options)
+			},
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"list %s %s/%s at or after parent resourceVersion %s to prove absence: %w",
