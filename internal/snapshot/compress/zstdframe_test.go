@@ -676,6 +676,68 @@ func TestZstdDecodedSize_RealMultiFrameStream(t *testing.T) {
 	}
 }
 
+func TestZstdDecodedSize_ChecksumCorruptionNeedsTerminalDecode(t *testing.T) {
+	t.Parallel()
+
+	raw := pseudoRandom(400_000, 0xC0FFEE)
+	codec, err := New("zstd", 0)
+	if err != nil {
+		t.Fatalf("New(zstd): %v", err)
+	}
+
+	var encoded bytes.Buffer
+	if err := codec.EncodeFrameStream(&encoded, bytes.NewReader(raw), int64(len(raw))); err != nil {
+		t.Fatalf("EncodeFrameStream: %v", err)
+	}
+
+	corrupt := append([]byte(nil), encoded.Bytes()...)
+	corrupt[len(corrupt)-1] ^= 0xFF
+
+	decodedSize, err := ZstdDecodedSize(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("ZstdDecodedSize accepted metadata unexpectedly failed: %v", err)
+	}
+
+	if decodedSize != int64(len(raw)) {
+		t.Fatalf("metadata decoded size = %d, want %d", decodedSize, len(raw))
+	}
+
+	decoder, err := zstd.NewReader(bytes.NewReader(corrupt))
+	if err != nil {
+		t.Fatalf("zstd.NewReader: %v", err)
+	}
+	t.Cleanup(decoder.Close)
+
+	buf := make([]byte, 32*1024)
+
+	var decoded int
+
+	var terminalErr error
+
+	for {
+		n, readErr := decoder.Read(buf)
+		decoded += n
+
+		if readErr != nil {
+			terminalErr = readErr
+
+			break
+		}
+
+		if n == 0 {
+			t.Fatal("zstd decoder made no progress")
+		}
+	}
+
+	if decoded != len(raw) {
+		t.Fatalf("decoder emitted %d bytes before terminal error, want exactly %d", decoded, len(raw))
+	}
+
+	if !errors.Is(terminalErr, zstd.ErrCRCMismatch) {
+		t.Fatalf("terminal decode error = %v, want zstd.ErrCRCMismatch", terminalErr)
+	}
+}
+
 func TestZstdDecodedSize_SeeksPayloadsAndBoundsReads(t *testing.T) {
 	t.Parallel()
 

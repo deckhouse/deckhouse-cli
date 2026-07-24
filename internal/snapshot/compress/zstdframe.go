@@ -132,7 +132,9 @@ func SkipZstdFrames(rs io.ReadSeeker, n int) (int64, error) {
 // payloads are skipped with Seek, so memory and bytes read are independent of
 // the decoded volume size. Every frame must declare its content size; a
 // content-size-less, malformed, truncated, empty, or overflowing stream wraps
-// ErrCorruptZstdFrame. The reader position is restored before return.
+// ErrCorruptZstdFrame. This is a size preflight, not a payload-integrity proof:
+// skipped payloads and frame checksums are not decoded or validated. The reader
+// position is restored before return.
 func ZstdDecodedSize(rs io.ReadSeeker) (int64, error) {
 	start, err := rs.Seek(0, io.SeekCurrent)
 	if err != nil {
