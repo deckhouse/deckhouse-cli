@@ -24,6 +24,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -674,7 +676,7 @@ func TestRootedDestinationEnsureDir_reconfirmsVisibleDeepAncestry(t *testing.T) 
 
 	nested := filepath.Join(append([]string{base}, components...)...)
 	failure := errors.New("ancestor sync failure")
-	failAt := filepath.Join(base, components[0])
+	failAt := filepath.Join(append([]string{base}, components[:depth-1]...)...)
 
 	var (
 		attempt   int
@@ -723,9 +725,9 @@ func TestRootedDestinationEnsureDir_reconfirmsVisibleDeepAncestry(t *testing.T) 
 			t.Fatalf("attempt %d: nested path is not a directory", attempt)
 		}
 
-		if len(events[attempt]) != depth {
+		if len(events[attempt]) != depth+1 {
 			t.Fatalf("attempt %d: got %d confirmations before failure, want %d",
-				attempt, len(events[attempt]), depth)
+				attempt, len(events[attempt]), depth+1)
 		}
 
 		if events[attempt][0] != filepath.Join(components...) {
@@ -733,9 +735,10 @@ func TestRootedDestinationEnsureDir_reconfirmsVisibleDeepAncestry(t *testing.T) 
 				attempt, events[attempt][0], filepath.Join(components...))
 		}
 
-		if events[attempt][len(events[attempt])-1] != components[0] {
+		wantFailed := filepath.Join(components[:depth-1]...)
+		if events[attempt][len(events[attempt])-1] != wantFailed {
 			t.Fatalf("attempt %d: last confirmation = %q, want failed ancestor %q",
-				attempt, events[attempt][len(events[attempt])-1], components[0])
+				attempt, events[attempt][len(events[attempt])-1], wantFailed)
 		}
 	}
 
@@ -755,11 +758,13 @@ func TestRootedDestinationEnsureDir_reconfirmsVisibleDeepAncestry(t *testing.T) 
 			events[attempt][0], filepath.Join(components...))
 	}
 
-	if events[attempt][len(events[attempt])-1] != "." {
-		t.Fatalf("successful retry last confirmation = %q, want rooted destination", events[attempt][len(events[attempt])-1])
+	wantLast := filepath.Join(components[:depth-1]...)
+	if events[attempt][len(events[attempt])-1] != wantLast {
+		t.Fatalf("successful retry last confirmation = %q, want leaf parent %q",
+			events[attempt][len(events[attempt])-1], wantLast)
 	}
 
-	wantNextCalls := 3*(depth-1) + depth + 1
+	wantNextCalls := 4*depth + 1
 	if nextCalls != wantNextCalls {
 		t.Fatalf("platform confirmation calls = %d, want %d", nextCalls, wantNextCalls)
 	}
@@ -876,6 +881,233 @@ func TestRootedDestinationEnsureDir_rootReplacementDuringConfirmation(t *testing
 
 	if len(entries) != 0 {
 		t.Fatalf("replacement tree was mutated: %v", entries)
+	}
+}
+
+func TestRootedDestinationDeepOperationsBoundDescriptors(t *testing.T) {
+	t.Helper()
+
+	base := t.TempDir()
+	targetLength := 3500
+	if runtime.GOOS == "darwin" {
+		targetLength = 700
+	}
+
+	components := make([]string, 0, targetLength/2)
+	for length := 1; length < targetLength; length += 2 {
+		components = append(components, "d")
+	}
+
+	deepRelative := filepath.Join(components...)
+	deep := filepath.Join(base, deepRelative)
+
+	var (
+		mu      sync.Mutex
+		current int
+		peak    int
+	)
+
+	destination, err := OpenRootedDestination(base, nil)
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	destination.setDescriptorObserver(func(delta int) {
+		mu.Lock()
+		current += delta
+		peak = max(peak, current)
+		mu.Unlock()
+	})
+
+	if err := destination.EnsureDir(deep); err != nil {
+		t.Fatalf("EnsureDir near path limit: %v", err)
+	}
+
+	path := filepath.Join(deep, "payload")
+	file, err := destination.CreateExclusive(path, 0o644)
+	if err != nil {
+		t.Fatalf("CreateExclusive: %v", err)
+	}
+
+	if _, err := file.WriteString("payload"); err != nil {
+		_ = file.Close()
+
+		t.Fatalf("write payload: %v", err)
+	}
+
+	if err := file.Close(); err != nil {
+		t.Fatalf("close payload: %v", err)
+	}
+
+	if _, err := destination.Stat(path); err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	if data, err := destination.ReadFile(path); err != nil || string(data) != "payload" {
+		t.Fatalf("ReadFile = %q, %v; want payload", data, err)
+	}
+
+	renamed := filepath.Join(deep, "renamed")
+	if err := destination.Rename(path, renamed); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+
+	if err := destination.SyncParent(renamed); err != nil {
+		t.Fatalf("SyncParent: %v", err)
+	}
+
+	mu.Lock()
+	descriptorPeak := peak
+	descriptorCurrent := current
+	mu.Unlock()
+
+	if descriptorPeak > 8 {
+		t.Fatalf("descriptor peak = %d across %d components, want at most 8",
+			descriptorPeak, len(components))
+	}
+
+	if descriptorCurrent != 0 {
+		t.Fatalf("descriptor balance after deep operations = %d, want 0", descriptorCurrent)
+	}
+
+	const workers = 24
+
+	start := make(chan struct{})
+	results := make(chan error, workers)
+
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+
+		go func() {
+			defer group.Done()
+			<-start
+
+			for range 4 {
+				if _, err := destination.Stat(renamed); err != nil {
+					results <- err
+
+					return
+				}
+			}
+
+			results <- nil
+		}()
+	}
+
+	close(start)
+	group.Wait()
+	close(results)
+
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent deep Stat: %v", err)
+		}
+	}
+
+	mu.Lock()
+	concurrentPeak := peak
+	concurrentCurrent := current
+	mu.Unlock()
+
+	if concurrentPeak > workers*5+8 {
+		t.Fatalf("concurrent descriptor peak = %d with %d workers", concurrentPeak, workers)
+	}
+
+	if concurrentCurrent != 0 {
+		t.Fatalf("descriptor balance after concurrent operations = %d, want 0", concurrentCurrent)
+	}
+}
+
+func TestRootedDestinationRemoveAllBoundedAndCancellable(t *testing.T) {
+	t.Helper()
+
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	opens := 0
+	destination, err := OpenRootedDestination(root, func(phase MutationPhase, _ string) {
+		if phase != MutationOpen {
+			return
+		}
+
+		opens++
+		if opens == 64 {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+
+	var (
+		mu                 sync.Mutex
+		currentDescriptors int
+		peakDescriptors    int
+	)
+	destination.setDescriptorObserver(func(delta int) {
+		mu.Lock()
+		currentDescriptors += delta
+		peakDescriptors = max(peakDescriptors, currentDescriptors)
+		mu.Unlock()
+	})
+
+	components := make([]string, 128)
+	for index := range components {
+		components[index] = fmt.Sprintf("d%03d", index)
+	}
+
+	deep := filepath.Join(append([]string{root, "cleanup"}, components...)...)
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatalf("create cleanup tree: %v", err)
+	}
+
+	destination.SetTraversalContext(ctx)
+	err = destination.RemoveAll(filepath.Join(root, "cleanup"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RemoveAll cancellation error = %v, want context.Canceled", err)
+	}
+
+	mu.Lock()
+	afterCancellation := currentDescriptors
+	mu.Unlock()
+	if afterCancellation != 0 {
+		t.Fatalf("descriptor balance after cancellation = %d, want 0", afterCancellation)
+	}
+
+	destination.SetTraversalContext(context.Background())
+	if err := destination.RemoveAll(filepath.Join(root, "cleanup")); err != nil {
+		t.Fatalf("RemoveAll retry: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "cleanup")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup tree survived retry: %v", err)
+	}
+
+	mu.Lock()
+	afterCleanup := currentDescriptors
+	cleanupPeak := peakDescriptors
+	mu.Unlock()
+	if afterCleanup != 0 {
+		t.Fatalf("descriptor balance after cleanup = %d, want 0", afterCleanup)
+	}
+
+	if cleanupPeak > 5 {
+		t.Fatalf("cleanup descriptor peak = %d across %d levels, want at most 5",
+			cleanupPeak, len(components)+1)
+	}
+
+	if err := destination.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("remove closed root: %v", err)
 	}
 }
 

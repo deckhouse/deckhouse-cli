@@ -922,7 +922,7 @@ func ComputeNodeChecksum(nodeDir string) (NodeChecksum, error) {
 	return computeNodeChecksum(source)
 }
 
-func computeNodeChecksum(source *RootedSource) (NodeChecksum, error) {
+func computeNodeChecksum(source archiveDirectory) (NodeChecksum, error) {
 	paths, err := collectNodeFiles(source)
 	if err != nil {
 		return NodeChecksum{}, err
@@ -1043,21 +1043,21 @@ func ValidateNodeMetadata(nodeDir string) error {
 // collectNodeFiles returns the relative paths of all files in nodeDir that
 // contribute to the node checksum. The returned paths are not sorted; callers
 // must sort them before computing the digest.
-func collectNodeFiles(source *RootedSource) ([]string, error) {
+func collectNodeFiles(source archiveDirectory) ([]string, error) {
 	var paths []string
 
-	manifests, err := source.OpenDirectory(ManifestsDirName)
+	manifests, err := source.archiveOpenDirectory(ManifestsDirName)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
 		}
 	} else {
-		defer func() { _ = manifests.Close() }()
+		defer func() { _ = manifests.archiveClose() }()
 	}
 
 	var entries []os.DirEntry
 	if manifests != nil {
-		entries, err = manifests.ReadDirectory()
+		entries, err = manifests.archiveReadDirectory()
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", ManifestsDirName, err)
 		}
@@ -1070,7 +1070,7 @@ func collectNodeFiles(source *RootedSource) ([]string, error) {
 
 		relPath := filepath.Join(ManifestsDirName, e.Name())
 
-		file, openErr := source.OpenRegularPath(relPath)
+		file, openErr := source.archiveOpenRegularPath(relPath)
 		if openErr != nil {
 			return nil, fmt.Errorf("inspect manifest %s: %w", relPath, openErr)
 		}
@@ -1082,11 +1082,11 @@ func collectNodeFiles(source *RootedSource) ([]string, error) {
 
 	blockPayload, blockFound, findErr := ClassifyBlockPayloadIn(source)
 	if findErr != nil {
-		return nil, fmt.Errorf("classify block payload in %s: %w", source.Path(), findErr)
+		return nil, fmt.Errorf("classify block payload in %s: %w", source.archivePath(), findErr)
 	}
 
 	if blockFound {
-		rel, relErr := filepath.Rel(source.Path(), blockPayload.Path)
+		rel, relErr := filepath.Rel(source.archivePath(), blockPayload.Path)
 		if relErr != nil {
 			return nil, relErr
 		}
@@ -1095,16 +1095,16 @@ func collectNodeFiles(source *RootedSource) ([]string, error) {
 	}
 
 	// Single-volume filesystem tar (data.tar).
-	tarFile, statErr := source.OpenRegularFile(FsTarName)
+	tarFile, statErr := source.archiveOpenRegularFile(FsTarName)
 	if statErr == nil {
 		_ = tarFile.Close()
 
 		paths = append(paths, FsTarName)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return nil, fmt.Errorf("inspect %s: %w", filepath.Join(source.Path(), FsTarName), statErr)
+		return nil, fmt.Errorf("inspect %s: %w", filepath.Join(source.archivePath(), FsTarName), statErr)
 	}
 
-	dataDir, err := source.OpenDirectory(DataDirName)
+	dataDir, err := source.archiveOpenDirectoryPath(DataDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return paths, nil
@@ -1113,9 +1113,11 @@ func collectNodeFiles(source *RootedSource) ([]string, error) {
 		return nil, fmt.Errorf("walk %s: %w", DataDirName, err)
 	}
 
-	defer func() { _ = dataDir.Close() }()
+	if err := dataDir.archiveClose(); err != nil {
+		return nil, fmt.Errorf("close %s: %w", DataDirName, err)
+	}
 
-	dataPaths, err := collectLegacyDataFiles(dataDir, DataDirName)
+	dataPaths, err := collectLegacyDataFiles(source, DataDirName)
 	if err != nil {
 		return nil, fmt.Errorf("walk %s: %w", DataDirName, err)
 	}
@@ -1125,34 +1127,31 @@ func collectNodeFiles(source *RootedSource) ([]string, error) {
 	return paths, nil
 }
 
-func collectLegacyDataFiles(dir *RootedSource, relDir string) ([]string, error) {
-	entries, err := dir.ReadDirectory()
+func collectLegacyDataFiles(source archiveDirectory, relDir string) ([]string, error) {
+	dir, err := source.archiveOpenDirectoryPath(relDir)
 	if err != nil {
 		return nil, err
+	}
+
+	entries, readErr := dir.archiveReadDirectory()
+
+	closeErr := dir.archiveClose()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
 	}
 
 	paths := make([]string, 0, len(entries))
 
 	for _, entry := range entries {
+		relPath := filepath.Join(relDir, entry.Name())
 		if entry.IsDir() {
 			if strings.HasSuffix(entry.Name(), ".d") {
 				continue
 			}
 
-			child, openErr := dir.OpenDirectory(entry.Name())
-			if openErr != nil {
-				return nil, openErr
-			}
-
-			childPaths, collectErr := collectLegacyDataFiles(child, filepath.Join(relDir, entry.Name()))
-			closeErr := child.Close()
-
+			childPaths, collectErr := collectLegacyDataFiles(source, relPath)
 			if collectErr != nil {
 				return nil, collectErr
-			}
-
-			if closeErr != nil {
-				return nil, fmt.Errorf("close archive directory %s: %w", child.Path(), closeErr)
 			}
 
 			paths = append(paths, childPaths...)
@@ -1160,14 +1159,14 @@ func collectLegacyDataFiles(dir *RootedSource, relDir string) ([]string, error) 
 			continue
 		}
 
-		file, openErr := dir.OpenRegularFile(entry.Name())
+		file, openErr := source.archiveOpenRegularPath(relPath)
 		if openErr != nil {
 			return nil, openErr
 		}
 
 		_ = file.Close()
 
-		paths = append(paths, filepath.Join(relDir, entry.Name()))
+		paths = append(paths, relPath)
 	}
 
 	return paths, nil
@@ -1176,20 +1175,20 @@ func collectLegacyDataFiles(dir *RootedSource, relDir string) ([]string, error) 
 // computeFileHash computes a SHA-256 digest over relPath (null-terminated) followed
 // by the raw content of absPath.  Using a per-file hash before folding into the
 // final digest prevents length-extension and path/content confusion.
-func computeFileHash(source *RootedSource, relPath string) ([]byte, error) {
+func computeFileHash(source archiveDirectory, relPath string) ([]byte, error) {
 	h := sha256.New()
 	h.Write([]byte(relPath))
 	h.Write([]byte{0})
 
-	f, err := source.OpenRegularPath(relPath)
+	f, err := source.archiveOpenRegularPath(relPath)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", filepath.Join(source.Path(), relPath), err)
+		return nil, fmt.Errorf("open %s: %w", filepath.Join(source.archivePath(), relPath), err)
 	}
 
 	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(h, f); err != nil {
-		return nil, fmt.Errorf("read %s: %w", filepath.Join(source.Path(), relPath), err)
+		return nil, fmt.Errorf("read %s: %w", filepath.Join(source.archivePath(), relPath), err)
 	}
 
 	return h.Sum(nil), nil

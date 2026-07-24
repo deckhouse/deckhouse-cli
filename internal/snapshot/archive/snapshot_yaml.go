@@ -207,6 +207,16 @@ type PinnedDirectory struct {
 	verifyBinding func() error
 }
 
+type archiveDirectory interface {
+	archiveClose() error
+	archiveOpenDirectory(string) (archiveDirectory, error)
+	archiveOpenDirectoryPath(string) (archiveDirectory, error)
+	archiveOpenRegularFile(string) (*os.File, error)
+	archiveOpenRegularPath(string) (*os.File, error)
+	archivePath() string
+	archiveReadDirectory() ([]os.DirEntry, error)
+}
+
 type rootedLockBinding struct {
 	mu      sync.RWMutex
 	claimed bool
@@ -422,6 +432,34 @@ func (s *RootedSource) OpenRegularPath(path string) (*os.File, error) {
 	return current.OpenRegularFile(components[len(components)-1])
 }
 
+func (s *RootedSource) archiveClose() error {
+	return s.Close()
+}
+
+func (s *RootedSource) archiveOpenDirectory(name string) (archiveDirectory, error) {
+	return s.OpenDirectory(name)
+}
+
+func (s *RootedSource) archiveOpenDirectoryPath(path string) (archiveDirectory, error) {
+	return s.OpenDirectoryPath(path)
+}
+
+func (s *RootedSource) archiveOpenRegularFile(name string) (*os.File, error) {
+	return s.OpenRegularFile(name)
+}
+
+func (s *RootedSource) archiveOpenRegularPath(path string) (*os.File, error) {
+	return s.OpenRegularPath(path)
+}
+
+func (s *RootedSource) archivePath() string {
+	return s.Path()
+}
+
+func (s *RootedSource) archiveReadDirectory() ([]os.DirEntry, error) {
+	return s.ReadDirectory()
+}
+
 // Close releases the descriptor retained by directory.
 func (d *PinnedDirectory) Close() error {
 	return d.dir.Close()
@@ -488,6 +526,114 @@ func (d *PinnedDirectory) OpenRegularFile(name string) (*os.File, error) {
 	}
 
 	return openArchiveRegularAt(d.dir, name, path)
+}
+
+func (d *PinnedDirectory) archiveClose() error {
+	return d.Close()
+}
+
+func (d *PinnedDirectory) archiveOpenDirectory(name string) (archiveDirectory, error) {
+	return d.OpenDirectory(name)
+}
+
+func (d *PinnedDirectory) archiveOpenDirectoryPath(path string) (archiveDirectory, error) {
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if !filepath.IsLocal(clean) {
+		return nil, fmt.Errorf("invalid rooted directory path %q: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	if clean == "." {
+		dir, err := openArchiveDirectoryAt(d.dir, ".", d.path)
+		if err != nil {
+			return nil, err
+		}
+
+		return &PinnedDirectory{
+			dir:           dir,
+			path:          d.path,
+			hook:          d.hook,
+			verifyBinding: d.verifyBinding,
+		}, nil
+	}
+
+	components := strings.Split(clean, string(filepath.Separator))
+
+	var current *PinnedDirectory
+
+	parent := d
+	for _, component := range components {
+		child, err := parent.OpenDirectory(component)
+		if err != nil {
+			if current != nil {
+				_ = current.Close()
+			}
+
+			return nil, err
+		}
+
+		if current != nil {
+			_ = current.Close()
+		}
+
+		current = child
+		parent = child
+	}
+
+	return current, nil
+}
+
+func (d *PinnedDirectory) archiveOpenRegularFile(name string) (*os.File, error) {
+	return d.OpenRegularFile(name)
+}
+
+func (d *PinnedDirectory) archiveOpenRegularPath(path string) (*os.File, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsLocal(clean) || clean == "." {
+		return nil, fmt.Errorf("invalid archive relative path %q: %w", path, ErrNonRegularArchiveArtifact)
+	}
+
+	components := strings.Split(clean, string(filepath.Separator))
+	if len(components) == 1 {
+		return d.OpenRegularFile(components[0])
+	}
+
+	var current *PinnedDirectory
+
+	parent := d
+	for _, component := range components[:len(components)-1] {
+		child, err := parent.OpenDirectory(component)
+		if err != nil {
+			if current != nil {
+				_ = current.Close()
+			}
+
+			return nil, err
+		}
+
+		if current != nil {
+			_ = current.Close()
+		}
+
+		current = child
+		parent = child
+	}
+
+	file, err := current.OpenRegularFile(components[len(components)-1])
+
+	closeErr := current.Close()
+	if err != nil || closeErr != nil {
+		return nil, errors.Join(err, closeErr)
+	}
+
+	return file, nil
+}
+
+func (d *PinnedDirectory) archivePath() string {
+	return d.Path()
+}
+
+func (d *PinnedDirectory) archiveReadDirectory() ([]os.DirEntry, error) {
+	return d.ReadDirectory(-1)
 }
 
 func (d *PinnedDirectory) runHook(path string) {
@@ -695,8 +841,8 @@ func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
 	return readSnapshotYAML(source)
 }
 
-func readSnapshotYAML(source *RootedSource) (SnapshotYAML, error) {
-	file, err := source.OpenRegularFile(SnapshotYAMLName)
+func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
+	file, err := source.archiveOpenRegularFile(SnapshotYAMLName)
 	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
 	}
