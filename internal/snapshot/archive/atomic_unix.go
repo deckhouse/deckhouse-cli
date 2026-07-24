@@ -46,6 +46,62 @@ func renameDurably(oldPath, newPath string) error {
 	return os.Rename(oldPath, newPath)
 }
 
+func renameRootedDurably(oldRoot *os.Root, oldName string, newRoot *os.Root, newName string) error {
+	same, err := sameRootedDirectory(oldRoot, newRoot)
+	if err != nil {
+		return err
+	}
+
+	if !same {
+		return fmt.Errorf("rooted atomic rename crosses directories: %w", ErrNonRegularArchiveArtifact)
+	}
+
+	return oldRoot.Rename(oldName, newName)
+}
+
+func sameRootedDirectory(left, right *os.Root) (bool, error) {
+	leftFile, err := left.Open(".")
+	if err != nil {
+		return false, err
+	}
+
+	defer func() { _ = leftFile.Close() }()
+
+	rightFile, err := right.Open(".")
+	if err != nil {
+		return false, err
+	}
+
+	defer func() { _ = rightFile.Close() }()
+
+	leftInfo, err := leftFile.Stat()
+	if err != nil {
+		return false, err
+	}
+
+	rightInfo, err := rightFile.Stat()
+	if err != nil {
+		return false, err
+	}
+
+	return os.SameFile(leftInfo, rightInfo), nil
+}
+
+func syncRootedDirectory(root *os.Root) error {
+	file, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+
+		return err
+	}
+
+	return file.Close()
+}
+
 // syncDir makes preceding renames and creates visible after a power loss.
 func syncDir(path string) error {
 	d, err := os.Open(path)

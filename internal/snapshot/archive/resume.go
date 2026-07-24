@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,9 +142,32 @@ func ScanNode(parentDir string, id NodeIdentity) (NodeResumePlan, error) {
 // is derived from the existing complete node's checksum.  This prevents the
 // pipeline from overwriting unrelated completed data.
 func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (NodeResumePlan, error) {
+	return scanNodeContext(ctx, nil, parentDir, id)
+}
+
+// ScanNodeRootedContext is ScanNodeContext rooted in destination's locked view.
+func ScanNodeRootedContext(
+	ctx context.Context,
+	destination *RootedDestination,
+	parentDir string,
+	id NodeIdentity,
+) (NodeResumePlan, error) {
+	if destination == nil {
+		return NodeResumePlan{}, errors.New("scan rooted node: destination is nil")
+	}
+
+	return scanNodeContext(ctx, destination, parentDir, id)
+}
+
+func scanNodeContext(
+	ctx context.Context,
+	destination *RootedDestination,
+	parentDir string,
+	id NodeIdentity,
+) (NodeResumePlan, error) {
 	primaryDir := filepath.Join(parentDir, NodeDirName(id.Kind, nodeDirComponent(id)))
 
-	_, statErr := os.Stat(primaryDir)
+	_, statErr := resumeStat(destination, primaryDir)
 	if errors.Is(statErr, os.ErrNotExist) {
 		return NodeResumePlan{TargetDir: primaryDir, Observed: ObservedPending}, nil
 	}
@@ -152,13 +176,13 @@ func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (No
 		return NodeResumePlan{}, fmt.Errorf("stat node dir %s: %w", primaryDir, statErr)
 	}
 
-	if err := removeTmpFiles(primaryDir); err != nil {
+	if err := removeTmpFilesAt(destination, primaryDir); err != nil {
 		return NodeResumePlan{}, err
 	}
 
-	verifyErr := VerifyNode(primaryDir)
+	verifyErr := resumeVerifyNode(destination, primaryDir)
 	if verifyErr == nil {
-		return classifyCompleteDir(ctx, parentDir, primaryDir, id)
+		return classifyCompleteDir(ctx, destination, parentDir, primaryDir, id)
 	}
 
 	// A PRESENT snapshot.yaml whose recorded checksum no longer matches the
@@ -170,7 +194,7 @@ func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (No
 	// code-style §6a "existence is not validity"). Surface it instead of
 	// resuming into it.
 	if errors.Is(verifyErr, ErrChecksumMismatch) {
-		return classifyChecksumMismatchDir(primaryDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
+		return classifyChecksumMismatchDir(destination, primaryDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
 			collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), ShortChecksum(sy.Checksum.Hex))
 
 			return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
@@ -184,7 +208,7 @@ func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (No
 	// non-empty marker the node is redirected to a stable collision path
 	// (mirroring classifyCompleteDir) instead of resuming into another
 	// snapshot's bytes.
-	return classifyPartialDir(primaryDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
+	return classifyPartialDir(destination, primaryDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
 		collisionDir := CollisionNodeDir(parentDir, id.Kind, nodeDirComponent(id), mm.short)
 
 		return NodeResumePlan{TargetDir: collisionDir, Observed: ObservedPending}, nil
@@ -207,8 +231,13 @@ func ScanNodeContext(ctx context.Context, parentDir string, id NodeIdentity) (No
 // merely collided on the directory name; onForeign redirects (ScanNode) or
 // rejects (ScanAbsolute) it exactly as a foreign VALID dir is handled, so
 // unrelated data is never overwritten.
-func classifyChecksumMismatchDir(nodeDir string, id NodeIdentity, onForeign func(sy SnapshotYAML) (NodeResumePlan, error)) (NodeResumePlan, error) {
-	sy, err := ReadSnapshotYAML(nodeDir)
+func classifyChecksumMismatchDir(
+	destination *RootedDestination,
+	nodeDir string,
+	id NodeIdentity,
+	onForeign func(sy SnapshotYAML) (NodeResumePlan, error),
+) (NodeResumePlan, error) {
+	sy, err := resumeReadSnapshotYAML(destination, nodeDir)
 	if err != nil {
 		return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", nodeDir, err)
 	}
@@ -221,7 +250,7 @@ func classifyChecksumMismatchDir(nodeDir string, id NodeIdentity, onForeign func
 	// mismatch verdict, so this recompute succeeds in practice; fall back to a
 	// placeholder rather than masking the mismatch with a recompute-time error.
 	computed := "unavailable"
-	if got, csErr := ComputeNodeChecksum(nodeDir); csErr == nil {
+	if got, csErr := resumeComputeNodeChecksum(destination, nodeDir); csErr == nil {
 		computed = got.Short
 	}
 
@@ -235,18 +264,23 @@ func classifyChecksumMismatchDir(nodeDir string, id NodeIdentity, onForeign func
 
 // classifyCompleteDir handles the case where the primary directory passes
 // VerifyNode.  It checks identity and may redirect to a collision path.
-func classifyCompleteDir(ctx context.Context, parentDir, primaryDir string, id NodeIdentity) (NodeResumePlan, error) {
-	sy, err := ReadSnapshotYAML(primaryDir)
+func classifyCompleteDir(
+	ctx context.Context,
+	destination *RootedDestination,
+	parentDir, primaryDir string,
+	id NodeIdentity,
+) (NodeResumePlan, error) {
+	sy, err := resumeReadSnapshotYAML(destination, primaryDir)
 	if err != nil {
 		return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", primaryDir, err)
 	}
 
 	if matchesIdentity(sy, id) {
-		if err := confirmSnapshotYAMLDurability(ctx, primaryDir); err != nil {
+		if err := confirmSnapshotYAMLDurability(ctx, destination, primaryDir); err != nil {
 			return NodeResumePlan{}, err
 		}
 
-		if err := healNodeIdentityMarker(primaryDir); err != nil {
+		if err := healNodeIdentityMarkerAt(destination, primaryDir); err != nil {
 			return NodeResumePlan{}, err
 		}
 
@@ -293,15 +327,20 @@ type partialMismatch struct {
 //
 // This is the resume-identity invariant (inv. #9): a partial dir is resumable
 // only with proven identity.
-func classifyPartialDir(dir string, id NodeIdentity, onMismatch func(partialMismatch) (NodeResumePlan, error)) (NodeResumePlan, error) {
-	marker, found, err := ReadNodeIdentityMarker(dir)
+func classifyPartialDir(
+	destination *RootedDestination,
+	dir string,
+	id NodeIdentity,
+	onMismatch func(partialMismatch) (NodeResumePlan, error),
+) (NodeResumePlan, error) {
+	marker, found, err := readNodeIdentityMarkerAt(destination, dir)
 	if err != nil {
 		return NodeResumePlan{}, err
 	}
 
 	if found {
 		if markerMatchesIdentity(marker, id) {
-			return classifyPartialResumable(dir)
+			return classifyPartialResumable(destination, dir)
 		}
 
 		return onMismatch(partialMismatch{
@@ -310,13 +349,13 @@ func classifyPartialDir(dir string, id NodeIdentity, onMismatch func(partialMism
 		})
 	}
 
-	populated, err := dirHasNodeArtifacts(dir)
+	populated, err := dirHasNodeArtifacts(destination, dir)
 	if err != nil {
 		return NodeResumePlan{}, err
 	}
 
 	if !populated {
-		return classifyPartialResumable(dir)
+		return classifyPartialResumable(destination, dir)
 	}
 
 	return onMismatch(partialMismatch{
@@ -328,24 +367,24 @@ func classifyPartialDir(dir string, id NodeIdentity, onMismatch func(partialMism
 // classifyPartialResumable classifies a partial dir whose identity is already
 // proven (matching marker, or a genuinely fresh dir). It branches purely on the
 // on-disk staging layout, exactly as the pre-identity-marker resume scan did.
-func classifyPartialResumable(dir string) (NodeResumePlan, error) {
+func classifyPartialResumable(destination *RootedDestination, dir string) (NodeResumePlan, error) {
 	// Block chunk staging dir (single-volume block download in progress). This
 	// fires on the DIRECTORY'S EXISTENCE alone, not on any chunk having
 	// finalized — a chunk dir holding only durable in-flight "*.part" raw
 	// partials (see volume.downloadChunk's sub-chunk resume) is exactly as
 	// much "in progress" as one with finalized chunk_NNNNN files, and must
 	// resume rather than restart from scratch.
-	if _, err := os.Stat(filepath.Join(dir, BlockChunksDirName)); err == nil {
+	if _, err := resumeStat(destination, filepath.Join(dir, BlockChunksDirName)); err == nil {
 		return NodeResumePlan{TargetDir: dir, Observed: ObservedBlockPartial}, nil
 	}
 
 	// Flat FS tar staging dir (single-volume filesystem download in progress).
-	if _, err := os.Stat(filepath.Join(dir, FsTarStagingDirName)); err == nil {
+	if _, err := resumeStat(destination, filepath.Join(dir, FsTarStagingDirName)); err == nil {
 		return NodeResumePlan{TargetDir: dir, Observed: ObservedFSPartial}, nil
 	}
 
 	// Multi-volume data/ directory (multi-volume layout, block or FS).
-	if _, err := os.Stat(filepath.Join(dir, DataDirName)); err == nil {
+	if _, err := resumeStat(destination, filepath.Join(dir, DataDirName)); err == nil {
 		return NodeResumePlan{TargetDir: dir, Observed: ObservedFSPartial}, nil
 	}
 
@@ -359,7 +398,7 @@ func classifyPartialResumable(dir string) (NodeResumePlan, error) {
 // pipeline does not own — the download advisory lock, the identity marker
 // itself, or unrelated user files — never make a genuinely fresh dir look
 // populated (which would wrongly block a first-time download).
-func dirHasNodeArtifacts(dir string) (bool, error) {
+func dirHasNodeArtifacts(destination *RootedDestination, dir string) (bool, error) {
 	for _, name := range []string{
 		ManifestsDirName,
 		BlockChunksDirName,
@@ -368,7 +407,7 @@ func dirHasNodeArtifacts(dir string) (bool, error) {
 		FsTarName,
 		SnapshotYAMLName,
 	} {
-		_, err := os.Stat(filepath.Join(dir, name))
+		_, err := resumeStat(destination, filepath.Join(dir, name))
 		if err == nil {
 			return true, nil
 		}
@@ -378,7 +417,7 @@ func dirHasNodeArtifacts(dir string) (bool, error) {
 		}
 	}
 
-	_, blockFound, err := FindBlockData(dir)
+	_, blockFound, err := resumeFindBlockData(destination, dir)
 	if err != nil {
 		return false, fmt.Errorf("find block data in %s: %w", dir, err)
 	}
@@ -413,7 +452,30 @@ func ScanAbsolute(nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
 //
 // Suitable for the root output directory where the path name is user-controlled.
 func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (NodeResumePlan, error) {
-	_, statErr := os.Stat(nodeDir)
+	return scanAbsoluteContext(ctx, nil, nodeDir, id)
+}
+
+// ScanAbsoluteRootedContext is ScanAbsoluteContext rooted in destination.
+func ScanAbsoluteRootedContext(
+	ctx context.Context,
+	destination *RootedDestination,
+	nodeDir string,
+	id NodeIdentity,
+) (NodeResumePlan, error) {
+	if destination == nil {
+		return NodeResumePlan{}, errors.New("scan rooted absolute node: destination is nil")
+	}
+
+	return scanAbsoluteContext(ctx, destination, nodeDir, id)
+}
+
+func scanAbsoluteContext(
+	ctx context.Context,
+	destination *RootedDestination,
+	nodeDir string,
+	id NodeIdentity,
+) (NodeResumePlan, error) {
+	_, statErr := resumeStat(destination, nodeDir)
 
 	if errors.Is(statErr, os.ErrNotExist) {
 		return NodeResumePlan{TargetDir: nodeDir, Observed: ObservedPending}, nil
@@ -423,13 +485,13 @@ func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (
 		return NodeResumePlan{}, fmt.Errorf("stat %s: %w", nodeDir, statErr)
 	}
 
-	if err := removeTmpFiles(nodeDir); err != nil {
+	if err := removeTmpFilesAt(destination, nodeDir); err != nil {
 		return NodeResumePlan{}, err
 	}
 
-	verifyErr := VerifyNode(nodeDir)
+	verifyErr := resumeVerifyNode(destination, nodeDir)
 	if verifyErr == nil {
-		sy, err := ReadSnapshotYAML(nodeDir)
+		sy, err := resumeReadSnapshotYAML(destination, nodeDir)
 		if err != nil {
 			return NodeResumePlan{}, fmt.Errorf("read snapshot.yaml in %s: %w", nodeDir, err)
 		}
@@ -439,11 +501,11 @@ func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		}
 
-		if err := confirmSnapshotYAMLDurability(ctx, nodeDir); err != nil {
+		if err := confirmSnapshotYAMLDurability(ctx, destination, nodeDir); err != nil {
 			return NodeResumePlan{}, err
 		}
 
-		if err := healNodeIdentityMarker(nodeDir); err != nil {
+		if err := healNodeIdentityMarkerAt(destination, nodeDir); err != nil {
 			return NodeResumePlan{}, err
 		}
 
@@ -457,7 +519,7 @@ func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (
 	// ErrIdentityMismatch, exactly as a foreign VALID dir is above, so the
 	// caller can pick a different output path.
 	if errors.Is(verifyErr, ErrChecksumMismatch) {
-		return classifyChecksumMismatchDir(nodeDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
+		return classifyChecksumMismatchDir(destination, nodeDir, id, func(sy SnapshotYAML) (NodeResumePlan, error) {
 			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		})
@@ -467,15 +529,19 @@ func ScanAbsoluteContext(ctx context.Context, nodeDir string, id NodeIdentity) (
 	// identity; on a mismatched or absent-but-non-empty marker reject with
 	// ErrIdentityMismatch so the caller can pick a different output path (the
 	// same contract as the complete-dir mismatch path above).
-	return classifyPartialDir(nodeDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
+	return classifyPartialDir(destination, nodeDir, id, func(mm partialMismatch) (NodeResumePlan, error) {
 		return NodeResumePlan{}, fmt.Errorf("%w: %s %s, expected %s/%s",
 			ErrIdentityMismatch, nodeDir, mm.detail, id.Kind, id.Name)
 	})
 }
 
-func confirmSnapshotYAMLDurability(ctx context.Context, nodeDir string) error {
+func confirmSnapshotYAMLDurability(
+	ctx context.Context,
+	destination *RootedDestination,
+	nodeDir string,
+) error {
 	path := filepath.Join(nodeDir, SnapshotYAMLName)
-	if err := ConfirmFileDurability(ctx, path); err != nil {
+	if err := resumeConfirmFileDurability(ctx, destination, path); err != nil {
 		return fmt.Errorf("confirm snapshot.yaml durability in %s: %w", nodeDir, err)
 	}
 
@@ -501,9 +567,39 @@ type NodeIdentityMarker struct {
 // same node. The write is crash-safe (WriteFileAtomic: .tmp -> fsync -> rename
 // -> dir fsync).
 func WriteNodeIdentityMarker(dir string, id NodeIdentity) error {
+	return writeNodeIdentityMarkerAt(context.Background(), nil, dir, id)
+}
+
+// WriteNodeIdentityMarkerRooted writes the marker through destination.
+func WriteNodeIdentityMarkerRooted(
+	ctx context.Context,
+	destination *RootedDestination,
+	dir string,
+	id NodeIdentity,
+) error {
+	if destination == nil {
+		return errors.New("write rooted node identity marker: destination is nil")
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("write rooted node identity marker: %w", err)
+	}
+
+	// Identity marker writes historically used WriteFileAtomic's background
+	// context. Keep directory-sync test hooks scoped to snapshot publication;
+	// destination binding loss is still checked at every rooted operation.
+	return writeNodeIdentityMarkerAt(context.Background(), destination, dir, id)
+}
+
+func writeNodeIdentityMarkerAt(
+	ctx context.Context,
+	destination *RootedDestination,
+	dir string,
+	id NodeIdentity,
+) error {
 	markerPath := filepath.Join(dir, NodeIdentityMarkerName)
 
-	_, statErr := os.Stat(markerPath)
+	_, statErr := resumeStat(destination, markerPath)
 	if statErr == nil {
 		return nil
 	}
@@ -517,7 +613,7 @@ func WriteNodeIdentityMarker(dir string, id NodeIdentity) error {
 		return fmt.Errorf("marshal identity marker: %w", err)
 	}
 
-	if err := WriteFileAtomic(markerPath, bytes.NewReader(data)); err != nil {
+	if err := resumeWriteFileAtomic(ctx, destination, markerPath, bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("write identity marker %s: %w", markerPath, err)
 	}
 
@@ -527,9 +623,16 @@ func WriteNodeIdentityMarker(dir string, id NodeIdentity) error {
 // ReadNodeIdentityMarker reads the identity marker from dir. found is false with
 // a nil error when the marker is absent.
 func ReadNodeIdentityMarker(dir string) (NodeIdentityMarker, bool, error) {
+	return readNodeIdentityMarkerAt(nil, dir)
+}
+
+func readNodeIdentityMarkerAt(
+	destination *RootedDestination,
+	dir string,
+) (NodeIdentityMarker, bool, error) {
 	markerPath := filepath.Join(dir, NodeIdentityMarkerName)
 
-	data, err := os.ReadFile(markerPath)
+	data, err := resumeReadFile(destination, markerPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return NodeIdentityMarker{}, false, nil
 	}
@@ -558,9 +661,9 @@ func ReadNodeIdentityMarker(dir string) (NodeIdentityMarker, bool, error) {
 // real I/O error propagates, exactly like removeTmpFiles' error on the same
 // scan path. Removal is checksum-neutral (collectNodeFiles excludes the marker),
 // so it cannot perturb the checksum VerifyNode just validated.
-func healNodeIdentityMarker(nodeDir string) error {
+func healNodeIdentityMarkerAt(destination *RootedDestination, nodeDir string) error {
 	markerPath := filepath.Join(nodeDir, NodeIdentityMarkerName)
-	if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := resumeRemove(destination, markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove identity marker %s: %w", markerPath, err)
 	}
 
@@ -617,7 +720,11 @@ func identityMarkerShort(m NodeIdentityMarker) string {
 // required cleanup. Internal ".tmp" outside that subtree (snapshot.yaml.tmp,
 // manifests/*.tmp, identity.json.tmp, block chunk-dir "<final>.tmp") is still
 // swept.
-func removeTmpFiles(dir string) error {
+func removeTmpFilesAt(destination *RootedDestination, dir string) error {
+	if destination != nil {
+		return removeRootedTmpFiles(destination, dir)
+	}
+
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -641,4 +748,119 @@ func removeTmpFiles(dir string) error {
 
 		return nil
 	})
+}
+
+func removeRootedTmpFiles(destination *RootedDestination, dir string) error {
+	entries, err := destination.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			if strings.HasSuffix(entry.Name(), fsStagingDirSuffix) {
+				continue
+			}
+
+			if err := removeRootedTmpFiles(destination, path); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		if !strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+
+		if err := destination.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale tmp %s: %w", path, err)
+		}
+	}
+
+	return nil
+}
+
+func resumeStat(destination *RootedDestination, path string) (os.FileInfo, error) {
+	if destination == nil {
+		return os.Stat(path)
+	}
+
+	return destination.Stat(path)
+}
+
+func resumeVerifyNode(destination *RootedDestination, path string) error {
+	if destination == nil {
+		return VerifyNode(path)
+	}
+
+	return destination.VerifyNode(path)
+}
+
+func resumeReadSnapshotYAML(destination *RootedDestination, path string) (SnapshotYAML, error) {
+	if destination == nil {
+		return ReadSnapshotYAML(path)
+	}
+
+	return destination.ReadSnapshotYAML(path)
+}
+
+func resumeComputeNodeChecksum(destination *RootedDestination, path string) (NodeChecksum, error) {
+	if destination == nil {
+		return ComputeNodeChecksum(path)
+	}
+
+	return destination.ComputeNodeChecksum(path)
+}
+
+func resumeFindBlockData(destination *RootedDestination, path string) (string, bool, error) {
+	if destination == nil {
+		return FindBlockData(path)
+	}
+
+	payload, found, err := destination.FindBlockData(path)
+
+	return payload.Path, found, err
+}
+
+func resumeConfirmFileDurability(
+	ctx context.Context,
+	destination *RootedDestination,
+	path string,
+) error {
+	if destination == nil {
+		return ConfirmFileDurability(ctx, path)
+	}
+
+	return ConfirmRootedFileDurability(ctx, destination, path)
+}
+
+func resumeWriteFileAtomic(
+	ctx context.Context,
+	destination *RootedDestination,
+	path string,
+	reader io.Reader,
+) error {
+	if destination == nil {
+		return WriteFileAtomicContext(ctx, path, reader)
+	}
+
+	return WriteFileAtomicRooted(ctx, destination, path, reader)
+}
+
+func resumeReadFile(destination *RootedDestination, path string) ([]byte, error) {
+	if destination == nil {
+		return os.ReadFile(path)
+	}
+
+	return destination.ReadFile(path)
+}
+
+func resumeRemove(destination *RootedDestination, path string) error {
+	if destination == nil {
+		return os.Remove(path)
+	}
+
+	return destination.Remove(path)
 }

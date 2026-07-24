@@ -18,6 +18,8 @@ package archive
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,44 +48,76 @@ func CollisionNodeDir(parentDir, kind, name, short string) string {
 //
 // Rewriting the same object (same kind, name, and API group) is idempotent.
 func WriteManifest(nodeDir string, obj unstructured.Unstructured) error {
+	return writeManifest(nil, nodeDir, obj)
+}
+
+// WriteManifestRooted writes a manifest through destination's locked view.
+func WriteManifestRooted(
+	destination *RootedDestination,
+	nodeDir string,
+	obj unstructured.Unstructured,
+) error {
+	return writeManifest(destination, nodeDir, obj)
+}
+
+func writeManifest(
+	destination *RootedDestination,
+	nodeDir string,
+	obj unstructured.Unstructured,
+) error {
 	kind := obj.GetKind()
 	name := obj.GetName()
 	normalPath := filepath.Join(nodeDir, ManifestsDirName, ManifestFileName(kind, name, ""))
 
-	existingGroup, err := readManifestAPIGroup(normalPath)
+	existingGroup, err := readManifestAPIGroupAt(destination, normalPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("check manifest %s: %w", normalPath, err)
 		}
 
-		return writeManifestYAML(normalPath, obj)
+		return writeManifestYAMLAt(destination, normalPath, obj)
 	}
 
 	// File exists; use the qualified name only when the API group differs.
 	newGroup := extractAPIGroup(obj.GetAPIVersion())
 	if newGroup == existingGroup {
-		return writeManifestYAML(normalPath, obj)
+		return writeManifestYAMLAt(destination, normalPath, obj)
 	}
 
 	qualifiedPath := filepath.Join(nodeDir, ManifestsDirName, ManifestFileName(kind, name, newGroup))
 
-	return writeManifestYAML(qualifiedPath, obj)
+	return writeManifestYAMLAt(destination, qualifiedPath, obj)
 }
 
-// writeManifestYAML marshals the unstructured object to YAML and writes it atomically to path.
-func writeManifestYAML(path string, obj unstructured.Unstructured) error {
+func writeManifestYAMLAt(
+	destination *RootedDestination,
+	path string,
+	obj unstructured.Unstructured,
+) error {
 	data, err := sigsyaml.Marshal(obj.Object)
 	if err != nil {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	return WriteFileAtomic(path, bytes.NewReader(data))
+	if destination == nil {
+		return WriteFileAtomic(path, bytes.NewReader(data))
+	}
+
+	return WriteFileAtomicRooted(context.Background(), destination, path, bytes.NewReader(data))
 }
 
-// readManifestAPIGroup reads the YAML file at path and returns the API group from its
-// apiVersion field. Returns an error wrapping os.ErrNotExist when the file is absent.
-func readManifestAPIGroup(path string) (string, error) {
-	data, err := os.ReadFile(path)
+func readManifestAPIGroupAt(destination *RootedDestination, path string) (string, error) {
+	var (
+		data []byte
+		err  error
+	)
+
+	if destination == nil {
+		data, err = os.ReadFile(path)
+	} else {
+		data, err = destination.ReadFile(path)
+	}
+
 	if err != nil {
 		return "", err
 	}
@@ -96,6 +130,23 @@ func readManifestAPIGroup(path string) (string, error) {
 	apiVersion, _ := obj["apiVersion"].(string)
 
 	return extractAPIGroup(apiVersion), nil
+}
+
+// WriteSnapshotYAMLRooted writes snapshot.yaml atomically through destination.
+func WriteSnapshotYAMLRooted(
+	ctx context.Context,
+	destination *RootedDestination,
+	nodeDir string,
+	snapshot SnapshotYAML,
+) error {
+	data, err := sigsyaml.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("marshal snapshot.yaml: %w", err)
+	}
+
+	path := filepath.Join(nodeDir, SnapshotYAMLName)
+
+	return WriteFileAtomicRooted(ctx, destination, path, bytes.NewReader(data))
 }
 
 // extractAPIGroup returns the API group portion of an apiVersion string.

@@ -208,6 +208,10 @@ type fsDirectoryRecord struct {
 	RelPrefix string `json:"relPrefix"`
 }
 
+type filesystemView struct {
+	destination *archive.RootedDestination
+}
+
 // DownloadFilesystemVolume downloads all files from the data-exporter filesystem
 // volume at filesRootURL, stages each file as a compressed blob named
 // <relPath><codec.Ext()> under stagingDir, then assembles a single uncompressed
@@ -256,17 +260,78 @@ func DownloadFilesystemVolume(
 	setTotal func(total int64),
 	onProgress func(n int),
 ) error {
+	return downloadFilesystemVolume(
+		ctx,
+		filesystemView{},
+		log,
+		tarPath,
+		stagingDir,
+		filesRootURL,
+		workers,
+		chunkSize,
+		fetcher,
+		codec,
+		setTotal,
+		onProgress,
+	)
+}
+
+// DownloadFilesystemVolumeRooted writes every filesystem artifact through destination.
+func DownloadFilesystemVolumeRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	log *slog.Logger,
+	tarPath string,
+	stagingDir string,
+	filesRootURL string,
+	workers int,
+	chunkSize int64,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	setTotal func(total int64),
+	onProgress func(n int),
+) error {
+	return downloadFilesystemVolume(
+		ctx,
+		filesystemView{destination: destination},
+		log,
+		tarPath,
+		stagingDir,
+		filesRootURL,
+		workers,
+		chunkSize,
+		fetcher,
+		codec,
+		setTotal,
+		onProgress,
+	)
+}
+
+func downloadFilesystemVolume(
+	ctx context.Context,
+	view filesystemView,
+	log *slog.Logger,
+	tarPath string,
+	stagingDir string,
+	filesRootURL string,
+	workers int,
+	chunkSize int64,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	setTotal func(total int64),
+	onProgress func(n int),
+) error {
 	// Resume: a visible tar may have been published by rename immediately
 	// before a failed parent-directory sync. Re-establish durability before
 	// trusting it or deleting the only retryable staging state.
-	if _, err := os.Stat(tarPath); err == nil {
-		if err := archive.ConfirmFileDurability(ctx, tarPath); err != nil {
+	if _, err := view.stat(tarPath); err == nil {
+		if err := view.confirmFileDurability(ctx, tarPath); err != nil {
 			return fmt.Errorf("confirm completed FS tar durability %s: %w", tarPath, err)
 		}
 
 		log.Info("fs tar already present, skipping", slog.String("path", tarPath))
 
-		if err := os.RemoveAll(stagingDir); err != nil {
+		if err := view.removeAll(stagingDir); err != nil {
 			return fmt.Errorf("remove stale FS staging after completed tar %s: %w", stagingDir, err)
 		}
 
@@ -279,7 +344,7 @@ func DownloadFilesystemVolume(
 		workers = 1
 	}
 
-	if err := archive.EnsureDir(stagingDir); err != nil {
+	if err := view.ensureDir(stagingDir); err != nil {
 		return fmt.Errorf("create staging dir %s: %w", stagingDir, err)
 	}
 
@@ -288,12 +353,20 @@ func DownloadFilesystemVolume(
 		return fmt.Errorf("parse files root URL %q: %w", filesRootURL, err)
 	}
 
-	inventoryPath, summary, err := prepareFSInventory(ctx, stagingDir, filesRootURL, base, codec.Ext(), fetcher)
+	inventoryPath, summary, err := prepareFSInventory(
+		ctx,
+		view,
+		stagingDir,
+		filesRootURL,
+		base,
+		codec.Ext(),
+		fetcher,
+	)
 	if err != nil {
 		return fmt.Errorf("prepare filesystem inventory: %w", err)
 	}
 
-	if err := writeFSSizesSidecar(ctx, stagingDir, inventoryPath, codec.Ext(), summary.total); err != nil {
+	if err := writeFSSizesSidecar(ctx, view, stagingDir, inventoryPath, codec.Ext(), summary.total); err != nil {
 		return fmt.Errorf("persist fs sizes sidecar: %w", err)
 	}
 
@@ -306,12 +379,24 @@ func DownloadFilesystemVolume(
 		slog.Int64("items", summary.count),
 		slog.Int("workers", workers))
 
-	if err := stageFSInventoryFiles(ctx, log, stagingDir, inventoryPath, base, workers, chunkSize, fetcher, codec, onProgress); err != nil {
+	if err := stageFSInventoryFiles(
+		ctx,
+		view,
+		log,
+		stagingDir,
+		inventoryPath,
+		base,
+		workers,
+		chunkSize,
+		fetcher,
+		codec,
+		onProgress,
+	); err != nil {
 		return fmt.Errorf("stage filesystem files: %w", err)
 	}
 
-	entries := tarEntriesFromInventory(ctx, inventoryPath, stagingDir, codec)
-	if err := WriteTar(ctx, tarPath, stagingDir, entries); err != nil {
+	entries := tarEntriesFromInventory(ctx, view, inventoryPath, stagingDir, codec)
+	if err := view.writeTar(ctx, tarPath, stagingDir, entries); err != nil {
 		if archive.CommitPublicationState(err) == archive.PublicationPublished {
 			return fmt.Errorf("assemble tar %s published without confirmed durability: %w", tarPath, err)
 		}
@@ -321,7 +406,7 @@ func DownloadFilesystemVolume(
 
 	log.Info("fs tar assembled", slog.String("path", tarPath))
 
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := view.removeAll(stagingDir); err != nil {
 		log.Warn("failed to remove FS staging dir",
 			slog.String("dir", stagingDir),
 			slog.String("error", err.Error()))
@@ -332,6 +417,7 @@ func DownloadFilesystemVolume(
 
 func prepareFSInventory(
 	ctx context.Context,
+	view filesystemView,
 	stagingDir string,
 	filesRootURL string,
 	base *url.URL,
@@ -339,36 +425,36 @@ func prepareFSInventory(
 	fetcher *exporter.Fetcher,
 ) (string, fsInventorySummary, error) {
 	metaDir := filepath.Join(stagingDir, FSMetaDirName)
-	if err := archive.EnsureDir(metaDir); err != nil {
+	if err := view.ensureDir(metaDir); err != nil {
 		return "", fsInventorySummary{}, fmt.Errorf("create fs metadata dir %s: %w", metaDir, err)
 	}
 
 	inventoryPath := filepath.Join(metaDir, fsInventoryName)
 
-	summary, err := validateFSInventory(ctx, inventoryPath, ext, nil)
+	summary, err := validateFSInventory(ctx, view, inventoryPath, ext, nil)
 	if err == nil {
 		workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
-		if removeErr := os.RemoveAll(workDir); removeErr != nil {
+		if removeErr := view.removeAll(workDir); removeErr != nil {
 			return "", fsInventorySummary{}, fmt.Errorf("remove stale inventory work dir %s: %w", workDir, removeErr)
 		}
 
 		return inventoryPath, summary, nil
 	}
 
-	if !os.IsNotExist(err) && !errors.Is(err, errFSInventoryCorrupt) {
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errFSInventoryCorrupt) {
 		return "", fsInventorySummary{}, err
 	}
 
-	if removeErr := os.Remove(inventoryPath); removeErr != nil && !os.IsNotExist(removeErr) {
+	if removeErr := view.remove(inventoryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return "", fsInventorySummary{}, fmt.Errorf("remove unusable inventory %s: %w", inventoryPath, removeErr)
 	}
 
-	summary, err = buildFSInventory(ctx, metaDir, inventoryPath, filesRootURL, base, ext, fetcher)
+	summary, err = buildFSInventory(ctx, view, metaDir, inventoryPath, filesRootURL, base, ext, fetcher)
 	if err != nil {
 		return "", fsInventorySummary{}, err
 	}
 
-	validated, err := validateFSInventory(ctx, inventoryPath, ext, nil)
+	validated, err := validateFSInventory(ctx, view, inventoryPath, ext, nil)
 	if err != nil {
 		return "", fsInventorySummary{}, fmt.Errorf("validate new filesystem inventory: %w", err)
 	}
@@ -383,6 +469,7 @@ func prepareFSInventory(
 
 func buildFSInventory(
 	ctx context.Context,
+	view filesystemView,
 	metaDir string,
 	inventoryPath string,
 	filesRootURL string,
@@ -391,19 +478,19 @@ func buildFSInventory(
 	fetcher *exporter.Fetcher,
 ) (fsInventorySummary, error) {
 	workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
-	if err := os.RemoveAll(workDir); err != nil {
+	if err := view.removeAll(workDir); err != nil {
 		return fsInventorySummary{}, fmt.Errorf("remove stale inventory work dir %s: %w", workDir, err)
 	}
 
-	if err := archive.EnsureDir(workDir); err != nil {
+	if err := view.ensureDir(workDir); err != nil {
 		return fsInventorySummary{}, fmt.Errorf("create inventory work dir %s: %w", workDir, err)
 	}
 
-	defer func() { _ = os.RemoveAll(workDir) }()
+	defer func() { _ = view.removeAll(workDir) }()
 
-	builder := newFSRunBuilder(workDir, ext)
+	builder := newFSRunBuilder(view, workDir, ext)
 
-	summary, err := walkFSInventory(ctx, workDir, filesRootURL, base, fetcher, builder.add)
+	summary, err := walkFSInventory(ctx, view, workDir, filesRootURL, base, fetcher, builder.add)
 	if err != nil {
 		return fsInventorySummary{}, err
 	}
@@ -413,12 +500,12 @@ func buildFSInventory(
 		return fsInventorySummary{}, err
 	}
 
-	finalRun, err := mergeFSInventoryRuns(ctx, workDir, ext, runCount)
+	finalRun, err := mergeFSInventoryRuns(ctx, view, workDir, ext, runCount)
 	if err != nil {
 		return fsInventorySummary{}, err
 	}
 
-	if err := writeFinalFSInventory(inventoryPath, finalRun, ext, summary); err != nil {
+	if err := writeFinalFSInventory(view, inventoryPath, finalRun, ext, summary); err != nil {
 		return fsInventorySummary{}, err
 	}
 
@@ -427,6 +514,7 @@ func buildFSInventory(
 
 func walkFSInventory(
 	ctx context.Context,
+	view filesystemView,
 	workDir string,
 	filesRootURL string,
 	base *url.URL,
@@ -435,7 +523,7 @@ func walkFSInventory(
 ) (fsInventorySummary, error) {
 	queuePath := filepath.Join(workDir, "directories.jsonl")
 
-	queueFile, err := os.OpenFile(queuePath, os.O_CREATE|os.O_TRUNC|os.O_APPEND|os.O_WRONLY, 0o600)
+	queueFile, err := view.createAppend(queuePath, 0o600)
 	if err != nil {
 		return fsInventorySummary{}, fmt.Errorf("create directory inventory queue: %w", err)
 	}
@@ -454,7 +542,7 @@ func walkFSInventory(
 		return fsInventorySummary{}, err
 	}
 
-	readerFile, err := os.Open(queuePath)
+	readerFile, err := view.open(queuePath)
 	if err != nil {
 		return fsInventorySummary{}, fmt.Errorf("open directory inventory queue: %w", err)
 	}
@@ -617,14 +705,16 @@ func inventoryItemFromListing(base *url.URL, dirURL, relPrefix string, item expo
 }
 
 type fsRunBuilder struct {
+	view    filesystemView
 	workDir string
 	ext     string
 	batch   []fsItem
 	runs    int
 }
 
-func newFSRunBuilder(workDir, ext string) *fsRunBuilder {
+func newFSRunBuilder(view filesystemView, workDir, ext string) *fsRunBuilder {
 	return &fsRunBuilder{
+		view:    view,
 		workDir: workDir,
 		ext:     ext,
 		batch:   make([]fsItem, 0, fsInventorySortBatchSize),
@@ -658,12 +748,12 @@ func (b *fsRunBuilder) flush() error {
 	})
 
 	passDir := filepath.Join(b.workDir, "pass-000000")
-	if err := archive.EnsureDir(passDir); err != nil {
+	if err := b.view.ensureDir(passDir); err != nil {
 		return fmt.Errorf("create inventory run dir %s: %w", passDir, err)
 	}
 
 	runPath := fsRunPath(b.workDir, 0, b.runs)
-	if err := writeFSRun(runPath, b.batch); err != nil {
+	if err := writeFSRun(b.view, runPath, b.batch); err != nil {
 		return err
 	}
 
@@ -677,8 +767,8 @@ func fsRunPath(workDir string, pass, run int) string {
 	return filepath.Join(workDir, fmt.Sprintf("pass-%06d", pass), fmt.Sprintf("run-%09d.jsonl", run))
 }
 
-func writeFSRun(path string, items []fsItem) error {
-	aw, err := archive.NewAtomicWriter(path)
+func writeFSRun(view filesystemView, path string, items []fsItem) error {
+	aw, err := view.atomicWriter(path)
 	if err != nil {
 		return fmt.Errorf("open inventory run %s: %w", path, err)
 	}
@@ -698,7 +788,12 @@ func writeFSRun(path string, items []fsItem) error {
 	return nil
 }
 
-func mergeFSInventoryRuns(ctx context.Context, workDir, ext string, runCount int) (string, error) {
+func mergeFSInventoryRuns(
+	ctx context.Context,
+	view filesystemView,
+	workDir, ext string,
+	runCount int,
+) (string, error) {
 	if runCount == 0 {
 		return "", nil
 	}
@@ -709,7 +804,7 @@ func mergeFSInventoryRuns(ctx context.Context, workDir, ext string, runCount int
 		nextPass := pass + 1
 		nextDir := filepath.Join(workDir, fmt.Sprintf("pass-%06d", nextPass))
 
-		if err := archive.EnsureDir(nextDir); err != nil {
+		if err := view.ensureDir(nextDir); err != nil {
 			return "", fmt.Errorf("create inventory merge dir %s: %w", nextDir, err)
 		}
 
@@ -724,14 +819,14 @@ func mergeFSInventoryRuns(ctx context.Context, workDir, ext string, runCount int
 			}
 
 			output := fsRunPath(workDir, nextPass, outputCount)
-			if err := mergeFSRunGroup(ctx, ext, inputs, output); err != nil {
+			if err := mergeFSRunGroup(ctx, view, ext, inputs, output); err != nil {
 				return "", err
 			}
 
 			outputCount++
 		}
 
-		if err := os.RemoveAll(filepath.Join(workDir, fmt.Sprintf("pass-%06d", pass))); err != nil {
+		if err := view.removeAll(filepath.Join(workDir, fmt.Sprintf("pass-%06d", pass))); err != nil {
 			return "", fmt.Errorf("remove merged inventory pass %d: %w", pass, err)
 		}
 
@@ -749,8 +844,8 @@ type fsRunCursor struct {
 	done    bool
 }
 
-func openFSRunCursor(path string) (*fsRunCursor, error) {
-	f, err := os.Open(path)
+func openFSRunCursor(view filesystemView, path string) (*fsRunCursor, error) {
+	f, err := view.open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open inventory run %s: %w", path, err)
 	}
@@ -789,10 +884,16 @@ func (c *fsRunCursor) advance() error {
 	return nil
 }
 
-func mergeFSRunGroup(ctx context.Context, ext string, inputs []string, output string) error {
+func mergeFSRunGroup(
+	ctx context.Context,
+	view filesystemView,
+	ext string,
+	inputs []string,
+	output string,
+) error {
 	cursors := make([]*fsRunCursor, 0, len(inputs))
 	for _, input := range inputs {
-		cursor, err := openFSRunCursor(input)
+		cursor, err := openFSRunCursor(view, input)
 		if err != nil {
 			closeFSRunCursors(cursors)
 
@@ -804,7 +905,7 @@ func mergeFSRunGroup(ctx context.Context, ext string, inputs []string, output st
 
 	defer closeFSRunCursors(cursors)
 
-	aw, err := archive.NewAtomicWriter(output)
+	aw, err := view.atomicWriter(output)
 	if err != nil {
 		return fmt.Errorf("open merged inventory run %s: %w", output, err)
 	}
@@ -859,8 +960,12 @@ func closeFSRunCursors(cursors []*fsRunCursor) {
 	}
 }
 
-func writeFinalFSInventory(path, runPath, ext string, summary fsInventorySummary) error {
-	aw, err := archive.NewAtomicWriter(path)
+func writeFinalFSInventory(
+	view filesystemView,
+	path, runPath, ext string,
+	summary fsInventorySummary,
+) error {
+	aw, err := view.atomicWriter(path)
 	if err != nil {
 		return fmt.Errorf("open final filesystem inventory %s: %w", path, err)
 	}
@@ -875,7 +980,7 @@ func writeFinalFSInventory(path, runPath, ext string, summary fsInventorySummary
 	hasher := sha256.New()
 
 	if runPath != "" {
-		cursor, err := openFSRunCursor(runPath)
+		cursor, err := openFSRunCursor(view, runPath)
 		if err != nil {
 			aw.Abort()
 
@@ -1030,11 +1135,12 @@ func decodeFSItemLine(line []byte) (fsItem, error) {
 
 func validateFSInventory(
 	ctx context.Context,
+	view filesystemView,
 	path string,
 	ext string,
 	yield func(fsItem) error,
 ) (fsInventorySummary, error) {
-	f, err := os.Open(path)
+	f, err := view.open(path)
 	if err != nil {
 		return fsInventorySummary{}, err
 	}
@@ -1224,6 +1330,7 @@ func resolveInventoryURI(base *url.URL, rawURI string) (string, error) {
 
 func stageFSInventoryFiles(
 	ctx context.Context,
+	view filesystemView,
 	log *slog.Logger,
 	stagingDir string,
 	inventoryPath string,
@@ -1263,7 +1370,17 @@ func stageFSInventoryFiles(
 
 				item.md5 = sourceMD5
 
-				if _, err := stageCompressedFile(gctx, log, stagingDir, item, chunkSize, codec, fetcher, onProgress); err != nil {
+				if _, err := stageCompressedFile(
+					gctx,
+					view,
+					log,
+					stagingDir,
+					item,
+					chunkSize,
+					codec,
+					fetcher,
+					onProgress,
+				); err != nil {
 					return recordCause(err)
 				}
 			}
@@ -1275,7 +1392,7 @@ func stageFSInventoryFiles(
 	g.Go(func() error {
 		defer close(jobs)
 
-		_, err := validateFSInventory(gctx, inventoryPath, codec.Ext(), func(item fsItem) error {
+		_, err := validateFSInventory(gctx, view, inventoryPath, codec.Ext(), func(item fsItem) error {
 			if item.itemType != "file" {
 				return nil
 			}
@@ -1310,17 +1427,18 @@ func stageFSInventoryFiles(
 
 func tarEntriesFromInventory(
 	ctx context.Context,
+	view filesystemView,
 	inventoryPath string,
 	stagingDir string,
 	codec compress.Codec,
 ) TarEntrySource {
 	return func(yield func(TarEntry) error) error {
-		_, err := validateFSInventory(ctx, inventoryPath, codec.Ext(), func(item fsItem) error {
+		_, err := validateFSInventory(ctx, view, inventoryPath, codec.Ext(), func(item fsItem) error {
 			rawSize := item.size
 			if item.itemType == "file" && rawSize < 0 {
 				destPath := filepath.Join(stagingDir, filepath.FromSlash(fsStoredPath(item, codec.Ext())))
 
-				derived, err := stagedFileRawSize(destPath, codec.Ext())
+				derived, err := stagedFileRawSize(view, destPath, codec.Ext())
 				if err != nil {
 					return fmt.Errorf("derive raw size for %s: %w", item.relPath, err)
 				}
@@ -1420,6 +1538,7 @@ func defaultPortForScheme(scheme string) string {
 // before either strategy runs.
 func stageCompressedFile(
 	ctx context.Context,
+	view filesystemView,
 	log *slog.Logger,
 	stagingDir string,
 	item fsItem,
@@ -1430,7 +1549,7 @@ func stageCompressedFile(
 ) (int64, error) {
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
 
-	if _, err := os.Stat(destPath); err == nil {
+	if _, err := view.stat(destPath); err == nil {
 		var (
 			verifyErr error
 			rawSize   int64
@@ -1443,10 +1562,10 @@ func stageCompressedFile(
 			if item.size >= 0 {
 				rawSize = item.size
 			} else {
-				rawSize, verifyErr = stagedFileRawSize(destPath, codec.Ext())
+				rawSize, verifyErr = stagedFileRawSize(view, destPath, codec.Ext())
 			}
 		} else {
-			rawSize, verifyErr = verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
+			rawSize, verifyErr = verifyStagedFileMD5(view, destPath, codec.Ext(), item.md5)
 		}
 
 		if verifyErr == nil && item.size >= 0 && rawSize != item.size {
@@ -1470,28 +1589,39 @@ func stageCompressedFile(
 			slog.String("path", destPath),
 			slog.String("error", verifyErr.Error()))
 
-		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := view.remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return 0, fmt.Errorf("remove mismatched staged file %s: %w", destPath, removeErr)
 		}
 	}
 
 	tmpPath := destPath + ".tmp"
 
-	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+	if err := view.remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
 
 	parentDir := filepath.Dir(destPath)
 
-	if err := archive.EnsureDir(parentDir); err != nil {
+	if err := view.ensureDir(parentDir); err != nil {
 		return 0, fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
 
 	if item.size > 0 {
-		return stageChunkedFile(ctx, log, stagingDir, destPath, item, chunkSize, codec, fetcher, onProgress)
+		return stageChunkedFile(
+			ctx,
+			view,
+			log,
+			stagingDir,
+			destPath,
+			item,
+			chunkSize,
+			codec,
+			fetcher,
+			onProgress,
+		)
 	}
 
-	return stageWholeFile(ctx, log, destPath, item, codec, fetcher, onProgress)
+	return stageWholeFile(ctx, view, log, destPath, item, codec, fetcher, onProgress)
 }
 
 // stageChunkedFile downloads item as one or more independent Range-based
@@ -1520,6 +1650,7 @@ func stageCompressedFile(
 // item.md5 is empty, verification is skipped with a single WARN.
 func stageChunkedFile(
 	ctx context.Context,
+	view filesystemView,
 	log *slog.Logger,
 	stagingDir string,
 	destPath string,
@@ -1532,11 +1663,29 @@ func stageChunkedFile(
 	chunkDirName := archive.FsFileChunksDirName(item.relPath, codec.Ext())
 	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(chunkDirName))
 
-	if err := DownloadBlockChunks(ctx, log, chunkDir, item.uri, item.size, chunkSize, 1, fetcher, codec, onProgress); err != nil {
+	if err := view.downloadBlockChunks(
+		ctx,
+		log,
+		chunkDir,
+		item.uri,
+		item.size,
+		chunkSize,
+		1,
+		fetcher,
+		codec,
+		onProgress,
+	); err != nil {
 		return 0, fmt.Errorf("download chunks for %s: %w", item.relPath, err)
 	}
 
-	if err := MergeBlockChunks(ctx, chunkDir, destPath, item.size, chunkSize, codec.Ext()); err != nil {
+	if err := view.mergeBlockChunks(
+		ctx,
+		chunkDir,
+		destPath,
+		item.size,
+		chunkSize,
+		codec.Ext(),
+	); err != nil {
 		return 0, fmt.Errorf("merge chunks for %s: %w", item.relPath, err)
 	}
 
@@ -1547,9 +1696,9 @@ func stageChunkedFile(
 		return item.size, nil
 	}
 
-	rawSize, err := verifyStagedFileMD5(destPath, codec.Ext(), item.md5)
+	rawSize, err := verifyStagedFileMD5(view, destPath, codec.Ext(), item.md5)
 	if err != nil {
-		if removeErr := os.Remove(destPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		if removeErr := view.remove(destPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			log.Warn("failed to remove corrupt staged file after MD5 mismatch",
 				slog.String("path", destPath),
 				slog.String("error", removeErr.Error()))
@@ -1571,8 +1720,11 @@ func stageChunkedFile(
 // compares the plaintext's MD5 against wantHex, the exporter-provided source
 // digest. Comparison is case-insensitive since both sides are lowercase hex
 // in practice but neither format is a hard contract.
-func verifyStagedFileMD5(destPath, ext, wantHex string) (int64, error) {
-	f, err := os.Open(destPath)
+func verifyStagedFileMD5(
+	view filesystemView,
+	destPath, ext, wantHex string,
+) (int64, error) {
+	f, err := view.open(destPath)
 	if err != nil {
 		return 0, fmt.Errorf("open staged file %s: %w", destPath, err)
 	}
@@ -1604,8 +1756,8 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func stagedFileRawSize(destPath, ext string) (int64, error) {
-	f, err := os.Open(destPath)
+func stagedFileRawSize(view filesystemView, destPath, ext string) (int64, error) {
+	f, err := view.open(destPath)
 	if err != nil {
 		return 0, fmt.Errorf("open staged file %s: %w", destPath, err)
 	}
@@ -1703,6 +1855,7 @@ func decodeLZ4Frames(dst io.Writer, src io.Reader) error {
 // failure, to stay compatible with an exporter that does not emit hash.md5.
 func stageWholeFile(
 	ctx context.Context,
+	view filesystemView,
 	log *slog.Logger,
 	destPath string,
 	item fsItem,
@@ -1728,7 +1881,7 @@ func stageWholeFile(
 	hasher := md5.New() //nolint:gosec // matches the exporter's own hash.md5 attribute, not a security control
 	src := io.TeeReader(cr, hasher)
 
-	aw, err := archive.NewAtomicWriter(destPath)
+	aw, err := view.atomicWriter(destPath)
 	if err != nil {
 		return 0, fmt.Errorf("open atomic writer for %s: %w", destPath, err)
 	}
@@ -1794,7 +1947,16 @@ func stageWholeFile(
 //     (stagingDir/<relPath><ext>.d) are not scanned; such a file re-downloads
 //     once, which is acceptable and preferable to risking a user-blob alias.
 func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, error) {
-	return scanFSStagingProgress(ctx, stagingDir, ext, nil)
+	return scanFSStagingProgress(ctx, nil, stagingDir, ext, nil)
+}
+
+// ScanFSStagingProgressRooted scans through destination's locked view.
+func ScanFSStagingProgressRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	stagingDir, ext string,
+) (int64, error) {
+	return scanFSStagingProgress(ctx, destination, stagingDir, ext, nil)
 }
 
 // ScanFSStagingProgressWithHook is ScanFSStagingProgress with a deterministic
@@ -1805,11 +1967,12 @@ func ScanFSStagingProgressWithHook(
 	ext string,
 	hook archive.OpenBoundaryHook,
 ) (int64, error) {
-	return scanFSStagingProgress(ctx, stagingDir, ext, hook)
+	return scanFSStagingProgress(ctx, nil, stagingDir, ext, hook)
 }
 
 func scanFSStagingProgress(
 	ctx context.Context,
+	destination *archive.RootedDestination,
 	stagingDir string,
 	ext string,
 	hook archive.OpenBoundaryHook,
@@ -1820,34 +1983,81 @@ func scanFSStagingProgress(
 		return 0, fmt.Errorf("scan fs staging progress in %s: %w", chunksRoot, err)
 	}
 
-	root, err := archive.OpenRootedSourceWithHook(chunksRoot, hook)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+	var openDirectory func(string) (*archive.PinnedDirectory, error)
+
+	if destination == nil {
+		root, err := archive.OpenRootedSourceWithHook(chunksRoot, hook)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return 0, nil
+			}
+
+			return 0, fmt.Errorf("open fs chunks dir %s: %w", chunksRoot, err)
 		}
 
-		return 0, fmt.Errorf("open fs chunks dir %s: %w", chunksRoot, err)
+		defer func() { _ = root.Close() }()
+
+		openDirectory = root.OpenDirectoryPath
+	} else {
+		if _, err := destination.Stat(chunksRoot); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return 0, nil
+			}
+
+			return 0, fmt.Errorf("open rooted fs chunks dir %s: %w", chunksRoot, err)
+		}
+
+		openDirectory = func(relative string) (*archive.PinnedDirectory, error) {
+			return destination.OpenPinnedDirectory(filepath.Join(chunksRoot, relative))
+		}
 	}
 
-	defer func() { _ = root.Close() }()
+	var (
+		queueFile *os.File
+		queuePath string
+		err       error
+	)
 
-	queueFile, err := os.CreateTemp("", "d8-snapshot-fs-progress-*.jsonl")
+	if destination == nil {
+		queueFile, err = os.CreateTemp("", "d8-snapshot-fs-progress-*.jsonl")
+		if err == nil {
+			queuePath = queueFile.Name()
+		}
+	} else {
+		queuePath = filepath.Join(chunksRoot, ".d8-progress.queue.tmp")
+		if removeErr := destination.Remove(queuePath); removeErr != nil &&
+			!errors.Is(removeErr, os.ErrNotExist) {
+			return 0, fmt.Errorf("remove stale fs progress directory queue: %w", removeErr)
+		}
+
+		queueFile, err = destination.CreateExclusive(queuePath, 0o600)
+	}
+
 	if err != nil {
 		return 0, fmt.Errorf("create fs progress directory queue: %w", err)
 	}
 
-	queuePath := queueFile.Name()
-
 	defer func() {
 		_ = queueFile.Close()
-		_ = os.Remove(queuePath)
+
+		if destination == nil {
+			_ = os.Remove(queuePath)
+		} else {
+			_ = destination.Remove(queuePath)
+		}
 	}()
 
 	if err := appendDirectoryRecord(queueFile, fsDirectoryRecord{}); err != nil {
 		return 0, fmt.Errorf("seed fs progress directory queue: %w", err)
 	}
 
-	readerFile, err := os.Open(queuePath)
+	var readerFile *os.File
+	if destination == nil {
+		readerFile, err = os.Open(queuePath)
+	} else {
+		readerFile, err = destination.OpenRegular(queuePath)
+	}
+
 	if err != nil {
 		return 0, fmt.Errorf("open fs progress directory queue: %w", err)
 	}
@@ -1871,7 +2081,7 @@ func scanFSStagingProgress(
 
 		directoryCommitted, children, err := scanFSProgressDirectory(
 			ctx,
-			root,
+			openDirectory,
 			record.RelPrefix,
 			ext,
 			queueFile,
@@ -1901,7 +2111,7 @@ func scanFSStagingProgress(
 // including the transient chunks.meta read.
 func scanFSProgressDirectory(
 	ctx context.Context,
-	root *archive.RootedSource,
+	openDirectory func(string) (*archive.PinnedDirectory, error),
 	relPath string,
 	ext string,
 	queueFile *os.File,
@@ -1910,7 +2120,7 @@ func scanFSProgressDirectory(
 		return 0, 0, fmt.Errorf("chunk directory path exceeds %d-byte limit", fsProgressMaxPathSize)
 	}
 
-	directory, err := root.OpenDirectoryPath(relPath)
+	directory, err := openDirectory(relPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("open chunk directory %s: %w", relPath, err)
 	}
@@ -2071,16 +2281,21 @@ type FSSizesSidecar struct {
 // archive.WriteFileAtomic. Only "file" items with a known positive size are
 // recorded. The JSON object is emitted incrementally in inventory order; no
 // map or whole-document byte slice proportional to the inode count is built.
-func writeFSSizesSidecar(ctx context.Context, stagingDir, inventoryPath, ext string, total int64) error {
+func writeFSSizesSidecar(
+	ctx context.Context,
+	view filesystemView,
+	stagingDir, inventoryPath, ext string,
+	total int64,
+) error {
 	metaDir := filepath.Join(stagingDir, FSMetaDirName)
 
-	if err := archive.EnsureDir(metaDir); err != nil {
+	if err := view.ensureDir(metaDir); err != nil {
 		return fmt.Errorf("create fs metadata dir %s: %w", metaDir, err)
 	}
 
 	path := filepath.Join(metaDir, FSSizesSidecarName)
 
-	aw, err := archive.NewAtomicWriter(path)
+	aw, err := view.atomicWriter(path)
 	if err != nil {
 		return fmt.Errorf("open fs sizes sidecar %s: %w", path, err)
 	}
@@ -2093,7 +2308,7 @@ func writeFSSizesSidecar(ctx context.Context, stagingDir, inventoryPath, ext str
 
 	first := true
 
-	_, err = validateFSInventory(ctx, inventoryPath, ext, func(item fsItem) error {
+	_, err = validateFSInventory(ctx, view, inventoryPath, ext, func(item fsItem) error {
 		if item.itemType != "file" || item.size <= 0 {
 			return nil
 		}
@@ -2159,7 +2374,7 @@ func ReadFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 		return sizes, true, nil
 	}
 
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return FSSizesSidecar{}, false, fmt.Errorf("read fs sizes sidecar %s: %w", path, err)
 	}
 
@@ -2176,7 +2391,7 @@ func readLegacyFSSizesSidecar(stagingDir string) (FSSizesSidecar, bool, error) {
 
 	sizes, err := decodeFSSizesSidecar(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return FSSizesSidecar{}, false, nil
 		}
 
@@ -2237,30 +2452,52 @@ func decodeFSSizesSidecar(path string) (FSSizesSidecar, error) {
 // caller knows to fall back to the network-driven total/credit path instead
 // of trusting a zero total.
 func ScanFSStagingSizes(ctx context.Context, stagingDir, ext string) (int64, int64, bool, error) {
+	return scanFSStagingSizes(ctx, filesystemView{}, stagingDir, ext)
+}
+
+// ScanFSStagingSizesRooted scans sidecar sizes through destination.
+func ScanFSStagingSizesRooted(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	stagingDir, ext string,
+) (int64, int64, bool, error) {
+	return scanFSStagingSizes(
+		ctx,
+		filesystemView{destination: destination},
+		stagingDir,
+		ext,
+	)
+}
+
+func scanFSStagingSizes(
+	ctx context.Context,
+	view filesystemView,
+	stagingDir, ext string,
+) (int64, int64, bool, error) {
 	path := filepath.Join(stagingDir, FSMetaDirName, FSSizesSidecarName)
 
 	if err := ctx.Err(); err != nil {
 		return 0, 0, false, fmt.Errorf("scan fs sizes sidecar %s: %w", path, err)
 	}
 
-	total, staged, err := scanFSSizesFile(ctx, path, stagingDir, ext)
+	total, staged, err := scanFSSizesFile(ctx, view, path, stagingDir, ext)
 	if err == nil {
 		return total, staged, true, nil
 	}
 
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return 0, 0, false, err
 	}
 
 	legacyPath := filepath.Join(stagingDir, FSSizesSidecarName)
 
-	total, staged, err = scanFSSizesFile(ctx, legacyPath, stagingDir, ext)
+	total, staged, err = scanFSSizesFile(ctx, view, legacyPath, stagingDir, ext)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 0, 0, false, err
 		}
 
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return 0, 0, false, nil
 		}
 
@@ -2273,8 +2510,12 @@ func ScanFSStagingSizes(ctx context.Context, stagingDir, ext string) (int64, int
 	return total, staged, true, nil
 }
 
-func scanFSSizesFile(ctx context.Context, path, stagingDir, ext string) (int64, int64, error) {
-	f, err := os.Open(path)
+func scanFSSizesFile(
+	ctx context.Context,
+	view filesystemView,
+	path, stagingDir, ext string,
+) (int64, int64, error) {
+	f, err := view.open(path)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -2382,7 +2623,7 @@ func scanFSSizesFile(ctx context.Context, path, stagingDir, ext string) (int64, 
 
 				destPath := filepath.Join(stagingDir, filepath.FromSlash(relPath+ext))
 
-				info, statErr := os.Stat(destPath)
+				info, statErr := view.stat(destPath)
 				if statErr == nil && !info.IsDir() {
 					if staged > math.MaxInt64-size {
 						return 0, 0, fmt.Errorf("parse fs sizes sidecar %s: staged size overflows int64", path)
@@ -2619,6 +2860,145 @@ func isFSSizesJSONBoundary(b byte) bool {
 
 func isFSSizesJSONSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
+}
+
+func (v filesystemView) stat(path string) (os.FileInfo, error) {
+	if v.destination == nil {
+		return os.Stat(path)
+	}
+
+	return v.destination.Stat(path)
+}
+
+func (v filesystemView) open(path string) (*os.File, error) {
+	if v.destination == nil {
+		return os.Open(path)
+	}
+
+	return v.destination.OpenRegular(path)
+}
+
+func (v filesystemView) createAppend(path string, perm os.FileMode) (*os.File, error) {
+	if v.destination == nil {
+		return os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_APPEND|os.O_WRONLY, perm)
+	}
+
+	return v.destination.CreateExclusive(path, perm)
+}
+
+func (v filesystemView) remove(path string) error {
+	if v.destination == nil {
+		return os.Remove(path)
+	}
+
+	return v.destination.Remove(path)
+}
+
+func (v filesystemView) removeAll(path string) error {
+	if v.destination == nil {
+		return os.RemoveAll(path)
+	}
+
+	return v.destination.RemoveAll(path)
+}
+
+func (v filesystemView) ensureDir(path string) error {
+	if v.destination == nil {
+		return archive.EnsureDir(path)
+	}
+
+	return v.destination.EnsureDir(path)
+}
+
+func (v filesystemView) atomicWriter(path string) (*archive.AtomicWriter, error) {
+	if v.destination == nil {
+		return archive.NewAtomicWriter(path)
+	}
+
+	return archive.NewRootedAtomicWriter(v.destination, path)
+}
+
+func (v filesystemView) confirmFileDurability(ctx context.Context, path string) error {
+	if v.destination == nil {
+		return archive.ConfirmFileDurability(ctx, path)
+	}
+
+	return archive.ConfirmRootedFileDurability(ctx, v.destination, path)
+}
+
+func (v filesystemView) downloadBlockChunks(
+	ctx context.Context,
+	log *slog.Logger,
+	chunkDir string,
+	blockURL string,
+	totalSize int64,
+	chunkSize int64,
+	workers int,
+	fetcher *exporter.Fetcher,
+	codec compress.Codec,
+	onProgress func(n int),
+) error {
+	if v.destination == nil {
+		return DownloadBlockChunks(
+			ctx,
+			log,
+			chunkDir,
+			blockURL,
+			totalSize,
+			chunkSize,
+			workers,
+			fetcher,
+			codec,
+			onProgress,
+		)
+	}
+
+	return DownloadBlockChunksRooted(
+		ctx,
+		v.destination,
+		log,
+		chunkDir,
+		blockURL,
+		totalSize,
+		chunkSize,
+		workers,
+		fetcher,
+		codec,
+		onProgress,
+	)
+}
+
+func (v filesystemView) mergeBlockChunks(
+	ctx context.Context,
+	chunkDir, outPath string,
+	totalSize, chunkSize int64,
+	ext string,
+) error {
+	if v.destination == nil {
+		return MergeBlockChunks(ctx, chunkDir, outPath, totalSize, chunkSize, ext)
+	}
+
+	return MergeBlockChunksRooted(
+		ctx,
+		v.destination,
+		chunkDir,
+		outPath,
+		totalSize,
+		chunkSize,
+		ext,
+	)
+}
+
+func (v filesystemView) writeTar(
+	ctx context.Context,
+	outputPath, stagingDir string,
+	entries TarEntrySource,
+) error {
+	if v.destination == nil {
+		return WriteTar(ctx, outputPath, stagingDir, entries)
+	}
+
+	return WriteTarRooted(ctx, v.destination, outputPath, stagingDir, entries)
 }
 
 // parseItemSize extracts the "size" attribute from a data-exporter listing item.
