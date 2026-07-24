@@ -17,15 +17,23 @@ limitations under the License.
 package archive
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 )
 
-const archiveLockFileName = ".d8-snapshot-download.lock"
+const (
+	archiveLockFileName        = ".d8-snapshot-download.lock"
+	archiveLockDomainMaxRecord = 64 * 1024
+)
+
+var archiveLockDomainMagic = [8]byte{'D', '8', 'A', 'L', 'K', '0', '0', '1'}
 
 // ErrArchiveLocked is returned when an incompatible archive reader or writer owns the lock.
 var (
@@ -33,9 +41,10 @@ var (
 	ErrArchiveLockChanged = errors.New("snapshot archive lock binding changed")
 )
 
-// Lock is a held cooperative archive lock bound to one pinned archive root and lock inode.
-// Callers must Unlock it. A lock acquired from an existing RootedSource does not close that
-// source; a path-based acquisition owns and closes its internally opened source.
+// Lock is a held cooperative archive lock bound to one stable path-domain record, pinned root,
+// and descriptor-relative lock inode. Callers must Unlock it. A lock acquired from an existing
+// RootedSource does not close that source; a path-based acquisition owns and closes its
+// internally opened source.
 type Lock struct {
 	mu         sync.Mutex
 	source     *RootedSource
@@ -135,12 +144,15 @@ func acquireSourceLock(
 		}
 	}()
 
+	// Every process acquires the archive-specific external domain before the pinned root and
+	// in-root entry. The domain records both the full normalized path and root file identity;
+	// a replacement root may take it over only after every holder of the old identity exits.
 	anchor, err := openArchiveLockAnchor(source)
 	if err != nil {
 		return nil, fmt.Errorf("open archive namespace lock anchor for %s: %w", source.path, err)
 	}
 
-	anchorLocked, err := tryArchiveAnchorLock(anchor, exclusive)
+	anchorLocked, err := tryArchiveAnchorLock(anchor, source, exclusive)
 	if err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("lock archive namespace anchor for %s: %w", source.path, err),
@@ -341,4 +353,213 @@ func wrapArchiveLockCloseError(resource string, err error) error {
 	}
 
 	return fmt.Errorf("release %s: %w", resource, err)
+}
+
+type archiveLockDomainBinding struct {
+	valid      bool
+	pathEquals bool
+	rootEquals bool
+}
+
+func bindArchiveLockDomain(
+	anchor *os.File,
+	source *RootedSource,
+	exclusive bool,
+	tryLock func(bool) (bool, error),
+	unlock func() error,
+) (bool, error) {
+	locked, err := tryLock(exclusive)
+	if err != nil || !locked {
+		return locked, err
+	}
+
+	binding, err := inspectArchiveLockDomain(anchor, source)
+	if err != nil {
+		return false, errors.Join(err, unlock())
+	}
+
+	if binding.valid && !binding.pathEquals {
+		return false, errors.Join(
+			fmt.Errorf("archive lock domain locator collision for %s: %w",
+				source.path, ErrNonRegularArchiveArtifact),
+			unlock(),
+		)
+	}
+
+	if binding.valid && binding.rootEquals {
+		return true, nil
+	}
+
+	if exclusive {
+		if err := writeArchiveLockDomain(anchor, source); err != nil {
+			return false, errors.Join(err, unlock())
+		}
+
+		return true, nil
+	}
+
+	if err := unlock(); err != nil {
+		return false, err
+	}
+
+	locked, err = tryLock(true)
+	if err != nil {
+		return false, err
+	}
+
+	if !locked {
+		return retryArchiveLockDomainReader(anchor, source, tryLock, unlock)
+	}
+
+	binding, err = inspectArchiveLockDomain(anchor, source)
+	if err != nil {
+		return false, errors.Join(err, unlock())
+	}
+
+	if binding.valid && !binding.pathEquals {
+		return false, errors.Join(
+			fmt.Errorf("archive lock domain locator collision for %s: %w",
+				source.path, ErrNonRegularArchiveArtifact),
+			unlock(),
+		)
+	}
+
+	if !binding.valid || !binding.rootEquals {
+		if err := writeArchiveLockDomain(anchor, source); err != nil {
+			return false, errors.Join(err, unlock())
+		}
+	}
+
+	if err := unlock(); err != nil {
+		return false, err
+	}
+
+	return tryLock(false)
+}
+
+func retryArchiveLockDomainReader(
+	anchor *os.File,
+	source *RootedSource,
+	tryLock func(bool) (bool, error),
+	unlock func() error,
+) (bool, error) {
+	locked, err := tryLock(false)
+	if err != nil || !locked {
+		return locked, err
+	}
+
+	binding, err := inspectArchiveLockDomain(anchor, source)
+	if err != nil {
+		return false, errors.Join(err, unlock())
+	}
+
+	if !binding.valid || !binding.pathEquals || !binding.rootEquals {
+		return false, errors.Join(
+			fmt.Errorf("%w: %s", ErrArchiveLocked, source.path),
+			unlock(),
+		)
+	}
+
+	return true, nil
+}
+
+func inspectArchiveLockDomain(anchor *os.File, source *RootedSource) (archiveLockDomainBinding, error) {
+	expectedPath, expectedRootID, err := archiveLockDomainIdentity(source)
+	if err != nil {
+		return archiveLockDomainBinding{}, err
+	}
+
+	info, err := anchor.Stat()
+	if err != nil {
+		return archiveLockDomainBinding{}, fmt.Errorf("inspect archive lock domain: %w", err)
+	}
+
+	size := info.Size()
+	if size <= 0 || size > archiveLockDomainMaxRecord {
+		return archiveLockDomainBinding{}, nil
+	}
+
+	data := make([]byte, size)
+	if _, err := io.ReadFull(io.NewSectionReader(anchor, 0, size), data); err != nil {
+		return archiveLockDomainBinding{}, fmt.Errorf("read archive lock domain: %w", err)
+	}
+
+	path, rootID, valid := decodeArchiveLockDomain(data)
+	if !valid {
+		return archiveLockDomainBinding{}, nil
+	}
+
+	return archiveLockDomainBinding{
+		valid:      true,
+		pathEquals: path == expectedPath,
+		rootEquals: path == expectedPath && rootID == expectedRootID,
+	}, nil
+}
+
+func writeArchiveLockDomain(anchor *os.File, source *RootedSource) error {
+	path, rootID, err := archiveLockDomainIdentity(source)
+	if err != nil {
+		return err
+	}
+
+	record, err := encodeArchiveLockDomain(path, rootID)
+	if err != nil {
+		return err
+	}
+
+	if err := anchor.Truncate(0); err != nil {
+		return fmt.Errorf("truncate archive lock domain: %w", err)
+	}
+
+	if _, err := anchor.WriteAt(record, 0); err != nil {
+		return fmt.Errorf("write archive lock domain: %w", err)
+	}
+
+	if err := anchor.Sync(); err != nil {
+		return fmt.Errorf("sync archive lock domain: %w", err)
+	}
+
+	return nil
+}
+
+func encodeArchiveLockDomain(path, rootID string) ([]byte, error) {
+	recordSize := len(archiveLockDomainMagic) + 8 + len(path) + len(rootID)
+	if recordSize > archiveLockDomainMaxRecord {
+		return nil, fmt.Errorf("archive lock domain identity is too large: %w", ErrNonRegularArchiveArtifact)
+	}
+
+	record := bytes.NewBuffer(make([]byte, 0, recordSize))
+	record.Write(archiveLockDomainMagic[:])
+
+	if err := binary.Write(record, binary.LittleEndian, uint32(len(path))); err != nil {
+		return nil, fmt.Errorf("encode archive lock domain path length: %w", err)
+	}
+
+	if err := binary.Write(record, binary.LittleEndian, uint32(len(rootID))); err != nil {
+		return nil, fmt.Errorf("encode archive lock domain root length: %w", err)
+	}
+
+	record.WriteString(path)
+	record.WriteString(rootID)
+
+	return record.Bytes(), nil
+}
+
+func decodeArchiveLockDomain(record []byte) (string, string, bool) {
+	const headerSize = 16
+
+	if len(record) < headerSize || !bytes.Equal(record[:8], archiveLockDomainMagic[:]) {
+		return "", "", false
+	}
+
+	pathLength := int(binary.LittleEndian.Uint32(record[8:12]))
+	rootLength := int(binary.LittleEndian.Uint32(record[12:16]))
+
+	if pathLength < 1 || rootLength < 1 || pathLength+rootLength != len(record)-headerSize {
+		return "", "", false
+	}
+
+	pathEnd := headerSize + pathLength
+
+	return string(record[headerSize:pathEnd]), string(record[pathEnd:]), true
 }

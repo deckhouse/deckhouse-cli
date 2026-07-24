@@ -19,18 +19,72 @@ limitations under the License.
 package archive
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func openArchiveLockAnchor(_ *RootedSource) (*os.File, error) {
-	// The root handle and lock-entry handle both deny delete sharing. Windows therefore
-	// enforces the namespace anchor directly instead of requiring a parent-directory lock.
-	return nil, nil
+func openArchiveLockAnchor(source *RootedSource) (*os.File, error) {
+	domainPath, err := archiveLockDomainPath(source.path)
+	if err != nil {
+		return nil, err
+	}
+
+	directory, err := openArchiveRoot(filepath.Dir(domainPath))
+	if err != nil {
+		return nil, fmt.Errorf("open archive lock domain directory: %w", err)
+	}
+
+	anchor, openErr := openArchiveLockAt(
+		directory,
+		filepath.Base(domainPath),
+		domainPath,
+	)
+	closeErr := directory.Close()
+
+	if openErr != nil {
+		return nil, errors.Join(openErr, wrapArchiveLockCloseError(filepath.Dir(domainPath), closeErr))
+	}
+
+	if closeErr != nil {
+		return nil, errors.Join(
+			wrapArchiveLockCloseError(filepath.Dir(domainPath), closeErr),
+			wrapArchiveLockCloseError(domainPath, anchor.Close()),
+		)
+	}
+
+	return anchor, nil
+}
+
+// archiveLockDomainPath uses the case-insensitive absolute archive name only as a bounded
+// locator. The returned handle, pinned root, and descriptor-relative in-root entry form the
+// actual lock identity.
+func archiveLockDomainPath(path string) (string, error) {
+	identity, err := archiveLockCanonicalPath(path)
+	if err != nil {
+		return "", err
+	}
+
+	domainDirectory, err := windows.KnownFolderPath(
+		windows.FOLDERID_LocalAppData,
+		windows.KF_FLAG_DEFAULT,
+	)
+	if err != nil {
+		return "", fmt.Errorf("resolve Windows archive lock domain directory: %w", err)
+	}
+
+	sum := sha256.Sum256([]byte(identity))
+
+	return filepath.Join(
+		domainDirectory,
+		fmt.Sprintf(".d8-snapshot-archive-lock-%x", sum),
+	), nil
 }
 
 func openArchiveLockAt(parent *os.File, name, path string) (*os.File, error) {
@@ -97,17 +151,60 @@ func openArchiveLockAt(parent *os.File, name, path string) (*os.File, error) {
 	return file, nil
 }
 
-func tryArchiveAnchorLock(_ *os.File, _ bool) (bool, error) {
-	return true, nil
+func archiveLockDomainIdentity(source *RootedSource) (string, string, error) {
+	path, err := archiveLockCanonicalPath(source.path)
+	if err != nil {
+		return "", "", err
+	}
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(source.dir.Fd()), &info); err != nil {
+		return "", "", fmt.Errorf("identify pinned archive root %s: %w", source.path, err)
+	}
+
+	rootID := fmt.Sprintf(
+		"%d:%d:%d",
+		info.VolumeSerialNumber,
+		info.FileIndexHigh,
+		info.FileIndexLow,
+	)
+
+	return path, rootID, nil
+}
+
+func archiveLockCanonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve archive lock identity path %s: %w", path, err)
+	}
+
+	return strings.ToLower(filepath.Clean(absolute)), nil
+}
+
+func tryArchiveAnchorLock(anchor *os.File, source *RootedSource, exclusive bool) (bool, error) {
+	return bindArchiveLockDomain(
+		anchor,
+		source,
+		exclusive,
+		func(lockExclusive bool) (bool, error) {
+			return tryWindowsArchiveLock(anchor, lockExclusive)
+		},
+		func() error {
+			return unlockWindowsArchiveLock(anchor)
+		},
+	)
 }
 
 func tryArchiveRootLock(_ *os.File, _ bool) (bool, error) {
-	// openArchiveRoot denies delete sharing while the rooted view is held. That prevents a
-	// cooperating Windows contender from replacing the directory identity before lock release.
+	// openArchiveRoot denies delete sharing while the rooted view is held.
 	return true, nil
 }
 
 func tryArchiveFileLock(file *os.File, exclusive bool) (bool, error) {
+	return tryWindowsArchiveLock(file, exclusive)
+}
+
+func tryWindowsArchiveLock(file *os.File, exclusive bool) (bool, error) {
 	flags := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if exclusive {
 		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
@@ -132,15 +229,19 @@ func tryArchiveFileLock(file *os.File, exclusive bool) (bool, error) {
 	return true, nil
 }
 
-func unlockArchiveAnchorLock(_ *os.File) error {
-	return nil
+func unlockArchiveAnchorLock(anchor *os.File) error {
+	return unlockWindowsArchiveLock(anchor)
 }
 
-func closeArchiveLockAnchor(_ *os.File) error {
-	return nil
+func closeArchiveLockAnchor(anchor *os.File) error {
+	return anchor.Close()
 }
 
 func unlockArchiveFileLock(file *os.File) error {
+	return unlockWindowsArchiveLock(file)
+}
+
+func unlockWindowsArchiveLock(file *os.File) error {
 	return windows.UnlockFileEx(
 		windows.Handle(file.Fd()),
 		0,

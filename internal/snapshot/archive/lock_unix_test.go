@@ -228,3 +228,177 @@ func TestArchiveLockRootReplacementFailsClosed(t *testing.T) {
 	}
 	defer func() { _ = writer.Unlock() }()
 }
+
+func TestArchiveLockAncestorReplacementKeepsSamePathDomain(t *testing.T) {
+	tests := []struct {
+		name            string
+		replacedElement string
+	}{
+		{
+			name:            "immediate parent",
+			replacedElement: "parent",
+		},
+		{
+			name:            "higher ancestor",
+			replacedElement: "ancestor",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			ancestor := filepath.Join(base, "ancestor")
+			parent := filepath.Join(ancestor, "parent")
+			root := filepath.Join(parent, "archive")
+
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatalf("create nested archive root: %v", err)
+			}
+
+			reader, err := AcquireReadLock(root)
+			if err != nil {
+				t.Fatalf("acquire reader: %v", err)
+			}
+
+			replaced := parent
+			if tc.replacedElement == "ancestor" {
+				replaced = ancestor
+			}
+
+			if err := os.Rename(replaced, replaced+".displaced"); err != nil {
+				t.Fatalf("rename held archive %s: %v", tc.replacedElement, err)
+			}
+
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatalf("create second same-path archive tree: %v", err)
+			}
+
+			if err := reader.Verify(); !errors.Is(err, ErrNonRegularArchiveArtifact) {
+				t.Fatalf("Verify error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			writer, err := AcquireWriteLock(root)
+			if writer != nil {
+				_ = writer.Unlock()
+			}
+
+			if !errors.Is(err, ErrArchiveLocked) {
+				t.Fatalf("same-path replacement writer error = %v, want ErrArchiveLocked", err)
+			}
+
+			secondReader, err := AcquireReadLock(root)
+			if secondReader != nil {
+				_ = secondReader.Unlock()
+			}
+
+			if !errors.Is(err, ErrArchiveLocked) {
+				t.Fatalf("same-path replacement reader error = %v, want ErrArchiveLocked", err)
+			}
+
+			runArchiveLockHelper(t, root, "write", false)
+
+			if err := reader.Unlock(); err != nil {
+				t.Fatalf("release displaced reader: %v", err)
+			}
+
+			writer, err = AcquireWriteLock(root)
+			if err != nil {
+				t.Fatalf("acquire replacement writer after release: %v", err)
+			}
+			defer func() { _ = writer.Unlock() }()
+		})
+	}
+}
+
+func TestArchiveLockRejectsMaliciousDomainEntries(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T, path string)
+	}{
+		{
+			name: "symlink",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				if err := os.Symlink(filepath.Join(t.TempDir(), "target"), path); err != nil {
+					t.Fatalf("create domain symlink: %v", err)
+				}
+			},
+		},
+		{
+			name: "fifo",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				if err := unix.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("create domain FIFO: %v", err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("create domain directory: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			domainPath, err := archiveLockDomainPath(root)
+			if err != nil {
+				t.Fatalf("resolve archive lock domain: %v", err)
+			}
+
+			if err := os.Remove(domainPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("remove prior archive lock domain: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(domainPath) })
+
+			tc.build(t, domainPath)
+
+			result := make(chan error, 1)
+			go func() {
+				lock, lockErr := AcquireWriteLock(root)
+				if lock != nil {
+					_ = lock.Unlock()
+				}
+
+				result <- lockErr
+			}()
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, ErrNonRegularArchiveArtifact) {
+					t.Fatalf("AcquireWriteLock error = %v, want ErrNonRegularArchiveArtifact", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("AcquireWriteLock blocked on a malicious domain entry")
+			}
+		})
+	}
+}
+
+func TestArchiveLockRepairsMalformedRegularDomainWhenUnheld(t *testing.T) {
+	root := t.TempDir()
+	domainPath, err := archiveLockDomainPath(root)
+	if err != nil {
+		t.Fatalf("resolve archive lock domain: %v", err)
+	}
+
+	if err := os.WriteFile(domainPath, []byte("malformed stale state"), 0o600); err != nil {
+		t.Fatalf("write malformed regular domain: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(domainPath) })
+
+	reader, err := AcquireReadLock(root)
+	if err != nil {
+		t.Fatalf("acquire reader with stale regular domain: %v", err)
+	}
+	defer func() { _ = reader.Unlock() }()
+}

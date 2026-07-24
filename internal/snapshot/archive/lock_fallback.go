@@ -30,7 +30,11 @@ func openArchiveLockAt(_ *os.File, _, path string) (*os.File, error) {
 	return nil, unsupportedRootedArchivePlatform(path)
 }
 
-func tryArchiveAnchorLock(_ *os.File, _ bool) (bool, error) {
+func archiveLockDomainIdentity(source *RootedSource) (string, string, error) {
+	return "", "", unsupportedRootedArchivePlatform(source.path)
+}
+
+func tryArchiveAnchorLock(_ *os.File, _ *RootedSource, _ bool) (bool, error) {
 	return false, unsupportedRootedArchivePlatform("archive namespace lock")
 }
 

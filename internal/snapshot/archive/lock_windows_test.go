@@ -64,6 +64,56 @@ func TestWindowsArchiveLockDeniesRootAndEntryReplacementWhileHeld(t *testing.T) 
 	}
 }
 
+func TestWindowsArchiveLockKeepsDomainAcrossAncestorReplacement(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "ancestor")
+	root := filepath.Join(ancestor, "parent", "archive")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create nested archive root: %v", err)
+	}
+
+	reader, err := AcquireReadLock(root)
+	if err != nil {
+		t.Fatalf("acquire archive reader: %v", err)
+	}
+
+	displaced := ancestor + ".displaced"
+	if err := os.Rename(ancestor, displaced); err != nil {
+		if verifyErr := reader.Verify(); verifyErr != nil {
+			t.Fatalf("verify retained lock after denied ancestor rename: %v", verifyErr)
+		}
+
+		if unlockErr := reader.Unlock(); unlockErr != nil {
+			t.Fatalf("release reader after denied ancestor rename: %v", unlockErr)
+		}
+
+		return
+	}
+
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("create second same-path archive tree: %v", err)
+	}
+
+	writer, err := AcquireWriteLock(root)
+	if writer != nil {
+		_ = writer.Unlock()
+	}
+
+	if !errors.Is(err, ErrArchiveLocked) {
+		t.Fatalf("same-path replacement writer error = %v, want ErrArchiveLocked", err)
+	}
+
+	if err := reader.Unlock(); err != nil {
+		t.Fatalf("release displaced reader: %v", err)
+	}
+
+	writer, err = AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("acquire replacement writer after release: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+}
+
 func TestWindowsArchiveLockRejectsReparseEntry(t *testing.T) {
 	tests := []struct {
 		name  string

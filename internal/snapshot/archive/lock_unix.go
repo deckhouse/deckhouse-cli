@@ -19,54 +19,97 @@ limitations under the License.
 package archive
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 
 	"golang.org/x/sys/unix"
 )
 
 func openArchiveLockAnchor(source *RootedSource) (*os.File, error) {
-	fd, err := unix.Openat(
-		int(source.dir.Fd()),
-		"..",
-		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK,
-		0,
-	)
+	domainPath, err := archiveLockDomainPath(source.path)
 	if err != nil {
 		return nil, err
 	}
 
-	anchor := os.NewFile(uintptr(fd), source.path+" namespace anchor")
-	if anchor == nil {
+	domainDirectory := filepath.Dir(domainPath)
+
+	fd, err := unix.Open(
+		domainDirectory,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open archive lock domain directory %s: %w", domainDirectory, err)
+	}
+
+	directory := os.NewFile(uintptr(fd), domainDirectory)
+	if directory == nil {
 		_ = unix.Close(fd)
 
-		return nil, errors.New("open archive namespace anchor: invalid descriptor")
+		return nil, errors.New("open archive lock domain directory: invalid descriptor")
 	}
 
-	anchorInfo, err := anchor.Stat()
+	directoryInfo, err := directory.Stat()
 	if err != nil {
-		_ = anchor.Close()
+		_ = directory.Close()
 
-		return nil, fmt.Errorf("inspect archive namespace anchor: %w", err)
+		return nil, fmt.Errorf("inspect archive lock domain directory %s: %w", domainDirectory, err)
 	}
 
-	rootInfo, err := source.dir.Stat()
-	if err != nil {
-		_ = anchor.Close()
+	if !directoryInfo.IsDir() {
+		_ = directory.Close()
 
-		return nil, fmt.Errorf("inspect archive root for namespace anchor: %w", err)
+		return nil, archiveModeError(domainDirectory, directoryInfo.Mode(), true)
 	}
 
-	if os.SameFile(anchorInfo, rootInfo) {
-		if err := anchor.Close(); err != nil {
-			return nil, fmt.Errorf("close duplicate archive namespace anchor: %w", err)
-		}
+	anchor, openErr := openArchiveLockAt(
+		directory,
+		filepath.Base(domainPath),
+		domainPath,
+	)
+	closeErr := directory.Close()
 
-		return nil, nil
+	if openErr != nil {
+		return nil, errors.Join(openErr, wrapArchiveLockCloseError(domainDirectory, closeErr))
+	}
+
+	if closeErr != nil {
+		return nil, errors.Join(
+			wrapArchiveLockCloseError(domainDirectory, closeErr),
+			wrapArchiveLockCloseError(domainPath, anchor.Close()),
+		)
 	}
 
 	return anchor, nil
+}
+
+// archiveLockDomainPath maps one normalized archive pathname to one coordination inode outside
+// the replaceable archive ancestry. The digest is only a bounded filename encoding: acquisition
+// still binds and verifies the pinned root and its descriptor-relative in-root lock entry.
+func archiveLockDomainPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve archive lock domain path %s: %w", path, err)
+	}
+
+	sum := sha256.Sum256([]byte(filepath.Clean(absolute)))
+
+	return filepath.Join(
+		archiveLockDomainDirectory(),
+		fmt.Sprintf(".d8-snapshot-archive-lock-%d-%x", os.Getuid(), sum),
+	), nil
+}
+
+func archiveLockDomainDirectory() string {
+	if runtime.GOOS == "darwin" {
+		return "/private/tmp"
+	}
+
+	return "/tmp"
 }
 
 func openArchiveLockAt(parent *os.File, name, path string) (*os.File, error) {
@@ -118,12 +161,36 @@ func openArchiveLockAt(parent *os.File, name, path string) (*os.File, error) {
 	return file, nil
 }
 
-func tryArchiveAnchorLock(anchor *os.File, exclusive bool) (bool, error) {
+func archiveLockDomainIdentity(source *RootedSource) (string, string, error) {
+	absolute, err := filepath.Abs(source.path)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve archive lock identity path %s: %w", source.path, err)
+	}
+
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(source.dir.Fd()), &stat); err != nil {
+		return "", "", fmt.Errorf("identify pinned archive root %s: %w", source.path, err)
+	}
+
+	return filepath.Clean(absolute), fmt.Sprintf("%d:%d", stat.Dev, stat.Ino), nil
+}
+
+func tryArchiveAnchorLock(anchor *os.File, source *RootedSource, exclusive bool) (bool, error) {
 	if anchor == nil {
 		return true, nil
 	}
 
-	return tryUnixArchiveLock(anchor, exclusive)
+	return bindArchiveLockDomain(
+		anchor,
+		source,
+		exclusive,
+		func(lockExclusive bool) (bool, error) {
+			return tryUnixArchiveLock(anchor, lockExclusive)
+		},
+		func() error {
+			return unix.Flock(int(anchor.Fd()), unix.LOCK_UN)
+		},
+	)
 }
 
 func tryArchiveRootLock(root *os.File, exclusive bool) (bool, error) {
