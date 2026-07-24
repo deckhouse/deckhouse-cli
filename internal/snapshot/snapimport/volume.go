@@ -682,15 +682,13 @@ func verifyPayloadHandle(ctx context.Context, handle *archive.VerifiedHandle) er
 // the importer's status.ca. Its caller owns the result for exactly one DataImport
 // upload lifecycle and closes its private idle HTTP/1.1 and HTTP/2 pools.
 func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPClient, error) {
-	var ca []byte
+	ca, err := base64.StdEncoding.DecodeString(caB64)
+	if err != nil {
+		return nil, fmt.Errorf("decode DataImport status.ca: %w", err)
+	}
 
-	if caB64 != "" {
-		decoded, err := base64.StdEncoding.DecodeString(caB64)
-		if err != nil {
-			return nil, fmt.Errorf("decode DataImport status.ca: %w", err)
-		}
-
-		ca = decoded
+	if err := safeClient.ValidateHTTPSIdentity(rawURL, ca); err != nil {
+		return nil, fmt.Errorf("validate DataImport upload identity: %w", err)
 	}
 
 	if c.newUploadClient != nil {
@@ -703,7 +701,10 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 
 	sub := c.sc.Copy()
 	sub.SetRequestTimeout(0)
-	sub.SetTLSCAData(ca)
+
+	if err := sub.SetTLSIdentityCAData(ca); err != nil {
+		return nil, fmt.Errorf("configure DataImport upload TLS identity: %w", err)
+	}
 
 	if err := sub.SetNetworkTimeouts(safeClient.NetworkTimeouts{
 		Connect:        uploadConnectTimeout,
@@ -715,7 +716,7 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 		return nil, fmt.Errorf("configure DataImport upload network timeouts: %w", err)
 	}
 
-	httpClient, err := sub.NewPersistentHTTPClientForOrigin(rawURL)
+	httpClient, err := sub.NewPersistentHTTPSClientForOrigin(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("build DataImport upload HTTP client: %w", err)
 	}

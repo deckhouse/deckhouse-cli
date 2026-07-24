@@ -20,6 +20,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -2017,10 +2019,21 @@ func TestUploadVolumeData_FilesystemReusesOneClientAndClosesItsConnections(t *te
 			closedConnections.Add(1)
 		}
 	}
-	server.Start()
+	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	di := readyDataImportObj(leaf, server.URL, volumeModeFilesystem, "")
+	serverCertificate := server.Certificate()
+	if serverCertificate == nil {
+		t.Fatal("TLS upload server has no certificate")
+	}
+
+	caData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCertificate.Raw})
+	di := readyDataImportObj(
+		leaf,
+		server.URL,
+		volumeModeFilesystem,
+		base64.StdEncoding.EncodeToString(caData),
+	)
 	dyn := newFakeDataImportDyn(di)
 	importer := newTestVolumeImporter(dyn)
 
