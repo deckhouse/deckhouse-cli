@@ -28,7 +28,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/gofrs/flock"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -37,6 +36,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -307,14 +307,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	return nil
 }
 
-// downloadLockFileName is the advisory lock file created directly inside the
-// output directory to serialize concurrent `d8 snapshot download` runs
-// against the same tree. It is a fixed, hidden name so unrelated tooling does
-// not stumble on it; it deliberately does NOT carry a ".tmp" suffix, so
-// archive/resume.go's stale-*.tmp sweep never touches it, and it is not one
-// of the fixed file/dir names archive.ComputeNodeChecksum reads (manifests/,
-// data.bin*, data.tar, data/), so its presence never perturbs a node's
-// checksum or resume classification.
 const downloadLockFileName = ".d8-snapshot-download.lock"
 
 // ErrOutputDirLocked is returned by acquireOutputLock when another process
@@ -344,27 +336,20 @@ var ErrOutputDirLocked = errors.New("output directory is locked by another d8 sn
 // same path after deletion is a different inode that a stale lock file
 // deletion race lets it forget); it persists as a tiny fixture in the output
 // directory.
-func acquireOutputLock(outputDir string) (*flock.Flock, error) {
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating output directory %s: %w", outputDir, err)
-	}
-
-	lockPath := filepath.Join(outputDir, downloadLockFileName)
-
-	fl := flock.New(lockPath)
-
-	locked, err := fl.TryLock()
+func acquireOutputLock(outputDir string) (*archive.Lock, error) {
+	lock, err := archive.AcquireWriteLock(outputDir)
 	if err != nil {
-		return nil, fmt.Errorf("locking output directory %s: %w", outputDir, err)
-	}
+		if errors.Is(err, archive.ErrArchiveLocked) {
+			return nil, fmt.Errorf(
+				"%w: %s (finish or stop the other download/upload first, or choose a different --%s)",
+				ErrOutputDirLocked, outputDir, flagOutput)
+		}
 
-	if !locked {
 		return nil, fmt.Errorf(
-			"%w: %s (finish or stop the other run first, or choose a different --%s)",
-			ErrOutputDirLocked, outputDir, flagOutput)
+			"locking output directory %s: %w", outputDir, err)
 	}
 
-	return fl, nil
+	return lock, nil
 }
 
 // validateVolumeCompression builds the requested volume Codec, restricting the

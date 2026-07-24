@@ -2502,3 +2502,196 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 		t.Errorf("archive directory entry count changed during upload: before=%d after=%d (a temp file was left behind)", len(dirBefore), len(dirAfter))
 	}
 }
+
+func TestSendVolumeData_FSTarReplacementUsesPinnedBytesAndDoesNotFinish(t *testing.T) {
+	content := []byte("verified filesystem bytes")
+
+	var tarBuffer bytes.Buffer
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryRawPAX(t, tarWriter, "file.txt", "file.txt", "none", int64(len(content)), content)
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	nodeSpec := archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		tarData:    tarBuffer.Bytes(),
+	}
+	nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+	nodeSpec.volumes[0].Size = strconv.Itoa(len(content))
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, nodeSpec)
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	plan, err := buildPlanFromVerifiedArchive(view)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+
+	if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+		t.Fatalf("verify archive: %v", err)
+	}
+
+	tarPath := filepath.Join(root, archive.FsTarName)
+
+	var (
+		received []byte
+		finished int
+		replaced bool
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodHead:
+			if !replaced {
+				replaced = true
+				if err := os.Rename(tarPath, tarPath+".verified"); err != nil {
+					t.Fatalf("move verified tar: %v", err)
+				}
+
+				if err := os.WriteFile(tarPath, []byte("replacement tar bytes"), 0o600); err != nil {
+					t.Fatalf("write replacement tar: %v", err)
+				}
+			}
+
+			writer.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			var err error
+			received, err = io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read PUT body: %v", err)
+			}
+
+			writer.WriteHeader(http.StatusCreated)
+		case http.MethodPost:
+			finished++
+			writer.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	err = importer.sendVolumeData(
+		context.Background(),
+		plainHTTPDoer{},
+		server.URL,
+		volumeModeFilesystem,
+		plan[0],
+		targetNS,
+		"di-pvc-1",
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+
+	if !bytes.Equal(received, content) {
+		t.Fatalf("PUT body = %q, want verified tar entry %q", received, content)
+	}
+
+	if finished != 0 {
+		t.Fatalf("finished POSTs = %d, want 0", finished)
+	}
+}
+
+func TestSendVolumeData_AllServerSkippedFSStillRejectsReplacement(t *testing.T) {
+	content := []byte("already durable filesystem bytes")
+
+	var tarBuffer bytes.Buffer
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryRawPAX(t, tarWriter, "file.txt", "file.txt", "none", int64(len(content)), content)
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	nodeSpec := archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		tarData:    tarBuffer.Bytes(),
+	}
+	nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+	nodeSpec.volumes[0].Size = strconv.Itoa(len(content))
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, nodeSpec)
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	plan, err := buildPlanFromVerifiedArchive(view)
+	if err != nil {
+		t.Fatalf("build plan: %v", err)
+	}
+
+	if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+		t.Fatalf("verify archive: %v", err)
+	}
+
+	tarPath := filepath.Join(root, archive.FsTarName)
+
+	var putCount, finished int
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodHead:
+			if err := os.Rename(tarPath, tarPath+".verified"); err != nil {
+				t.Fatalf("move verified tar: %v", err)
+			}
+
+			if err := os.WriteFile(tarPath, []byte("replacement tar bytes"), 0o600); err != nil {
+				t.Fatalf("write replacement tar: %v", err)
+			}
+
+			writer.Header().Set("Content-Length", strconv.Itoa(len(content)))
+			writer.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			putCount++
+			writer.WriteHeader(http.StatusCreated)
+		case http.MethodPost:
+			finished++
+			writer.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	err = importer.sendVolumeData(
+		context.Background(),
+		plainHTTPDoer{},
+		server.URL,
+		volumeModeFilesystem,
+		plan[0],
+		targetNS,
+		"di-pvc-1",
+		nil,
+		nil,
+		nil,
+	)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("sendVolumeData error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+
+	if putCount != 0 || finished != 0 {
+		t.Fatalf("requests after all-server skip: PUT=%d finished=%d, want zero", putCount, finished)
+	}
+}

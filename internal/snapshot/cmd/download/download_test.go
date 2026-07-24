@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 )
 
@@ -458,6 +459,30 @@ func TestAcquireOutputLock_ReacquireAfterRelease(t *testing.T) {
 	}
 
 	defer func() { _ = second.Unlock() }()
+}
+
+func TestAcquireOutputLock_ConflictsWithUploadReader(t *testing.T) {
+	dir := t.TempDir()
+
+	reader, err := archive.AcquireReadLock(dir)
+	if err != nil {
+		t.Fatalf("acquire upload reader lock: %v", err)
+	}
+
+	_, err = acquireOutputLock(dir)
+	if !errors.Is(err, ErrOutputDirLocked) {
+		t.Fatalf("download writer error = %v, want ErrOutputDirLocked", err)
+	}
+
+	if err := reader.Unlock(); err != nil {
+		t.Fatalf("release upload reader lock: %v", err)
+	}
+
+	writer, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("acquire download writer after upload release: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
 }
 
 // TestAcquireOutputLock_StaleLockFileIsHarmless documents and locks in the

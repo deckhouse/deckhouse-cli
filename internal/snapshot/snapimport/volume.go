@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
@@ -438,6 +439,11 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 	}
 
 	if done {
+		if err := verifyLeafPayloadCurrent(ctx, leaf); err != nil {
+			return fmt.Errorf("validate archive payload before reusing completed DataImport %s/%s: %w",
+				namespace, diName, err)
+		}
+
 		c.log.Info("volume data already imported; skipping upload",
 			slog.String("namespace", namespace), slog.String("dataimport", diName))
 
@@ -465,12 +471,64 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 	return c.waitDataImportCompleted(ctx, leaf, diName, namespace)
 }
 
+func verifyLeafPayloadCurrent(ctx context.Context, leaf PlannedNode) error {
+	if leaf.archiveView == nil || leaf.payloadFile == nil {
+		return nil
+	}
+
+	handle, err := leaf.archiveView.OpenVerifiedFile(ctx, leaf.payloadFile)
+	if err != nil {
+		return err
+	}
+
+	verifyErr := handle.Verify(ctx)
+
+	closeErr := handle.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close verified payload: %w", closeErr)
+	}
+
+	return errors.Join(verifyErr, closeErr)
+}
+
 // sendVolumeData streams the volume payload (FS tar or raw block data) to the importer
 // and signals end-of-upload via postFinished. It does NOT poll for DataImport completion;
 // the caller must invoke waitDataImportCompleted afterwards.
 // Using leaf.TarFile (not leaf.DataFile) for the FS path is essential: DataFile holds the
 // block-data glob result (data.bin*), which is always empty for FS-only leaves.
 func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient httpDoer, url, volumeMode string, leaf PlannedNode, namespace, diName string, setTotal func(int64), onProgress func(int), activate func()) error {
+	if leaf.archiveView == nil || leaf.payloadFile == nil {
+		return c.sendVolumeDataFromSource(ctx, httpClient, url, volumeMode, leaf, namespace, diName,
+			nil, setTotal, onProgress, activate)
+	}
+
+	handle, err := leaf.archiveView.OpenVerifiedFile(ctx, leaf.payloadFile)
+	if err != nil {
+		return fmt.Errorf("open verified payload for %s/%s: %w", leaf.Kind, leaf.Name, err)
+	}
+
+	sendErr := c.sendVolumeDataFromSource(ctx, httpClient, url, volumeMode, leaf, namespace, diName,
+		handle, setTotal, onProgress, activate)
+
+	closeErr := handle.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close verified payload for %s/%s: %w", leaf.Kind, leaf.Name, closeErr)
+	}
+
+	return errors.Join(sendErr, closeErr)
+}
+
+func (c *clusterVolumeImporter) sendVolumeDataFromSource(
+	ctx context.Context,
+	httpClient httpDoer,
+	url, volumeMode string,
+	leaf PlannedNode,
+	namespace, diName string,
+	handle *archive.VerifiedHandle,
+	setTotal func(int64),
+	onProgress func(int),
+	activate func(),
+) error {
 	switch volumeMode {
 	case volumeModeFilesystem:
 		c.log.Info("uploading filesystem data",
@@ -490,8 +548,20 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 		// step / hdr.Size), so the bar's denominator grows as work is discovered rather
 		// than staying at zero for the whole upload. Honest limitation: the total is not
 		// complete until the LAST entry in the tar has been processed.
-		if err := importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress, activate); err != nil {
+		var err error
+		if handle == nil {
+			err = importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress, activate)
+		} else {
+			err = importFSFromTarSource(ctx, httpClient, url, leaf.TarFile, handle, c.log, setTotal, onProgress, activate)
+		}
+
+		if err != nil {
 			return fmt.Errorf("upload filesystem data for %s/%s: %w", namespace, diName, err)
+		}
+
+		if err := verifyPayloadHandle(ctx, handle); err != nil {
+			return fmt.Errorf("verify filesystem payload for %s/%s before finalisation: %w",
+				namespace, diName, err)
 		}
 
 		if err := postFinished(ctx, httpClient, url); err != nil {
@@ -501,7 +571,17 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 	case volumeModeBlock:
 		ext := leaf.Ext
 
-		totalSize, err := blockTotalSize(leaf.DataFile, leaf.Size, ext)
+		var (
+			totalSize int64
+			err       error
+		)
+
+		if handle == nil {
+			totalSize, err = blockTotalSize(leaf.DataFile, leaf.Size, ext)
+		} else {
+			totalSize, err = blockTotalSizeFromSource(leaf.DataFile, leaf.Size, ext, handle)
+		}
+
 		if err != nil {
 			return err
 		}
@@ -523,8 +603,21 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 			setTotal(totalSize)
 		}
 
-		if err := putBlock(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize, c.log, onProgress, activate); err != nil {
+		if handle == nil {
+			err = putBlock(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize,
+				c.log, onProgress, activate)
+		} else {
+			err = putBlockFromSource(ctx, httpClient, blockURL, leaf.DataFile, ext, totalSize,
+				handle, c.log, onProgress, activate)
+		}
+
+		if err != nil {
 			return fmt.Errorf("upload block data for %s/%s: %w", namespace, diName, err)
+		}
+
+		if err := verifyPayloadHandle(ctx, handle); err != nil {
+			return fmt.Errorf("verify block payload for %s/%s before finalisation: %w",
+				namespace, diName, err)
 		}
 
 		if err := postFinished(ctx, httpClient, url); err != nil {
@@ -536,6 +629,14 @@ func (c *clusterVolumeImporter) sendVolumeData(ctx context.Context, httpClient h
 	}
 
 	return nil
+}
+
+func verifyPayloadHandle(ctx context.Context, handle *archive.VerifiedHandle) error {
+	if handle == nil {
+		return nil
+	}
+
+	return handle.Verify(ctx)
 }
 
 // uploadClient builds an isolated SafeClient that trusts the importer's status.ca.
@@ -689,6 +790,12 @@ var errFailedBlockDecoderClose = errors.New("failed to close block decoder")
 // A compressed file's on-disk (compressed) size is not comparable to the captured
 // (decompressed) size at all, so no such check is possible or meaningful for ext != "".
 func blockTotalSize(dataFile, size, ext string) (int64, error) {
+	return blockTotalSizeFromSource(dataFile, size, ext, nil)
+}
+
+func blockTotalSizeFromSource(dataFile, size, ext string, source interface {
+	Stat() (os.FileInfo, error)
+}) (int64, error) {
 	q, err := resource.ParseQuantity(size)
 	if err != nil {
 		return 0, fmt.Errorf("parsing captured volume size %q for %s: %w", size, dataFile, err)
@@ -700,7 +807,13 @@ func blockTotalSize(dataFile, size, ext string) (int64, error) {
 		return captured, nil
 	}
 
-	info, err := os.Stat(dataFile)
+	var info os.FileInfo
+	if source == nil {
+		info, err = os.Stat(dataFile)
+	} else {
+		info, err = source.Stat()
+	}
+
 	if err != nil {
 		return 0, fmt.Errorf("stat volume data %s: %w", dataFile, err)
 	}
@@ -721,7 +834,46 @@ func blockTotalSize(dataFile, size, ext string) (int64, error) {
 // raw bytes known durable, including the initial HEAD prefix. activate, when non-nil, is called at the start of every
 // real transfer iteration (never when offset==totalSize short-circuits before any PUT is
 // attempted), so the caller's progress stream is activated only on a genuine transfer.
+type blockArchiveSource interface {
+	io.Reader
+	io.ReaderAt
+	io.Seeker
+}
+
 func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
+	if err := validateBlockOffset(0, totalSize); err != nil {
+		return fmt.Errorf("invalid block upload size %d: %w", totalSize, err)
+	}
+
+	offset, err := headBlockOffset(ctx, httpClient, url, totalSize)
+	if err != nil {
+		return err
+	}
+
+	progress := blockUploadProgress{onProgress: onProgress}
+	progress.creditTo(offset)
+
+	if offset == totalSize && ext == "" {
+		return nil
+	}
+
+	file, err := os.Open(dataFile)
+	if err != nil {
+		return fmt.Errorf("open volume data %s: %w", dataFile, err)
+	}
+
+	uploadErr := putBlockFromOffset(ctx, httpClient, url, dataFile, ext, totalSize, offset,
+		file, log, &progress, activate)
+
+	closeErr := file.Close()
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close volume data %s: %w", dataFile, closeErr)
+	}
+
+	return errors.Join(uploadErr, closeErr)
+}
+
+func putBlockFromSource(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, source blockArchiveSource, log *slog.Logger, onProgress func(int), activate func()) error {
 	if err := validateBlockOffset(0, totalSize); err != nil {
 		return fmt.Errorf("invalid block upload size %d: %w", totalSize, err)
 	}
@@ -737,22 +889,36 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 	progress := blockUploadProgress{onProgress: onProgress}
 	progress.creditTo(offset)
 
+	return putBlockFromOffset(ctx, httpClient, url, dataFile, ext, totalSize, offset,
+		source, log, &progress, activate)
+}
+
+func putBlockFromOffset(
+	ctx context.Context,
+	httpClient httpDoer,
+	url, dataFile, ext string,
+	totalSize, offset int64,
+	source blockArchiveSource,
+	log *slog.Logger,
+	progress *blockUploadProgress,
+	activate func(),
+) error {
 	// A compressed full skip still has to prove the archive decodes to exactly totalSize.
 	// A prior run may have durably written the under-declared prefix and then rejected an
 	// extra decoded byte, leaving HEAD at totalSize for this run.
 	if offset == totalSize {
 		if ext != "" {
-			return verifyCompressedBlockSize(ctx, dataFile, ext, totalSize)
+			return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
 		}
 
 		return nil
 	}
 
 	if ext == "" {
-		return putBlockRaw(ctx, httpClient, url, dataFile, offset, totalSize, &progress, activate)
+		return putBlockRaw(ctx, httpClient, url, source, offset, totalSize, progress, activate)
 	}
 
-	return putBlockCompressed(ctx, httpClient, url, dataFile, ext, offset, totalSize, log, &progress, activate)
+	return putBlockCompressed(ctx, httpClient, url, source, dataFile, ext, offset, totalSize, log, progress, activate)
 }
 
 type blockUploadProgress struct {
@@ -806,13 +972,7 @@ func (t *blockConflictTracker) reset() {
 // putBlockRaw streams an uncompressed data.bin file starting at offset. Every request
 // gets a fresh SectionReader limited to the client cap, so neither nginx's 64m ingress
 // limit nor a server-directed reposition can make one PUT body unbounded.
-func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string, offset, totalSize int64, progress *blockUploadProgress, activate func()) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
+func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io.ReaderAt, offset, totalSize int64, progress *blockUploadProgress, activate func()) error {
 	var conflicts blockConflictTracker
 
 	for offset < totalSize {
@@ -821,7 +981,7 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 		}
 
 		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
-		section := io.NewSectionReader(file, offset, requestEnd-offset)
+		section := io.NewSectionReader(source, offset, requestEnd-offset)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(section))
 		if err != nil {
@@ -871,15 +1031,12 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url, filePath string,
 //     O(offset) compatibility path because neither codec is user-selectable and neither
 //     has the bounded header-walk integration implemented for zstd. The "none" codec
 //     never reaches this function; putBlock routes it to putBlockRaw.
-func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
-	f, err := os.Open(dataFile)
-	if err != nil {
-		return fmt.Errorf("open volume data %s: %w", dataFile, err)
+func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, source io.ReadSeeker, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind compressed block %s: %w", dataFile, err)
 	}
 
-	defer func() { _ = f.Close() }()
-
-	decodeReader, _, err := resolveBlockDecodeReader(ctx, f, dataFile, ext, offset, log)
+	decodeReader, _, err := resolveBlockDecodeReader(ctx, source, dataFile, ext, offset, log)
 	if err != nil {
 		return err
 	}
@@ -949,11 +1106,11 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 				break
 			}
 
-			if _, err := f.Seek(0, io.SeekStart); err != nil {
+			if _, err := source.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("reset compressed block %s before repositioning to offset %d: %w", dataFile, offset, err)
 			}
 
-			decodeReader, _, err = resolveBlockDecodeReader(ctx, f, dataFile, ext, offset, log)
+			decodeReader, _, err = resolveBlockDecodeReader(ctx, source, dataFile, ext, offset, log)
 			if err != nil {
 				return fmt.Errorf("reposition block decoder for %s to offset %d: %w", dataFile, offset, err)
 			}
@@ -973,7 +1130,7 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	var probe [1]byte
 
 	if decodeReader == nil {
-		return verifyCompressedBlockSize(ctx, dataFile, ext, totalSize)
+		return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
 	}
 
 	n, rerr := decodeReader.Read(probe[:])
@@ -989,25 +1146,19 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url, dataFile,
 	return nil
 }
 
-func verifyCompressedBlockSize(ctx context.Context, dataFile, ext string, totalSize int64) error {
+func verifyCompressedBlockSizeFromSource(ctx context.Context, source io.ReadSeeker, dataFile, ext string, totalSize int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	file, err := os.Open(dataFile)
-	if err != nil {
-		return fmt.Errorf("open compressed block %s for decoded-size verification: %w", dataFile, err)
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind compressed block %s for decoded-size verification: %w", dataFile, err)
 	}
 
 	if ext == ".zst" {
-		decodedSize, proofErr := compress.ZstdDecodedSize(file)
-		closeErr := file.Close()
-
-		if proofErr != nil || closeErr != nil {
-			return errors.Join(
-				wrapCompressedBlockProofError(dataFile, proofErr),
-				wrapCompressedBlockFileCloseError(dataFile, closeErr),
-			)
+		decodedSize, proofErr := compress.ZstdDecodedSize(source)
+		if proofErr != nil {
+			return wrapCompressedBlockProofError(dataFile, proofErr)
 		}
 
 		if err := ctx.Err(); err != nil {
@@ -1017,25 +1168,18 @@ func verifyCompressedBlockSize(ctx context.Context, dataFile, ext string, totalS
 		return validateCompressedBlockSize(dataFile, decodedSize, totalSize)
 	}
 
-	decodeReader, err := compress.NewReader(ext, file)
+	decodeReader, err := compress.NewReader(ext, source)
 	if err != nil {
-		closeErr := file.Close()
-
-		return errors.Join(
-			fmt.Errorf("open decompressor for %s size verification: %w", dataFile, err),
-			wrapCompressedBlockFileCloseError(dataFile, closeErr),
-		)
+		return fmt.Errorf("open decompressor for %s size verification: %w", dataFile, err)
 	}
 
 	decodedSize, proofErr := countDecodedBlock(ctx, decodeReader, totalSize)
 	decodeCloseErr := decodeReader.Close()
-	fileCloseErr := file.Close()
 
-	if proofErr != nil || decodeCloseErr != nil || fileCloseErr != nil {
+	if proofErr != nil || decodeCloseErr != nil {
 		return errors.Join(
 			wrapCompressedBlockProofError(dataFile, proofErr),
 			wrapCompressedBlockDecoderCloseError(dataFile, decodeCloseErr),
-			wrapCompressedBlockFileCloseError(dataFile, fileCloseErr),
 		)
 	}
 
@@ -1106,14 +1250,6 @@ func wrapCompressedBlockDecoderCloseError(dataFile string, err error) error {
 	}
 
 	return fmt.Errorf("close decompressor after verifying %s: %w", dataFile, err)
-}
-
-func wrapCompressedBlockFileCloseError(dataFile string, err error) error {
-	if err == nil {
-		return nil
-	}
-
-	return fmt.Errorf("close compressed block %s after decoded-size verification: %w", dataFile, err)
 }
 
 type blockDecodeDependencies struct {

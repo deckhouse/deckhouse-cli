@@ -17,7 +17,9 @@ limitations under the License.
 package archive
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -594,6 +596,100 @@ func TestVerifyNode_OK(t *testing.T) {
 
 	if err := VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode: unexpected error: %v", err)
+	}
+}
+
+func TestVerifiedArchiveHandleSurvivesReplacementAndDetectsNamespaceChange(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	manifestPath := filepath.Join(nodeDir, ManifestsDirName, "configmap_app.yaml")
+	verifiedBytes := "kind: ConfigMap\nmetadata:\n  name: verified\n"
+	writeFile(t, manifestPath, verifiedBytes)
+
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "test",
+		Checksum:   checksum,
+	}); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+
+	view, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	node, err := view.VerifyNode(context.Background(), nodeDir)
+	if err != nil {
+		t.Fatalf("verify node: %v", err)
+	}
+
+	expected, ok := node.File(filepath.Join(ManifestsDirName, "configmap_app.yaml"))
+	if !ok {
+		t.Fatal("verified manifest is absent")
+	}
+
+	handle, err := view.OpenVerifiedFile(context.Background(), expected)
+	if err != nil {
+		t.Fatalf("open verified file: %v", err)
+	}
+	defer func() { _ = handle.Close() }()
+
+	if err := os.Rename(manifestPath, manifestPath+".verified"); err != nil {
+		t.Fatalf("move verified manifest: %v", err)
+	}
+
+	writeFile(t, manifestPath, "kind: Secret\nmetadata:\n  name: replacement\n")
+
+	data, err := io.ReadAll(handle)
+	if err != nil {
+		t.Fatalf("read pinned handle: %v", err)
+	}
+
+	if string(data) != verifiedBytes {
+		t.Fatalf("pinned bytes = %q, want %q", data, verifiedBytes)
+	}
+
+	if err := handle.Verify(context.Background()); !errors.Is(err, ErrVerifiedArchiveChanged) {
+		t.Fatalf("Verify error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+}
+
+func TestVerifiedArchiveVerificationHonorsCancellation(t *testing.T) {
+	nodeDir := makeNodeDir(t)
+	writeFile(t, filepath.Join(nodeDir, ManifestsDirName, "configmap_app.yaml"), strings.Repeat("x", 1024*1024))
+
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("compute checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "test",
+		Checksum:   checksum,
+	}); err != nil {
+		t.Fatalf("write snapshot metadata: %v", err)
+	}
+
+	view, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := view.VerifyNode(ctx, nodeDir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("VerifyNode error = %v, want context.Canceled", err)
 	}
 }
 
