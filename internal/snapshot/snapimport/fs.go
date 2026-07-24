@@ -294,10 +294,9 @@ func headFileOffset(ctx context.Context, client httpDoer, fileURL string, totalS
 		return 0, false, 0, err
 	}
 
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	if err := drainAndCloseResponseBody(resp); err != nil {
+		return 0, false, 0, fmt.Errorf("drain HEAD %s response: %w", fileURL, err)
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:

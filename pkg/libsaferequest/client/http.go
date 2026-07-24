@@ -17,13 +17,18 @@ limitations under the License.
 package client
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -69,8 +74,28 @@ func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
 }
 
 type SafeClient struct {
-	restConfig *rest.Config
+	restConfig       *rest.Config
+	networkTimeouts  NetworkTimeouts
+	idleTimerFactory idleTimerFactory
+	idleNow          func() time.Time
 }
+
+// NetworkTimeouts bounds silent stalls in each HTTP transport phase without
+// imposing one total duration on a request whose body keeps making progress.
+type NetworkTimeouts struct {
+	Connect        time.Duration
+	TLSHandshake   time.Duration
+	ResponseHeader time.Duration
+	WriteIdle      time.Duration
+	ReadIdle       time.Duration
+}
+
+type idleTimer interface {
+	Reset(time.Duration) bool
+	Stop() bool
+}
+
+type idleTimerFactory func(time.Duration, func()) idleTimer
 
 // PersistentHTTPClient owns one materialized client-go HTTP transport stack.
 // It is safe for concurrent use. Call CloseIdleConnections when the caller's
@@ -81,6 +106,9 @@ type PersistentHTTPClient struct {
 	ownedHTTPTransport *http.Transport
 	hasConfiguredAuth  bool
 	origin             *httpOrigin
+	networkTimeouts    NetworkTimeouts
+	idleTimerFactory   idleTimerFactory
+	idleNow            func() time.Time
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
@@ -89,7 +117,7 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 		return nil, err
 	}
 
-	return &SafeClient{restConfig}, nil
+	return &SafeClient{restConfig: restConfig}, nil
 }
 
 // NewPersistentHTTPClient materializes the current rest.Config exactly once,
@@ -162,6 +190,9 @@ func (c *SafeClient) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		ownedTransport:     ownedTransport,
 		ownedHTTPTransport: ownedHTTPTransport,
 		hasConfiguredAuth:  hasConfiguredAuth(config),
+		networkTimeouts:    c.networkTimeouts,
+		idleTimerFactory:   c.idleTimerFactory,
+		idleNow:            c.idleNow,
 	}, nil
 }
 
@@ -216,12 +247,339 @@ func (c *PersistentHTTPClient) HTTPDo(req *http.Request) (*http.Response, error)
 		return nil, errors.New("No auth")
 	}
 
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("persistent HTTP client do request: %w", err)
+	parentCtx := req.Context()
+	requestCtx, cancelRequest := context.WithCancelCause(parentCtx)
+	watchdog := newIdleWatchdog(cancelRequest, c.idleTimerFactory, c.idleNow)
+	request := req.Clone(requestCtx)
+
+	var (
+		bodyTracker     *progressRequestBody
+		headersReceived atomic.Bool
+		responseHasBody atomic.Bool
+	)
+
+	if request.Body != nil && request.Body != http.NoBody && request.ContentLength != 0 {
+		if notifier, ok := request.Body.(networkStallNotifier); ok {
+			watchdog.setNotifier(notifier.NetworkStall)
+		}
+
+		watchdog.arm("request body write", c.networkTimeouts.WriteIdle)
+		bodyTracker = &progressRequestBody{
+			ReadCloser: request.Body,
+			onProgress: watchdog.progress,
+			onClose: func() {
+				if headersReceived.Load() {
+					watchdog.stop()
+
+					if !responseHasBody.Load() {
+						cancelRequest(nil)
+					}
+
+					return
+				}
+
+				watchdog.arm("response headers", c.networkTimeouts.ResponseHeader)
+			},
+		}
+		request.Body = bodyTracker
+	} else {
+		watchdog.arm("response headers", c.networkTimeouts.ResponseHeader)
 	}
 
+	resp, err := c.client.Do(request)
+	if err != nil {
+		watchdog.stop()
+
+		cause := watchdog.cause()
+		if cause == nil && parentCtx.Err() != nil {
+			cause = context.Cause(parentCtx)
+		}
+
+		if cause == nil {
+			var timeoutErr net.Error
+			if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+				cause = context.DeadlineExceeded
+			}
+		}
+
+		cancelRequest(nil)
+
+		return nil, fmt.Errorf("persistent HTTP client do request: %w", errors.Join(err, cause))
+	}
+
+	if resp == nil {
+		watchdog.stop()
+		cancelRequest(nil)
+
+		return nil, errors.New("persistent HTTP client returned a nil response without an error")
+	}
+
+	hasResponseBody := resp.Body != nil && resp.Body != http.NoBody
+	responseHasBody.Store(hasResponseBody)
+	headersReceived.Store(true)
+
+	if bodyTracker == nil || bodyTracker.isClosed() {
+		watchdog.stop()
+	}
+
+	if !hasResponseBody {
+		if bodyTracker == nil || bodyTracker.isClosed() {
+			cancelRequest(nil)
+		}
+
+		return resp, nil
+	}
+
+	resp.Body = newProgressResponseBody(
+		resp.Body,
+		parentCtx,
+		cancelRequest,
+		c.networkTimeouts.ReadIdle,
+		c.idleTimerFactory,
+		c.idleNow,
+	)
+
 	return resp, nil
+}
+
+type networkStallError struct {
+	phase   string
+	timeout time.Duration
+}
+
+func (e *networkStallError) Error() string {
+	return fmt.Sprintf("%s made no progress for %s", e.phase, e.timeout)
+}
+
+func (e *networkStallError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+type idleWatchdog struct {
+	mu           sync.Mutex
+	cancel       context.CancelCauseFunc
+	timerFactory idleTimerFactory
+	now          func() time.Time
+	timer        idleTimer
+	timeout      time.Duration
+	deadline     time.Time
+	phase        string
+	stallErr     error
+	notify       func(error)
+	stopped      bool
+}
+
+func newIdleWatchdog(
+	cancel context.CancelCauseFunc,
+	factory idleTimerFactory,
+	now func() time.Time,
+) *idleWatchdog {
+	if factory == nil {
+		factory = func(timeout time.Duration, fn func()) idleTimer {
+			return time.AfterFunc(timeout, fn)
+		}
+	}
+
+	if now == nil {
+		now = time.Now
+	}
+
+	return &idleWatchdog{cancel: cancel, timerFactory: factory, now: now}
+}
+
+func (w *idleWatchdog) arm(phase string, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.stopped || w.stallErr != nil {
+		return
+	}
+
+	w.phase = phase
+	w.timeout = timeout
+	w.deadline = w.now().Add(timeout)
+
+	if w.timer == nil {
+		w.timer = w.timerFactory(timeout, w.expire)
+
+		return
+	}
+
+	w.timer.Reset(timeout)
+}
+
+func (w *idleWatchdog) progress(count int) {
+	if count <= 0 {
+		return
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.stopped || w.stallErr != nil || w.timer == nil {
+		return
+	}
+
+	w.deadline = w.now().Add(w.timeout)
+	w.timer.Reset(w.timeout)
+}
+
+func (w *idleWatchdog) setNotifier(notify func(error)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.notify = notify
+}
+
+func (w *idleWatchdog) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.stopped = true
+
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+}
+
+func (w *idleWatchdog) expire() {
+	w.mu.Lock()
+
+	if w.stopped || w.stallErr != nil {
+		w.mu.Unlock()
+
+		return
+	}
+
+	if remaining := w.deadline.Sub(w.now()); remaining > 0 {
+		w.timer.Reset(remaining)
+		w.mu.Unlock()
+
+		return
+	}
+
+	stallErr := &networkStallError{phase: w.phase, timeout: w.timeout}
+	w.stallErr = stallErr
+	notify := w.notify
+	w.mu.Unlock()
+
+	w.cancel(stallErr)
+
+	if notify != nil {
+		notify(stallErr)
+	}
+}
+
+func (w *idleWatchdog) cause() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.stallErr
+}
+
+type progressRequestBody struct {
+	io.ReadCloser
+	onProgress func(int)
+	onClose    func()
+	closeOnce  sync.Once
+	closed     atomic.Bool
+}
+
+type networkStallNotifier interface {
+	NetworkStall(error)
+}
+
+func (b *progressRequestBody) Read(p []byte) (int, error) {
+	count, err := b.ReadCloser.Read(p)
+	b.onProgress(count)
+
+	return count, err
+}
+
+func (b *progressRequestBody) Close() error {
+	closeErr := b.ReadCloser.Close()
+	b.closeOnce.Do(func() {
+		b.closed.Store(true)
+		b.onClose()
+	})
+
+	return closeErr
+}
+
+func (b *progressRequestBody) isClosed() bool {
+	return b.closed.Load()
+}
+
+type progressResponseBody struct {
+	body      io.ReadCloser
+	parentCtx context.Context
+	cancel    context.CancelCauseFunc
+	watchdog  *idleWatchdog
+	closeOnce sync.Once
+}
+
+func newProgressResponseBody(
+	body io.ReadCloser,
+	parentCtx context.Context,
+	cancel context.CancelCauseFunc,
+	timeout time.Duration,
+	factory idleTimerFactory,
+	now func() time.Time,
+) *progressResponseBody {
+	watchdog := newIdleWatchdog(cancel, factory, now)
+	watchdog.arm("response body read", timeout)
+
+	return &progressResponseBody{
+		body:      body,
+		parentCtx: parentCtx,
+		cancel:    cancel,
+		watchdog:  watchdog,
+	}
+}
+
+func (b *progressResponseBody) Read(p []byte) (int, error) {
+	count, err := b.body.Read(p)
+	b.watchdog.progress(count)
+
+	if errors.Is(err, io.EOF) {
+		b.stop()
+	}
+
+	cause := b.watchdog.cause()
+	if cause == nil && b.parentCtx.Err() != nil {
+		cause = context.Cause(b.parentCtx)
+	}
+
+	if cause == nil {
+		var timeoutErr net.Error
+		if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+			cause = context.DeadlineExceeded
+		}
+	}
+
+	if cause == nil {
+		return count, err
+	}
+
+	return count, errors.Join(err, cause)
+}
+
+func (b *progressResponseBody) Close() error {
+	closeErr := b.body.Close()
+	b.stop()
+
+	return closeErr
+}
+
+func (b *progressResponseBody) stop() {
+	b.closeOnce.Do(func() {
+		b.watchdog.stop()
+		b.cancel(nil)
+	})
 }
 
 type httpOrigin struct {
@@ -348,6 +706,77 @@ func (c *SafeClient) SetQPS(qps float32, burst int) {
 	c.restConfig.Burst = burst
 }
 
+// SetRequestTimeout sets the rest.Config total timeout used by short control-plane
+// requests. Streaming callers can clear it on a copied SafeClient before building
+// a progress-aware persistent client.
+func (c *SafeClient) SetRequestTimeout(timeout time.Duration) {
+	c.restConfig.Timeout = timeout
+}
+
+// SetNetworkTimeouts installs finite connection, TLS-handshake, response-header,
+// request-write-idle, and response-read-idle bounds on persistent HTTP clients.
+// WriteIdle and ReadIdle reset after every successful body read, so a healthy
+// transfer may run for arbitrarily longer than either idle budget.
+func (c *SafeClient) SetNetworkTimeouts(timeouts NetworkTimeouts) error {
+	switch {
+	case timeouts.Connect <= 0:
+		return errors.New("network connect timeout must be positive")
+	case timeouts.TLSHandshake <= 0:
+		return errors.New("network TLS handshake timeout must be positive")
+	case timeouts.ResponseHeader <= 0:
+		return errors.New("network response header timeout must be positive")
+	case timeouts.WriteIdle <= 0:
+		return errors.New("network write idle timeout must be positive")
+	case timeouts.ReadIdle <= 0:
+		return errors.New("network read idle timeout must be positive")
+	}
+
+	c.networkTimeouts = timeouts
+	prev := c.restConfig.WrapTransport
+
+	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
+		transport, ok := rt.(*http.Transport)
+		if !ok {
+			return rt
+		}
+
+		cloned := transport.Clone()
+		cloned.ResponseHeaderTimeout = timeouts.ResponseHeader
+		cloned.TLSHandshakeTimeout = timeouts.TLSHandshake
+
+		baseDialContext := cloned.DialContext
+		if baseDialContext == nil {
+			dialer := &net.Dialer{}
+			baseDialContext = dialer.DialContext
+		}
+
+		cloned.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialCtx, cancel := context.WithTimeout(ctx, timeouts.Connect)
+			defer cancel()
+
+			return baseDialContext(dialCtx, network, address)
+		}
+
+		if cloned.DialTLSContext != nil {
+			baseDialTLSContext := cloned.DialTLSContext
+			cloned.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				dialCtx, cancel := context.WithTimeout(ctx, timeouts.TLSHandshake)
+				defer cancel()
+
+				return baseDialTLSContext(dialCtx, network, address)
+			}
+		}
+
+		return cloned
+	}
+
+	return nil
+}
+
 func (c *SafeClient) HTTPDo(req *http.Request) (*http.Response, error) {
 	if len(req.Header.Get("Authorization")) != 0 {
 		httpClient, err := rest.HTTPClientFor(c.restConfig)
@@ -465,7 +894,13 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 
 	c.restConfig.TLSClientConfig.CAData = nil
 	c.restConfig.TLSClientConfig.CAFile = ""
+	prev := c.restConfig.WrapTransport
+
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
 		transport, ok := rt.(*http.Transport)
 		if !ok {
 			// CA-pool injection is a best-effort enhancement over *http.Transport;
@@ -517,7 +952,12 @@ func (c *SafeClient) SetResponseHeaderTimeout(timeout time.Duration) {
 }
 
 func (c *SafeClient) Copy() *SafeClient {
-	return &SafeClient{rest.CopyConfig(c.restConfig)}
+	return &SafeClient{
+		restConfig:       rest.CopyConfig(c.restConfig),
+		networkTimeouts:  c.networkTimeouts,
+		idleTimerFactory: c.idleTimerFactory,
+		idleNow:          c.idleNow,
+	}
 }
 
 // RESTConfig returns a deep copy of the underlying *rest.Config so callers (e.g. the

@@ -56,6 +56,58 @@ var (
 	demoVMSnapGVR      = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
 )
 
+func TestUploadNodeManifests_ControlRequestDeadline(t *testing.T) {
+	t.Parallel()
+
+	deadline := make(chan context.CancelCauseFunc, 1)
+	uploader := &blockingManifestUploader{started: make(chan struct{})}
+	cfg := applyDefaults(Config{
+		Namespace: "target",
+		Uploader:  uploader,
+		newRequestContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			requestCtx, cancel := context.WithCancelCause(parent)
+			deadline <- cancel
+
+			return requestCtx, func() { cancel(nil) }
+		},
+	})
+	node := PlannedNode{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root",
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- uploadNodeManifests(context.Background(), cfg, node)
+	}()
+
+	<-uploader.started
+	cancel := <-deadline
+	cancel(context.DeadlineExceeded)
+
+	err := <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("uploadNodeManifests error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+type blockingManifestUploader struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (u *blockingManifestUploader) UploadManifests(
+	ctx context.Context,
+	_ aggapi.NodeRef,
+	_ []byte,
+) ([]byte, error) {
+	u.once.Do(func() { close(u.started) })
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
 type uploadCall struct {
 	ref  aggapi.NodeRef
 	body uploadPayload

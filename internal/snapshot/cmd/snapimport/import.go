@@ -220,6 +220,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	// to fail a cleanup/status call. Set BEFORE building kubeClient/aggClient/
 	// dynClient so all three inherit the higher limits.
 	sc.SetQPS(snapshotClientQPS, snapshotClientBurst)
+	sc.SetRequestTimeout(snapimport.DefaultControlRequestTimeout)
 
 	kubeClient, err := sc.NewRTClient(
 		snapshotapi.AddToScheme,
@@ -261,20 +262,21 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, runLog)
 
 	cfg := snapimport.Config{
-		Namespace:        namespace,
-		InputDir:         inputDir,
-		SelectedNodeKind: selectedKind,
-		SelectedNodeName: selectedName,
-		Workers:          workers,
-		AllowExisting:    allowExisting,
-		TTL:              ttl,
-		Timeout:          timeout,
-		Uploader:         aggClient,
-		Volumes:          volumes,
-		Dynamic:          dynClient,
-		Mapper:           kubeClient.RESTMapper(),
-		Log:              runLog,
-		Progress:         sink,
+		Namespace:             namespace,
+		InputDir:              inputDir,
+		SelectedNodeKind:      selectedKind,
+		SelectedNodeName:      selectedName,
+		Workers:               workers,
+		AllowExisting:         allowExisting,
+		TTL:                   ttl,
+		Timeout:               timeout,
+		ControlRequestTimeout: snapimport.DefaultControlRequestTimeout,
+		Uploader:              aggClient,
+		Volumes:               volumes,
+		Dynamic:               dynClient,
+		Mapper:                kubeClient.RESTMapper(),
+		Log:                   runLog,
+		Progress:              sink,
 	}
 
 	log.Info("starting snapshot upload",

@@ -1222,6 +1222,162 @@ func TestResolveBlockDecodeReader_ResumedSuffixMatches(t *testing.T) {
 	}
 }
 
+func TestUploadControlEndpoints_PropagateResponseDrainDeadline(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		run  func(httpDoer) error
+	}{
+		{
+			name: "block HEAD",
+			run: func(doer httpDoer) error {
+				_, err := headBlockOffset(context.Background(), doer, "https://upload.test/api/v1/block", 1)
+
+				return err
+			},
+		},
+		{
+			name: "filesystem HEAD",
+			run: func(doer httpDoer) error {
+				_, _, _, err := headFileOffset(
+					context.Background(),
+					doer,
+					"https://upload.test/api/v1/files/data",
+					1,
+				)
+
+				return err
+			},
+		},
+		{
+			name: "finished POST",
+			run: func(doer httpDoer) error {
+				return postFinished(context.Background(), doer, "https://upload.test")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusNoContent,
+					Status:     http.StatusText(http.StatusNoContent),
+					Header: http.Header{
+						"X-Next-Offset": []string{"0"},
+					},
+					Body: deadlineResponseBody{},
+				}, nil
+			})
+
+			err := tc.run(doer)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+			}
+		})
+	}
+}
+
+func TestSendVolumeData_WriteDeadlineLeavesResumeOffsetAndSkipsFinished(t *testing.T) {
+	t.Parallel()
+
+	const (
+		totalSize    = int64(10)
+		resumeOffset = int64(3)
+	)
+
+	dataFile := filepath.Join(t.TempDir(), "data.bin")
+	if err := os.WriteFile(dataFile, []byte("0123456789"), 0o600); err != nil {
+		t.Fatalf("write data file: %v", err)
+	}
+
+	var (
+		finishedCalls int
+		progress      int
+		activated     int
+	)
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		switch req.Method {
+		case http.MethodHead:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     http.StatusText(http.StatusOK),
+				Header: http.Header{
+					"X-Next-Offset": []string{strconv.FormatInt(resumeOffset, 10)},
+				},
+				Body: http.NoBody,
+			}, nil
+		case http.MethodPut:
+			if req.Header.Get("X-Offset") != strconv.FormatInt(resumeOffset, 10) {
+				t.Fatalf("PUT offset = %q, want %d", req.Header.Get("X-Offset"), resumeOffset)
+			}
+
+			if _, err := io.CopyN(io.Discard, req.Body, 2); err != nil {
+				t.Fatalf("read partial PUT body: %v", err)
+			}
+			if err := req.Body.Close(); err != nil {
+				t.Fatalf("close partial PUT body: %v", err)
+			}
+
+			return nil, context.DeadlineExceeded
+		case http.MethodPost:
+			finishedCalls++
+
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Status:     http.StatusText(http.StatusNoContent),
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+	})
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+	leaf := PlannedNode{
+		DataFile: dataFile,
+		Size:     strconv.FormatInt(totalSize, 10),
+	}
+
+	err := importer.sendVolumeData(
+		context.Background(),
+		doer,
+		"https://upload.test",
+		volumeModeBlock,
+		leaf,
+		"target",
+		"dataimport",
+		nil,
+		func(count int) { progress += count },
+		func() { activated++ },
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sendVolumeData error = %v, want context.DeadlineExceeded", err)
+	}
+	if progress != int(resumeOffset) {
+		t.Fatalf("durable progress = %d, want resume offset %d only", progress, resumeOffset)
+	}
+	if activated != 1 {
+		t.Fatalf("activation count = %d, want 1", activated)
+	}
+	if finishedCalls != 0 {
+		t.Fatalf("finished POST calls = %d, want 0 after stalled PUT", finishedCalls)
+	}
+}
+
+type deadlineResponseBody struct{}
+
+func (deadlineResponseBody) Read([]byte) (int, error) {
+	return 0, context.DeadlineExceeded
+}
+
+func (deadlineResponseBody) Close() error {
+	return nil
+}
+
 type testHTTPDoer func(*http.Request) (*http.Response, error)
 
 func (f testHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
@@ -4901,6 +5057,31 @@ func TestAttestedRequestBody_ReportsExactCompletionAndRange(t *testing.T) {
 
 	if report.bodyRange != (requestBodyRange{start: 17, end: 17 + int64(len(payload))}) {
 		t.Fatalf("body range = %+v, want [17,%d)", report.bodyRange, 17+len(payload))
+	}
+}
+
+func TestAttestedRequestBody_NetworkStallQuiescesWithDeadlineCause(t *testing.T) {
+	t.Parallel()
+
+	body := newAttestedRequestBody(
+		io.NopCloser(bytes.NewReader([]byte("unread payload"))),
+		requestBodyRange{start: 4, end: 18},
+		14,
+	)
+
+	body.NetworkStall(context.DeadlineExceeded)
+
+	report, err := body.wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait for body report: %v", err)
+	}
+
+	err = report.validateExact()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("body report error = %v, want context.DeadlineExceeded", err)
+	}
+	if !report.closed {
+		t.Fatal("network stall did not close the attested request body")
 	}
 }
 

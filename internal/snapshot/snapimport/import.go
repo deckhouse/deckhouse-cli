@@ -48,6 +48,11 @@ const (
 	defaultWorkers      = 5
 )
 
+// DefaultControlRequestTimeout bounds one Kubernetes or aggregated-API request.
+const DefaultControlRequestTimeout = 30 * time.Second
+
+type requestContextFactory func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+
 // ManifestUploader posts a node's manifests-and-children-refs-upload payload. It is
 // satisfied by *aggapi.Client and stubbed in tests.
 type ManifestUploader interface {
@@ -70,6 +75,9 @@ type Config struct {
 	TTL string
 	// Timeout bounds the per-node readiness/completion waits.
 	Timeout time.Duration
+	// ControlRequestTimeout bounds each Kubernetes and aggregated-API request
+	// independently of the longer readiness/completion polling budget.
+	ControlRequestTimeout time.Duration
 	// PollInterval is the readiness polling cadence.
 	PollInterval time.Duration
 
@@ -106,7 +114,8 @@ type Config struct {
 	// and leaves upload behaviour unchanged.
 	Progress progress.Sink
 
-	testHooks *archiveRaceHooks
+	testHooks         *archiveRaceHooks
+	newRequestContext requestContextFactory
 }
 
 type archiveRaceHooks struct {
@@ -453,7 +462,10 @@ func preflightNamespace(ctx context.Context, cfg Config, plan []PlannedNode) err
 			return mapErr
 		}
 
-		obj, getErr := cfg.resourceInterface(mapping).Get(ctx, node.Name, metav1.GetOptions{})
+		obj, getErr := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return cfg.resourceInterface(mapping).Get(requestCtx, node.Name, metav1.GetOptions{})
+			})
 		if kubeerrors.IsNotFound(getErr) {
 			continue
 		}
@@ -564,7 +576,11 @@ func waitForBinds(ctx context.Context, cfg Config, plan []PlannedNode) error {
 		var stillPending []pendingNode
 
 		for _, p := range pending {
-			obj, err := cfg.Dynamic.Resource(p.gvr).Namespace(cfg.Namespace).Get(ctx, p.node.Name, metav1.GetOptions{})
+			obj, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+				func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+					return cfg.Dynamic.Resource(p.gvr).Namespace(cfg.Namespace).
+						Get(requestCtx, p.node.Name, metav1.GetOptions{})
+				})
 			if err != nil {
 				return fmt.Errorf("get %s %s/%s while waiting for bind: %w", p.node.Kind, cfg.Namespace, p.node.Name, err)
 			}
@@ -772,7 +788,11 @@ func uploadNodeManifests(ctx context.Context, cfg Config, node PlannedNode) erro
 		return fmt.Errorf("marshal upload payload for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	if _, err := cfg.Uploader.UploadManifests(ctx, node.Ref(cfg.Namespace), body); err != nil {
+	_, err = runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+		func(requestCtx context.Context) ([]byte, error) {
+			return cfg.Uploader.UploadManifests(requestCtx, node.Ref(cfg.Namespace), body)
+		})
+	if err != nil {
 		return fmt.Errorf("upload manifests for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
@@ -804,25 +824,34 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 
 	ri := cfg.Dynamic.Resource(mapping.Resource).Namespace(obj.GetNamespace())
 
-	existing, err := ri.Get(ctx, obj.GetName(), metav1.GetOptions{})
+	existing, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return ri.Get(requestCtx, obj.GetName(), metav1.GetOptions{})
+		})
 	if err == nil {
-		return reconcileExistingMarker(ctx, ri, existing, obj.GetOwnerReferences())
+		return reconcileExistingMarker(ctx, cfg, ri, existing, obj.GetOwnerReferences())
 	} else if !kubeerrors.IsNotFound(err) {
 		return "", fmt.Errorf("get: %w", err)
 	}
 
-	created, err := ri.Create(ctx, obj, metav1.CreateOptions{})
+	created, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return ri.Create(requestCtx, obj, metav1.CreateOptions{})
+		})
 	if err != nil {
 		if !kubeerrors.IsAlreadyExists(err) {
 			return "", fmt.Errorf("create: %w", err)
 		}
 
-		got, gErr := ri.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		got, gErr := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Get(requestCtx, obj.GetName(), metav1.GetOptions{})
+			})
 		if gErr != nil {
 			return "", fmt.Errorf("get after AlreadyExists: %w", gErr)
 		}
 
-		return reconcileExistingMarker(ctx, ri, got, obj.GetOwnerReferences())
+		return reconcileExistingMarker(ctx, cfg, ri, got, obj.GetOwnerReferences())
 	}
 
 	return created.GetUID(), nil
@@ -832,7 +861,13 @@ func (cfg Config) ensureMarker(ctx context.Context, obj *unstructured.Unstructur
 // refuses to touch an object that is NOT in import mode (a capture-mode Snapshot/VolumeSnapshot
 // that merely shares the name) so importing into a populated namespace cannot mutate live
 // production objects; only then does it reconcile the child->parent ownerRefs.
-func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
+func reconcileExistingMarker(
+	ctx context.Context,
+	cfg Config,
+	ri dynamic.ResourceInterface,
+	existing *unstructured.Unstructured,
+	desired []metav1.OwnerReference,
+) (types.UID, error) {
 	imp, err := isImportModeMarker(existing)
 	if err != nil {
 		return "", err
@@ -845,7 +880,7 @@ func reconcileExistingMarker(ctx context.Context, ri dynamic.ResourceInterface, 
 			existing.GetKind(), existing.GetNamespace(), existing.GetName(), snapshotapi.SnapshotModeImport)
 	}
 
-	return reconcileMarkerOwnerRefs(ctx, ri, existing, desired)
+	return reconcileMarkerOwnerRefs(ctx, cfg, ri, existing, desired)
 }
 
 // isImportModeMarker reports whether a live CR is an import-mode marker. Import mode is keyed
@@ -877,9 +912,18 @@ func isImportModeMarker(obj *unstructured.Unstructured) (bool, error) {
 
 // reconcileMarkerOwnerRefs patches any desired child->parent ownerRef a previous partial
 // run did not yet stamp onto the live CR, then returns its UID. It never clobbers the spec.
-func reconcileMarkerOwnerRefs(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, desired []metav1.OwnerReference) (types.UID, error) {
+func reconcileMarkerOwnerRefs(
+	ctx context.Context,
+	cfg Config,
+	ri dynamic.ResourceInterface,
+	existing *unstructured.Unstructured,
+	desired []metav1.OwnerReference,
+) (types.UID, error) {
 	if addOwnerRefs(existing, desired) {
-		updated, err := ri.Update(ctx, existing, metav1.UpdateOptions{})
+		updated, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Update(requestCtx, existing, metav1.UpdateOptions{})
+			})
 		if err != nil {
 			return "", fmt.Errorf("ensure ownerRefs: %w", err)
 		}
@@ -1042,7 +1086,11 @@ func waitNamespacedReady(ctx context.Context, cfg Config, gvr schema.GroupVersio
 	deadline := time.Now().Add(cfg.Timeout)
 
 	for {
-		obj, err := cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+		obj, err := runControlRequest(ctx, cfg.ControlRequestTimeout, cfg.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return cfg.Dynamic.Resource(gvr).Namespace(cfg.Namespace).
+					Get(requestCtx, name, metav1.GetOptions{})
+			})
 		if err != nil {
 			return fmt.Errorf("get %s %s/%s: %w", kind, cfg.Namespace, name, err)
 		}
@@ -1184,6 +1232,10 @@ func applyDefaults(cfg Config) Config {
 		cfg.Timeout = defaultTimeout
 	}
 
+	if cfg.ControlRequestTimeout <= 0 {
+		cfg.ControlRequestTimeout = DefaultControlRequestTimeout
+	}
+
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = defaultPollInterval
 	}
@@ -1196,7 +1248,51 @@ func applyDefaults(cfg Config) Config {
 		cfg.Log = slog.Default()
 	}
 
+	if cfg.newRequestContext == nil {
+		cfg.newRequestContext = context.WithTimeout
+	}
+
 	return cfg
+}
+
+func runControlRequest[T any](
+	ctx context.Context,
+	timeout time.Duration,
+	newRequestContext requestContextFactory,
+	request func(context.Context) (T, error),
+) (T, error) {
+	if timeout <= 0 {
+		timeout = DefaultControlRequestTimeout
+	}
+
+	if newRequestContext == nil {
+		newRequestContext = context.WithTimeout
+	}
+
+	requestCtx, cancel := newRequestContext(ctx, timeout)
+	value, err := request(requestCtx)
+	cause := context.Cause(requestCtx)
+
+	cancel()
+
+	if err != nil {
+		return value, errors.Join(err, cause)
+	}
+
+	return value, nil
+}
+
+func runControlRequestNoResult(
+	ctx context.Context,
+	timeout time.Duration,
+	newRequestContext requestContextFactory,
+	request func(context.Context) error,
+) error {
+	_, err := runControlRequest(ctx, timeout, newRequestContext, func(requestCtx context.Context) (struct{}, error) {
+		return struct{}{}, request(requestCtx)
+	})
+
+	return err
 }
 
 // validate checks that all required dependencies and identifiers are set.
