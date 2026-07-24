@@ -25,7 +25,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 )
@@ -79,33 +78,9 @@ type WriteLockBoundaryHook func(WriteLockBoundary)
 
 type writeLockBoundaryHookKey struct{}
 
-// WriteLockReconfirmationPhase identifies one descriptor-bound durability operation.
-type WriteLockReconfirmationPhase uint8
-
-const (
-	// WriteLockReconfirmationBeforeOpen runs before opening an exact child directory.
-	WriteLockReconfirmationBeforeOpen WriteLockReconfirmationPhase = iota + 1
-	// WriteLockReconfirmationBeforeSync runs before syncing an exact directory descriptor.
-	WriteLockReconfirmationBeforeSync
-	// WriteLockReconfirmationAfterSync runs after syncing the directory that contains path
-	// and before its namespace generation is accepted.
-	WriteLockReconfirmationAfterSync
-	// WriteLockReconfirmationBeforeClose runs before closing an exact directory descriptor.
-	WriteLockReconfirmationBeforeClose
-)
-
-// WriteLockReconfirmationHook runs at descriptor-bound durability operations. Returning an
-// error injects that operation's failure for deterministic production-path tests.
-type WriteLockReconfirmationHook func(WriteLockReconfirmationPhase, string) error
-
-type writeLockReconfirmationHookKey struct{}
-
 type durablePathEntry struct {
-	path          string
-	info          os.FileInfo
-	parentPath    string
-	parentInfo    os.FileInfo
-	symlinkTarget string
+	path string
+	info os.FileInfo
 }
 
 type durableWriteRoot struct {
@@ -119,15 +94,6 @@ type durableWriteRoot struct {
 // WithWriteLockBoundaryHook returns a context that invokes hook during write-lock acquisition.
 func WithWriteLockBoundaryHook(ctx context.Context, hook WriteLockBoundaryHook) context.Context {
 	return context.WithValue(ctx, writeLockBoundaryHookKey{}, hook)
-}
-
-// WithWriteLockReconfirmationHook returns a context that invokes hook while exact directory
-// descriptors are opened, synced, generation-checked, and closed.
-func WithWriteLockReconfirmationHook(
-	ctx context.Context,
-	hook WriteLockReconfirmationHook,
-) context.Context {
-	return context.WithValue(ctx, writeLockReconfirmationHookKey{}, hook)
 }
 
 // AcquireReadLock takes a non-blocking shared lock. Multiple uploads may coexist, while an
@@ -217,21 +183,12 @@ func acquireLockWithRootEnsurer(
 			)
 		}
 
-		verifyRootIdentity = func() error {
-			return durableRoot.reconfirm(ctx)
-		}
+		verifyRootIdentity = durableRoot.reconfirmCurrent
 	}
 
 	lock, err := acquireSourceLock(ctx, source, exclusive, false, verifyRootIdentity)
 	if err != nil {
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
-	}
-
-	if durableRoot != nil {
-		retainedContext := context.WithoutCancel(ctx)
-		lock.verifyRootIdentity = func() error {
-			return durableRoot.reconfirm(retainedContext)
-		}
 	}
 
 	lock.ownsSource = true
@@ -267,7 +224,7 @@ func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, e
 		return nil, err
 	}
 
-	durableIdentity, err := captureDurableDirectoryPath(ctx, durablePath)
+	durableIdentity, err := captureDurablePath(ctx, durablePath)
 	if err != nil {
 		return nil, errors.Join(err, wrapArchiveLockCloseError("archive root", source.Close()))
 	}
@@ -309,161 +266,6 @@ func ensureWriteLockRoot(ctx context.Context, root string) (*durableWriteRoot, e
 	return confirmed, nil
 }
 
-func captureDurableDirectoryPath(ctx context.Context, path string) ([]durablePathEntry, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive directory %s: %w", path, err)
-	}
-
-	volume := filepath.VolumeName(absolute)
-	rootPath := volume + string(filepath.Separator)
-
-	relative, err := filepath.Rel(rootPath, absolute)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive directory components for %s: %w", path, err)
-	}
-
-	root, err := openArchiveRoot(rootPath)
-	if err != nil {
-		return nil, fmt.Errorf("open durable archive root %s: %w", rootPath, err)
-	}
-
-	rootInfo, err := root.Stat()
-	if err != nil {
-		_ = root.Close()
-
-		return nil, fmt.Errorf("inspect durable archive root %s: %w", rootPath, err)
-	}
-
-	identity := []durablePathEntry{{path: rootPath, info: rootInfo}}
-	parent := root
-	parentPath := rootPath
-
-	if relative != "." {
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
-			if err := ctx.Err(); err != nil {
-				_ = parent.Close()
-
-				return nil, err
-			}
-
-			childPath := filepath.Join(parentPath, component)
-
-			parentInfo, statErr := parent.Stat()
-			if statErr != nil {
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("inspect durable archive parent %s: %w", parentPath, statErr)
-			}
-
-			child, openErr := openDurableDirectoryAt(parent, component, childPath)
-			if openErr != nil {
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("open durable archive directory %s: %w", childPath, openErr)
-			}
-
-			currentParentInfo, parentStatErr := parent.Stat()
-			if parentStatErr != nil {
-				_ = child.Close()
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("reinspect durable archive parent %s: %w", parentPath, parentStatErr)
-			}
-
-			if !sameDurableNamespaceState(parentInfo, currentParentInfo) {
-				_ = child.Close()
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("durable archive parent %s changed while capturing %s: %w",
-					parentPath, childPath, ErrArchiveLockChanged)
-			}
-
-			childInfo, childStatErr := child.Stat()
-			if childStatErr != nil {
-				_ = child.Close()
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("inspect durable archive directory %s: %w", childPath, childStatErr)
-			}
-
-			identity = append(identity, durablePathEntry{
-				path: childPath,
-				info: childInfo,
-			})
-
-			if closeErr := parent.Close(); closeErr != nil {
-				_ = child.Close()
-
-				return nil, fmt.Errorf("close durable archive parent %s: %w", parentPath, closeErr)
-			}
-
-			parent = child
-			parentPath = childPath
-		}
-	}
-
-	if err := parent.Close(); err != nil {
-		return nil, fmt.Errorf("close durable archive directory %s: %w", parentPath, err)
-	}
-
-	return identity, nil
-}
-
-func openDurableDirectoryPath(ctx context.Context, path string) (*os.File, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive directory %s: %w", path, err)
-	}
-
-	volume := filepath.VolumeName(absolute)
-	rootPath := volume + string(filepath.Separator)
-
-	relative, err := filepath.Rel(rootPath, absolute)
-	if err != nil {
-		return nil, fmt.Errorf("resolve durable archive directory components for %s: %w", path, err)
-	}
-
-	parent, err := openArchiveRoot(rootPath)
-	if err != nil {
-		return nil, fmt.Errorf("open durable archive root %s: %w", rootPath, err)
-	}
-
-	parentPath := rootPath
-
-	if relative == "." {
-		return parent, nil
-	}
-
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if err := ctx.Err(); err != nil {
-			_ = parent.Close()
-
-			return nil, err
-		}
-
-		childPath := filepath.Join(parentPath, component)
-
-		child, openErr := openDurableDirectoryAt(parent, component, childPath)
-		if openErr != nil {
-			_ = parent.Close()
-
-			return nil, fmt.Errorf("open durable archive directory %s: %w", childPath, openErr)
-		}
-
-		if closeErr := parent.Close(); closeErr != nil {
-			_ = child.Close()
-
-			return nil, fmt.Errorf("close durable archive parent %s: %w", parentPath, closeErr)
-		}
-
-		parent = child
-		parentPath = childPath
-	}
-
-	return parent, nil
-}
-
 func captureDurablePath(ctx context.Context, path string) ([]durablePathEntry, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -498,42 +300,7 @@ func captureDurablePath(ctx context.Context, path string) ([]durablePathEntry, e
 			return nil, fmt.Errorf("inspect durable archive path component %s: %w", current, statErr)
 		}
 
-		entry := durablePathEntry{path: current, info: info}
-		if info.Mode()&os.ModeSymlink != 0 {
-			parentPath, evalErr := filepath.EvalSymlinks(filepath.Dir(current))
-			if evalErr != nil {
-				return nil, fmt.Errorf("resolve durable archive symlink parent %s: %w", current, evalErr)
-			}
-
-			parent, openErr := openDurableDirectoryPath(ctx, parentPath)
-			if openErr != nil {
-				return nil, openErr
-			}
-
-			parentInfo, parentStatErr := parent.Stat()
-			if parentStatErr != nil {
-				_ = parent.Close()
-
-				return nil, fmt.Errorf("inspect durable archive symlink parent %s: %w",
-					parentPath, parentStatErr)
-			}
-
-			target, readErr := readDurableSymlinkAt(parent, filepath.Base(current), current)
-
-			closeErr := parent.Close()
-			if readErr != nil || closeErr != nil {
-				return nil, errors.Join(
-					readErr,
-					wrapArchiveLockCloseError(parentPath, closeErr),
-				)
-			}
-
-			entry.parentPath = parentPath
-			entry.parentInfo = parentInfo
-			entry.symlinkTarget = target
-		}
-
-		identity = append(identity, entry)
+		identity = append(identity, durablePathEntry{path: current, info: info})
 	}
 
 	return identity, nil
@@ -592,168 +359,41 @@ func (r *durableWriteRoot) reconfirm(ctx context.Context) error {
 }
 
 func reconfirmDurableDirectories(ctx context.Context, identity []durablePathEntry) error {
-	if len(identity) == 0 {
-		return fmt.Errorf("durable archive directory identity is empty: %w", ErrArchiveLockChanged)
-	}
-
-	parent, err := openArchiveRoot(identity[0].path)
-	if err != nil {
-		return fmt.Errorf("open durable archive root %s for reconfirmation: %w", identity[0].path, err)
-	}
-
-	parentPath := identity[0].path
-	if err := verifyDurableDirectoryIdentity(parent, identity[0]); err != nil {
-		return errors.Join(err, closeReconfirmationDirectory(ctx, parent, parentPath))
+	if err := verifyDurablePath(identity); err != nil {
+		return err
 	}
 
 	for index := 1; index < len(identity); index++ {
 		if err := ctx.Err(); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, parentPath))
+			return err
 		}
 
-		entry := identity[index]
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationBeforeOpen,
-			entry.path,
-		); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, parentPath))
+		parent := identity[index-1].path
+		if err := syncDir(parent); err != nil {
+			return fmt.Errorf("reconfirm durable archive entry %s in %s: %w",
+				identity[index].path, parent, err)
 		}
-
-		child, err := openDurableDirectoryAt(parent, filepath.Base(entry.path), entry.path)
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("open durable archive entry %s in %s: %w", entry.path, parentPath, err),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := verifyDurableDirectoryIdentity(child, entry); err != nil {
-			return errors.Join(
-				err,
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationBeforeSync,
-			entry.path,
-		); err != nil {
-			return errors.Join(
-				err,
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := syncDurableDirectory(parent); err != nil {
-			return errors.Join(
-				fmt.Errorf("reconfirm durable archive entry %s in %s: %w",
-					entry.path, parentPath, err),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		confirmedNamespace, err := parent.Stat()
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("capture confirmed durable archive namespace %s: %w", parentPath, err),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationAfterSync,
-			entry.path,
-		); err != nil {
-			return errors.Join(
-				err,
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		currentNamespace, err := parent.Stat()
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("reinspect confirmed durable archive namespace %s: %w", parentPath, err),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if !sameDurableNamespaceState(confirmedNamespace, currentNamespace) {
-			return errors.Join(
-				fmt.Errorf("durable archive namespace %s changed after confirming %s: %w",
-					parentPath, entry.path, ErrArchiveLockChanged),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		probe, err := openDurableDirectoryAt(parent, filepath.Base(entry.path), entry.path)
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("reopen confirmed durable archive entry %s in %s: %w",
-					entry.path, parentPath, err),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := verifyDurableDirectoryIdentity(probe, entry); err != nil {
-			return errors.Join(
-				err,
-				closeReconfirmationDirectory(ctx, probe, entry.path),
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := closeReconfirmationDirectory(ctx, probe, entry.path); err != nil {
-			return errors.Join(
-				err,
-				closeReconfirmationDirectory(ctx, child, entry.path),
-				closeReconfirmationDirectory(ctx, parent, parentPath),
-			)
-		}
-
-		if err := closeReconfirmationDirectory(ctx, parent, parentPath); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, child, entry.path))
-		}
-
-		parent = child
-		parentPath = entry.path
 	}
 
-	if err := runWriteLockReconfirmationHook(
-		ctx,
-		WriteLockReconfirmationBeforeSync,
-		parentPath,
-	); err != nil {
-		return errors.Join(err, closeReconfirmationDirectory(ctx, parent, parentPath))
-	}
+	if len(identity) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-	if err := syncDurableDirectory(parent); err != nil {
-		return errors.Join(
-			fmt.Errorf("reconfirm durable archive leaf %s: %w", parentPath, err),
-			closeReconfirmationDirectory(ctx, parent, parentPath),
-		)
-	}
-
-	if err := closeReconfirmationDirectory(ctx, parent, parentPath); err != nil {
-		return err
+		leaf := identity[len(identity)-1].path
+		if err := syncDir(leaf); err != nil {
+			return fmt.Errorf("reconfirm durable archive leaf %s: %w", leaf, err)
+		}
 	}
 
 	return verifyDurablePath(identity)
 }
 
 func reconfirmRequestedSymlinks(ctx context.Context, identity []durablePathEntry) error {
+	if err := verifyDurablePath(identity); err != nil {
+		return err
+	}
+
 	for _, entry := range identity {
 		if entry.info.Mode()&os.ModeSymlink == 0 {
 			continue
@@ -763,154 +403,17 @@ func reconfirmRequestedSymlinks(ctx context.Context, identity []durablePathEntry
 			return err
 		}
 
-		parent, err := openDurableDirectoryPath(ctx, entry.parentPath)
-		if err != nil {
-			return fmt.Errorf("open requested archive symlink parent %s: %w", entry.parentPath, err)
-		}
-
-		if err := verifyDurableParentIdentity(parent, entry); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationBeforeOpen,
-			entry.path,
-		); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		target, err := readDurableSymlinkAt(parent, filepath.Base(entry.path), entry.path)
-		if err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		if target != entry.symlinkTarget {
-			return errors.Join(
-				fmt.Errorf("requested archive symlink %s changed target: %w",
-					entry.path, ErrArchiveLockChanged),
-				closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-			)
-		}
-
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationBeforeSync,
-			entry.path,
-		); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		if err := syncDurableDirectory(parent); err != nil {
-			return fmt.Errorf("reconfirm durable archive entry %s in %s: %w",
-				entry.path, entry.parentPath, errors.Join(
-					err,
-					closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-				))
-		}
-
-		confirmedNamespace, err := parent.Stat()
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("capture confirmed requested archive namespace %s: %w",
-					entry.parentPath, err),
-				closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-			)
-		}
-
-		if err := runWriteLockReconfirmationHook(
-			ctx,
-			WriteLockReconfirmationAfterSync,
-			entry.path,
-		); err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		currentNamespace, err := parent.Stat()
-		if err != nil {
-			return errors.Join(
-				fmt.Errorf("reinspect confirmed requested archive namespace %s: %w",
-					entry.parentPath, err),
-				closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-			)
-		}
-
-		if !sameDurableNamespaceState(confirmedNamespace, currentNamespace) {
-			return errors.Join(
-				fmt.Errorf("requested archive namespace %s changed after confirming %s: %w",
-					entry.parentPath, entry.path, ErrArchiveLockChanged),
-				closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-			)
-		}
-
-		target, err = readDurableSymlinkAt(parent, filepath.Base(entry.path), entry.path)
-		if err != nil {
-			return errors.Join(err, closeReconfirmationDirectory(ctx, parent, entry.parentPath))
-		}
-
-		if target != entry.symlinkTarget {
-			return errors.Join(
-				fmt.Errorf("requested archive symlink %s changed target: %w",
-					entry.path, ErrArchiveLockChanged),
-				closeReconfirmationDirectory(ctx, parent, entry.parentPath),
-			)
-		}
-
-		if err := closeReconfirmationDirectory(ctx, parent, entry.parentPath); err != nil {
-			return err
+		parent := filepath.Dir(entry.path)
+		if err := syncDir(parent); err != nil {
+			return fmt.Errorf("reconfirm requested archive symlink %s in %s: %w", entry.path, parent, err)
 		}
 	}
 
 	return verifyDurablePath(identity)
 }
 
-func verifyDurableDirectoryIdentity(directory *os.File, expected durablePathEntry) error {
-	current, err := directory.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect exact durable archive directory %s: %w", expected.path, err)
-	}
-
-	if current.Mode().Type() != expected.info.Mode().Type() || !os.SameFile(current, expected.info) {
-		return fmt.Errorf("exact durable archive directory %s changed: %w",
-			expected.path, ErrArchiveLockChanged)
-	}
-
-	return nil
-}
-
-func verifyDurableParentIdentity(directory *os.File, entry durablePathEntry) error {
-	current, err := directory.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect durable archive namespace %s for %s: %w",
-			entry.parentPath, entry.path, err)
-	}
-
-	if current.Mode().Type() != entry.parentInfo.Mode().Type() ||
-		!os.SameFile(entry.parentInfo, current) {
-		return fmt.Errorf("durable archive namespace %s changed before confirming %s: %w",
-			entry.parentPath, entry.path, ErrArchiveLockChanged)
-	}
-
-	return nil
-}
-
-func sameDurableNamespaceState(expected, current os.FileInfo) bool {
-	if expected == nil || current == nil {
-		return false
-	}
-
-	return expected.Mode() == current.Mode() &&
-		expected.Size() == current.Size() &&
-		expected.ModTime().Equal(current.ModTime()) &&
-		os.SameFile(expected, current) &&
-		reflect.DeepEqual(expected.Sys(), current.Sys())
-}
-
-func closeReconfirmationDirectory(ctx context.Context, directory *os.File, path string) error {
-	hookErr := runWriteLockReconfirmationHook(ctx, WriteLockReconfirmationBeforeClose, path)
-	closeErr := directory.Close()
-
-	return errors.Join(hookErr, wrapArchiveLockCloseError(path, closeErr))
+func (r *durableWriteRoot) reconfirmCurrent() error {
+	return r.reconfirm(context.Background())
 }
 
 func verifyDurablePath(identity []durablePathEntry) error {
@@ -935,29 +438,6 @@ func runWriteLockBoundaryHook(ctx context.Context, boundary WriteLockBoundary) {
 	if hook != nil {
 		hook(boundary)
 	}
-}
-
-func runWriteLockReconfirmationHook(
-	ctx context.Context,
-	phase WriteLockReconfirmationPhase,
-	path string,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	hook, _ := ctx.Value(writeLockReconfirmationHookKey{}).(WriteLockReconfirmationHook)
-	if hook == nil {
-		return nil
-	}
-
-	hookErr := hook(phase, path)
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	return hookErr
 }
 
 func resolveWriteLockDurabilityPath(root string) (string, error) {

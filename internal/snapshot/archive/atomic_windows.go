@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
@@ -167,59 +166,6 @@ func pathExists(path string) (bool, error) {
 // supported operation for separately confirming MkdirAll directory creation.
 func syncDir(string) error {
 	return nil
-}
-
-func openDurableDirectoryAt(parent *os.File, name, path string) (*os.File, error) {
-	return openArchiveDirectoryAt(parent, name, path)
-}
-
-func syncDurableDirectory(*os.File) error {
-	return nil
-}
-
-func readDurableSymlinkAt(parent *os.File, name, path string) (string, error) {
-	root, err := os.OpenRoot(filepath.Dir(path))
-	if err != nil {
-		return "", fmt.Errorf("open durable symbolic-link parent %s: %w", filepath.Dir(path), err)
-	}
-	defer func() { _ = root.Close() }()
-
-	currentParent, err := root.Open(".")
-	if err != nil {
-		return "", fmt.Errorf("open durable symbolic-link parent descriptor %s: %w", filepath.Dir(path), err)
-	}
-	defer func() { _ = currentParent.Close() }()
-
-	expectedInfo, err := parent.Stat()
-	if err != nil {
-		return "", fmt.Errorf("inspect durable symbolic-link parent %s: %w", filepath.Dir(path), err)
-	}
-
-	currentInfo, err := currentParent.Stat()
-	if err != nil {
-		return "", fmt.Errorf("inspect current symbolic-link parent %s: %w", filepath.Dir(path), err)
-	}
-
-	if !os.SameFile(expectedInfo, currentInfo) {
-		return "", fmt.Errorf("durable symbolic-link parent %s changed: %w",
-			filepath.Dir(path), ErrArchiveLockChanged)
-	}
-
-	info, err := root.Lstat(name)
-	if err != nil {
-		return "", fmt.Errorf("inspect durable symbolic link %s: %w", path, err)
-	}
-
-	if info.Mode()&os.ModeSymlink == 0 {
-		return "", fmt.Errorf("%s is not a symbolic link: %w", path, ErrNonRegularArchiveArtifact)
-	}
-
-	target, err := root.Readlink(name)
-	if err != nil {
-		return "", fmt.Errorf("read durable symbolic link %s: %w", path, err)
-	}
-
-	return target, nil
 }
 
 // ensureDirDurably deliberately provides only MkdirAll semantics on Windows.

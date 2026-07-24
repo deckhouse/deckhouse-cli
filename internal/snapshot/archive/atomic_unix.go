@@ -24,8 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 type durableDir interface {
@@ -118,44 +116,6 @@ func syncDir(path string) error {
 	}
 
 	return d.Close()
-}
-
-func openDurableDirectoryAt(parent *os.File, name, path string) (*os.File, error) {
-	fd, err := unix.Openat(
-		int(parent.Fd()),
-		name,
-		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK,
-		0,
-	)
-	if err != nil {
-		return nil, classifyArchiveOpenError(path, true, err)
-	}
-
-	directory := os.NewFile(uintptr(fd), path)
-	if directory == nil {
-		_ = unix.Close(fd)
-
-		return nil, fmt.Errorf("open durable directory %s: invalid descriptor", path)
-	}
-
-	info, err := directory.Stat()
-	if err != nil {
-		_ = directory.Close()
-
-		return nil, fmt.Errorf("inspect durable directory %s: %w", path, err)
-	}
-
-	if !info.IsDir() {
-		_ = directory.Close()
-
-		return nil, archiveModeError(path, info.Mode(), true)
-	}
-
-	return directory, nil
-}
-
-func syncDurableDirectory(directory *os.File) error {
-	return directory.Sync()
 }
 
 func ensureDirDurably(path string) error {
