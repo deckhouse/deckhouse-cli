@@ -76,6 +76,53 @@ func TestArchiveLockCompatibility(t *testing.T) {
 	})
 }
 
+func TestArchiveLockSiblingDomainsAreIndependent(t *testing.T) {
+	parent := t.TempDir()
+	firstRoot := filepath.Join(parent, "first")
+	secondRoot := filepath.Join(parent, "second")
+
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatalf("create sibling archive root %s: %v", root, err)
+		}
+	}
+
+	t.Run("writers coexist", func(t *testing.T) {
+		first, err := AcquireWriteLock(firstRoot)
+		if err != nil {
+			t.Fatalf("acquire first sibling writer: %v", err)
+		}
+		defer func() { _ = first.Unlock() }()
+
+		second, err := AcquireWriteLock(secondRoot)
+		if err != nil {
+			t.Fatalf("acquire second sibling writer: %v", err)
+		}
+		defer func() { _ = second.Unlock() }()
+
+		runArchiveLockHelper(t, secondRoot, "write", false)
+	})
+
+	t.Run("reader and unrelated writer coexist", func(t *testing.T) {
+		reader, err := AcquireReadLock(firstRoot)
+		if err != nil {
+			t.Fatalf("acquire first sibling reader: %v", err)
+		}
+		defer func() { _ = reader.Unlock() }()
+
+		writer, err := AcquireWriteLock(secondRoot)
+		if err != nil {
+			t.Fatalf("acquire unrelated sibling writer: %v", err)
+		}
+
+		if err := writer.Unlock(); err != nil {
+			t.Fatalf("release unrelated sibling writer: %v", err)
+		}
+
+		runArchiveLockHelper(t, secondRoot, "write", true)
+	})
+}
+
 func TestArchiveLockCancellationAndCleanup(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
