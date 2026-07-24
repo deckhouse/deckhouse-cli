@@ -65,9 +65,11 @@ const (
 	blockAttrUID         = "0"
 	blockAttrGID         = "0"
 
-	blockDiscardBufferSize       = 32 * 1024
-	blockPutPayloadLimit         = 32 * 1024 * 1024
-	maxConsecutiveBlockConflicts = 8
+	blockDiscardBufferSize             = 32 * 1024
+	blockPutPayloadLimit               = 32 * 1024 * 1024
+	maxConsecutiveBlockConflicts       = 8
+	maxBlockConflictReplays            = 4 * maxConsecutiveBlockConflicts
+	maxBlockReplayBytes          int64 = maxBlockConflictReplays * blockPutPayloadLimit
 
 	uploadConnectTimeout        = 30 * time.Second
 	uploadTLSHandshakeTimeout   = 10 * time.Second
@@ -1252,11 +1254,43 @@ func (p *blockUploadProgress) creditTo(offset int64) {
 }
 
 type blockConflictTracker struct {
-	offsets [maxConsecutiveBlockConflicts + 1]int64
-	count   int
+	offsets       [maxConsecutiveBlockConflicts + 1]int64
+	count         int
+	total         int
+	highWater     int64
+	replayedBytes int64
 }
 
-func (t *blockConflictTracker) observe(from, to int64) error {
+func newBlockConflictTracker(offset int64) blockConflictTracker {
+	return blockConflictTracker{highWater: offset}
+}
+
+func (t *blockConflictTracker) observeConflict(from, to int64) error {
+	if t.total == maxBlockConflictReplays {
+		return fmt.Errorf(
+			"too many block upload conflict replays (%d); latest transition from %d to %d",
+			maxBlockConflictReplays,
+			from,
+			to,
+		)
+	}
+
+	replayBytes := max(t.highWater-to, 0)
+	if replayBytes > maxBlockReplayBytes-t.replayedBytes {
+		return fmt.Errorf(
+			"block upload replay budget exceeded (%d bytes); latest transition from %d to %d would replay %d bytes",
+			maxBlockReplayBytes,
+			from,
+			to,
+			replayBytes,
+		)
+	}
+
+	if to > t.highWater {
+		t.highWater = to
+		t.reset()
+	}
+
 	if t.count == 0 {
 		t.offsets[0] = from
 		t.count = 1
@@ -1274,8 +1308,19 @@ func (t *blockConflictTracker) observe(from, to int64) error {
 
 	t.offsets[t.count] = to
 	t.count++
+	t.total++
+	t.replayedBytes += replayBytes
 
 	return nil
+}
+
+func (t *blockConflictTracker) observeSuccess(to int64) {
+	if to <= t.highWater {
+		return
+	}
+
+	t.highWater = to
+	t.reset()
 }
 
 func (t *blockConflictTracker) reset() {
@@ -1286,14 +1331,36 @@ func (t *blockConflictTracker) reset() {
 // gets a fresh SectionReader limited to the client cap, so neither nginx's 64m ingress
 // limit nor a server-directed reposition can make one PUT body unbounded.
 func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io.ReaderAt, offset, totalSize int64, progress *blockUploadProgress, activate func()) error {
-	var conflicts blockConflictTracker
+	return putBlockRawWithPayloadLimit(
+		ctx,
+		httpClient,
+		url,
+		source,
+		offset,
+		totalSize,
+		blockPutPayloadLimit,
+		progress,
+		activate,
+	)
+}
+
+func putBlockRawWithPayloadLimit(
+	ctx context.Context,
+	httpClient httpDoer,
+	url string,
+	source io.ReaderAt,
+	offset, totalSize, payloadLimit int64,
+	progress *blockUploadProgress,
+	activate func(),
+) error {
+	conflicts := newBlockConflictTracker(offset)
 
 	for offset < totalSize {
 		if activate != nil {
 			activate()
 		}
 
-		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		requestEnd := offset + min(payloadLimit, totalSize-offset)
 
 		resetAuthenticatedRead(source)
 
@@ -1317,11 +1384,11 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io
 		}
 
 		if reposition {
-			if err := conflicts.observe(offset, next); err != nil {
+			if err := conflicts.observeConflict(offset, next); err != nil {
 				return err
 			}
 		} else {
-			conflicts.reset()
+			conflicts.observeSuccess(next)
 		}
 
 		progress.creditTo(next)
@@ -1348,6 +1415,33 @@ func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io
 //     has the bounded header-walk integration implemented for zstd. The "none" codec
 //     never reaches this function; putBlock routes it to putBlockRaw.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, source io.ReadSeeker, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
+	return putBlockCompressedWithPayloadLimit(
+		ctx,
+		httpClient,
+		url,
+		source,
+		dataFile,
+		ext,
+		offset,
+		totalSize,
+		blockPutPayloadLimit,
+		log,
+		progress,
+		activate,
+	)
+}
+
+func putBlockCompressedWithPayloadLimit(
+	ctx context.Context,
+	httpClient httpDoer,
+	url string,
+	source io.ReadSeeker,
+	dataFile, ext string,
+	offset, totalSize, payloadLimit int64,
+	log *slog.Logger,
+	progress *blockUploadProgress,
+	activate func(),
+) error {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind compressed block %s: %w", dataFile, err)
 	}
@@ -1363,14 +1457,14 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, so
 		}
 	}()
 
-	var conflicts blockConflictTracker
+	conflicts := newBlockConflictTracker(offset)
 
 	for offset < totalSize {
 		if activate != nil {
 			activate()
 		}
 
-		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		requestEnd := offset + min(payloadLimit, totalSize-offset)
 		requestSize := requestEnd - offset
 		limited := io.LimitReader(decodeReader, requestSize)
 
@@ -1400,11 +1494,11 @@ func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, so
 		}
 
 		if reposition {
-			if err := conflicts.observe(offset, next); err != nil {
+			if err := conflicts.observeConflict(offset, next); err != nil {
 				return err
 			}
 		} else {
-			conflicts.reset()
+			conflicts.observeSuccess(next)
 		}
 
 		progress.creditTo(next)

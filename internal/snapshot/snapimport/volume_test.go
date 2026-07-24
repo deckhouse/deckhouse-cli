@@ -1052,7 +1052,165 @@ func TestPutBlock_ZstdAllowsRollbackAfterSuccessfulChunk(t *testing.T) {
 	}
 }
 
-func TestBlockConflictTracker_BoundsOnlyConsecutiveConflicts(t *testing.T) {
+func TestPutBlock_RawAndZstdBoundLifetimeSuccessRollbackCycles(t *testing.T) {
+	const payloadLimit = int64(8)
+
+	payload := bytes.Repeat([]byte("bounded-replay-"), 32)
+
+	tests := []struct {
+		name  string
+		codec string
+		ext   string
+	}{
+		{name: "raw", codec: "none"},
+		{name: "zstd", codec: "zstd", ext: ".zst"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dataFile := filepath.Join(t.TempDir(), "data.bin"+tc.ext)
+			writeEncodedBlockFile(t, dataFile, tc.codec, payload)
+
+			encoded, err := os.ReadFile(dataFile)
+			if err != nil {
+				t.Fatalf("read encoded fixture: %v", err)
+			}
+
+			nodeSpec := archiveNode{
+				apiVersion: "snapshot.storage.k8s.io/v1",
+				kind:       "VolumeSnapshot",
+				name:       "bounded-replay",
+				namespace:  "src",
+				blockData:  encoded,
+				blockExt:   tc.ext,
+			}
+			nodeSpec.volumes = synthVolumeInfo(nodeSpec)
+			nodeSpec.volumes[0].Size = strconv.Itoa(len(payload))
+
+			root := t.TempDir()
+			writeArchiveNode(t, root, nodeSpec)
+
+			view, err := archive.OpenVerifiedArchive(root)
+			if err != nil {
+				t.Fatalf("open verified archive: %v", err)
+			}
+			defer func() { _ = view.Close() }()
+
+			plan, err := buildPlanFromVerifiedArchive(view)
+			if err != nil {
+				t.Fatalf("build upload plan: %v", err)
+			}
+
+			if err := verifyArchiveIntegrity(context.Background(), view, plan); err != nil {
+				t.Fatalf("verify archive: %v", err)
+			}
+
+			source, err := view.OpenVerifiedFile(context.Background(), plan[0].payloadFile)
+			if err != nil {
+				t.Fatalf("open verified payload: %v", err)
+			}
+			defer func() { _ = source.Close() }()
+
+			var (
+				activated int
+				bodyBytes int64
+				putCount  int
+			)
+
+			doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				putCount++
+
+				offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+				if err != nil {
+					return nil, err
+				}
+
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+
+				bodyBytes += int64(len(body))
+
+				requestEnd := offset + min(payloadLimit, int64(len(payload))-offset)
+				if !bytes.Equal(body, payload[offset:requestEnd]) {
+					return nil, fmt.Errorf("PUT %d body differs from raw range [%d,%d)", putCount, offset, requestEnd)
+				}
+
+				header := http.Header{}
+				if putCount%2 == 0 {
+					header.Set("X-Expected-Offset", strconv.FormatInt(offset-1, 10))
+
+					return newTestHTTPResponse(http.StatusConflict, header), nil
+				}
+
+				header.Set("X-Next-Offset", strconv.FormatInt(requestEnd, 10))
+
+				return newTestHTTPResponse(http.StatusNoContent, header), nil
+			})
+
+			progress := blockUploadProgress{}
+
+			if tc.ext == "" {
+				err = putBlockRawWithPayloadLimit(
+					context.Background(),
+					doer,
+					"https://importer.local/block",
+					source,
+					0,
+					int64(len(payload)),
+					payloadLimit,
+					&progress,
+					func() { activated++ },
+				)
+			} else {
+				err = putBlockCompressedWithPayloadLimit(
+					context.Background(),
+					doer,
+					"https://importer.local/block",
+					source,
+					dataFile,
+					tc.ext,
+					0,
+					int64(len(payload)),
+					payloadLimit,
+					discardLogger(),
+					&progress,
+					func() { activated++ },
+				)
+			}
+
+			if err == nil || !strings.Contains(err.Error(), "too many block upload conflict replays (32)") {
+				t.Fatalf("put block error = %v, want bounded lifetime replay failure", err)
+			}
+
+			wantPUTs := 2*maxBlockConflictReplays + 2
+			if putCount != wantPUTs || activated != wantPUTs {
+				t.Errorf("opened PUT bodies = %d, activations = %d, want fixed %d", putCount, activated, wantPUTs)
+			}
+
+			if bodyBytes > int64(wantPUTs)*payloadLimit {
+				t.Errorf("request-body work = %d bytes, want at most fixed %d", bodyBytes, int64(wantPUTs)*payloadLimit)
+			}
+
+			stats := source.AuthenticatedReadStats()
+			maxAuthenticatedBytes := int64(wantPUTs) * int64(len(encoded))
+			if stats.SourceBytes > maxAuthenticatedBytes || stats.HashedBytes > maxAuthenticatedBytes {
+				t.Errorf("authenticated source work = %+v, want at most fixed %d bytes", stats, maxAuthenticatedBytes)
+			}
+			if stats.ChunkLoads > int64(wantPUTs) {
+				t.Errorf("authenticated chunk loads = %d, want at most fixed %d", stats.ChunkLoads, wantPUTs)
+			}
+
+			wantHighWater := payloadLimit + int64(maxBlockConflictReplays)*(payloadLimit-1)
+			if progress.credited != wantHighWater {
+				t.Errorf("credited progress = %d, want monotonic high-water %d", progress.credited, wantHighWater)
+			}
+		})
+	}
+}
+
+func TestBlockConflictTracker_BoundsLifetimeReplay(t *testing.T) {
 	t.Parallel()
 
 	t.Run("error: consecutive cycle", func(t *testing.T) {
@@ -1060,11 +1218,11 @@ func TestBlockConflictTracker_BoundsOnlyConsecutiveConflicts(t *testing.T) {
 
 		var tracker blockConflictTracker
 
-		if err := tracker.observe(0, 1); err != nil {
+		if err := tracker.observeConflict(0, 1); err != nil {
 			t.Fatalf("first conflict: %v", err)
 		}
 
-		if err := tracker.observe(1, 0); err == nil {
+		if err := tracker.observeConflict(1, 0); err == nil {
 			t.Fatal("expected consecutive conflict cycle error, got nil")
 		}
 	})
@@ -1072,34 +1230,77 @@ func TestBlockConflictTracker_BoundsOnlyConsecutiveConflicts(t *testing.T) {
 	t.Run("error: bounded acyclic conflicts", func(t *testing.T) {
 		t.Parallel()
 
-		var tracker blockConflictTracker
+		tracker := newBlockConflictTracker(100)
 
-		for offset := int64(0); offset < maxConsecutiveBlockConflicts; offset++ {
-			if err := tracker.observe(offset, offset+1); err != nil {
-				t.Fatalf("conflict %d: %v", offset, err)
+		for conflict := int64(0); conflict < maxConsecutiveBlockConflicts; conflict++ {
+			from := int64(100) - conflict
+			if err := tracker.observeConflict(from, from-1); err != nil {
+				t.Fatalf("conflict %d: %v", conflict, err)
 			}
 		}
 
-		if err := tracker.observe(maxConsecutiveBlockConflicts, maxConsecutiveBlockConflicts+1); err == nil {
+		if err := tracker.observeConflict(100-maxConsecutiveBlockConflicts, 99-maxConsecutiveBlockConflicts); err == nil {
 			t.Fatal("expected bounded consecutive-conflict error, got nil")
 		}
 	})
 
-	t.Run("success resets prior offsets", func(t *testing.T) {
+	t.Run("replayed success does not reset cycle history", func(t *testing.T) {
 		t.Parallel()
 
-		var tracker blockConflictTracker
+		tracker := newBlockConflictTracker(32)
 
-		for i := 0; i < 10_000; i++ {
-			if err := tracker.observe(32, 0); err != nil {
-				t.Fatalf("iteration %d conflict: %v", i, err)
+		if err := tracker.observeConflict(32, 0); err != nil {
+			t.Fatalf("rollback conflict: %v", err)
+		}
+
+		tracker.observeSuccess(32)
+
+		if err := tracker.observeConflict(32, 0); err == nil {
+			t.Fatal("expected repeated success-rollback cycle error, got nil")
+		}
+	})
+
+	t.Run("durable progress compacts history but not lifetime budget", func(t *testing.T) {
+		t.Parallel()
+
+		tracker := newBlockConflictTracker(1)
+		highWater := int64(1)
+
+		for replay := range maxBlockConflictReplays {
+			if err := tracker.observeConflict(highWater, highWater-1); err != nil {
+				t.Fatalf("observe replay %d: %v", replay+1, err)
 			}
 
-			tracker.reset()
+			highWater++
+			tracker.observeSuccess(highWater)
 		}
 
 		if tracker.count != 0 {
-			t.Errorf("tracker count = %d after successes, want 0", tracker.count)
+			t.Errorf("tracker count = %d after durable progress, want compacted to zero", tracker.count)
+		}
+		if tracker.total != maxBlockConflictReplays {
+			t.Errorf("lifetime conflicts = %d, want fixed %d", tracker.total, maxBlockConflictReplays)
+		}
+		if tracker.replayedBytes != maxBlockConflictReplays {
+			t.Errorf("lifetime replay bytes = %d, want %d", tracker.replayedBytes, maxBlockConflictReplays)
+		}
+
+		if err := tracker.observeConflict(highWater, highWater-1); err == nil {
+			t.Fatal("expected lifetime conflict budget error, got nil")
+		}
+	})
+
+	t.Run("rollback distance is bounded before replay", func(t *testing.T) {
+		t.Parallel()
+
+		tracker := newBlockConflictTracker(maxBlockReplayBytes + 1)
+		err := tracker.observeConflict(maxBlockReplayBytes+1, 0)
+		if err == nil || !strings.Contains(err.Error(), "block upload replay budget exceeded") {
+			t.Fatalf("oversized rollback error = %v, want replay-budget failure", err)
+		}
+
+		if tracker.total != 0 || tracker.replayedBytes != 0 || tracker.count != 0 {
+			t.Fatalf("tracker mutated after rejected rollback: %+v", tracker)
 		}
 
 		if len(tracker.offsets) != maxConsecutiveBlockConflicts+1 {
