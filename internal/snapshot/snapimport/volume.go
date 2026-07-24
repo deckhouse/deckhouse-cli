@@ -18,11 +18,9 @@ package snapimport
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"log/slog"
 	"net/http"
@@ -775,7 +773,6 @@ type requestBodyReport struct {
 	bodyRange requestBodyRange
 	expected  int64
 	consumed  int64
-	digest    [sha256.Size]byte
 	readErr   error
 	closeErr  error
 	closed    bool
@@ -824,7 +821,6 @@ type attestedRequestBody struct {
 	body      io.ReadCloser
 	bodyRange requestBodyRange
 	expected  int64
-	digest    hash.Hash
 	consumed  int64
 	readErr   error
 	closeErr  error
@@ -838,7 +834,6 @@ func newAttestedRequestBody(body io.ReadCloser, bodyRange requestBodyRange, expe
 		body:      body,
 		bodyRange: bodyRange,
 		expected:  expected,
-		digest:    sha256.New(),
 		done:      make(chan struct{}),
 	}
 }
@@ -862,7 +857,6 @@ func (b *attestedRequestBody) Read(p []byte) (int, error) {
 	}
 
 	if count > 0 {
-		_, _ = b.digest.Write(p[:count])
 		b.consumed += int64(count)
 
 		if b.consumed > b.expected {
@@ -927,7 +921,6 @@ func (b *attestedRequestBody) report() requestBodyReport {
 		closeErr:  b.closeErr,
 		closed:    b.closed,
 	}
-	copy(report.digest[:], b.digest.Sum(nil))
 
 	return report
 }
@@ -943,7 +936,6 @@ func doAttestedRequest(
 		report := requestBodyReport{
 			bodyRange: bodyRange,
 			expected:  req.ContentLength,
-			digest:    sha256.Sum256(nil),
 			closed:    true,
 		}
 

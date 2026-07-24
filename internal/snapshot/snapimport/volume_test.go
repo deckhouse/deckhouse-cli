@@ -20,7 +20,6 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -4720,7 +4719,7 @@ func TestDoBlockChunk_RejectsDelayedCloseErrorAfterExactRead(t *testing.T) {
 	}
 }
 
-func TestAttestedRequestBody_ReportsExactDigestAndRange(t *testing.T) {
+func TestAttestedRequestBody_ReportsExactCompletionAndRange(t *testing.T) {
 	payload := []byte("authenticated request payload")
 	body := newAttestedRequestBody(
 		io.NopCloser(bytes.NewReader(payload)),
@@ -4747,12 +4746,42 @@ func TestAttestedRequestBody_ReportsExactDigestAndRange(t *testing.T) {
 		t.Fatalf("validate exact report: %v", err)
 	}
 
-	wantDigest := sha256.Sum256(payload)
-	if report.digest != wantDigest {
-		t.Fatalf("body digest = %x, want %x", report.digest, wantDigest)
-	}
 	if report.bodyRange != (requestBodyRange{start: 17, end: 17 + int64(len(payload))}) {
 		t.Fatalf("body range = %+v, want [17,%d)", report.bodyRange, 17+len(payload))
+	}
+}
+
+func BenchmarkAttestedRequestBodyCompletion(b *testing.B) {
+	const payloadSize = 8 << 20
+
+	payload := bytes.Repeat([]byte{'a'}, payloadSize)
+	bodyRange := requestBodyRange{start: 17, end: 17 + payloadSize}
+
+	b.SetBytes(payloadSize)
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		body := newAttestedRequestBody(
+			io.NopCloser(bytes.NewReader(payload)),
+			bodyRange,
+			payloadSize,
+		)
+
+		if _, err := io.Copy(io.Discard, body); err != nil {
+			b.Fatalf("read attested body: %v", err)
+		}
+		if err := body.Close(); err != nil {
+			b.Fatalf("close attested body: %v", err)
+		}
+
+		report, err := body.wait(context.Background())
+		if err != nil {
+			b.Fatalf("wait for body report: %v", err)
+		}
+		if err := report.validateExact(); err != nil {
+			b.Fatalf("validate exact report: %v", err)
+		}
 	}
 }
 
