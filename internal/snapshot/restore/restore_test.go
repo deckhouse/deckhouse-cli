@@ -216,6 +216,16 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		scGVR:         "StorageClassList",
 	}
 
+	for _, obj := range objs {
+		gvk := obj.GetObjectKind().GroupVersionKind()
+		if gvk.Empty() {
+			continue
+		}
+
+		gvr, _ := meta.UnsafeGuessKindToResource(gvk)
+		gvrToListKind[gvr] = gvk.Kind + "List"
+	}
+
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
 
 	addSSAReactor(dyn)
@@ -420,6 +430,23 @@ func readyDomainDiskSnapshot(name string) *unstructured.Unstructured {
 		},
 		"status": map[string]interface{}{
 			"boundSnapshotContentName": "content-disk-1",
+			"conditions": []interface{}{
+				map[string]interface{}{"type": "Ready", "status": "True"},
+			},
+		},
+	}}
+}
+
+func readyGeneratedSnapshot(apiVersion, kind, name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      name,
+		},
+		"status": map[string]interface{}{
+			"boundSnapshotContentName": "content-" + name,
 			"conditions": []interface{}{
 				map[string]interface{}{"type": "Ready", "status": "True"},
 			},
@@ -2027,6 +2054,88 @@ func testMapperWithDomain() meta.RESTMapper {
 	return base
 }
 
+func testMapperWithGenerated(gvks ...schema.GroupVersionKind) meta.RESTMapper {
+	groupVersions := []schema.GroupVersion{
+		{Group: "", Version: "v1"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+	}
+
+	for _, gvk := range gvks {
+		groupVersions = append(groupVersions, gvk.GroupVersion())
+	}
+
+	mapper := meta.NewDefaultRESTMapper(groupVersions)
+	mapper.Add(
+		schema.GroupVersionKind{
+			Group:   "state-snapshotter.deckhouse.io",
+			Version: "v1alpha1",
+			Kind:    "Snapshot",
+		},
+		meta.RESTScopeNamespace,
+	)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+
+	for _, gvk := range gvks {
+		mapper.Add(gvk, meta.RESTScopeNamespace)
+	}
+
+	return mapper
+}
+
+func TestRun_SelectedNodeAPIVersionValidationPrecedesAPI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		kind       string
+		nodeName   string
+		apiVersion string
+		wantErr    string
+	}{
+		{
+			name:       "API version without node",
+			apiVersion: "apps/v1",
+			wantErr:    "SelectedNodeAPIVersion requires a selected node",
+		},
+		{
+			name:       "malformed API version",
+			kind:       "Deployment",
+			nodeName:   "demo",
+			apiVersion: "apps/v1/extra",
+			wantErr:    "parse Kubernetes apiVersion",
+		},
+		{
+			name:    "kind without name",
+			kind:    "Deployment",
+			wantErr: "SelectedNodeKind and SelectedNodeName must be set together",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{}
+			dyn := newFakeDynamic()
+			cfg := baseConfig(src, dyn)
+			cfg.SelectedNodeKind = tc.kind
+			cfg.SelectedNodeName = tc.nodeName
+			cfg.SelectedNodeAPIVersion = tc.apiVersion
+
+			err := Run(context.Background(), cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Run error = %v, want text %q", err, tc.wantErr)
+			}
+
+			if len(dyn.Actions()) != 0 {
+				t.Errorf("dynamic API actions = %v, want none", dyn.Actions())
+			}
+
+			assertNoRestoreMutation(t, src, dyn)
+		})
+	}
+}
+
 // TestRun_NoSelectedNode_UsesRootRef verifies that when no SelectedNode is set,
 // RestoreManifests is called with the root Snapshot NodeRef.
 func TestRun_NoSelectedNode_UsesRootRef(t *testing.T) {
@@ -2141,6 +2250,228 @@ func TestRun_SelectedNode_ResolvesWithinRootTree(t *testing.T) {
 
 			if src.gotRef != tc.wantRef {
 				t.Errorf("NodeRef: got %+v, want %+v", src.gotRef, tc.wantRef)
+			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_APIVersionDisambiguatesGeneratedIdentity(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sharedKind = "SharedSnapshot"
+		sharedName = "shared"
+	)
+
+	apiVersions := []string{
+		"v1",
+		"alpha.example.io/v1alpha1",
+		"alpha.example.io/v1beta1",
+		"beta.example.io/v1",
+	}
+	gvks := make([]schema.GroupVersionKind, 0, len(apiVersions))
+	objects := make([]runtime.Object, 0, len(apiVersions)+1)
+	childRefs := make([]map[string]interface{}, 0, len(apiVersions))
+
+	for _, apiVersion := range apiVersions {
+		gv := schema.FromAPIVersionAndKind(apiVersion, sharedKind)
+		gvks = append(gvks, gv)
+		objects = append(objects, readyGeneratedSnapshot(apiVersion, sharedKind, sharedName))
+		childRefs = append(childRefs, snapshotChildRef(apiVersion, sharedKind, sharedName))
+	}
+
+	objects = append(objects, snapshotWithChildren(readySnapshot(), childRefs...))
+
+	tests := []struct {
+		name               string
+		selectedAPIVersion string
+		wantAPIVersion     string
+		wantErrSubstrs     []string
+	}{
+		{
+			name: "unqualified identity is ambiguous",
+			wantErrSubstrs: []string{
+				"ambiguous",
+				"matching apiVersions: v1",
+				"matching apiVersions: alpha.example.io/v1alpha1",
+				"matching apiVersions: alpha.example.io/v1beta1",
+				"matching apiVersions: beta.example.io/v1",
+				"--node-api-version v1",
+				"--node-api-version alpha.example.io/v1beta1",
+			},
+		},
+		{
+			name:               "core API version",
+			selectedAPIVersion: "v1",
+			wantAPIVersion:     "v1",
+		},
+		{
+			name:               "named group stored version",
+			selectedAPIVersion: "alpha.example.io/v1alpha1",
+			wantAPIVersion:     "alpha.example.io/v1alpha1",
+		},
+		{
+			name:               "same group alternate version",
+			selectedAPIVersion: "alpha.example.io/v1beta1",
+			wantAPIVersion:     "alpha.example.io/v1beta1",
+		},
+		{
+			name:               "same version different group",
+			selectedAPIVersion: "beta.example.io/v1",
+			wantAPIVersion:     "beta.example.io/v1",
+		},
+		{
+			name:               "well formed API version has no match",
+			selectedAPIVersion: "gamma.example.io/v1",
+			wantErrSubstrs:     []string{"gamma.example.io/v1 SharedSnapshot/shared", "does not belong"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(objects...)
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       sharedKind,
+				SelectedNodeName:       sharedName,
+				SelectedNodeAPIVersion: tc.selectedAPIVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 testMapperWithGenerated(gvks...),
+				Log:                    discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if len(tc.wantErrSubstrs) != 0 {
+				if err == nil {
+					t.Fatal("Run unexpectedly succeeded")
+				}
+
+				for _, substr := range tc.wantErrSubstrs {
+					if !strings.Contains(err.Error(), substr) {
+						t.Errorf("Run error %q does not contain %q", err, substr)
+					}
+				}
+
+				assertNoRestoreMutation(t, src, dyn)
+			} else {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+
+				if src.calls != 1 {
+					t.Fatalf("RestoreManifestsScoped calls = %d, want 1", src.calls)
+				}
+
+				if src.gotRef.APIVersion != tc.wantAPIVersion ||
+					src.gotRef.Kind != sharedKind ||
+					src.gotRef.Name != sharedName {
+					t.Errorf("NodeRef = %+v, want %s %s/%s", src.gotRef, tc.wantAPIVersion, sharedKind, sharedName)
+				}
+			}
+
+			hierarchyGets := 0
+			for _, action := range dyn.Actions() {
+				if action.GetVerb() == "get" &&
+					(action.GetResource() == snapshotGVR || action.GetResource().Resource == "sharedsnapshots") {
+					hierarchyGets++
+				}
+			}
+
+			if hierarchyGets != len(apiVersions)+1 {
+				t.Errorf("hierarchy GET calls = %d, want %d", hierarchyGets, len(apiVersions)+1)
+			}
+		})
+	}
+}
+
+func TestRun_SelectedNode_GeneratedIdentityUsesStoredVersionAfterConversion(t *testing.T) {
+	t.Parallel()
+
+	const (
+		storedAPIVersion    = "conversion.example.io/v1alpha1"
+		convertedAPIVersion = "conversion.example.io/v1beta1"
+		kind                = "ConvertedSnapshot"
+		name                = "converted"
+	)
+
+	tests := []struct {
+		name               string
+		selectedAPIVersion string
+		wantMatch          bool
+	}{
+		{
+			name:               "stored child ref version matches",
+			selectedAPIVersion: storedAPIVersion,
+			wantMatch:          true,
+		},
+		{
+			name:               "converted response version is not generated identity",
+			selectedAPIVersion: convertedAPIVersion,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			storedGVK := schema.FromAPIVersionAndKind(storedAPIVersion, kind)
+			child := readyGeneratedSnapshot(storedAPIVersion, kind, name)
+			converted := child.DeepCopy()
+			converted.SetAPIVersion(convertedAPIVersion)
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(storedAPIVersion, kind, name),
+			)
+			dyn := newFakeDynamic(root, child)
+			storedGVR, _ := meta.UnsafeGuessKindToResource(storedGVK)
+			dyn.PrependReactor("get", storedGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+				if action.GetResource() != storedGVR {
+					return false, nil, nil
+				}
+
+				getAction, ok := action.(clienttesting.GetAction)
+				if !ok || getAction.GetName() != name {
+					return false, nil, nil
+				}
+
+				return true, converted.DeepCopy(), nil
+			})
+
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       kind,
+				SelectedNodeName:       name,
+				SelectedNodeAPIVersion: tc.selectedAPIVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 testMapperWithGenerated(storedGVK),
+				Log:                    discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if !tc.wantMatch {
+				if err == nil || !strings.Contains(err.Error(), "does not belong") {
+					t.Fatalf("Run error = %v, want no-match error", err)
+				}
+
+				assertNoRestoreMutation(t, src, dyn)
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if src.gotRef.APIVersion != storedAPIVersion {
+				t.Errorf("selected apiVersion = %q, want stored ref version %q", src.gotRef.APIVersion, storedAPIVersion)
 			}
 		})
 	}
@@ -2346,6 +2677,116 @@ func TestRun_SelectedNode_ResolvesImportSourceAliases(t *testing.T) {
 	}
 }
 
+func TestRun_SelectedNode_APIVersionFiltersOriginalAliases(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sourceKind = "VirtualDisk"
+		sourceName = "shared-source"
+	)
+
+	tests := []struct {
+		name               string
+		selectedAPIVersion string
+		wantGeneratedName  string
+		wantErrSubstrs     []string
+	}{
+		{
+			name: "unqualified aliases are ambiguous",
+			wantErrSubstrs: []string{
+				"ambiguous",
+				"virtualization.deckhouse.io/v1alpha2",
+				"legacy.example.io/v1",
+				"--node-api-version virtualization.deckhouse.io/v1alpha2",
+				"--node-api-version legacy.example.io/v1",
+			},
+		},
+		{
+			name:               "status source ref exact version",
+			selectedAPIVersion: "virtualization.deckhouse.io/v1alpha2",
+			wantGeneratedName:  "nss-current",
+		},
+		{
+			name:               "import annotation exact version",
+			selectedAPIVersion: "legacy.example.io/v1",
+			wantGeneratedName:  "nss-imported",
+		},
+		{
+			name:               "wrong alias version matches nothing",
+			selectedAPIVersion: "virtualization.deckhouse.io/v1beta1",
+			wantErrSubstrs:     []string{"does not belong"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			current := readyDomainDiskSnapshot("nss-current")
+			setSnapshotSourceRef(
+				current,
+				"virtualization.deckhouse.io/v1alpha2",
+				sourceKind,
+				sourceName,
+			)
+
+			imported := readyDomainDiskSnapshot("nss-imported")
+			setSnapshotMode(imported, snapshotapi.SnapshotModeImport)
+			setImportSourceRefAnnotation(t, imported, "legacy.example.io/v1", sourceKind, sourceName)
+
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(current.GetAPIVersion(), current.GetKind(), current.GetName()),
+				snapshotChildRef(imported.GetAPIVersion(), imported.GetKind(), imported.GetName()),
+			)
+			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
+			dyn := newFakeDynamic(root, current, imported)
+			cfg := Config{
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       sourceKind,
+				SelectedNodeName:       sourceName,
+				SelectedNodeAPIVersion: tc.selectedAPIVersion,
+				Source:                 src,
+				Dynamic:                dyn,
+				Mapper:                 testMapperWithDomain(),
+				Log:                    discardLogger(),
+			}
+
+			err := Run(context.Background(), cfg)
+			if len(tc.wantErrSubstrs) != 0 {
+				if err == nil {
+					t.Fatal("Run unexpectedly succeeded")
+				}
+
+				for _, substr := range tc.wantErrSubstrs {
+					if !strings.Contains(err.Error(), substr) {
+						t.Errorf("Run error %q does not contain %q", err, substr)
+					}
+				}
+
+				assertNoRestoreMutation(t, src, dyn)
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if src.calls != 1 {
+				t.Fatalf("RestoreManifestsScoped calls = %d, want 1", src.calls)
+			}
+
+			if src.gotRef.APIVersion != domainDiskAPIVersion ||
+				src.gotRef.Kind != "DemoVirtualDiskSnapshot" ||
+				src.gotRef.Name != tc.wantGeneratedName {
+				t.Errorf("NodeRef = %+v, want generated node %q", src.gotRef, tc.wantGeneratedName)
+			}
+		})
+	}
+}
+
 func TestRun_SelectedNode_RejectsInvalidImportSourceAliases(t *testing.T) {
 	t.Parallel()
 
@@ -2501,6 +2942,57 @@ func TestRun_SelectedNode_RejectsInvalidImportSourceAliases(t *testing.T) {
 			wantErrSubstrs: []string{"status.sourceRef.uid", "unexpected type int64"},
 		},
 		{
+			name: "status source ref rejects malformed API version",
+			objects: func(_ *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-bad-source-version")
+				setSnapshotSourceRef(child, "virtualization.deckhouse.io/v1/extra", "VirtualDisk", "disk-a")
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind:   "VirtualDisk",
+			selectedName:   "disk-a",
+			wantErrSubstrs: []string{"status.sourceRef.apiVersion", "invalid", "nss-child-bad-source-version"},
+		},
+		{
+			name: "import annotation rejects malformed API group",
+			objects: func(t *testing.T) []runtime.Object {
+				child := readyDomainDiskSnapshot("nss-child-bad-import-version")
+				setSnapshotMode(child, snapshotapi.SnapshotModeImport)
+				setImportSourceRefAnnotation(t, child, "Virtualization.Example/v1", "VirtualDisk", "disk-a")
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+				)
+
+				return []runtime.Object{root, child}
+			},
+			selectedKind: "VirtualDisk",
+			selectedName: "disk-a",
+			wantErrSubstrs: []string{
+				"malformed",
+				snapshotapi.AnnotationImportSourceRef,
+				"invalid API group",
+			},
+		},
+		{
+			name: "child ref rejects malformed API version before child get",
+			objects: func(_ *testing.T) []runtime.Object {
+				root := snapshotWithChildren(
+					readySnapshot(),
+					snapshotChildRef("invalid.example.io/v1/extra", "DemoVirtualDiskSnapshot", "must-not-get"),
+				)
+
+				return []runtime.Object{root}
+			},
+			selectedKind:   "DemoVirtualDiskSnapshot",
+			selectedName:   "must-not-get",
+			wantErrSubstrs: []string{"childrenSnapshotRefs", "invalid apiVersion", "element 0"},
+		},
+		{
 			name: "duplicate original names across API versions are ambiguous",
 			objects: func(t *testing.T) []runtime.Object {
 				first := readyDomainDiskSnapshot("nss-child-first-import")
@@ -2536,7 +3028,8 @@ func TestRun_SelectedNode_RejectsInvalidImportSourceAliases(t *testing.T) {
 				"ambiguous",
 				"nss-child-first-import",
 				"nss-child-second-import",
-				"generated snapshot-CR Kind/name",
+				"--node-api-version virtualization.deckhouse.io/v1alpha2",
+				"--node-api-version virtualization.deckhouse.io/v1alpha3",
 			},
 			wantOrder: []string{"nss-child-first-import", "nss-child-second-import"},
 		},
@@ -2660,15 +3153,16 @@ func TestRun_SelectedNode_ClientFailureStopsTraversal(t *testing.T) {
 			}
 			src := &stubSource{body: mustArray(t, configMapManifest("cm-1"))}
 			cfg := Config{
-				Namespace:        testNS,
-				Snapshot:         testSnap,
-				SelectedNodeKind: "DemoVirtualDiskSnapshot",
-				SelectedNodeName: grandchild.GetName(),
-				Source:           src,
-				Dynamic:          wrapped,
-				Mapper:           testMapperWithDomain(),
-				Log:              discardLogger(),
-				PollInterval:     time.Millisecond,
+				Namespace:              testNS,
+				Snapshot:               testSnap,
+				SelectedNodeKind:       "DemoVirtualDiskSnapshot",
+				SelectedNodeName:       grandchild.GetName(),
+				SelectedNodeAPIVersion: domainDiskAPIVersion,
+				Source:                 src,
+				Dynamic:                wrapped,
+				Mapper:                 testMapperWithDomain(),
+				Log:                    discardLogger(),
+				PollInterval:           time.Millisecond,
 			}
 
 			err := Run(ctx, cfg)
@@ -2820,9 +3314,15 @@ func TestRun_SelectedNode_RejectedBeforeMutation(t *testing.T) {
 
 				return []runtime.Object{root, first, second}
 			},
-			selectedKind:   "DemoVirtualDisk",
-			selectedName:   "bk-shared",
-			wantErrSubstrs: []string{"ambiguous", "nss-child-first", "nss-child-second", "generated snapshot-CR Kind/name"},
+			selectedKind: "DemoVirtualDisk",
+			selectedName: "bk-shared",
+			wantErrSubstrs: []string{
+				"ambiguous",
+				"nss-child-first",
+				"nss-child-second",
+				"--node DemoVirtualDiskSnapshot/nss-child-first",
+				"--node-api-version " + domainDiskAPIVersion,
+			},
 		},
 	}
 

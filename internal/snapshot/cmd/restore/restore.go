@@ -40,14 +40,15 @@ import (
 const (
 	cmdUse = "restore"
 
-	flagNamespace = "namespace"
-	flagNode      = "node"
-	flagScope     = "scope"
-	flagObject    = "object"
-	flagDryRun    = "dry-run"
-	flagEdit      = "edit"
-	flagWait      = "wait"
-	flagTimeout   = "timeout"
+	flagNamespace      = "namespace"
+	flagNode           = "node"
+	flagNodeAPIVersion = "node-api-version"
+	flagScope          = "scope"
+	flagObject         = "object"
+	flagDryRun         = "dry-run"
+	flagEdit           = "edit"
+	flagWait           = "wait"
+	flagTimeout        = "timeout"
 )
 
 // NewCommand builds the `d8 snapshot restore` cobra command.
@@ -77,6 +78,10 @@ anchors the hierarchy and must exist; the selection may use either the generated
 Kind/name or the original captured source Kind/name. A Ready child remains restorable when
 the root is DEGRADED because an unrelated sibling CR was deleted.
 
+--node-api-version disambiguates nodes whose selected Kind/name is shared across API groups
+or versions. Use "v1" for the Kubernetes core group, or "<group>/<version>" for a named group.
+It requires --node and must match the generated or original identity used by that selection.
+
 --scope narrows how much of the addressed node (the root, or --node's selection) the server
 compiles: "subtree" (default) compiles the node and its whole subtree, recursively; "node"
 compiles only the addressed node itself, with no descendants. --scope node with no --node
@@ -104,6 +109,9 @@ StorageClass are still awaited until Bound or --timeout as before.`,
   # snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123) still works too
   d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a
 
+  # Disambiguate identical Kind/name identities from different API groups or versions
+  d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a --node-api-version virtualization.deckhouse.io/v1alpha2
+
   # Restore only the selected node itself, no descendants
   d8 snapshot restore my-snap -n default --node DemoVirtualDisk/bk-disk-a --scope node
 
@@ -126,6 +134,7 @@ StorageClass are still awaited until Bound or --timeout as before.`,
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
 	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123) is still accepted")
+	cmd.Flags().String(flagNodeAPIVersion, "", "disambiguate --node by exact API version: 'v1' for core resources or '<group>/<version>' for named groups (requires --node)")
 	cmd.Flags().String(flagScope, string(aggapi.RestoreScopeSubtree), "restore scope: 'subtree' (default) compiles the addressed node and its whole subtree; 'node' compiles only the addressed node itself")
 	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
@@ -167,6 +176,19 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	selectedKind, selectedName, err := parseNodeFlag(nodeFlag)
 	if err != nil {
 		return fmt.Errorf("invalid --%s %q: %w", flagNode, nodeFlag, err)
+	}
+
+	selectedAPIVersion, err := cmd.Flags().GetString(flagNodeAPIVersion)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNodeAPIVersion, err)
+	}
+
+	if selectedAPIVersion != "" && selectedKind == "" {
+		return fmt.Errorf("--%s requires --%s", flagNodeAPIVersion, flagNode)
+	}
+
+	if err := restore.ValidateNodeAPIVersion(selectedAPIVersion); err != nil {
+		return fmt.Errorf("invalid --%s %q: %w", flagNodeAPIVersion, selectedAPIVersion, err)
 	}
 
 	scopeFlag, err := cmd.Flags().GetString(flagScope)
@@ -239,21 +261,22 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := restore.Config{
-		Namespace:        namespace,
-		Snapshot:         snapshotName,
-		SelectedNodeKind: selectedKind,
-		SelectedNodeName: selectedName,
-		Scope:            scope,
-		FilterKind:       filterKind,
-		FilterName:       filterName,
-		Edit:             edit,
-		DryRun:           dryRun,
-		Wait:             wait,
-		Timeout:          timeout,
-		Source:           aggClient,
-		Dynamic:          dynClient,
-		Mapper:           kubeClient.RESTMapper(),
-		Log:              log,
+		Namespace:              namespace,
+		Snapshot:               snapshotName,
+		SelectedNodeKind:       selectedKind,
+		SelectedNodeName:       selectedName,
+		SelectedNodeAPIVersion: selectedAPIVersion,
+		Scope:                  scope,
+		FilterKind:             filterKind,
+		FilterName:             filterName,
+		Edit:                   edit,
+		DryRun:                 dryRun,
+		Wait:                   wait,
+		Timeout:                timeout,
+		Source:                 aggClient,
+		Dynamic:                dynClient,
+		Mapper:                 kubeClient.RESTMapper(),
+		Log:                    log,
 	}
 
 	log.Info("starting snapshot restore",

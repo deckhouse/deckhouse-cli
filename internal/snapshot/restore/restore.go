@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -124,6 +125,10 @@ type Config struct {
 	SelectedNodeKind string
 	// SelectedNodeName is the name of the selected node. Required when SelectedNodeKind is set.
 	SelectedNodeName string
+	// SelectedNodeAPIVersion optionally restricts generated and original identities to
+	// one exact Kubernetes apiVersion. Core resources use "v1"; named groups use
+	// "<group>/<version>".
+	SelectedNodeAPIVersion string
 
 	// Scope narrows the server-side manifest compilation: aggapi.RestoreScopeSubtree (the
 	// zero value behaves identically) compiles the addressed node and its whole subtree;
@@ -209,9 +214,8 @@ func Run(ctx context.Context, cfg Config) error {
 		ref, obj, err := cfg.resolveNodeRef(ctx)
 		if err != nil {
 			return fmt.Errorf(
-				"resolve selected node %s/%s within Snapshot %s/%s: %w",
-				cfg.SelectedNodeKind,
-				cfg.SelectedNodeName,
+				"resolve selected node %s within Snapshot %s/%s: %w",
+				cfg.selectedNodeDescription(),
 				cfg.Namespace,
 				cfg.Snapshot,
 				err,
@@ -323,6 +327,10 @@ func validate(cfg Config) error {
 		return fmt.Errorf("restore: Namespace must be set")
 	case cfg.Snapshot == "":
 		return fmt.Errorf("restore: Snapshot must be set")
+	case (cfg.SelectedNodeKind == "") != (cfg.SelectedNodeName == ""):
+		return fmt.Errorf("restore: SelectedNodeKind and SelectedNodeName must be set together")
+	case cfg.SelectedNodeAPIVersion != "" && cfg.SelectedNodeKind == "":
+		return fmt.Errorf("restore: SelectedNodeAPIVersion requires a selected node")
 	case cfg.Source == nil:
 		return fmt.Errorf("restore: Source must be set")
 	case cfg.Dynamic == nil:
@@ -330,8 +338,39 @@ func validate(cfg Config) error {
 	case cfg.Mapper == nil:
 		return fmt.Errorf("restore: Mapper must be set")
 	default:
+		return ValidateNodeAPIVersion(cfg.SelectedNodeAPIVersion)
+	}
+}
+
+// ValidateNodeAPIVersion validates the canonical apiVersion syntax accepted by
+// --node-api-version and persisted Kubernetes object identities.
+func ValidateNodeAPIVersion(apiVersion string) error {
+	if apiVersion == "" {
 		return nil
 	}
+
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return fmt.Errorf("parse Kubernetes apiVersion: %w", err)
+	}
+
+	if gv.Version == "" || gv.String() != apiVersion {
+		return fmt.Errorf("must be 'v1' for the core group or '<group>/<version>' for a named group")
+	}
+
+	if versionErrors := validation.IsDNS1035Label(gv.Version); len(versionErrors) != 0 {
+		return fmt.Errorf("invalid version %q: %s", gv.Version, strings.Join(versionErrors, "; "))
+	}
+
+	if gv.Group == "" {
+		return nil
+	}
+
+	if groupErrors := validation.IsDNS1123Subdomain(gv.Group); len(groupErrors) != 0 {
+		return fmt.Errorf("invalid API group %q: %s", gv.Group, strings.Join(groupErrors, "; "))
+	}
+
+	return nil
 }
 
 // preflightRootSnapshot verifies the source Snapshot is Ready and has a bound SnapshotContent.
@@ -886,13 +925,15 @@ func (cfg Config) resourceForGroupKind(group, kind string) (schema.GroupVersionR
 }
 
 type nodeMatch struct {
-	ref aggapi.NodeRef
-	obj *unstructured.Unstructured
+	ref         aggapi.NodeRef
+	obj         *unstructured.Unstructured
+	apiVersions []string
 }
 
 type nodeIdentity struct {
-	kind string
-	name string
+	apiVersion string
+	kind       string
+	name       string
 }
 
 type nodeResolver struct {
@@ -929,9 +970,8 @@ func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstruct
 	switch len(resolver.matches) {
 	case 0:
 		return aggapi.NodeRef{}, nil, fmt.Errorf(
-			"%s/%s does not belong to Snapshot %s/%s",
-			cfg.SelectedNodeKind,
-			cfg.SelectedNodeName,
+			"%s does not belong to Snapshot %s/%s",
+			cfg.selectedNodeDescription(),
 			cfg.Namespace,
 			cfg.Snapshot,
 		)
@@ -939,24 +979,63 @@ func (cfg Config) resolveNodeRef(ctx context.Context) (aggapi.NodeRef, *unstruct
 		return resolver.matches[0].ref, resolver.matches[0].obj, nil
 	default:
 		candidates := make([]string, 0, len(resolver.matches))
+		reruns := make([]string, 0, len(resolver.matches))
+		apiVersionCounts := make(map[string]int)
+
+		for _, match := range resolver.matches {
+			for _, apiVersion := range match.apiVersions {
+				apiVersionCounts[apiVersion]++
+			}
+		}
+
 		for _, match := range resolver.matches {
 			candidates = append(candidates, fmt.Sprintf(
-				"%s %s/%s",
+				"%s %s/%s (matching apiVersions: %s)",
 				match.ref.APIVersion,
 				match.ref.Kind,
 				match.ref.Name,
+				strings.Join(match.apiVersions, ", "),
 			))
+
+			for _, apiVersion := range match.apiVersions {
+				kind := cfg.SelectedNodeKind
+				name := cfg.SelectedNodeName
+
+				if apiVersionCounts[apiVersion] > 1 {
+					apiVersion = match.ref.APIVersion
+					kind = match.ref.Kind
+					name = match.ref.Name
+				}
+
+				reruns = append(reruns, fmt.Sprintf(
+					"d8 snapshot restore %s -n %s --node %s/%s --node-api-version %s",
+					cfg.Snapshot,
+					cfg.Namespace,
+					kind,
+					name,
+					apiVersion,
+				))
+			}
 		}
 
 		return aggapi.NodeRef{}, nil, fmt.Errorf(
-			"%s/%s is ambiguous within Snapshot %s/%s; matching snapshot nodes: %s; select one by its generated snapshot-CR Kind/name",
-			cfg.SelectedNodeKind,
-			cfg.SelectedNodeName,
+			"%s is ambiguous within Snapshot %s/%s; matching snapshot nodes: %s; rerun with an exact apiVersion: %s",
+			cfg.selectedNodeDescription(),
 			cfg.Namespace,
 			cfg.Snapshot,
 			strings.Join(candidates, ", "),
+			strings.Join(reruns, " or "),
 		)
 	}
+}
+
+func (cfg Config) selectedNodeDescription() string {
+	identity := cfg.SelectedNodeKind + "/" + cfg.SelectedNodeName
+	if cfg.SelectedNodeAPIVersion == "" {
+		return identity
+	}
+
+	return cfg.SelectedNodeAPIVersion + " " + identity
 }
 
 func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstructured.Unstructured) error {
@@ -967,13 +1046,13 @@ func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstr
 
 	r.seen[key] = struct{}{}
 
-	matches, err := r.matchesSelector(obj, ref)
+	apiVersions, err := r.matchingAPIVersions(obj, ref)
 	if err != nil {
 		return err
 	}
 
-	if matches {
-		r.matches = append(r.matches, nodeMatch{ref: ref, obj: obj})
+	if len(apiVersions) != 0 {
+		r.matches = append(r.matches, nodeMatch{ref: ref, obj: obj, apiVersions: apiVersions})
 	}
 
 	childRefs, err := snapshotChildRefs(obj)
@@ -1006,23 +1085,53 @@ func (r *nodeResolver) visit(ctx context.Context, ref aggapi.NodeRef, obj *unstr
 	return nil
 }
 
-func (r *nodeResolver) matchesSelector(obj *unstructured.Unstructured, ref aggapi.NodeRef) (bool, error) {
+func (r *nodeResolver) matchingAPIVersions(obj *unstructured.Unstructured, ref aggapi.NodeRef) ([]string, error) {
 	sourceRef, hasSourceRef, err := snapshotSourceIdentity(obj, ref)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
 	importSourceRef, hasImportSourceRef, err := importSourceIdentity(obj, ref)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 
-	generatedMatches := ref.Kind == r.cfg.SelectedNodeKind && ref.Name == r.cfg.SelectedNodeName
-	sourceMatches := hasSourceRef && sourceRef.matches(r.cfg.SelectedNodeKind, r.cfg.SelectedNodeName)
-	importSourceMatches := hasImportSourceRef &&
-		importSourceRef.matches(r.cfg.SelectedNodeKind, r.cfg.SelectedNodeName)
+	identities := make([]nodeIdentity, 0, 3)
+	identities = append(identities, nodeIdentity{
+		apiVersion: ref.APIVersion,
+		kind:       ref.Kind,
+		name:       ref.Name,
+	})
 
-	return generatedMatches || sourceMatches || importSourceMatches, nil
+	if hasSourceRef {
+		identities = append(identities, sourceRef)
+	}
+
+	if hasImportSourceRef {
+		identities = append(identities, importSourceRef)
+	}
+
+	apiVersions := make([]string, 0, len(identities))
+	seenAPIVersions := make(map[string]struct{}, len(identities))
+
+	for _, identity := range identities {
+		if !identity.matches(
+			r.cfg.SelectedNodeKind,
+			r.cfg.SelectedNodeName,
+			r.cfg.SelectedNodeAPIVersion,
+		) {
+			continue
+		}
+
+		if _, seen := seenAPIVersions[identity.apiVersion]; seen {
+			continue
+		}
+
+		seenAPIVersions[identity.apiVersion] = struct{}{}
+		apiVersions = append(apiVersions, identity.apiVersion)
+	}
+
+	return apiVersions, nil
 }
 
 func snapshotSourceIdentity(
@@ -1057,6 +1166,17 @@ func snapshotSourceIdentity(
 		)
 	}
 
+	if err := ValidateNodeAPIVersion(sourceAPIVersion); err != nil {
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: status.sourceRef.apiVersion %q is invalid: %w",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			sourceAPIVersion,
+			err,
+		)
+	}
+
 	for _, optionalField := range []string{"namespace", "uid"} {
 		if value, exists := sourceRef[optionalField]; exists {
 			if _, ok := value.(string); !ok {
@@ -1073,8 +1193,9 @@ func snapshotSourceIdentity(
 	}
 
 	return nodeIdentity{
-		kind: sourceKind,
-		name: sourceName,
+		apiVersion: sourceAPIVersion,
+		kind:       sourceKind,
+		name:       sourceName,
 	}, true, nil
 }
 
@@ -1114,6 +1235,18 @@ func importSourceIdentity(
 		)
 	}
 
+	if err := ValidateNodeAPIVersion(sourceRef.APIVersion); err != nil {
+		return nodeIdentity{}, false, fmt.Errorf(
+			"%s %s/%s: malformed %s annotation: apiVersion %q is invalid: %w",
+			ref.APIVersion,
+			ref.Kind,
+			ref.Name,
+			snapshotapi.AnnotationImportSourceRef,
+			sourceRef.APIVersion,
+			err,
+		)
+	}
+
 	canonical, err := json.Marshal(sourceRef)
 	if err != nil {
 		return nodeIdentity{}, false, fmt.Errorf("marshal import source reference: %w", err)
@@ -1131,13 +1264,14 @@ func importSourceIdentity(
 	}
 
 	return nodeIdentity{
-		kind: sourceRef.Kind,
-		name: sourceRef.Name,
+		apiVersion: sourceRef.APIVersion,
+		kind:       sourceRef.Kind,
+		name:       sourceRef.Name,
 	}, true, nil
 }
 
-func (i nodeIdentity) matches(kind, name string) bool {
-	return i.kind == kind && i.name == name
+func (i nodeIdentity) matches(kind, name, apiVersion string) bool {
+	return i.kind == kind && i.name == name && (apiVersion == "" || i.apiVersion == apiVersion)
 }
 
 func (cfg Config) getSnapshotNode(ctx context.Context, ref aggapi.NodeRef) (*unstructured.Unstructured, error) {
@@ -1195,6 +1329,10 @@ func snapshotChildRefs(obj *unstructured.Unstructured) ([]snapshotapi.SnapshotCh
 
 		if apiVersion == "" || kind == "" || name == "" {
 			return nil, fmt.Errorf("element %d is incomplete (apiVersion/kind/name required)", i)
+		}
+
+		if err := ValidateNodeAPIVersion(apiVersion); err != nil {
+			return nil, fmt.Errorf("element %d has invalid apiVersion %q: %w", i, apiVersion, err)
 		}
 
 		refs = append(refs, snapshotapi.SnapshotChildRef{
