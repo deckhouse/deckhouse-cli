@@ -98,8 +98,9 @@ func (s *fakeStream) Fail() {
 // in creation order, so a test can inspect exactly which terminal method each
 // stream received.
 type fakeSink struct {
-	mu      sync.Mutex
-	streams []*fakeStream
+	mu           sync.Mutex
+	streams      []*fakeStream
+	volumeTotals []int
 }
 
 func (s *fakeSink) NewStream(_ string, _ int64) progress.Stream {
@@ -112,8 +113,13 @@ func (s *fakeSink) NewStream(_ string, _ int64) progress.Stream {
 	return fs
 }
 
-func (s *fakeSink) SetVolumeTotal(int) {}
-func (s *fakeSink) Wait()              {}
+func (s *fakeSink) SetVolumeTotal(total int) {
+	s.mu.Lock()
+	s.volumeTotals = append(s.volumeTotals, total)
+	s.mu.Unlock()
+}
+
+func (s *fakeSink) Wait() {}
 
 func (s *fakeSink) LogWriter() io.Writer { return io.Discard }
 
@@ -125,6 +131,154 @@ func (s *fakeSink) snapshot() []*fakeStream {
 	copy(out, s.streams)
 
 	return out
+}
+
+func (s *fakeSink) snapshotVolumeTotals() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]int, len(s.volumeTotals))
+	copy(out, s.volumeTotals)
+
+	return out
+}
+
+func (s *fakeSink) volumeTotalState() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.volumeTotals) == 0 {
+		return 0, 0
+	}
+
+	return len(s.volumeTotals), s.volumeTotals[len(s.volumeTotals)-1]
+}
+
+type volumeTotalObservation struct {
+	callCount int
+	total     int
+}
+
+type volumeTotalCheckingVolumes struct {
+	sink *fakeSink
+
+	mu           sync.Mutex
+	observations []volumeTotalObservation
+}
+
+func (v *volumeTotalCheckingVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (v *volumeTotalCheckingVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	callCount, total := v.sink.volumeTotalState()
+
+	v.mu.Lock()
+	v.observations = append(v.observations, volumeTotalObservation{callCount: callCount, total: total})
+	v.mu.Unlock()
+
+	return leaf.Name, nil
+}
+
+func (v *volumeTotalCheckingVolumes) UploadVolumeData(
+	_ context.Context,
+	_ PlannedNode,
+	_, _ string,
+	_ func(int64),
+	_ func(int),
+	_ func(),
+) error {
+	return nil
+}
+
+func (v *volumeTotalCheckingVolumes) snapshot() []volumeTotalObservation {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	out := make([]volumeTotalObservation, len(v.observations))
+	copy(out, v.observations)
+
+	return out
+}
+
+func assertVolumeTotalBeforeUploads(
+	t *testing.T,
+	sink *fakeSink,
+	volumes *volumeTotalCheckingVolumes,
+	want int,
+) {
+	t.Helper()
+
+	totals := sink.snapshotVolumeTotals()
+	if len(totals) != 1 || totals[0] != want {
+		t.Fatalf("SetVolumeTotal calls = %v, want exactly [%d]", totals, want)
+	}
+
+	observations := volumes.snapshot()
+	if len(observations) != want {
+		t.Fatalf("volume upload starts = %d, want %d", len(observations), want)
+	}
+
+	for i, observation := range observations {
+		if observation.callCount != 1 || observation.total != want {
+			t.Errorf("volume upload %d observed SetVolumeTotal state = {calls: %d, total: %d}, want {calls: 1, total: %d}",
+				i, observation.callCount, observation.total, want)
+		}
+	}
+}
+
+func TestRun_SetVolumeTotal_ReflectsDataLeafCount(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		leaves int
+	}{
+		{name: "no data leaves", leaves: 0},
+		{name: "one data leaf", leaves: 1},
+		{name: "multiple data leaves", leaves: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _ := buildMultiLeafArchive(t, test.leaves)
+			sink := &fakeSink{}
+			volumes := &volumeTotalCheckingVolumes{sink: sink}
+
+			cfg := baseConfig(root, &stubUploader{}, volumes, newFakeDynamic(readyRootSnapshot()))
+			cfg.Progress = sink
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			assertVolumeTotalBeforeUploads(t, sink, volumes, test.leaves)
+		})
+	}
+
+	t.Run("selected node uses subtree total", func(t *testing.T) {
+		root, leafNames := buildMultiLeafArchive(t, 3)
+		selectedLeaf := readyImportLeafVS()
+		selectedLeaf.SetName(leafNames[1])
+
+		sink := &fakeSink{}
+		volumes := &volumeTotalCheckingVolumes{sink: sink}
+
+		cfg := baseConfig(root, &stubUploader{}, volumes, newFakeDynamic(selectedLeaf))
+		cfg.SelectedNodeKind = volumeSnapshotKind
+		cfg.SelectedNodeName = leafNames[1]
+		cfg.Progress = sink
+
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		assertVolumeTotalBeforeUploads(t, sink, volumes, 1)
+	})
+
+	t.Run("nil progress is a no-op", func(t *testing.T) {
+		root, _ := buildMultiLeafArchive(t, 2)
+		cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic(readyRootSnapshot()))
+		cfg.Progress = nil
+
+		if err := Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	})
 }
 
 // failingVolumes is a VolumeImporter stub whose UploadVolumeData always fails,

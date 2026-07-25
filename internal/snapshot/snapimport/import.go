@@ -291,6 +291,18 @@ func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedA
 		}
 	}
 
+	if cfg.Progress != nil {
+		volumeTotal := 0
+
+		for _, node := range plan {
+			if node.isVolumeSnapshotLeaf() || node.isDomainDataLeaf() {
+				volumeTotal++
+			}
+		}
+
+		cfg.Progress.SetVolumeTotal(volumeTotal)
+	}
+
 	// Pass 2b: import each data leaf's volume bytes with bounded concurrency. The DataImport
 	// is created immediately before the upload so its idle TTL window stays minimal.
 	// The first leaf error cancels all in-flight siblings via gctx.
