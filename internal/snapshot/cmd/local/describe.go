@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/localscan"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/treeview"
 )
@@ -30,8 +31,16 @@ import (
 // NewDescribeCommand builds the `d8 snapshot local describe` cobra command.
 func NewDescribeCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:           "describe <DIR>",
-		Short:         "Show the structure of a locally downloaded snapshot archive as a tree",
+		Use:   "describe <DIR>",
+		Short: "Show the structure of a locally downloaded snapshot archive as a tree",
+		Long: `Show the structure of a locally downloaded snapshot archive as a tree.
+
+By default, every node's content checksum and authenticated snapshot.yaml metadata are
+verified before any output is rendered. Legacy archives without formatVersion and
+metadataChecksum are rejected because their identity and volume metadata are unauthenticated.
+Use --allow-unauthenticated-legacy only to inspect a trusted pre-version archive; the command
+emits a warning because compatibility mode cannot distinguish a genuine legacy archive from a
+downgraded and tampered current archive.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ExactArgs(1),
@@ -44,6 +53,12 @@ func NewDescribeCommand(log *slog.Logger) *cobra.Command {
 			return runDescribe(log, cmd, args)
 		},
 	}
+
+	cmd.Flags().Bool(
+		flagAllowUnauthenticatedLegacy,
+		false,
+		"allow trusted pre-version archives with unauthenticated snapshot.yaml metadata (unsafe compatibility mode)",
+	)
 
 	return cmd
 }
@@ -58,7 +73,20 @@ func runDescribe(log *slog.Logger, cmd *cobra.Command, args []string) error {
 
 	log.Debug("scanning archive", slog.String("dir", absDir))
 
-	root, err := localscan.Scan(absDir)
+	allowUnauthenticatedLegacy, err := cmd.Flags().GetBool(flagAllowUnauthenticatedLegacy)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagAllowUnauthenticatedLegacy, err)
+	}
+
+	if allowUnauthenticatedLegacy {
+		log.Warn("allowing unauthenticated legacy snapshot metadata",
+			slog.String("warning",
+				"legacy compatibility cannot distinguish a genuine pre-version archive from a downgraded tampered archive"))
+	}
+
+	root, err := localscan.ScanVerifiedWithOptions(absDir, archive.SnapshotYAMLReadOptions{
+		AllowUnauthenticatedLegacy: allowUnauthenticatedLegacy,
+	})
 	if err != nil {
 		return fmt.Errorf("scanning archive directory %q: %w", absDir, err)
 	}

@@ -89,6 +89,30 @@ func Scan(root string) (*Node, error) {
 	return ScanWithLimits(root, DefaultScanLimits())
 }
 
+// ScanVerified walks an archive with the default traversal limits and verifies every node's
+// content checksum and structural metadata before returning the tree.
+func ScanVerified(root string) (*Node, error) {
+	return ScanVerifiedWithOptions(root, archive.SnapshotYAMLReadOptions{})
+}
+
+// ScanVerifiedWithOptions verifies every node under an explicit snapshot.yaml compatibility policy.
+func ScanVerifiedWithOptions(
+	root string,
+	options archive.SnapshotYAMLReadOptions,
+) (*Node, error) {
+	return ScanVerifiedWithLimitsAndOptions(root, DefaultScanLimits(), options)
+}
+
+// ScanVerifiedWithLimitsAndOptions verifies every node subject to explicit traversal limits
+// and snapshot.yaml compatibility policy.
+func ScanVerifiedWithLimitsAndOptions(
+	root string,
+	limits ScanLimits,
+	options archive.SnapshotYAMLReadOptions,
+) (*Node, error) {
+	return scan(root, limits, options, true)
+}
+
 // ScanWithOptions scans an archive under an explicit snapshot.yaml compatibility policy.
 func ScanWithOptions(
 	root string,
@@ -124,6 +148,15 @@ func ScanWithLimitsAndOptions(
 	limits ScanLimits,
 	options archive.SnapshotYAMLReadOptions,
 ) (*Node, error) {
+	return scan(root, limits, options, false)
+}
+
+func scan(
+	root string,
+	limits ScanLimits,
+	options archive.SnapshotYAMLReadOptions,
+	verifyIntegrity bool,
+) (*Node, error) {
 	if limits.MaxDepth < 0 {
 		return nil, fmt.Errorf("local snapshot scan maxDepth must be non-negative: %w", ErrScanBudget)
 	}
@@ -145,6 +178,7 @@ func ScanWithLimitsAndOptions(
 		root:                root,
 		limits:              limits,
 		snapshotReadOptions: options,
+		verifyIntegrity:     verifyIntegrity,
 	}
 
 	return scanner.scanDir(root, 0)
@@ -154,6 +188,7 @@ type treeScanner struct {
 	root                string
 	limits              ScanLimits
 	snapshotReadOptions archive.SnapshotYAMLReadOptions
+	verifyIntegrity     bool
 	nodeCount           int
 }
 
@@ -183,6 +218,16 @@ func (s *treeScanner) scanDir(dir string, depth int) (*Node, error) {
 	sy, err := archive.ReadSnapshotYAMLWithOptions(dir, s.snapshotReadOptions)
 	if err != nil {
 		return nil, fmt.Errorf("read node at %s: %w", dir, err)
+	}
+
+	if s.verifyIntegrity {
+		if err := archive.VerifyNodeWithOptions(dir, s.snapshotReadOptions); err != nil {
+			return nil, fmt.Errorf("verify node at %s: %w", dir, err)
+		}
+
+		if err := archive.ValidateNodeMetadataWithOptions(dir, s.snapshotReadOptions); err != nil {
+			return nil, fmt.Errorf("validate node metadata at %s: %w", dir, err)
+		}
 	}
 
 	rel, err := filepath.Rel(s.root, dir)

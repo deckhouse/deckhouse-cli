@@ -143,6 +143,175 @@ func TestScanRequiresExplicitLegacyCompatibility(t *testing.T) {
 	}
 }
 
+func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T) string
+		limits  localscan.ScanLimits
+		wantErr error
+	}{
+		{
+			name: "valid tree",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
+				})
+				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+				if err := os.MkdirAll(filepath.Join(child, archive.ManifestsDirName), 0o755); err != nil {
+					t.Fatalf("create child manifests: %v", err)
+				}
+
+				if err := os.WriteFile(
+					filepath.Join(child, archive.ManifestsDirName, "configmap_child.yaml"),
+					[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: child\n"),
+					0o600,
+				); err != nil {
+					t.Fatalf("write child manifest: %v", err)
+				}
+
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "child",
+				})
+
+				return root
+			},
+			limits: localscan.DefaultScanLimits(),
+		},
+		{
+			name: "corrupt child manifest",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
+				})
+				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+				if err := os.MkdirAll(filepath.Join(child, archive.ManifestsDirName), 0o755); err != nil {
+					t.Fatalf("create child manifests: %v", err)
+				}
+
+				manifest := filepath.Join(child, archive.ManifestsDirName, "configmap_child.yaml")
+				if err := os.WriteFile(manifest, []byte("original"), 0o600); err != nil {
+					t.Fatalf("write child manifest: %v", err)
+				}
+
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "child",
+				})
+
+				if err := os.WriteFile(manifest, []byte("corrupt"), 0o600); err != nil {
+					t.Fatalf("corrupt child manifest: %v", err)
+				}
+
+				return root
+			},
+			limits:  localscan.DefaultScanLimits(),
+			wantErr: archive.ErrChecksumMismatch,
+		},
+		{
+			name: "invalid structural metadata",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					Kind: "Snapshot",
+					Name: "root",
+				})
+
+				return root
+			},
+			limits:  localscan.DefaultScanLimits(),
+			wantErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "node budget",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
+				})
+				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+				if err := os.MkdirAll(child, 0o755); err != nil {
+					t.Fatalf("create child: %v", err)
+				}
+
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "child",
+				})
+
+				return root
+			},
+			limits: localscan.ScanLimits{
+				MaxDepth: 64,
+				MaxNodes: 1,
+			},
+			wantErr: localscan.ErrScanBudget,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.prepare(t)
+
+			node, err := localscan.ScanVerifiedWithLimitsAndOptions(
+				root,
+				test.limits,
+				archive.SnapshotYAMLReadOptions{},
+			)
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("ScanVerifiedWithLimitsAndOptions() error = %v, want %v", err, test.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ScanVerifiedWithLimitsAndOptions(): %v", err)
+			}
+
+			if len(node.Children) != 1 {
+				t.Fatalf("verified children = %d, want 1", len(node.Children))
+			}
+		})
+	}
+}
+
+func finalizeVerifiedNode(t *testing.T, dir string, sy archive.SnapshotYAML) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Join(dir, archive.ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("create manifests directory for %s: %v", dir, err)
+	}
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("compute checksum for %s: %v", dir, err)
+	}
+
+	sy.Checksum = checksum
+	writeNodeYAML(t, dir, sy)
+}
+
 func TestScan_RootWithDirectChildren(t *testing.T) {
 	t.Parallel()
 
