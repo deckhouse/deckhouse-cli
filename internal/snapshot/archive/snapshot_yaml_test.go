@@ -143,6 +143,89 @@ func TestReadSnapshotYAMLRejectsSymlinkBeforeReadingTarget(t *testing.T) {
 	}
 }
 
+func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
+	tests := []struct {
+		name                 string
+		write                func(t *testing.T, nodeDir string)
+		wantVersion          int
+		wantMetadataChecksum bool
+		wantErr              error
+	}{
+		{
+			name: "current version round trip",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				err := archive.WriteSnapshotYAML(nodeDir, archive.SnapshotYAML{
+					FormatVersion: archive.SnapshotFormatVersionCurrent,
+					APIVersion:    "snapshot.example.io/v1",
+					Kind:          "Snapshot",
+					Name:          "current",
+					Checksum:      validChecksum(),
+				})
+				if err != nil {
+					t.Fatalf("WriteSnapshotYAML: %v", err)
+				}
+			},
+			wantVersion:          archive.SnapshotFormatVersionCurrent,
+			wantMetadataChecksum: true,
+		},
+		{
+			name: "unknown future major",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := []byte("formatVersion: 2\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: future\n")
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write future snapshot.yaml: %v", err)
+				}
+			},
+			wantErr: archive.ErrUnsupportedSnapshotFormat,
+		},
+		{
+			name: "legacy unversioned archive",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := []byte("apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n")
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write legacy snapshot.yaml: %v", err)
+				}
+			},
+			wantVersion: archive.SnapshotFormatVersionLegacy,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			tt.write(t, nodeDir)
+
+			got, err := archive.ReadSnapshotYAML(nodeDir)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ReadSnapshotYAML error = %v, want %v", err, tt.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ReadSnapshotYAML: %v", err)
+			}
+
+			if got.FormatVersion != tt.wantVersion {
+				t.Errorf("FormatVersion = %d, want %d", got.FormatVersion, tt.wantVersion)
+			}
+
+			if (got.MetadataChecksum != nil) != tt.wantMetadataChecksum {
+				t.Errorf("MetadataChecksum presence = %t, want %t",
+					got.MetadataChecksum != nil, tt.wantMetadataChecksum)
+			}
+		})
+	}
+}
+
 func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
 	tests := []struct {
 		name  string

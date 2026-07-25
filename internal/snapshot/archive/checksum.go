@@ -938,7 +938,8 @@ func wrapAuthIndexCleanupError(err error) error {
 //   - data.tar (filesystem volume, single-volume flat layout, if present)
 //   - data/<pvc>.bin[.<ext>] / data/<pvc>.tar (multi-volume layout, if data/ present)
 //
-// Excluded: snapshot.yaml itself and the snapshots/ child directory.
+// Excluded: snapshot.yaml itself and the snapshots/ child directory. Versioned snapshot.yaml
+// semantic fields are covered separately by SnapshotYAML.MetadataChecksum.
 //
 // Each file contributes its relative path (null-terminated) followed by its
 // raw content to an independent per-file SHA-256. All per-file digests are
@@ -994,9 +995,10 @@ func ShortChecksum(hex string) string {
 	return hex
 }
 
-// VerifyNode recomputes the checksum for nodeDir and compares it with the value
-// stored in snapshot.yaml. Returns ErrSnapshotYAMLMissing if snapshot.yaml is absent,
-// ErrChecksumMismatch if the digests differ.
+// VerifyNode validates snapshot.yaml's versioned metadata checksum, then recomputes the node
+// content checksum and compares it with the stored value. Returns ErrSnapshotYAMLMissing if
+// snapshot.yaml is absent, ErrSnapshotMetadataChecksumMismatch if versioned metadata differs,
+// and ErrChecksumMismatch if the content digests differ.
 func VerifyNode(nodeDir string) error {
 	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
@@ -1027,12 +1029,11 @@ func VerifyNode(nodeDir string) error {
 	return nil
 }
 
-// ValidateNodeMetadata reads nodeDir's snapshot.yaml and strictly validates its metadata via
-// ValidateSnapshotYAML, deriving the node's data-payload flags from the directory itself
-// (ClassifyBlockPayload for data.bin[.<ext>], OpenRegularFile for data.tar). It complements VerifyNode:
-// VerifyNode checks the integrity digest over the node's files, while snapshot.yaml — excluded
-// from that digest — is validated here. Returns ErrSnapshotYAMLMissing when snapshot.yaml is
-// absent, and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
+// ValidateNodeMetadata reads nodeDir's snapshot.yaml and strictly validates its envelope and
+// metadata via ValidateSnapshotYAML, deriving the node's data-payload flags from the directory
+// itself (ClassifyBlockPayload for data.bin[.<ext>], OpenRegularFile for data.tar). It complements
+// VerifyNode's content checksum. Returns ErrSnapshotYAMLMissing when snapshot.yaml is absent,
+// and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
 func ValidateNodeMetadata(nodeDir string) error {
 	source, err := OpenRootedSource(nodeDir)
 	if err != nil {

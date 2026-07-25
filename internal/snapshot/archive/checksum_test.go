@@ -601,6 +601,81 @@ func TestVerifyNode_OK(t *testing.T) {
 	}
 }
 
+func TestVerifyNodeRejectsSemanticSnapshotYAMLTampering(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "node identity", old: "archive-node-original", new: "archive-node-tampered"},
+		{name: "source object reference", old: "source-original", new: "source-tampered"},
+		{name: "storage class", old: "storage-original", new: "storage-tampered"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := makeNodeDir(t)
+			writeFile(t, filepath.Join(nodeDir, DataBlockName("")), "block-data")
+
+			checksum, err := ComputeNodeChecksum(nodeDir)
+			if err != nil {
+				t.Fatalf("compute checksum: %v", err)
+			}
+
+			snapshot := SnapshotYAML{
+				APIVersion: "snapshot.example.io/v1",
+				Kind:       "DiskSnapshot",
+				Name:       "archive-node-original",
+				SourceObjectRef: &SourceObjectRef{
+					APIVersion: "storage.example.io/v1",
+					Kind:       "Disk",
+					Name:       "source-original",
+				},
+				Checksum: checksum,
+				Volumes: []VolumeInfo{{
+					Target: VolumeObjectRef{
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Name:       "source-pvc",
+					},
+					Artifact: VolumeObjectRef{
+						APIVersion: "snapshot.storage.k8s.io/v1",
+						Kind:       "VolumeSnapshotContent",
+						Name:       "source-content",
+					},
+					VolumeMode:       VolumeModeBlock,
+					StorageClassName: "storage-original",
+					Size:             "1Gi",
+				}},
+			}
+
+			if err := WriteSnapshotYAML(nodeDir, snapshot); err != nil {
+				t.Fatalf("write snapshot.yaml: %v", err)
+			}
+
+			path := filepath.Join(nodeDir, SnapshotYAMLName)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read snapshot.yaml: %v", err)
+			}
+
+			tampered := bytes.Replace(data, []byte(tt.old), []byte(tt.new), 1)
+			if bytes.Equal(tampered, data) {
+				t.Fatalf("snapshot.yaml does not contain mutation source %q", tt.old)
+			}
+
+			if err := os.WriteFile(path, tampered, 0o644); err != nil {
+				t.Fatalf("tamper snapshot.yaml: %v", err)
+			}
+
+			err = VerifyNode(nodeDir)
+			if !errors.Is(err, ErrSnapshotMetadataChecksumMismatch) {
+				t.Fatalf("VerifyNode error = %v, want ErrSnapshotMetadataChecksumMismatch", err)
+			}
+		})
+	}
+}
+
 func TestVerifiedArchiveHandleSurvivesReplacementAndDetectsNamespaceChange(t *testing.T) {
 	nodeDir := makeNodeDir(t)
 	manifestPath := filepath.Join(nodeDir, ManifestsDirName, "configmap_app.yaml")

@@ -19,6 +19,8 @@ package archive
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,9 +33,16 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
-// ChecksumAlgorithmSHA256 is the only checksum algorithm the archive uses; it is the value
-// ComputeNodeChecksum records and ValidateSnapshotYAML requires in NodeChecksum.Algorithm.
-const ChecksumAlgorithmSHA256 = "sha256"
+const (
+	// ChecksumAlgorithmSHA256 is the only checksum algorithm the archive uses; it is the value
+	// ComputeNodeChecksum records and ValidateSnapshotYAML requires in NodeChecksum.Algorithm.
+	ChecksumAlgorithmSHA256 = "sha256"
+	// SnapshotFormatVersionLegacy identifies archives written before explicit envelope versioning.
+	// Version zero retains the former permissive metadata behavior for compatibility.
+	SnapshotFormatVersionLegacy = 0
+	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal.
+	SnapshotFormatVersionCurrent = 1
+)
 
 // sha256HexLen is the length of a hex-encoded SHA-256 digest (32 bytes → 64 hex chars).
 const sha256HexLen = 64
@@ -55,15 +64,23 @@ var ErrNonRegularArchiveArtifact = errors.New("non-regular archive artifact")
 var ErrArchiveMountBoundaryUnsupported = errors.New("archive mount-boundary verification unsupported")
 
 // ErrInvalidSnapshotYAML is returned by ValidateSnapshotYAML/ValidateNodeMetadata when a
-// node's snapshot.yaml violates a structural metadata invariant. snapshot.yaml is EXCLUDED
-// from the integrity digest (ComputeNodeChecksum/VerifyNode), so these invariants are not
-// covered by the checksum and must be validated separately before the archive is trusted.
+// node's snapshot.yaml violates a structural metadata invariant.
 var ErrInvalidSnapshotYAML = errors.New("invalid snapshot.yaml")
 
+// ErrUnsupportedSnapshotFormat is returned when snapshot.yaml declares an unknown format version.
+var ErrUnsupportedSnapshotFormat = errors.New("unsupported snapshot.yaml format version")
+
+// ErrSnapshotMetadataChecksumMismatch is returned when versioned snapshot.yaml metadata differs
+// from the canonical metadata digest recorded when the archive was written.
+var ErrSnapshotMetadataChecksumMismatch = errors.New("snapshot.yaml metadata checksum mismatch")
+
 // SnapshotYAML is the per-node file written at <nodeDir>/snapshot.yaml.
-// It records the snapshot CR identity and the locally-computed integrity checksum.
+// It records the versioned snapshot CR identity and locally-computed integrity checksums.
 // sigs.k8s.io/yaml uses json struct tags for marshaling and unmarshaling.
 type SnapshotYAML struct {
+	// FormatVersion identifies the snapshot.yaml envelope schema. Missing means the compatible
+	// legacy version zero; writers always stamp SnapshotFormatVersionCurrent.
+	FormatVersion int `json:"formatVersion,omitempty"`
 	// APIVersion is the apiVersion of the snapshot CR (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
 	APIVersion string `json:"apiVersion"`
 	// Kind is the kind of the snapshot CR (e.g. "Snapshot", "DemoVirtualDiskSnapshot").
@@ -74,22 +91,21 @@ type SnapshotYAML struct {
 	Namespace string `json:"namespace,omitempty"`
 	// UID is the metadata.uid of the snapshot CR. It is the identity component the resume
 	// scan matches (matchesIdentity), tying a node directory to the exact snapshot CR
-	// (including UID) rather than to the source-object name. Does not affect
-	// ComputeNodeChecksum because snapshot.yaml is excluded from the integrity digest.
+	// (including UID) rather than to the source-object name.
 	UID string `json:"uid,omitempty"`
 	// SourceName is the metadata.name of the original captured source object
 	// (status.sourceRef.name), recorded for readability. Omitted when the node has no
-	// source (e.g. some import nodes). It is NOT an identity component (resume uses UID)
-	// and does not affect ComputeNodeChecksum because snapshot.yaml is excluded from the
-	// integrity digest.
+	// source (e.g. some import nodes). It is NOT an identity component (resume uses UID).
 	SourceName string `json:"sourceName,omitempty"`
 	// SourceObjectRef carries the structured spec.sourceRef from a domain snapshot CR
 	// ({apiVersion,kind,name} of the source object). Absent for core Snapshot nodes and
-	// CSI VolumeSnapshot data leaves. Does not affect ComputeNodeChecksum because
-	// snapshot.yaml is excluded from the integrity digest.
+	// CSI VolumeSnapshot data leaves.
 	SourceObjectRef *SourceObjectRef `json:"sourceObjectRef,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
+	// MetadataChecksum covers the canonical versioned envelope except this field itself.
+	// It is absent only on compatible legacy version-zero archives.
+	MetadataChecksum *NodeChecksum `json:"metadataChecksum,omitempty"`
 	// Volumes lists the captured PVC volumes owned by this node.
 	//
 	//   - A node that captured its own volume (namespaced status.data present) carries
@@ -97,10 +113,97 @@ type SnapshotYAML struct {
 	//     non-aggregator domain nodes and orphan leaf volume nodes.
 	//   - Aggregator snapshot nodes and purely-manifest nodes carry no volumes
 	//     and the field is omitted (omitempty).
-	//
-	// snapshot.yaml is excluded from ComputeNodeChecksum/VerifyNode, so this
-	// field does not affect the integrity digest.
 	Volumes []VolumeInfo `json:"volumes,omitempty"`
+}
+
+type snapshotYAMLWire SnapshotYAML
+
+// MarshalJSON stamps the current envelope version and canonical metadata checksum. Both rooted
+// and path-based snapshot.yaml writers use sigs.k8s.io/yaml, which delegates to this method.
+func (sy SnapshotYAML) MarshalJSON() ([]byte, error) {
+	sy.FormatVersion = SnapshotFormatVersionCurrent
+	sy.MetadataChecksum = nil
+
+	checksum, err := computeSnapshotMetadataChecksum(sy)
+	if err != nil {
+		return nil, err
+	}
+
+	sy.MetadataChecksum = &checksum
+
+	data, err := json.Marshal(snapshotYAMLWire(sy))
+	if err != nil {
+		return nil, fmt.Errorf("marshal versioned snapshot.yaml envelope: %w", err)
+	}
+
+	return data, nil
+}
+
+// UnmarshalJSON validates envelope version and metadata integrity before exposing semantic fields.
+// A missing formatVersion is the explicit legacy version zero and keeps the pre-version behavior.
+func (sy *SnapshotYAML) UnmarshalJSON(data []byte) error {
+	var wire snapshotYAMLWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("unmarshal snapshot.yaml envelope: %w", err)
+	}
+
+	decoded := SnapshotYAML(wire)
+	if err := validateSnapshotEnvelope(decoded); err != nil {
+		return err
+	}
+
+	*sy = decoded
+
+	return nil
+}
+
+func validateSnapshotEnvelope(sy SnapshotYAML) error {
+	switch sy.FormatVersion {
+	case SnapshotFormatVersionLegacy:
+		return nil
+	case SnapshotFormatVersionCurrent:
+	default:
+		return fmt.Errorf("%d: %w", sy.FormatVersion, ErrUnsupportedSnapshotFormat)
+	}
+
+	if sy.MetadataChecksum == nil {
+		return fmt.Errorf("format version %d requires metadataChecksum: %w",
+			sy.FormatVersion, ErrInvalidSnapshotYAML)
+	}
+
+	if err := validateChecksum(*sy.MetadataChecksum); err != nil {
+		return fmt.Errorf("metadataChecksum: %w", err)
+	}
+
+	got, err := computeSnapshotMetadataChecksum(sy)
+	if err != nil {
+		return err
+	}
+
+	if got.Hex != sy.MetadataChecksum.Hex {
+		return fmt.Errorf("stored %q computed %q: %w",
+			sy.MetadataChecksum.Hex, got.Hex, ErrSnapshotMetadataChecksumMismatch)
+	}
+
+	return nil
+}
+
+func computeSnapshotMetadataChecksum(sy SnapshotYAML) (NodeChecksum, error) {
+	sy.MetadataChecksum = nil
+
+	canonical, err := json.Marshal(snapshotYAMLWire(sy))
+	if err != nil {
+		return NodeChecksum{}, fmt.Errorf("marshal canonical snapshot.yaml metadata: %w", err)
+	}
+
+	sum := sha256.Sum256(canonical)
+	hexString := fmt.Sprintf("%x", sum)
+
+	return NodeChecksum{
+		Algorithm: ChecksumAlgorithmSHA256,
+		Hex:       hexString,
+		Short:     ShortChecksum(hexString),
+	}, nil
 }
 
 // SourceObjectRef is the structured spec.sourceRef from a domain snapshot CR, persisted
@@ -152,9 +255,8 @@ type VolumeInfo struct {
 	Size string `json:"size,omitempty"`
 }
 
-// NodeChecksum is the locally-computed integrity digest for one node directory.
-// The digest covers the node's own files (manifests and volume data) but excludes
-// snapshot.yaml itself and the snapshots/ child directory.
+// NodeChecksum is a locally-computed integrity digest. SnapshotYAML.Checksum covers the node's
+// manifests and volume data; SnapshotYAML.MetadataChecksum covers its canonical envelope fields.
 type NodeChecksum struct {
 	// Algorithm is always "sha256".
 	Algorithm string `json:"algorithm"`
@@ -828,7 +930,9 @@ func archiveModeError(path string, mode os.FileMode, wantDir bool) error {
 	return fmt.Errorf("%s has mode %s, want %s: %w", path, mode, want, ErrNonRegularArchiveArtifact)
 }
 
-// ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml.
+// ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml, rejecting unsupported
+// envelope versions and invalid versioned metadata checksums. Unversioned legacy metadata
+// remains readable with its original permissive integrity behavior.
 // Returns an error wrapping os.ErrNotExist when the file is absent.
 func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
 	source, err := OpenRootedSource(nodeDir)
@@ -862,12 +966,9 @@ func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
 	return sy, nil
 }
 
-// ValidateSnapshotYAML strictly validates the snapshot.yaml metadata that
-// ComputeNodeChecksum/VerifyNode intentionally do NOT cover. Because snapshot.yaml is
-// excluded from the integrity digest, a corrupt or mismatched metadata block would pass the
-// checksum check unnoticed, so the import path validates it explicitly before any cluster
-// mutation. It does NOT claim the checksum covers snapshot.yaml (it does not); it validates
-// the excluded metadata as a separate, standalone check.
+// ValidateSnapshotYAML strictly validates the snapshot.yaml envelope and structural metadata.
+// Versioned archives authenticate the semantic envelope through MetadataChecksum; compatible
+// legacy version-zero archives retain their original standalone structural validation.
 //
 // hasBlockData and hasFilesystemData report the node's on-disk volume payload
 // (data.bin[.<ext>] and data.tar respectively); ValidateNodeMetadata derives them from the
@@ -883,10 +984,11 @@ func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
 //     volumeMode that agrees with the payload kind (Block for data.bin, Filesystem for
 //     data.tar).
 //   - a non-data node carries no volume.
-//
-// Authenticated/versioned snapshot.yaml evolution (signing, schema version) is a separate
-// concern and out of scope here.
 func ValidateSnapshotYAML(sy SnapshotYAML, hasBlockData, hasFilesystemData bool) error {
+	if err := validateSnapshotEnvelope(sy); err != nil {
+		return err
+	}
+
 	if sy.APIVersion == "" || sy.Kind == "" || sy.Name == "" {
 		return fmt.Errorf("apiVersion/kind/name are required (got apiVersion=%q kind=%q name=%q): %w",
 			sy.APIVersion, sy.Kind, sy.Name, ErrInvalidSnapshotYAML)
