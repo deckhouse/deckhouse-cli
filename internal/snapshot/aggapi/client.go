@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -88,6 +89,15 @@ const (
 	VolumeSnapshotKind = "VolumeSnapshot"
 )
 
+const (
+	// DefaultMaxResponseBytes caps one aggregated-API response at 64 MiB. Manifest
+	// bundles may be large, but must not grow client memory without a finite bound.
+	DefaultMaxResponseBytes int64 = 64 << 20
+)
+
+// ErrResponseTooLarge reports that an aggregated-API response exceeded its byte budget.
+var ErrResponseTooLarge = errors.New("aggregated API response exceeds byte limit")
+
 // Subresource names.
 const (
 	// SubManifestsDownload reads one node's own captured manifests.
@@ -123,25 +133,107 @@ func (r NodeRef) IsVolumeSnapshotLeaf() bool {
 // (typically a discovery REST client) and resolves a node's GVK to its resource
 // plural via a RESTMapper.
 type Client struct {
-	rest   rest.Interface
-	mapper meta.RESTMapper
+	rest             rest.Interface
+	mapper           meta.RESTMapper
+	maxResponseBytes int64
 }
 
 // NewClient builds a Client from a raw REST interface (e.g. the discovery REST client)
 // and a RESTMapper used to resolve GVK -> resource plural.
 func NewClient(restClient rest.Interface, mapper meta.RESTMapper) *Client {
-	return &Client{rest: restClient, mapper: mapper}
+	return &Client{
+		rest:             restClient,
+		mapper:           mapper,
+		maxResponseBytes: DefaultMaxResponseBytes,
+	}
 }
 
 // NewClientForConfig builds a Client from a rest.Config, constructing the discovery
 // REST client internally. mapper resolves GVK -> resource plural.
 func NewClientForConfig(cfg *rest.Config, mapper meta.RESTMapper) (*Client, error) {
-	cs, err := kubernetes.NewForConfig(cfg)
+	return newClientForConfig(cfg, mapper, DefaultMaxResponseBytes)
+}
+
+func newClientForConfig(cfg *rest.Config, mapper meta.RESTMapper, maxResponseBytes int64) (*Client, error) {
+	bounded := rest.CopyConfig(cfg)
+	previousWrap := bounded.WrapTransport
+	bounded.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if previousWrap != nil {
+			roundTripper = previousWrap(roundTripper)
+		}
+
+		return &responseLimitRoundTripper{
+			next:             roundTripper,
+			maxResponseBytes: maxResponseBytes,
+		}
+	}
+
+	cs, err := kubernetes.NewForConfig(bounded)
 	if err != nil {
 		return nil, fmt.Errorf("build clientset for aggregated API: %w", err)
 	}
 
-	return NewClient(cs.Discovery().RESTClient(), mapper), nil
+	client := NewClient(cs.Discovery().RESTClient(), mapper)
+	client.maxResponseBytes = maxResponseBytes
+
+	return client, nil
+}
+
+type responseLimitRoundTripper struct {
+	next             http.RoundTripper
+	maxResponseBytes int64
+}
+
+type requestCanceler interface {
+	CancelRequest(*http.Request)
+}
+
+func (r *responseLimitRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := r.next.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+
+	if response.ContentLength > r.maxResponseBytes {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("%w: declared %d bytes, limit %d",
+					ErrResponseTooLarge, response.ContentLength, r.maxResponseBytes),
+				fmt.Errorf("close oversized aggregated API response: %w", closeErr),
+			)
+		}
+
+		return nil, fmt.Errorf("%w: declared %d bytes, limit %d",
+			ErrResponseTooLarge, response.ContentLength, r.maxResponseBytes)
+	}
+
+	response.Body = &limitedResponseBody{
+		Reader: io.LimitReader(response.Body, r.maxResponseBytes+1),
+		Closer: response.Body,
+	}
+
+	return response, nil
+}
+
+func (r *responseLimitRoundTripper) CancelRequest(request *http.Request) {
+	if canceler, ok := r.next.(requestCanceler); ok {
+		canceler.CancelRequest(request)
+	}
+}
+
+type limitedResponseBody struct {
+	io.Reader
+	io.Closer
+}
+
+func (c *Client) doRaw(ctx context.Context, request *rest.Request) ([]byte, error) {
+	body, err := request.DoRaw(ctx)
+	if int64(len(body)) > c.maxResponseBytes {
+		return nil, fmt.Errorf("%w: received more than %d bytes",
+			ErrResponseTooLarge, c.maxResponseBytes)
+	}
+
+	return body, err
 }
 
 // NodeManifestsDownload performs GET <node>/manifests-download and returns the raw
@@ -199,7 +291,7 @@ func (c *Client) getManifestsDownload(ctx context.Context, path string) ([]byte,
 	backoffErr := wait.ExponentialBackoffWithContext(ctx, manifestsDownloadBackoff, func(stepCtx context.Context) (bool, error) {
 		var doErr error
 
-		body, doErr = c.rest.Get().AbsPath(path).DoRaw(stepCtx)
+		body, doErr = c.doRaw(stepCtx, c.rest.Get().AbsPath(path))
 
 		switch {
 		case doErr == nil:
@@ -217,7 +309,7 @@ func (c *Client) getManifestsDownload(ctx context.Context, path string) ([]byte,
 		return body, nil
 	case ctx.Err() != nil:
 		return nil, fmt.Errorf("GET %s: %w", path, ctx.Err())
-	case wait.Interrupted(backoffErr):
+	case wait.Interrupted(backoffErr) && lastErr != nil:
 		return nil, fmt.Errorf("GET %s: exhausted retries on transient error: %w", path, lastErr)
 	default:
 		return nil, fmt.Errorf("GET %s: %w", path, backoffErr)
@@ -291,7 +383,7 @@ func (c *Client) RestoreManifestsScoped(ctx context.Context, ref NodeRef, target
 		req = req.Param("apiVersion", opts.FilterAPIVersion)
 	}
 
-	body, err := req.DoRaw(ctx)
+	body, err := c.doRaw(ctx, req)
 	if err != nil {
 		return nil, classifyRestoreError(path, err, body)
 	}
@@ -426,11 +518,10 @@ func (c *Client) postManifestsUpload(ctx context.Context, path string, body []by
 	backoffErr := wait.ExponentialBackoffWithContext(ctx, manifestsUploadBackoff, func(stepCtx context.Context) (bool, error) {
 		var doErr error
 
-		out, doErr = c.rest.Post().
+		out, doErr = c.doRaw(stepCtx, c.rest.Post().
 			AbsPath(path).
 			SetHeader("Content-Type", "application/json").
-			Body(body).
-			DoRaw(stepCtx)
+			Body(body))
 
 		switch {
 		case doErr == nil:
@@ -448,7 +539,7 @@ func (c *Client) postManifestsUpload(ctx context.Context, path string, body []by
 		return out, nil
 	case ctx.Err() != nil:
 		return nil, fmt.Errorf("POST %s: %w", path, ctx.Err())
-	case wait.Interrupted(backoffErr):
+	case wait.Interrupted(backoffErr) && lastErr != nil:
 		return nil, fmt.Errorf("POST %s: exhausted retries on bind-first 409 (ImportContentNotBound): %w", path, lastErr)
 	default:
 		return nil, fmt.Errorf("POST %s: %w", path, backoffErr)

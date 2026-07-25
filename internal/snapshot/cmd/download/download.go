@@ -22,11 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
@@ -68,6 +71,9 @@ const (
 const (
 	snapshotClientQPS   float32 = 50
 	snapshotClientBurst int     = 100
+
+	// defaultControlPlaneTimeout bounds each Kubernetes or aggregated-API request.
+	defaultControlPlaneTimeout = 30 * time.Second
 )
 
 var commandRESTConfigLoader = transport.NewRESTConfig
@@ -345,6 +351,40 @@ func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (
 
 	config.QPS = snapshotClientQPS
 	config.Burst = snapshotClientBurst
+	config.Timeout = defaultControlPlaneTimeout
+
+	previousWrap := config.WrapTransport
+	config.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if transport, ok := roundTripper.(*http.Transport); ok {
+			cloned := transport.Clone()
+			cloned.TLSHandshakeTimeout = defaultControlPlaneTimeout
+			cloned.ResponseHeaderTimeout = defaultControlPlaneTimeout
+
+			baseDialContext := cloned.DialContext
+			if baseDialContext == nil {
+				baseDialContext = (&net.Dialer{}).DialContext
+			}
+
+			cloned.DialContext = func(
+				ctx context.Context,
+				network string,
+				address string,
+			) (net.Conn, error) {
+				dialCtx, cancel := context.WithTimeout(ctx, defaultControlPlaneTimeout)
+				defer cancel()
+
+				return baseDialContext(dialCtx, network, address)
+			}
+
+			roundTripper = cloned
+		}
+
+		if previousWrap != nil {
+			return previousWrap(roundTripper)
+		}
+
+		return roundTripper
+	}
 
 	return config, nil
 }

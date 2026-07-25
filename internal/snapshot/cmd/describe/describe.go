@@ -22,12 +22,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -41,6 +45,9 @@ import (
 const (
 	cmdUse        = "describe"
 	flagNamespace = "namespace"
+
+	// defaultControlPlaneTimeout bounds each Kubernetes control-plane request.
+	defaultControlPlaneTimeout = 30 * time.Second
 
 	// conditionFalse is the Ready condition's "status" value for a failed/degraded snapshot.
 	conditionFalse = "False"
@@ -97,7 +104,7 @@ func runE(log *slog.Logger, cmd *cobra.Command, args []string) error {
 
 	snapshotName := args[0]
 
-	restConfig, err := commandRESTConfigLoader(cmd.PersistentFlags())
+	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
@@ -117,6 +124,50 @@ func runE(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return Run(ctx, kubeClient, namespace, snapshotName, cmd.OutOrStdout())
+}
+
+func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {
+	config, err := load(cmd.PersistentFlags())
+	if err != nil {
+		return nil, err
+	}
+
+	config.Timeout = defaultControlPlaneTimeout
+
+	previousWrap := config.WrapTransport
+	config.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if transport, ok := roundTripper.(*http.Transport); ok {
+			cloned := transport.Clone()
+			cloned.TLSHandshakeTimeout = defaultControlPlaneTimeout
+			cloned.ResponseHeaderTimeout = defaultControlPlaneTimeout
+
+			baseDialContext := cloned.DialContext
+			if baseDialContext == nil {
+				baseDialContext = (&net.Dialer{}).DialContext
+			}
+
+			cloned.DialContext = func(
+				ctx context.Context,
+				network string,
+				address string,
+			) (net.Conn, error) {
+				dialCtx, cancel := context.WithTimeout(ctx, defaultControlPlaneTimeout)
+				defer cancel()
+
+				return baseDialContext(dialCtx, network, address)
+			}
+
+			roundTripper = cloned
+		}
+
+		if previousWrap != nil {
+			return previousWrap(roundTripper)
+		}
+
+		return roundTripper
+	}
+
+	return config, nil
 }
 
 // Run resolves the snapshot tree and renders it to w as an ASCII tree.

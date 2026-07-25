@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -32,9 +34,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
@@ -47,6 +51,9 @@ const (
 	flagOutput        = "output"
 	flagKubeconfig    = "kubeconfig"
 	flagContext       = "context"
+
+	// defaultControlPlaneTimeout bounds each Kubernetes control-plane request.
+	defaultControlPlaneTimeout = 30 * time.Second
 
 	// readyConditionType is the status condition reporting overall Snapshot
 	// readiness; it matches the type used by the restore preflight.
@@ -67,6 +74,8 @@ const (
 // errUnsupportedFormat is returned for an unknown -o value. Callers wrap it
 // with the accepted formats; tests use errors.Is.
 var errUnsupportedFormat = errors.New("unsupported output format")
+
+var commandRESTConfigLoader = transport.NewRESTConfig
 
 // snapshotGVR is the dynamic resource for state-snapshotter.deckhouse.io Snapshots.
 var snapshotGVR = schema.GroupVersionResource{
@@ -102,7 +111,7 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	}
 
 	// Reuse the standard kubeconfig/context flags (same as `d8 system ...`),
-	// so NewDynamicClient and KubeconfigNamespace can read them.
+	// so the bounded REST config and KubeconfigNamespace can read them.
 	flags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "namespace to list Snapshots from (defaults to the kubeconfig context namespace)")
@@ -155,9 +164,14 @@ func Run(log *slog.Logger, cmd *cobra.Command) error {
 		}
 	}
 
-	dyn, err := utilk8s.NewDynamicClient(cmd)
+	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)
 	if err != nil {
-		return err
+		return fmt.Errorf("building kube client: %w", err)
+	}
+
+	dyn, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return fmt.Errorf("building dynamic client: %w", err)
 	}
 
 	log.Debug("listing snapshots",
@@ -171,6 +185,50 @@ func Run(log *slog.Logger, cmd *cobra.Command) error {
 	}
 
 	return render(cmd.OutOrStdout(), list, allNamespaces, outputFmt)
+}
+
+func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {
+	config, err := load(cmd.PersistentFlags())
+	if err != nil {
+		return nil, err
+	}
+
+	config.Timeout = defaultControlPlaneTimeout
+
+	previousWrap := config.WrapTransport
+	config.WrapTransport = func(roundTripper http.RoundTripper) http.RoundTripper {
+		if transport, ok := roundTripper.(*http.Transport); ok {
+			cloned := transport.Clone()
+			cloned.TLSHandshakeTimeout = defaultControlPlaneTimeout
+			cloned.ResponseHeaderTimeout = defaultControlPlaneTimeout
+
+			baseDialContext := cloned.DialContext
+			if baseDialContext == nil {
+				baseDialContext = (&net.Dialer{}).DialContext
+			}
+
+			cloned.DialContext = func(
+				ctx context.Context,
+				network string,
+				address string,
+			) (net.Conn, error) {
+				dialCtx, cancel := context.WithTimeout(ctx, defaultControlPlaneTimeout)
+				defer cancel()
+
+				return baseDialContext(dialCtx, network, address)
+			}
+
+			roundTripper = cloned
+		}
+
+		if previousWrap != nil {
+			return previousWrap(roundTripper)
+		}
+
+		return roundTripper
+	}
+
+	return config, nil
 }
 
 // listSnapshots fetches Snapshot objects for a single namespace, or across all

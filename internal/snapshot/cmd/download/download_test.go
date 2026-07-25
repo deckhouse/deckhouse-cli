@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,6 +207,29 @@ func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
 	if got.QPS != snapshotClientQPS || got.Burst != snapshotClientBurst {
 		t.Fatalf("shared tuning = QPS %v, Burst %d; want QPS %v, Burst %d",
 			got.QPS, got.Burst, snapshotClientQPS, snapshotClientBurst)
+	}
+
+	if got.Timeout != defaultControlPlaneTimeout {
+		t.Fatalf("control-plane timeout = %v, want %v", got.Timeout, defaultControlPlaneTimeout)
+	}
+
+	wrapped, ok := got.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("bounded control-plane transport is not an *http.Transport")
+	}
+
+	if wrapped.DialContext == nil {
+		t.Fatal("bounded control-plane transport has no DialContext")
+	}
+
+	if wrapped.TLSHandshakeTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("TLS handshake timeout = %v, want %v",
+			wrapped.TLSHandshakeTimeout, defaultControlPlaneTimeout)
+	}
+
+	if wrapped.ResponseHeaderTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("response header timeout = %v, want %v",
+			wrapped.ResponseHeaderTimeout, defaultControlPlaneTimeout)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +139,45 @@ current-context: default
 	}
 
 	return kubeconfigPath
+}
+
+func TestNewCommandRESTConfig_BoundsControlPlaneRequests(t *testing.T) {
+	source := &rest.Config{}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if got != source {
+		t.Fatal("newCommandRESTConfig replaced the parsed config")
+	}
+
+	if got.Timeout != defaultControlPlaneTimeout {
+		t.Fatalf("control-plane timeout = %v, want %v", got.Timeout, defaultControlPlaneTimeout)
+	}
+
+	wrapped, ok := got.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("bounded control-plane transport is not an *http.Transport")
+	}
+
+	if wrapped.DialContext == nil {
+		t.Fatal("bounded control-plane transport has no DialContext")
+	}
+
+	if wrapped.TLSHandshakeTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("TLS handshake timeout = %v, want %v",
+			wrapped.TLSHandshakeTimeout, defaultControlPlaneTimeout)
+	}
+
+	if wrapped.ResponseHeaderTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("response header timeout = %v, want %v",
+			wrapped.ResponseHeaderTimeout, defaultControlPlaneTimeout)
+	}
 }
 
 // describeScheme returns an empty scheme so the fake client stores and returns every

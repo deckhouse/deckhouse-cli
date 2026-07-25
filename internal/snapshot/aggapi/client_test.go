@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	restfake "k8s.io/client-go/rest/fake"
 )
 
@@ -949,5 +951,179 @@ func TestRestoreManifestsScoped_NotFoundWrapped(t *testing.T) {
 
 	if !strings.Contains(err.Error(), message) {
 		t.Errorf("expected error to carry the server's message %q, got: %v", message, err)
+	}
+}
+
+type aggregatedAPICall struct {
+	name string
+	call func(context.Context, *Client) error
+}
+
+func aggregatedAPICallCases() []aggregatedAPICall {
+	return []aggregatedAPICall{
+		{
+			name: "manifests download",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.NodeManifestsDownload(ctx, coreSnapshotRef())
+
+				return err
+			},
+		},
+		{
+			name: "restore manifests",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.RestoreManifests(ctx, coreSnapshotRef(), "target-ns")
+
+				return err
+			},
+		},
+		{
+			name: "upload manifests",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.UploadManifests(ctx, coreSnapshotRef(), []byte(`{"manifests":[]}`))
+
+				return err
+			},
+		},
+	}
+}
+
+func newBoundedTestClient(
+	t *testing.T,
+	handler http.Handler,
+	timeout time.Duration,
+	maxResponseBytes int64,
+) *Client {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	t.Cleanup(server.CloseClientConnections)
+
+	client, err := newClientForConfig(&rest.Config{
+		Host:    server.URL,
+		Timeout: timeout,
+	}, testMapper(), maxResponseBytes)
+	if err != nil {
+		t.Fatalf("newClientForConfig: %v", err)
+	}
+
+	return client
+}
+
+func TestAggregatedAPICalls_RejectOversizedChunkedResponses(t *testing.T) {
+	const maxResponseBytes int64 = 32
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		_, _ = io.WriteString(w, strings.Repeat("x", int(maxResponseBytes+1)))
+	})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newBoundedTestClient(t, handler, 5*time.Second, maxResponseBytes)
+
+			err := tc.call(context.Background(), client)
+			if !errors.Is(err, ErrResponseTooLarge) {
+				t.Fatalf("call error = %v, want ErrResponseTooLarge", err)
+			}
+
+			if !strings.Contains(err.Error(), "32 bytes") {
+				t.Fatalf("call error does not state the response limit: %v", err)
+			}
+		})
+	}
+}
+
+func TestAggregatedAPICalls_TimeoutWhileWaitingForHeaders(t *testing.T) {
+	const requestTimeout = time.Second
+
+	withFastBackoff(t, wait.Backoff{Steps: 1})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseHandler := make(chan struct{})
+			defer close(releaseHandler)
+
+			handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				select {
+				case <-request.Context().Done():
+				case <-releaseHandler:
+				}
+			})
+
+			client := newBoundedTestClient(t, handler, requestTimeout, 1024)
+			started := time.Now()
+
+			err := tc.call(context.Background(), client)
+			if err == nil {
+				t.Fatal("call unexpectedly succeeded while response headers were stalled")
+			}
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if elapsed := time.Since(started); elapsed > 5*requestTimeout {
+				t.Fatalf("header-stalled call took %v, want at most %v", elapsed, 5*requestTimeout)
+			}
+		})
+	}
+}
+
+func TestAggregatedAPICalls_TimeoutEndlessPositiveByteTrickle(t *testing.T) {
+	const requestTimeout = time.Second
+
+	withFastBackoff(t, wait.Backoff{Steps: 1})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseHandler := make(chan struct{})
+			defer close(releaseHandler)
+
+			handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+
+				flusher := w.(http.Flusher)
+				ticker := time.NewTicker(50 * time.Millisecond)
+				defer ticker.Stop()
+
+				for {
+					if _, err := io.WriteString(w, "x"); err != nil {
+						return
+					}
+
+					flusher.Flush()
+
+					select {
+					case <-request.Context().Done():
+						return
+					case <-releaseHandler:
+						return
+					case <-ticker.C:
+					}
+				}
+			})
+
+			client := newBoundedTestClient(t, handler, requestTimeout, 1024)
+			started := time.Now()
+
+			err := tc.call(context.Background(), client)
+			if err == nil {
+				t.Fatal("call unexpectedly succeeded while response body trickled forever")
+			}
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if elapsed := time.Since(started); elapsed > 5*requestTimeout {
+				t.Fatalf("trickling call took %v, want at most %v", elapsed, 5*requestTimeout)
+			}
+		})
 	}
 }

@@ -24,16 +24,21 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/rest"
 	sigsyaml "sigs.k8s.io/yaml"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 // snapshotObj builds an unstructured Snapshot for tests. An empty ready/content
@@ -120,6 +125,45 @@ func TestCommandRejectsPositionalArg(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error when positional argument is provided")
+	}
+}
+
+func TestNewCommandRESTConfig_BoundsControlPlaneRequests(t *testing.T) {
+	source := &rest.Config{}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if got != source {
+		t.Fatal("newCommandRESTConfig replaced the parsed config")
+	}
+
+	if got.Timeout != defaultControlPlaneTimeout {
+		t.Fatalf("control-plane timeout = %v, want %v", got.Timeout, defaultControlPlaneTimeout)
+	}
+
+	wrapped, ok := got.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("bounded control-plane transport is not an *http.Transport")
+	}
+
+	if wrapped.DialContext == nil {
+		t.Fatal("bounded control-plane transport has no DialContext")
+	}
+
+	if wrapped.TLSHandshakeTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("TLS handshake timeout = %v, want %v",
+			wrapped.TLSHandshakeTimeout, defaultControlPlaneTimeout)
+	}
+
+	if wrapped.ResponseHeaderTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("response header timeout = %v, want %v",
+			wrapped.ResponseHeaderTimeout, defaultControlPlaneTimeout)
 	}
 }
 
