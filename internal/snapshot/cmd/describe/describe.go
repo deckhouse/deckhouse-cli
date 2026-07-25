@@ -43,8 +43,11 @@ import (
 )
 
 const (
-	cmdUse        = "describe"
-	flagNamespace = "namespace"
+	cmdUse = "describe"
+
+	flagNamespace  = "namespace"
+	flagKubeconfig = "kubeconfig"
+	flagContext    = "context"
 
 	// defaultControlPlaneTimeout bounds each Kubernetes control-plane request.
 	defaultControlPlaneTimeout = 30 * time.Second
@@ -90,16 +93,9 @@ func runE(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(parentCtx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	namespace, err := cmd.Flags().GetString(flagNamespace)
+	namespace, err := resolveCommandNamespace(cmd)
 	if err != nil {
-		return fmt.Errorf("reading --%s flag: %w", flagNamespace, err)
-	}
-
-	if namespace == "" {
-		namespace, err = utilk8s.KubeconfigNamespace("", "")
-		if err != nil {
-			return fmt.Errorf("resolving namespace from kubeconfig: %w", err)
-		}
+		return err
 	}
 
 	snapshotName := args[0]
@@ -124,6 +120,34 @@ func runE(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return Run(ctx, kubeClient, namespace, snapshotName, cmd.OutOrStdout())
+}
+
+func resolveCommandNamespace(cmd *cobra.Command) (string, error) {
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		return "", fmt.Errorf("reading --%s flag: %w", flagNamespace, err)
+	}
+
+	if namespace != "" {
+		return namespace, nil
+	}
+
+	kubeconfigPath, err := cmd.PersistentFlags().GetString(flagKubeconfig)
+	if err != nil {
+		return "", fmt.Errorf("reading --%s flag: %w", flagKubeconfig, err)
+	}
+
+	contextName, err := cmd.PersistentFlags().GetString(flagContext)
+	if err != nil {
+		return "", fmt.Errorf("reading --%s flag: %w", flagContext, err)
+	}
+
+	namespace, err = utilk8s.KubeconfigNamespace(kubeconfigPath, contextName)
+	if err != nil {
+		return "", fmt.Errorf("resolving namespace from kubeconfig: %w", err)
+	}
+
+	return namespace, nil
 }
 
 func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {

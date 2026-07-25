@@ -37,6 +37,7 @@ import (
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -45,7 +46,10 @@ const (
 	testVSAPI   = "snapshot.storage.k8s.io/v1"
 )
 
-const commandSelectedHost = "https://selected.example.test"
+const (
+	commandSelectedHost      = "https://selected.example.test"
+	commandSelectedNamespace = "selected-ns"
+)
 
 func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
 	helpCmd := NewCommand(slog.Default())
@@ -112,6 +116,66 @@ func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
 	}
 }
 
+func TestCommandConfiguration_UsesSameKubeconfigAndContext(t *testing.T) {
+	kubeconfigPath := writeCommandKubeconfig(t)
+	cmd := NewCommand(slog.Default())
+
+	err := cmd.PersistentFlags().Parse([]string{
+		"--kubeconfig", kubeconfigPath,
+		"--context", "selected",
+	})
+	if err != nil {
+		t.Fatalf("parse persistent flags: %v", err)
+	}
+
+	namespace, err := resolveCommandNamespace(cmd)
+	if err != nil {
+		t.Fatalf("resolve command namespace: %v", err)
+	}
+
+	config, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
+	if err != nil {
+		t.Fatalf("build command REST config: %v", err)
+	}
+
+	if namespace != commandSelectedNamespace {
+		t.Fatalf("namespace = %q, want %q", namespace, commandSelectedNamespace)
+	}
+
+	if config.Host != commandSelectedHost {
+		t.Fatalf("REST config host = %q, want %q", config.Host, commandSelectedHost)
+	}
+}
+
+func TestNewCommand_DoesNotMutateGlobalAuthPolicyAcrossInvocations(t *testing.T) {
+	originalSupportNoAuth := safeClient.SupportNoAuth
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		safeClient.SupportNoAuth = originalSupportNoAuth
+		commandRESTConfigLoader = originalLoader
+	})
+
+	safeClient.SupportNoAuth = true
+	stopAfterConfig := errors.New("stop after REST config")
+	commandRESTConfigLoader = func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		return nil, stopAfterConfig
+	}
+
+	for invocation := 1; invocation <= 2; invocation++ {
+		cmd := NewCommand(slog.Default())
+		cmd.SetArgs([]string{"snapshot-a", "--namespace", "snapshot-ns"})
+
+		err := cmd.Execute()
+		if !errors.Is(err, stopAfterConfig) {
+			t.Fatalf("invocation %d error = %v, want stop hook", invocation, err)
+		}
+
+		if !safeClient.SupportNoAuth {
+			t.Fatalf("invocation %d mutated package-global auth policy", invocation)
+		}
+	}
+}
+
 func writeCommandKubeconfig(t *testing.T) string {
 	t.Helper()
 
@@ -129,9 +193,11 @@ contexts:
 - name: default
   context:
     cluster: default
+    namespace: default-ns
 - name: selected
   context:
     cluster: selected
+    namespace: ` + commandSelectedNamespace + `
 current-context: default
 `)
 	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
