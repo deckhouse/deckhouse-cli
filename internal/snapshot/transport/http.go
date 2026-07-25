@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,11 +37,12 @@ import (
 	"github.com/spf13/pflag"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
 	"k8s.io/client-go/rest"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 // RESTConfigLoader parses Kubernetes flags into a command-scoped REST config.
@@ -49,24 +51,48 @@ type RESTConfigLoader func(...*pflag.FlagSet) (*rest.Config, error)
 // NewRESTConfig parses Kubernetes client flags once and returns the command-scoped
 // configuration from which every snapshot control-plane and data-plane client is derived.
 func NewRESTConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
-	kubeConfigFlags := genericclioptions.ConfigFlags{}
-
-	if len(flags) == 0 {
-		flags = []*pflag.FlagSet{pflag.CommandLine}
+	kubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
+	if path := os.Getenv("KUBECONFIG"); path != "" {
+		kubeconfigPath = path
 	}
 
-	for _, f := range flags {
-		if flags != nil {
-			kubeConfigFlags.AddFlags(f)
-		}
-	}
-
-	restConfig, err := kubeConfigFlags.ToRESTConfig()
+	flagKubeconfigPath, found, err := stringFlagValue("kubeconfig", flags...)
 	if err != nil {
 		return nil, err
 	}
 
+	if found {
+		kubeconfigPath = flagKubeconfigPath
+	}
+
+	contextName, _, err := stringFlagValue("context", flags...)
+	if err != nil {
+		return nil, err
+	}
+
+	restConfig, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, fmt.Errorf("setup Kubernetes client: %w", err)
+	}
+
 	return restConfig, nil
+}
+
+func stringFlagValue(name string, flags ...*pflag.FlagSet) (string, bool, error) {
+	for _, flagSet := range flags {
+		if flagSet == nil || flagSet.Lookup(name) == nil {
+			continue
+		}
+
+		value, err := flagSet.GetString(name)
+		if err != nil {
+			return "", false, fmt.Errorf("read --%s flag: %w", name, err)
+		}
+
+		return value, true, nil
+	}
+
+	return "", false, nil
 }
 
 // Client owns snapshot-specific authenticated HTTP transport configuration.

@@ -40,6 +40,7 @@ import (
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
 const (
@@ -72,6 +73,8 @@ const (
 	snapshotClientQPS   float32 = 50
 	snapshotClientBurst int     = 100
 )
+
+var commandRESTConfigLoader = transport.NewRESTConfig
 
 // NewCommand builds the `d8 snapshot upload` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
@@ -131,6 +134,8 @@ Scope and limitations:
 			return Run(log, cmd, args)
 		},
 	}
+
+	systemflags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "target namespace to import into (required)")
 	cmd.Flags().StringP(flagInput, "i", "", "root archive directory produced by 'd8 snapshot download' (required)")
@@ -206,7 +211,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
 	}
 
-	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
+	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}

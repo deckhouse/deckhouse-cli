@@ -39,6 +39,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
 const (
@@ -54,6 +55,8 @@ const (
 	flagWait           = "wait"
 	flagTimeout        = "timeout"
 )
+
+var commandRESTConfigLoader = transport.NewRESTConfig
 
 // NewCommand builds the `d8 snapshot restore` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
@@ -139,6 +142,8 @@ StorageClass are still awaited until Bound or --timeout as before.`,
 			return Run(log, cmd, args)
 		},
 	}
+
+	systemflags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace; also the restore target namespace (required)")
 	cmd.Flags().String(flagNode, "", "restrict restore to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc123) is still accepted")
@@ -243,7 +248,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagTimeout, err)
 	}
 
-	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
+	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}

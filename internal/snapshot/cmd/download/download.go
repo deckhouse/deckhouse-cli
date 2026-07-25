@@ -41,6 +41,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
 const (
@@ -69,6 +70,8 @@ const (
 	snapshotClientBurst int     = 100
 )
 
+var commandRESTConfigLoader = transport.NewRESTConfig
+
 // NewCommand builds the `d8 snapshot download` cobra command. Per the code-style
 // §4 Cobra pattern the CALLER owns the root context: it is threaded in here and
 // captured by the thin RunE below, rather than recovered from cmd.Context().
@@ -96,6 +99,8 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 			return Run(ctx, log, cmd, args)
 		},
 	}
+
+	systemflags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace (required)")
 	cmd.Flags().StringP(flagOutput, "o", "", "root output directory (required)")
@@ -231,7 +236,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("reading --%s flag: %w", flagCleanup, err)
 	}
 
-	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
+	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}

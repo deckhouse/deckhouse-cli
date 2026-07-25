@@ -17,6 +17,7 @@ limitations under the License.
 package download
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -32,6 +33,103 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
+
+const commandSelectedHost = "https://selected.example.test"
+
+func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
+	helpCmd := NewCommand(context.Background(), slog.Default())
+
+	var help bytes.Buffer
+
+	helpCmd.SetOut(&help)
+	helpCmd.SetErr(&help)
+	helpCmd.SetArgs([]string{"--help"})
+	if err := helpCmd.Execute(); err != nil {
+		t.Fatalf("execute help: %v", err)
+	}
+
+	for _, flag := range []string{"-k, --kubeconfig", "--context"} {
+		if !strings.Contains(help.String(), flag) {
+			t.Fatalf("help does not contain %q:\n%s", flag, help.String())
+		}
+	}
+
+	kubeconfigPath := writeCommandKubeconfig(t)
+	stopAfterConfig := errors.New("stop after REST config")
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		commandRESTConfigLoader = originalLoader
+	})
+
+	var gotHost string
+
+	commandRESTConfigLoader = func(flagSets ...*pflag.FlagSet) (*rest.Config, error) {
+		config, err := transport.NewRESTConfig(flagSets...)
+		if err != nil {
+			return nil, err
+		}
+
+		gotHost = config.Host
+
+		return nil, stopAfterConfig
+	}
+
+	cmd := NewCommand(context.Background(), slog.Default())
+	cmd.SetArgs([]string{
+		"snapshot-a",
+		"--namespace", "snapshot-ns",
+		"--output", t.TempDir(),
+		"--kubeconfig", kubeconfigPath,
+		"--context", "selected",
+	})
+
+	err := cmd.Execute()
+	if !errors.Is(err, stopAfterConfig) {
+		t.Fatalf("execute error = %v, want stop hook", err)
+	}
+
+	if gotHost != commandSelectedHost {
+		t.Fatalf("REST config host = %q, want %q", gotHost, commandSelectedHost)
+	}
+
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("read namespace flag: %v", err)
+	}
+
+	if namespace != "snapshot-ns" {
+		t.Fatalf("snapshot namespace = %q, want %q", namespace, "snapshot-ns")
+	}
+}
+
+func writeCommandKubeconfig(t *testing.T) string {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://default.example.test
+- name: selected
+  cluster:
+    server: ` + commandSelectedHost + `
+contexts:
+- name: default
+  context:
+    cluster: default
+- name: selected
+  context:
+    cluster: selected
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	return kubeconfigPath
+}
 
 func TestNewCommand_Defaults(t *testing.T) {
 	t.Helper()

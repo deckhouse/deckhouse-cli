@@ -32,9 +32,10 @@ import (
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/treeview"
+	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -44,6 +45,8 @@ const (
 	// conditionFalse is the Ready condition's "status" value for a failed/degraded snapshot.
 	conditionFalse = "False"
 )
+
+var commandRESTConfigLoader = transport.NewRESTConfig
 
 // NewCommand builds the `d8 snapshot describe` cobra command.
 func NewCommand(log *slog.Logger) *cobra.Command {
@@ -62,6 +65,8 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 			return runE(log, cmd, args)
 		},
 	}
+
+	systemflags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "snapshot namespace (defaults to the kubeconfig context namespace)")
 
@@ -92,14 +97,13 @@ func runE(log *slog.Logger, cmd *cobra.Command, args []string) error {
 
 	snapshotName := args[0]
 
-	safeClient.SupportNoAuth = false
-
-	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	restConfig, err := commandRESTConfigLoader(cmd.PersistentFlags())
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
 
-	kubeClient, err := sc.NewRTClient(
+	kubeClient, err := transport.NewRuntimeClient(
+		restConfig,
 		snapshotapi.AddToScheme,
 		snapv1.AddToScheme,
 	)

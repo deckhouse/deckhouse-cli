@@ -32,16 +32,62 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/rest"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
+
+func TestNewRESTConfig_UsesRegisteredKubeconfigAndContextFlags(t *testing.T) {
+	const selectedHost = "https://selected.example.test"
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://default.example.test
+- name: selected
+  cluster:
+    server: ` + selectedHost + `
+contexts:
+- name: default
+  context:
+    cluster: default
+- name: selected
+  context:
+    cluster: selected
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("kubeconfig", "", "")
+	flags.String("context", "", "")
+	if err := flags.Parse([]string{"--kubeconfig", kubeconfigPath, "--context", "selected"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	config, err := NewRESTConfig(flags)
+	if err != nil {
+		t.Fatalf("NewRESTConfig: %v", err)
+	}
+
+	if config.Host != selectedHost {
+		t.Fatalf("REST config host = %q, want %q", config.Host, selectedHost)
+	}
+}
 
 // TestClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
 // QPS/Burst fields to exactly the values passed, and that RESTConfig() (the deep

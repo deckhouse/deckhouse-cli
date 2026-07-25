@@ -19,15 +19,23 @@ package describe
 import (
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 const (
@@ -35,6 +43,102 @@ const (
 	testRootAPI = snapshotapi.StorageGroup + "/" + snapshotapi.Version
 	testVSAPI   = "snapshot.storage.k8s.io/v1"
 )
+
+const commandSelectedHost = "https://selected.example.test"
+
+func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
+	helpCmd := NewCommand(slog.Default())
+
+	var help bytes.Buffer
+
+	helpCmd.SetOut(&help)
+	helpCmd.SetErr(&help)
+	helpCmd.SetArgs([]string{"--help"})
+	if err := helpCmd.Execute(); err != nil {
+		t.Fatalf("execute help: %v", err)
+	}
+
+	for _, flag := range []string{"-k, --kubeconfig", "--context"} {
+		if !strings.Contains(help.String(), flag) {
+			t.Fatalf("help does not contain %q:\n%s", flag, help.String())
+		}
+	}
+
+	kubeconfigPath := writeCommandKubeconfig(t)
+	stopAfterConfig := errors.New("stop after REST config")
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		commandRESTConfigLoader = originalLoader
+	})
+
+	var gotHost string
+
+	commandRESTConfigLoader = func(flagSets ...*pflag.FlagSet) (*rest.Config, error) {
+		config, err := transport.NewRESTConfig(flagSets...)
+		if err != nil {
+			return nil, err
+		}
+
+		gotHost = config.Host
+
+		return nil, stopAfterConfig
+	}
+
+	cmd := NewCommand(slog.Default())
+	cmd.SetArgs([]string{
+		"snapshot-a",
+		"--namespace", "snapshot-ns",
+		"--kubeconfig", kubeconfigPath,
+		"--context", "selected",
+	})
+
+	err := cmd.Execute()
+	if !errors.Is(err, stopAfterConfig) {
+		t.Fatalf("execute error = %v, want stop hook", err)
+	}
+
+	if gotHost != commandSelectedHost {
+		t.Fatalf("REST config host = %q, want %q", gotHost, commandSelectedHost)
+	}
+
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("read namespace flag: %v", err)
+	}
+
+	if namespace != "snapshot-ns" {
+		t.Fatalf("snapshot namespace = %q, want %q", namespace, "snapshot-ns")
+	}
+}
+
+func writeCommandKubeconfig(t *testing.T) string {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://default.example.test
+- name: selected
+  cluster:
+    server: ` + commandSelectedHost + `
+contexts:
+- name: default
+  context:
+    cluster: default
+- name: selected
+  context:
+    cluster: selected
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	return kubeconfigPath
+}
 
 // describeScheme returns an empty scheme so the fake client stores and returns every
 // snapshot-tree object verbatim as unstructured. Registering the typed Snapshot API would
