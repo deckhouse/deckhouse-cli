@@ -164,6 +164,15 @@ func TestNewCommand_Defaults(t *testing.T) {
 	if timeout != 20*time.Minute {
 		t.Fatalf("default --%s: got %s, want 20m", flagTimeout, timeout)
 	}
+
+	skipUnsupported, err := cmd.Flags().GetBool(flagSkipUnsupportedFSEntries)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagSkipUnsupportedFSEntries, err)
+	}
+
+	if skipUnsupported {
+		t.Fatalf("default --%s = true, want false", flagSkipUnsupportedFSEntries)
+	}
 }
 
 func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
@@ -178,6 +187,9 @@ func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
 		{name: "special entries", fragment: "device, FIFO, and\n    socket entries"},
 		{name: "empty directories", fragment: "empty directories other than well-known filesystem-reserved names"},
 		{name: "directory side effect", fragment: "creates directories only as a side effect of a file PUT inside them"},
+		{name: "lossy opt-in flag", fragment: "--skip-unsupported-fs-entries"},
+		{name: "data loss warning", fragment: "causes data loss for each skipped path"},
+		{name: "post-upload summary", fragment: "bounded post-upload summary"},
 	}
 
 	commandLong := NewCommand(slog.Default()).Long

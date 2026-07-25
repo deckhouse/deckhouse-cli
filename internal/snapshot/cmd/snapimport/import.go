@@ -46,13 +46,14 @@ import (
 const (
 	cmdUse = "upload"
 
-	flagNamespace     = "namespace"
-	flagInput         = "input"
-	flagNode          = "node"
-	flagWorkers       = "workers"
-	flagTTL           = "ttl"
-	flagTimeout       = "timeout"
-	flagAllowExisting = "allow-existing"
+	flagNamespace                = "namespace"
+	flagInput                    = "input"
+	flagNode                     = "node"
+	flagWorkers                  = "workers"
+	flagTTL                      = "ttl"
+	flagTimeout                  = "timeout"
+	flagAllowExisting            = "allow-existing"
+	flagSkipUnsupportedFSEntries = "skip-unsupported-fs-entries"
 
 	defaultImportWorkers = 5
 
@@ -122,6 +123,8 @@ Scope and limitations:
     socket entries, plus empty directories other than well-known filesystem-reserved names
     (for example lost+found), cannot be uploaded: the protocol supports only regular-file
     PUTs, and creates directories only as a side effect of a file PUT inside them.
+  - --skip-unsupported-fs-entries uploads the supported regular files instead of failing,
+    but causes data loss for each skipped path; review the bounded post-upload summary.
   - Uploading requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
     read-only snapshot admin role is not sufficient.`,
@@ -148,6 +151,7 @@ Scope and limitations:
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
 	cmd.Flags().Bool(flagAllowExisting, false, "downgrade namespace preflight conflict check to a warning (import-mode markers from a prior run are never conflicts regardless of this flag)")
+	cmd.Flags().Bool(flagSkipUnsupportedFSEntries, false, "skip unsupported filesystem entries and report them after upload (causes data loss for skipped paths)")
 
 	return cmd
 }
@@ -213,6 +217,15 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	allowExisting, err := cmd.Flags().GetBool(flagAllowExisting)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
+	}
+
+	skipUnsupportedFSEntries, err := cmd.Flags().GetBool(flagSkipUnsupportedFSEntries)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagSkipUnsupportedFSEntries, err)
+	}
+
+	if skipUnsupportedFSEntries {
+		ctx = snapimport.WithSkipUnsupportedFSEntries(ctx)
 	}
 
 	restConfig, err := newCommandRESTConfig(cmd, commandRESTConfigLoader)

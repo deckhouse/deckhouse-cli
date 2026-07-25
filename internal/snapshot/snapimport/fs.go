@@ -64,6 +64,19 @@ var fsTarReservedEmptyDirectories = map[string]struct{}{
 	"lost+found": {},
 }
 
+type skipUnsupportedFSEntriesContextKey struct{}
+
+// WithSkipUnsupportedFSEntries enables the explicit lossy filesystem-upload mode for ctx.
+func WithSkipUnsupportedFSEntries(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipUnsupportedFSEntriesContextKey{}, true)
+}
+
+func skipUnsupportedFSEntries(ctx context.Context) bool {
+	enabled, _ := ctx.Value(skipUnsupportedFSEntriesContextKey{}).(bool)
+
+	return enabled
+}
+
 // The preflight inventory keeps one fixed-size in-memory run, merges at most eight runs at
 // once, and retains a fixed sixteen-level run table. A merge therefore opens at most nine
 // inventory descriptors (eight inputs plus one output), while sorted metadata occupies at
@@ -500,6 +513,8 @@ type fsTarScan struct {
 	regularCount                uint64
 	StructuralDirectoryCount    int
 	ReservedEmptyDirectoryCount int
+	unsupportedEntryCount       uint64
+	unsupportedEntrySummary     string
 	removeAll                   func(string) error
 }
 
@@ -1009,7 +1024,8 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // directories implicitly on the first child file write. Their mode, uid, gid, and mtime
 // therefore cannot be restored; one bounded warning reports the number of affected
 // directories without listing archive-controlled paths. Empty directories and every other
-// non-regular entry are rejected by the preflight because the importer cannot reproduce them.
+// non-regular entry are rejected by default because the importer cannot reproduce them. The
+// explicit lossy mode skips them and emits a bounded post-upload summary.
 // onProgress, when non-nil, is called with the decompressed byte count after each file is
 // successfully uploaded or after an already-fully-uploaded entry passes its terminal codec
 // proof without activating a transfer.
@@ -1387,7 +1403,17 @@ func uploadFSTarFromScan(
 		return errors.Join(err, closeFSTarSequence(sequence))
 	}
 
-	return closeFSTarSequence(sequence)
+	if err := closeFSTarSequence(sequence); err != nil {
+		return err
+	}
+
+	if scan.unsupportedEntryCount > 0 {
+		log.Warn("filesystem import skipped unsupported entries due to --skip-unsupported-fs-entries",
+			slog.Uint64("entry_count", scan.unsupportedEntryCount),
+			slog.String("entries", scan.unsupportedEntrySummary))
+	}
+
+	return nil
 }
 
 func scanFSTar(ctx context.Context, tarPath string) (fsTarScan, error) {
@@ -1617,7 +1643,11 @@ func scanFSTarReaderWithOptions(
 		return cleanup(err)
 	}
 
-	directoryCounts, err := validateSortedFSTar(ctx, sortedPath)
+	directoryCounts, diagnostics, err := validateSortedFSTar(
+		ctx,
+		sortedPath,
+		skipUnsupportedFSEntries(ctx),
+	)
 	if err != nil {
 		return cleanup(err)
 	}
@@ -1629,6 +1659,8 @@ func scanFSTarReaderWithOptions(
 		regularCount:                regularCount,
 		StructuralDirectoryCount:    directoryCounts.Structural,
 		ReservedEmptyDirectoryCount: directoryCounts.ReservedEmpty,
+		unsupportedEntryCount:       diagnostics.count,
+		unsupportedEntrySummary:     diagnostics.summary(),
 		removeAll:                   options.removeAll,
 	}, nil
 }
@@ -1658,43 +1690,53 @@ func (c *fsTarDiagnosticCollector) Add(message string) {
 	}
 }
 
-func (c *fsTarDiagnosticCollector) Err() error {
-	if c.count == 0 {
-		return nil
-	}
-
+func (c *fsTarDiagnosticCollector) summary() string {
 	message := strings.Join(c.messages, "; ")
 	if omitted := c.count - uint64(len(c.messages)); omitted > 0 {
 		message += fmt.Sprintf("; ... %d additional entries omitted", omitted)
+	}
+
+	return message
+}
+
+func (c *fsTarDiagnosticCollector) Err() error {
+	if c.count == 0 {
+		return nil
 	}
 
 	return fmt.Errorf(
 		"known permanent upload protocol limitation: unsupported filesystem tar entries (%d): %s; "+
 			"see 'd8 snapshot upload --help' for the exact unsupported entry kinds",
 		c.count,
-		message,
+		c.summary(),
 	)
 }
 
-func validateSortedFSTar(ctx context.Context, sortedPath string) (fsTarDirectoryCounts, error) {
+func validateSortedFSTar(
+	ctx context.Context,
+	sortedPath string,
+	skipUnsupported bool,
+) (fsTarDirectoryCounts, *fsTarDiagnosticCollector, error) {
 	diagnostics := &fsTarDiagnosticCollector{
 		messages: make([]string, 0, fsTarMaxDiagnostics),
 	}
 
 	if err := inspectSortedFSTarConflicts(ctx, sortedPath, diagnostics); err != nil {
-		return fsTarDirectoryCounts{}, err
+		return fsTarDirectoryCounts{}, nil, err
 	}
 
 	directoryCounts, err := classifySortedFSTarDirectories(ctx, sortedPath, diagnostics)
 	if err != nil {
-		return fsTarDirectoryCounts{}, err
+		return fsTarDirectoryCounts{}, nil, err
 	}
 
-	if err := diagnostics.Err(); err != nil {
-		return fsTarDirectoryCounts{}, err
+	if !skipUnsupported {
+		if err := diagnostics.Err(); err != nil {
+			return fsTarDirectoryCounts{}, nil, err
+		}
 	}
 
-	return directoryCounts, nil
+	return directoryCounts, diagnostics, nil
 }
 
 func inspectSortedFSTarConflicts(

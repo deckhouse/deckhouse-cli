@@ -1703,7 +1703,7 @@ func TestFSTarPreflightInventory_MillionEntriesRetainsConstantHeapAndFDs(t *test
 		t.Fatalf("finalize million-entry inventory: %v", err)
 	}
 
-	directoryCounts, err := validateSortedFSTar(context.Background(), sortedPath)
+	directoryCounts, _, err := validateSortedFSTar(context.Background(), sortedPath, false)
 	if err != nil {
 		t.Fatalf("validate million-entry inventory: %v", err)
 	}
@@ -1848,7 +1848,7 @@ func TestFSTarPreflightInventory_ComponentRelationsAcrossSortRuns(t *testing.T) 
 				t.Fatalf("finalize inventory: %v", err)
 			}
 
-			directoryCounts, err := validateSortedFSTar(context.Background(), sortedPath)
+			directoryCounts, _, err := validateSortedFSTar(context.Background(), sortedPath, false)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("validateSortedFSTar: %v", err)
@@ -2202,6 +2202,147 @@ func TestImportFSFromTar_RejectsUnsupportedEntriesBeforeHTTP(t *testing.T) {
 
 			if doer.called {
 				t.Fatal("unsupported full-tar preflight must run before HTTP")
+			}
+		})
+	}
+}
+
+func TestImportFSFromTar_SkipUnsupportedEntries(t *testing.T) {
+	t.Parallel()
+
+	boundedHeaders := make([]tar.Header, 0, fsTarMaxDiagnostics+2)
+	for index := range fsTarMaxDiagnostics + 2 {
+		boundedHeaders = append(boundedHeaders, tar.Header{
+			Typeflag: tar.TypeSymlink,
+			Name:     fmt.Sprintf("link-%03d", index),
+			Linkname: "payload.txt",
+		})
+	}
+
+	tests := []struct {
+		name           string
+		headers        []tar.Header
+		regularPaths   []string
+		wantLog        []string
+		unwantedLog    []string
+		wantEntryCount int
+	}{
+		{
+			name: "mixed archive",
+			headers: []tar.Header{
+				{Typeflag: tar.TypeDir, Name: "nested/"},
+				{Typeflag: tar.TypeDir, Name: "empty/"},
+				{Typeflag: tar.TypeSymlink, Name: "sym", Linkname: "payload.txt"},
+			},
+			regularPaths: []string{"nested/file.txt", "payload.txt"},
+			wantLog: []string{
+				`entry \"empty\" (directory)`,
+				`entry \"sym\" (symlink)`,
+				"entry_count=2",
+			},
+			wantEntryCount: 2,
+		},
+		{
+			name:         "bounded summary",
+			headers:      boundedHeaders,
+			regularPaths: []string{"payload.txt"},
+			wantLog: []string{
+				`entry \"link-000\" (symlink)`,
+				"2 additional entries omitted",
+				fmt.Sprintf("entry_count=%d", fsTarMaxDiagnostics+2),
+			},
+			unwantedLog:    []string{`entry \"link-033\" (symlink)`},
+			wantEntryCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var tarBuffer bytes.Buffer
+
+			tarWriter := tar.NewWriter(&tarBuffer)
+			for index := range tc.headers {
+				if err := tarWriter.WriteHeader(&tc.headers[index]); err != nil {
+					t.Fatalf("write header %q: %v", tc.headers[index].Name, err)
+				}
+			}
+
+			for _, regularPath := range tc.regularPaths {
+				addTarEntry(t, tarWriter, regularPath, []byte(regularPath), 0o600, 0, 0, time.Time{})
+			}
+
+			if err := tarWriter.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuffer.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
+
+			capture := &fsCapture{}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodHead {
+					writer.WriteHeader(http.StatusNotFound)
+
+					return
+				}
+
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Errorf("read request body: %v", err)
+
+					writer.WriteHeader(http.StatusInternalServerError)
+
+					return
+				}
+
+				relativePath := strings.TrimPrefix(request.URL.Path, "/api/v1/files/")
+				capture.record(relativePath, body, request.Header.Clone())
+				writer.Header().Set("X-Next-Offset", strconv.FormatInt(request.ContentLength, 10))
+				writer.WriteHeader(http.StatusCreated)
+			}))
+			t.Cleanup(server.Close)
+
+			var logs bytes.Buffer
+
+			log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			ctx := WithSkipUnsupportedFSEntries(context.Background())
+			if err := importFSFromTar(ctx, plainHTTPDoer{}, server.URL, tarPath, log, nil, nil, nil); err != nil {
+				t.Fatalf("importFSFromTar: %v", err)
+			}
+
+			capture.mu.Lock()
+			uploadCount := len(capture.uploads)
+			capture.mu.Unlock()
+
+			if uploadCount != tc.wantEntryCount {
+				t.Errorf("upload count = %d, want %d", uploadCount, tc.wantEntryCount)
+			}
+
+			for _, regularPath := range tc.regularPaths {
+				if _, ok := capture.find(regularPath); !ok {
+					t.Errorf("regular file %q not found in uploads", regularPath)
+				}
+			}
+
+			logOutput := logs.String()
+			if got := strings.Count(logOutput, "filesystem import skipped unsupported entries"); got != 1 {
+				t.Errorf("skip summary count = %d, want 1; logs=%q", got, logOutput)
+			}
+
+			for _, fragment := range tc.wantLog {
+				if !strings.Contains(logOutput, fragment) {
+					t.Errorf("skip summary %q does not contain %q", logOutput, fragment)
+				}
+			}
+
+			for _, fragment := range tc.unwantedLog {
+				if strings.Contains(logOutput, fragment) {
+					t.Errorf("bounded skip summary %q contains omitted entry %q", logOutput, fragment)
+				}
 			}
 		})
 	}
