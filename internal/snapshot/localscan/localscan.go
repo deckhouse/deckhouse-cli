@@ -89,6 +89,14 @@ func Scan(root string) (*Node, error) {
 	return ScanWithLimits(root, DefaultScanLimits())
 }
 
+// ScanWithOptions scans an archive under an explicit snapshot.yaml compatibility policy.
+func ScanWithOptions(
+	root string,
+	options archive.SnapshotYAMLReadOptions,
+) (*Node, error) {
+	return ScanWithLimitsAndOptions(root, DefaultScanLimits(), options)
+}
+
 // DefaultScanLimits returns the traversal limits used by Scan: at most
 // 10,000 nodes and 64 child directories below the root.
 func DefaultScanLimits() ScanLimits {
@@ -107,6 +115,15 @@ type ScanLimits struct {
 
 // ScanWithLimits scans an archive tree subject to explicit traversal limits.
 func ScanWithLimits(root string, limits ScanLimits) (*Node, error) {
+	return ScanWithLimitsAndOptions(root, limits, archive.SnapshotYAMLReadOptions{})
+}
+
+// ScanWithLimitsAndOptions scans with explicit traversal and snapshot.yaml compatibility policy.
+func ScanWithLimitsAndOptions(
+	root string,
+	limits ScanLimits,
+	options archive.SnapshotYAMLReadOptions,
+) (*Node, error) {
 	if limits.MaxDepth < 0 {
 		return nil, fmt.Errorf("local snapshot scan maxDepth must be non-negative: %w", ErrScanBudget)
 	}
@@ -125,17 +142,19 @@ func ScanWithLimits(root string, limits ScanLimits) (*Node, error) {
 	}
 
 	scanner := treeScanner{
-		root:   root,
-		limits: limits,
+		root:                root,
+		limits:              limits,
+		snapshotReadOptions: options,
 	}
 
 	return scanner.scanDir(root, 0)
 }
 
 type treeScanner struct {
-	root      string
-	limits    ScanLimits
-	nodeCount int
+	root                string
+	limits              ScanLimits
+	snapshotReadOptions archive.SnapshotYAMLReadOptions
+	nodeCount           int
 }
 
 // scanDir reads snapshot.yaml from dir and discovers child nodes under dir/snapshots/.
@@ -161,7 +180,7 @@ func (s *treeScanner) scanDir(dir string, depth int) (*Node, error) {
 
 	s.nodeCount++
 
-	sy, err := archive.ReadSnapshotYAML(dir)
+	sy, err := archive.ReadSnapshotYAMLWithOptions(dir, s.snapshotReadOptions)
 	if err != nil {
 		return nil, fmt.Errorf("read node at %s: %w", dir, err)
 	}

@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 
+	sigsyaml "sigs.k8s.io/yaml"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/localscan"
 )
@@ -90,6 +92,54 @@ func TestScan_RootNoChildren(t *testing.T) {
 
 	if len(node.Volumes) != 0 {
 		t.Errorf("Volumes: got %d, want 0", len(node.Volumes))
+	}
+}
+
+func TestScanRequiresExplicitLegacyCompatibility(t *testing.T) {
+	root := t.TempDir()
+	writeNodeYAML(t, root, archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "original",
+	})
+
+	path := filepath.Join(root, archive.SnapshotYAMLName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current snapshot.yaml: %v", err)
+	}
+
+	var fields map[string]interface{}
+	if err := sigsyaml.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal current snapshot.yaml: %v", err)
+	}
+
+	delete(fields, "formatVersion")
+	delete(fields, "metadataChecksum")
+	fields["name"] = "tampered"
+
+	data, err = sigsyaml.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal downgraded snapshot.yaml: %v", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write downgraded snapshot.yaml: %v", err)
+	}
+
+	if _, err := localscan.Scan(root); !errors.Is(err, archive.ErrLegacySnapshotFormat) {
+		t.Fatalf("Scan error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	node, err := localscan.ScanWithOptions(root, archive.SnapshotYAMLReadOptions{
+		AllowUnauthenticatedLegacy: true,
+	})
+	if err != nil {
+		t.Fatalf("ScanWithOptions: %v", err)
+	}
+
+	if node.Name != "tampered" {
+		t.Fatalf("legacy node name = %q, want tampered", node.Name)
 	}
 }
 

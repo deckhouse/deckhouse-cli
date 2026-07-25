@@ -173,6 +173,15 @@ func TestNewCommand_Defaults(t *testing.T) {
 	if skipUnsupported {
 		t.Fatalf("default --%s = true, want false", flagSkipUnsupportedFSEntries)
 	}
+
+	allowLegacy, err := cmd.Flags().GetBool(flagAllowUnauthenticatedLegacy)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagAllowUnauthenticatedLegacy, err)
+	}
+
+	if allowLegacy {
+		t.Fatalf("default --%s = true, want false", flagAllowUnauthenticatedLegacy)
+	}
 }
 
 func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
@@ -190,6 +199,9 @@ func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
 		{name: "lossy opt-in flag", fragment: "--skip-unsupported-fs-entries"},
 		{name: "data loss warning", fragment: "causes data loss for each skipped path"},
 		{name: "post-upload summary", fragment: "bounded post-upload summary"},
+		{name: "legacy opt-in", fragment: "--allow-unauthenticated-legacy"},
+		{name: "legacy integrity warning", fragment: "snapshot.yaml identity and volume metadata are unauthenticated"},
+		{name: "downgrade ambiguity", fragment: "downgraded and tampered current archive"},
 	}
 
 	commandLong := NewCommand(slog.Default()).Long
@@ -201,6 +213,46 @@ func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
 				t.Errorf("command Long does not contain %q:\n%s", tc.fragment, commandLong)
 			}
 		})
+	}
+}
+
+func TestRunWarnsWhenUnauthenticatedLegacyCompatibilityEnabled(t *testing.T) {
+	stopAfterConfig := errors.New("stop after compatibility warning")
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		commandRESTConfigLoader = originalLoader
+	})
+
+	commandRESTConfigLoader = func(...*pflag.FlagSet) (*rest.Config, error) {
+		return nil, stopAfterConfig
+	}
+
+	var output bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&output, nil))
+	cmd := NewCommand(log)
+
+	for name, value := range map[string]string{
+		flagNamespace:                  "restored",
+		flagInput:                      t.TempDir(),
+		flagAllowUnauthenticatedLegacy: "true",
+	} {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("setting %s flag: %v", name, err)
+		}
+	}
+
+	err := Run(log, cmd, nil)
+	if !errors.Is(err, stopAfterConfig) {
+		t.Fatalf("Run error = %v, want stop sentinel", err)
+	}
+
+	for _, fragment := range []string{
+		"allowing unauthenticated legacy snapshot metadata",
+		"cannot distinguish a genuine pre-version archive from a downgraded tampered archive",
+	} {
+		if !strings.Contains(output.String(), fragment) {
+			t.Fatalf("warning output does not contain %q: %s", fragment, output.String())
+		}
 	}
 }
 

@@ -29,8 +29,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	sigsyaml "sigs.k8s.io/yaml"
 )
 
 const (
@@ -53,9 +51,10 @@ var ErrVerifiedArchiveChanged = errors.New("verified archive view changed")
 // VerifiedArchive retains one rooted archive descriptor for the upload lifetime. Individual
 // payload handles are opened only for active workers, keeping descriptor use bounded.
 type VerifiedArchive struct {
-	root    *RootedSource
-	path    string
-	authDir string
+	root                *RootedSource
+	path                string
+	authDir             string
+	snapshotReadOptions SnapshotYAMLReadOptions
 }
 
 // VerifiedNode is the immutable verification result for one archive node.
@@ -105,6 +104,14 @@ type VerifiedHandle struct {
 
 // OpenVerifiedArchive pins root for planning, verification, upload, and final readiness.
 func OpenVerifiedArchive(root string) (*VerifiedArchive, error) {
+	return OpenVerifiedArchiveWithOptions(root, SnapshotYAMLReadOptions{})
+}
+
+// OpenVerifiedArchiveWithOptions pins root under an explicit snapshot.yaml compatibility policy.
+func OpenVerifiedArchiveWithOptions(
+	root string,
+	options SnapshotYAMLReadOptions,
+) (*VerifiedArchive, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve archive root %s: %w", root, err)
@@ -123,7 +130,12 @@ func OpenVerifiedArchive(root string) (*VerifiedArchive, error) {
 		)
 	}
 
-	return &VerifiedArchive{root: source, path: absolute, authDir: authDir}, nil
+	return &VerifiedArchive{
+		root:                source,
+		path:                absolute,
+		authDir:             authDir,
+		snapshotReadOptions: options,
+	}, nil
 }
 
 // Close releases the pinned archive root. All VerifiedHandles must already be closed.
@@ -182,8 +194,8 @@ func (a *VerifiedArchive) VerifyNode(ctx context.Context, nodeDir string) (*Veri
 			filepath.Join(nodeDir, SnapshotYAMLName), ErrVerifiedArchiveChanged)
 	}
 
-	var metadata SnapshotYAML
-	if err := sigsyaml.Unmarshal(snapshotData, &metadata); err != nil {
+	metadata, err := UnmarshalSnapshotYAML(snapshotData, a.snapshotReadOptions)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal %s: %w", filepath.Join(nodeDir, SnapshotYAMLName), err)
 	}
 
@@ -229,7 +241,12 @@ func (a *VerifiedArchive) VerifyNode(ctx context.Context, nodeDir string) (*Veri
 		hasFS = hasFS || relPath == FsTarName
 	}
 
-	if err := ValidateSnapshotYAML(metadata, hasBlock, hasFS); err != nil {
+	if err := ValidateSnapshotYAMLWithOptions(
+		metadata,
+		hasBlock,
+		hasFS,
+		a.snapshotReadOptions,
+	); err != nil {
 		return nil, fmt.Errorf("%s: %w", nodeDir, err)
 	}
 
@@ -1000,6 +1017,11 @@ func ShortChecksum(hex string) string {
 // snapshot.yaml is absent, ErrSnapshotMetadataChecksumMismatch if versioned metadata differs,
 // and ErrChecksumMismatch if the content digests differ.
 func VerifyNode(nodeDir string) error {
+	return VerifyNodeWithOptions(nodeDir, SnapshotYAMLReadOptions{})
+}
+
+// VerifyNodeWithOptions verifies one node under an explicit snapshot.yaml compatibility policy.
+func VerifyNodeWithOptions(nodeDir string, options SnapshotYAMLReadOptions) error {
 	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
 		return err
@@ -1007,7 +1029,7 @@ func VerifyNode(nodeDir string) error {
 
 	defer func() { _ = source.Close() }()
 
-	sy, err := readSnapshotYAML(source)
+	sy, err := readSnapshotYAML(source, options)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
@@ -1035,6 +1057,11 @@ func VerifyNode(nodeDir string) error {
 // VerifyNode's content checksum. Returns ErrSnapshotYAMLMissing when snapshot.yaml is absent,
 // and propagates ClassifyBlockPayload's ErrInvalidBlockPayload for a malformed payload.
 func ValidateNodeMetadata(nodeDir string) error {
+	return ValidateNodeMetadataWithOptions(nodeDir, SnapshotYAMLReadOptions{})
+}
+
+// ValidateNodeMetadataWithOptions validates one node under an explicit compatibility policy.
+func ValidateNodeMetadataWithOptions(nodeDir string, options SnapshotYAMLReadOptions) error {
 	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
 		return err
@@ -1042,7 +1069,7 @@ func ValidateNodeMetadata(nodeDir string) error {
 
 	defer func() { _ = source.Close() }()
 
-	sy, err := readSnapshotYAML(source)
+	sy, err := readSnapshotYAML(source, options)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)
@@ -1066,7 +1093,7 @@ func ValidateNodeMetadata(nodeDir string) error {
 		return fmt.Errorf("inspect %s in %s: %w", FsTarName, nodeDir, statErr)
 	}
 
-	if err := ValidateSnapshotYAML(sy, hasBlock, hasFS); err != nil {
+	if err := ValidateSnapshotYAMLWithOptions(sy, hasBlock, hasFS, options); err != nil {
 		return fmt.Errorf("%s: %w", nodeDir, err)
 	}
 

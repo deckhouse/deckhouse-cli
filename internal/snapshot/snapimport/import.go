@@ -107,6 +107,9 @@ type Config struct {
 	// are never treated as conflicts regardless of this flag. When false (default), the
 	// run aborts before any cluster mutation if conflicting non-import-mode objects exist.
 	AllowExisting bool
+	// AllowUnauthenticatedLegacy permits pre-version snapshot.yaml metadata that has no
+	// metadata checksum. The default rejects it as a possible version-downgrade attack.
+	AllowUnauthenticatedLegacy bool
 	// Mapper resolves node GVKs to resources.
 	Mapper meta.RESTMapper
 	// Log receives progress output.
@@ -155,7 +158,11 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	view, err := archive.OpenVerifiedArchive(cfg.InputDir)
+	snapshotReadOptions := archive.SnapshotYAMLReadOptions{
+		AllowUnauthenticatedLegacy: cfg.AllowUnauthenticatedLegacy,
+	}
+
+	view, err := archive.OpenVerifiedArchiveWithOptions(cfg.InputDir, snapshotReadOptions)
 	if err != nil {
 		return fmt.Errorf("open pinned snapshot archive: %w", err)
 	}
@@ -188,7 +195,11 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedArchive) error {
-	plan, err := buildPlanFromVerifiedArchive(view)
+	snapshotReadOptions := archive.SnapshotYAMLReadOptions{
+		AllowUnauthenticatedLegacy: cfg.AllowUnauthenticatedLegacy,
+	}
+
+	plan, err := buildPlanFromVerifiedArchiveWithOptions(view, snapshotReadOptions)
 	if err != nil {
 		return fmt.Errorf("build import plan: %w", err)
 	}

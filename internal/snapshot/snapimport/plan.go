@@ -154,9 +154,10 @@ type PlanLimits struct {
 }
 
 type planBuilder struct {
-	limits        PlanLimits
-	nodeCount     int
-	metadataBytes int64
+	limits              PlanLimits
+	snapshotReadOptions archive.SnapshotYAMLReadOptions
+	nodeCount           int
+	metadataBytes       int64
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -190,13 +191,37 @@ func BuildPlan(rootDir string) ([]PlannedNode, error) {
 	return BuildPlanWithLimits(rootDir, DefaultPlanLimits())
 }
 
+// BuildPlanWithOptions builds an import plan under an explicit snapshot.yaml compatibility policy.
+func BuildPlanWithOptions(
+	rootDir string,
+	options archive.SnapshotYAMLReadOptions,
+) ([]PlannedNode, error) {
+	return BuildPlanWithLimitsAndOptions(rootDir, DefaultPlanLimits(), options)
+}
+
 // BuildPlanWithLimits builds an import plan subject to explicit traversal and metadata limits.
 func BuildPlanWithLimits(rootDir string, limits PlanLimits) ([]PlannedNode, error) {
-	return buildPlanWithLimits(rootDir, nil, limits)
+	return BuildPlanWithLimitsAndOptions(rootDir, limits, archive.SnapshotYAMLReadOptions{})
+}
+
+// BuildPlanWithLimitsAndOptions builds an import plan with explicit resource and compatibility policy.
+func BuildPlanWithLimitsAndOptions(
+	rootDir string,
+	limits PlanLimits,
+	options archive.SnapshotYAMLReadOptions,
+) ([]PlannedNode, error) {
+	return buildPlanWithLimits(rootDir, nil, limits, options)
 }
 
 func buildPlanFromVerifiedArchive(view *archive.VerifiedArchive) ([]PlannedNode, error) {
-	builder, err := newPlanBuilder(DefaultPlanLimits())
+	return buildPlanFromVerifiedArchiveWithOptions(view, archive.SnapshotYAMLReadOptions{})
+}
+
+func buildPlanFromVerifiedArchiveWithOptions(
+	view *archive.VerifiedArchive,
+	options archive.SnapshotYAMLReadOptions,
+) ([]PlannedNode, error) {
+	builder, err := newPlanBuilder(DefaultPlanLimits(), options)
 	if err != nil {
 		return nil, err
 	}
@@ -214,15 +239,21 @@ func buildPlanFromVerifiedArchive(view *archive.VerifiedArchive) ([]PlannedNode,
 }
 
 func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, error) {
-	return buildPlanWithLimits(rootDir, hook, DefaultPlanLimits())
+	return buildPlanWithLimits(
+		rootDir,
+		hook,
+		DefaultPlanLimits(),
+		archive.SnapshotYAMLReadOptions{},
+	)
 }
 
 func buildPlanWithLimits(
 	rootDir string,
 	hook archive.OpenBoundaryHook,
 	limits PlanLimits,
+	options archive.SnapshotYAMLReadOptions,
 ) ([]PlannedNode, error) {
-	builder, err := newPlanBuilder(limits)
+	builder, err := newPlanBuilder(limits, options)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +296,10 @@ func DefaultPlanLimits() PlanLimits {
 	}
 }
 
-func newPlanBuilder(limits PlanLimits) (*planBuilder, error) {
+func newPlanBuilder(
+	limits PlanLimits,
+	options archive.SnapshotYAMLReadOptions,
+) (*planBuilder, error) {
 	switch {
 	case limits.MaxDepth < 0:
 		return nil, fmt.Errorf("snapshot import plan maxDepth must be non-negative: %w", ErrPlanBudget)
@@ -280,7 +314,7 @@ func newPlanBuilder(limits PlanLimits) (*planBuilder, error) {
 		return nil, fmt.Errorf("snapshot import plan maxManifestsPerNode must be non-negative: %w", ErrPlanBudget)
 	}
 
-	return &planBuilder{limits: limits}, nil
+	return &planBuilder{limits: limits, snapshotReadOptions: options}, nil
 }
 
 // indexPlanTopology validates canonical node identities and physical parent-child
@@ -503,8 +537,8 @@ func (b *planBuilder) readNode(source *archive.RootedSource) (PlannedNode, error
 		return PlannedNode{}, fmt.Errorf("read node %s snapshot.yaml: %w", dir, err)
 	}
 
-	var sy archive.SnapshotYAML
-	if err := sigsyaml.Unmarshal(snapshotData, &sy); err != nil {
+	sy, err := archive.UnmarshalSnapshotYAML(snapshotData, b.snapshotReadOptions)
+	if err != nil {
 		return PlannedNode{}, fmt.Errorf("unmarshal node %s snapshot.yaml: %w", dir, err)
 	}
 

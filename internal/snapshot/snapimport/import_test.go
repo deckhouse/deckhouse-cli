@@ -353,6 +353,65 @@ func TestRun_ImportsBottomUp(t *testing.T) {
 	}
 }
 
+func TestRunRequiresExplicitLegacyCompatibilityBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowLegacy bool
+		wantErr     error
+	}{
+		{
+			name:    "default rejects",
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name:        "explicit compatibility accepts",
+			allowLegacy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := buildTwoLevelArchive(t)
+			rewriteArchiveNodeAsLegacy(t, root, nil)
+			rewriteArchiveNodeAsLegacy(t, childDir(root, "VolumeSnapshot", "pvc-1"), nil)
+
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.AllowUnauthenticatedLegacy = tt.allowLegacy
+
+			err := Run(context.Background(), cfg)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Run error = %v, want %v", err, tt.wantErr)
+				}
+
+				if len(dyn.Actions()) != 0 || len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 {
+					t.Fatalf(
+						"legacy rejection occurred after side effects: dynamic=%d uploads=%d ensures=%d volume_uploads=%d",
+						len(dyn.Actions()),
+						len(up.calls),
+						len(vol.ensure),
+						len(vol.upload),
+					)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run with explicit legacy compatibility: %v", err)
+			}
+
+			if len(up.calls) != 2 || len(vol.upload) != 1 {
+				t.Fatalf("explicit legacy upload effects = manifests %d volumes %d, want 2 and 1",
+					len(up.calls), len(vol.upload))
+			}
+		})
+	}
+}
+
 // TestRun_UploadsAllManifestsBeforeData locks in the manifests-before-data ordering: a data
 // leaf's SVDM DataImport stays Pending until the leaf VolumeSnapshot has a bound
 // SnapshotContent (which needs the parent content -> the parent's manifests upload), so

@@ -201,6 +201,14 @@ func scanNodeContext(
 		})
 	}
 
+	if errors.Is(verifyErr, ErrLegacySnapshotFormat) {
+		return NodeResumePlan{}, fmt.Errorf(
+			"refuse to resume node directory %s with unauthenticated legacy metadata: %w",
+			primaryDir,
+			verifyErr,
+		)
+	}
+
 	// Any other VerifyNode failure keeps its existing handling. In particular
 	// the crash window (data committed, snapshot.yaml never written ->
 	// ErrSnapshotYAMLMissing) and I/O errors flow here: a partial dir is
@@ -523,6 +531,14 @@ func scanAbsoluteContext(
 			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		})
+	}
+
+	if errors.Is(verifyErr, ErrLegacySnapshotFormat) {
+		return NodeResumePlan{}, fmt.Errorf(
+			"refuse to resume node directory %s with unauthenticated legacy metadata: %w",
+			nodeDir,
+			verifyErr,
+		)
 	}
 
 	// A partial dir under a user-controlled path is resumable only with proven

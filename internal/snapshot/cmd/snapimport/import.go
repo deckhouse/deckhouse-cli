@@ -46,14 +46,15 @@ import (
 const (
 	cmdUse = "upload"
 
-	flagNamespace                = "namespace"
-	flagInput                    = "input"
-	flagNode                     = "node"
-	flagWorkers                  = "workers"
-	flagTTL                      = "ttl"
-	flagTimeout                  = "timeout"
-	flagAllowExisting            = "allow-existing"
-	flagSkipUnsupportedFSEntries = "skip-unsupported-fs-entries"
+	flagNamespace                  = "namespace"
+	flagInput                      = "input"
+	flagNode                       = "node"
+	flagWorkers                    = "workers"
+	flagTTL                        = "ttl"
+	flagTimeout                    = "timeout"
+	flagAllowExisting              = "allow-existing"
+	flagAllowUnauthenticatedLegacy = "allow-unauthenticated-legacy"
+	flagSkipUnsupportedFSEntries   = "skip-unsupported-fs-entries"
 
 	defaultImportWorkers = 5
 
@@ -125,6 +126,11 @@ Scope and limitations:
     PUTs, and creates directories only as a side effect of a file PUT inside them.
   - --skip-unsupported-fs-entries uploads the supported regular files instead of failing,
     but causes data loss for each skipped path; review the bounded post-upload summary.
+  - Legacy archives without formatVersion and metadataChecksum are rejected by default because
+    their snapshot.yaml identity and volume metadata are unauthenticated. Use
+    --allow-unauthenticated-legacy only for deliberate migration or inspection of trusted
+    pre-version archives; this mode cannot distinguish a genuine legacy archive from a
+    downgraded and tampered current archive.
   - Uploading requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
     read-only snapshot admin role is not sufficient.`,
@@ -151,6 +157,7 @@ Scope and limitations:
 	cmd.Flags().String(flagTTL, defaultImportTTL, "idle TTL for each data-leaf DataImport (e.g. 2h, 30m); must exceed the importer's provisioning and post-upload completion time")
 	cmd.Flags().Duration(flagTimeout, 20*time.Minute, "timeout for per-node readiness/completion waits")
 	cmd.Flags().Bool(flagAllowExisting, false, "downgrade namespace preflight conflict check to a warning (import-mode markers from a prior run are never conflicts regardless of this flag)")
+	cmd.Flags().Bool(flagAllowUnauthenticatedLegacy, false, "allow trusted pre-version archives whose snapshot.yaml metadata is unauthenticated (unsafe; explicit compatibility mode)")
 	cmd.Flags().Bool(flagSkipUnsupportedFSEntries, false, "skip unsupported filesystem entries and report them after upload (causes data loss for skipped paths)")
 
 	return cmd
@@ -219,6 +226,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
 	}
 
+	allowUnauthenticatedLegacy, err := cmd.Flags().GetBool(flagAllowUnauthenticatedLegacy)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagAllowUnauthenticatedLegacy, err)
+	}
+
+	if allowUnauthenticatedLegacy {
+		log.Warn("allowing unauthenticated legacy snapshot metadata",
+			slog.String("warning",
+				"legacy compatibility cannot distinguish a genuine pre-version archive from a downgraded tampered archive"))
+	}
+
 	skipUnsupportedFSEntries, err := cmd.Flags().GetBool(flagSkipUnsupportedFSEntries)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagSkipUnsupportedFSEntries, err)
@@ -283,21 +301,22 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	volumes := snapimport.NewClusterVolumeImporter(dynClient, dataPlaneClient, ttl, timeout, 3*time.Second, runLog)
 
 	cfg := snapimport.Config{
-		Namespace:             namespace,
-		InputDir:              inputDir,
-		SelectedNodeKind:      selectedKind,
-		SelectedNodeName:      selectedName,
-		Workers:               workers,
-		AllowExisting:         allowExisting,
-		TTL:                   ttl,
-		Timeout:               timeout,
-		ControlRequestTimeout: snapimport.DefaultControlRequestTimeout,
-		Uploader:              aggClient,
-		Volumes:               volumes,
-		Dynamic:               dynClient,
-		Mapper:                kubeClient.RESTMapper(),
-		Log:                   runLog,
-		Progress:              sink,
+		Namespace:                  namespace,
+		InputDir:                   inputDir,
+		SelectedNodeKind:           selectedKind,
+		SelectedNodeName:           selectedName,
+		Workers:                    workers,
+		AllowExisting:              allowExisting,
+		AllowUnauthenticatedLegacy: allowUnauthenticatedLegacy,
+		TTL:                        ttl,
+		Timeout:                    timeout,
+		ControlRequestTimeout:      snapimport.DefaultControlRequestTimeout,
+		Uploader:                   aggClient,
+		Volumes:                    volumes,
+		Dynamic:                    dynClient,
+		Mapper:                     kubeClient.RESTMapper(),
+		Log:                        runLog,
+		Progress:                   sink,
 	}
 
 	log.Info("starting snapshot upload",

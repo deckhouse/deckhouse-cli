@@ -38,7 +38,7 @@ const (
 	// ComputeNodeChecksum records and ValidateSnapshotYAML requires in NodeChecksum.Algorithm.
 	ChecksumAlgorithmSHA256 = "sha256"
 	// SnapshotFormatVersionLegacy identifies archives written before explicit envelope versioning.
-	// Version zero retains the former permissive metadata behavior for compatibility.
+	// Version zero is accepted only through an explicit unauthenticated compatibility option.
 	SnapshotFormatVersionLegacy = 0
 	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal.
 	SnapshotFormatVersionCurrent = 1
@@ -70,16 +70,29 @@ var ErrInvalidSnapshotYAML = errors.New("invalid snapshot.yaml")
 // ErrUnsupportedSnapshotFormat is returned when snapshot.yaml declares an unknown format version.
 var ErrUnsupportedSnapshotFormat = errors.New("unsupported snapshot.yaml format version")
 
+// ErrLegacySnapshotFormat is returned when an unversioned archive is read without explicit
+// permission to trust its unauthenticated snapshot.yaml metadata.
+var ErrLegacySnapshotFormat = errors.New(
+	"legacy snapshot.yaml metadata is unauthenticated; explicit compatibility mode is required",
+)
+
 // ErrSnapshotMetadataChecksumMismatch is returned when versioned snapshot.yaml metadata differs
 // from the canonical metadata digest recorded when the archive was written.
 var ErrSnapshotMetadataChecksumMismatch = errors.New("snapshot.yaml metadata checksum mismatch")
+
+// SnapshotYAMLReadOptions controls compatibility when decoding snapshot.yaml. The zero value
+// fails closed. AllowUnauthenticatedLegacy must be selected explicitly by migration or
+// inspection callers that accept legacy metadata without an integrity checksum.
+type SnapshotYAMLReadOptions struct {
+	AllowUnauthenticatedLegacy bool
+}
 
 // SnapshotYAML is the per-node file written at <nodeDir>/snapshot.yaml.
 // It records the versioned snapshot CR identity and locally-computed integrity checksums.
 // sigs.k8s.io/yaml uses json struct tags for marshaling and unmarshaling.
 type SnapshotYAML struct {
-	// FormatVersion identifies the snapshot.yaml envelope schema. Missing means the compatible
-	// legacy version zero; writers always stamp SnapshotFormatVersionCurrent.
+	// FormatVersion identifies the snapshot.yaml envelope schema. Missing decodes as legacy
+	// version zero, which normal readers reject; writers always stamp SnapshotFormatVersionCurrent.
 	FormatVersion int `json:"formatVersion,omitempty"`
 	// APIVersion is the apiVersion of the snapshot CR (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
 	APIVersion string `json:"apiVersion"`
@@ -140,7 +153,8 @@ func (sy SnapshotYAML) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON validates envelope version and metadata integrity before exposing semantic fields.
-// A missing formatVersion is the explicit legacy version zero and keeps the pre-version behavior.
+// It deliberately fails closed on missing or zero formatVersion; explicit legacy callers must use
+// UnmarshalSnapshotYAML with AllowUnauthenticatedLegacy.
 func (sy *SnapshotYAML) UnmarshalJSON(data []byte) error {
 	var wire snapshotYAMLWire
 	if err := json.Unmarshal(data, &wire); err != nil {
@@ -148,7 +162,7 @@ func (sy *SnapshotYAML) UnmarshalJSON(data []byte) error {
 	}
 
 	decoded := SnapshotYAML(wire)
-	if err := validateSnapshotEnvelope(decoded); err != nil {
+	if err := validateSnapshotEnvelope(decoded, SnapshotYAMLReadOptions{}); err != nil {
 		return err
 	}
 
@@ -157,9 +171,30 @@ func (sy *SnapshotYAML) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func validateSnapshotEnvelope(sy SnapshotYAML) error {
+// UnmarshalSnapshotYAML decodes YAML bytes under the caller-selected compatibility policy.
+// The zero options value enforces the current authenticated envelope.
+func UnmarshalSnapshotYAML(data []byte, options SnapshotYAMLReadOptions) (SnapshotYAML, error) {
+	var wire snapshotYAMLWire
+	if err := sigsyaml.Unmarshal(data, &wire); err != nil {
+		return SnapshotYAML{}, fmt.Errorf("unmarshal snapshot.yaml envelope: %w", err)
+	}
+
+	decoded := SnapshotYAML(wire)
+	if err := validateSnapshotEnvelope(decoded, options); err != nil {
+		return SnapshotYAML{}, err
+	}
+
+	return decoded, nil
+}
+
+func validateSnapshotEnvelope(sy SnapshotYAML, options SnapshotYAMLReadOptions) error {
 	switch sy.FormatVersion {
 	case SnapshotFormatVersionLegacy:
+		if !options.AllowUnauthenticatedLegacy {
+			return fmt.Errorf("format version %d may indicate an archive downgrade: %w",
+				sy.FormatVersion, ErrLegacySnapshotFormat)
+		}
+
 		return nil
 	case SnapshotFormatVersionCurrent:
 	default:
@@ -930,11 +965,18 @@ func archiveModeError(path string, mode os.FileMode, wantDir bool) error {
 	return fmt.Errorf("%s has mode %s, want %s: %w", path, mode, want, ErrNonRegularArchiveArtifact)
 }
 
-// ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml, rejecting unsupported
-// envelope versions and invalid versioned metadata checksums. Unversioned legacy metadata
-// remains readable with its original permissive integrity behavior.
+// ReadSnapshotYAML reads and deserialises <nodeDir>/snapshot.yaml, rejecting legacy and
+// unsupported envelope versions and invalid versioned metadata checksums.
 // Returns an error wrapping os.ErrNotExist when the file is absent.
 func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
+	return ReadSnapshotYAMLWithOptions(nodeDir, SnapshotYAMLReadOptions{})
+}
+
+// ReadSnapshotYAMLWithOptions reads snapshot.yaml under an explicit compatibility policy.
+func ReadSnapshotYAMLWithOptions(
+	nodeDir string,
+	options SnapshotYAMLReadOptions,
+) (SnapshotYAML, error) {
 	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
@@ -942,10 +984,13 @@ func ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
 
 	defer func() { _ = source.Close() }()
 
-	return readSnapshotYAML(source)
+	return readSnapshotYAML(source, options)
 }
 
-func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
+func readSnapshotYAML(
+	source archiveDirectory,
+	options SnapshotYAMLReadOptions,
+) (SnapshotYAML, error) {
 	file, err := source.archiveOpenRegularFile(SnapshotYAMLName)
 	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
@@ -958,17 +1003,16 @@ func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
 		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
 	}
 
-	var sy SnapshotYAML
-	if err := sigsyaml.Unmarshal(data, &sy); err != nil {
+	sy, err := UnmarshalSnapshotYAML(data, options)
+	if err != nil {
 		return SnapshotYAML{}, fmt.Errorf("unmarshal snapshot.yaml: %w", err)
 	}
 
 	return sy, nil
 }
 
-// ValidateSnapshotYAML strictly validates the snapshot.yaml envelope and structural metadata.
-// Versioned archives authenticate the semantic envelope through MetadataChecksum; compatible
-// legacy version-zero archives retain their original standalone structural validation.
+// ValidateSnapshotYAML strictly validates the current authenticated snapshot.yaml envelope and
+// structural metadata.
 //
 // hasBlockData and hasFilesystemData report the node's on-disk volume payload
 // (data.bin[.<ext>] and data.tar respectively); ValidateNodeMetadata derives them from the
@@ -985,7 +1029,21 @@ func readSnapshotYAML(source archiveDirectory) (SnapshotYAML, error) {
 //     data.tar).
 //   - a non-data node carries no volume.
 func ValidateSnapshotYAML(sy SnapshotYAML, hasBlockData, hasFilesystemData bool) error {
-	if err := validateSnapshotEnvelope(sy); err != nil {
+	return ValidateSnapshotYAMLWithOptions(
+		sy,
+		hasBlockData,
+		hasFilesystemData,
+		SnapshotYAMLReadOptions{},
+	)
+}
+
+// ValidateSnapshotYAMLWithOptions validates snapshot.yaml under an explicit compatibility policy.
+func ValidateSnapshotYAMLWithOptions(
+	sy SnapshotYAML,
+	hasBlockData, hasFilesystemData bool,
+	options SnapshotYAMLReadOptions,
+) error {
+	if err := validateSnapshotEnvelope(sy, options); err != nil {
 		return err
 	}
 

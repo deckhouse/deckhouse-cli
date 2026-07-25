@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -599,6 +600,118 @@ func TestVerifyNode_OK(t *testing.T) {
 	if err := VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode: unexpected error: %v", err)
 	}
+}
+
+func TestLegacySnapshotCompatibilityPolicyAcrossVerifiers(t *testing.T) {
+	nodeDir := makeLegacyNodeDir(t)
+	options := SnapshotYAMLReadOptions{AllowUnauthenticatedLegacy: true}
+
+	if err := VerifyNode(nodeDir); !errors.Is(err, ErrLegacySnapshotFormat) {
+		t.Fatalf("VerifyNode error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	if err := VerifyNodeWithOptions(nodeDir, options); err != nil {
+		t.Fatalf("VerifyNodeWithOptions: %v", err)
+	}
+
+	defaultView, err := OpenVerifiedArchive(nodeDir)
+	if err != nil {
+		t.Fatalf("OpenVerifiedArchive: %v", err)
+	}
+
+	if _, err := defaultView.VerifyNode(context.Background(), nodeDir); !errors.Is(err, ErrLegacySnapshotFormat) {
+		_ = defaultView.Close()
+		t.Fatalf("default VerifiedArchive.VerifyNode error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	if err := defaultView.Close(); err != nil {
+		t.Fatalf("close default verified archive: %v", err)
+	}
+
+	legacyView, err := OpenVerifiedArchiveWithOptions(nodeDir, options)
+	if err != nil {
+		t.Fatalf("OpenVerifiedArchiveWithOptions: %v", err)
+	}
+
+	if _, err := legacyView.VerifyNode(context.Background(), nodeDir); err != nil {
+		_ = legacyView.Close()
+		t.Fatalf("legacy VerifiedArchive.VerifyNode: %v", err)
+	}
+
+	if err := legacyView.Close(); err != nil {
+		t.Fatalf("close legacy verified archive: %v", err)
+	}
+
+	destination, err := OpenRootedDestination(nodeDir, nil)
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	if _, err := destination.ReadSnapshotYAML("."); !errors.Is(err, ErrLegacySnapshotFormat) {
+		t.Fatalf("RootedDestination.ReadSnapshotYAML error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	if _, err := destination.ReadSnapshotYAMLWithOptions(".", options); err != nil {
+		t.Fatalf("RootedDestination.ReadSnapshotYAMLWithOptions: %v", err)
+	}
+
+	if err := destination.VerifyNode("."); !errors.Is(err, ErrLegacySnapshotFormat) {
+		t.Fatalf("RootedDestination.VerifyNode error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	if err := destination.VerifyNodeWithOptions(".", options); err != nil {
+		t.Fatalf("RootedDestination.VerifyNodeWithOptions: %v", err)
+	}
+}
+
+func TestResumeRejectsLegacySnapshotMetadata(t *testing.T) {
+	nodeDir := makeLegacyNodeDir(t)
+	id := NodeIdentity{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "legacy",
+	}
+
+	_, err := ScanAbsolute(nodeDir, id)
+	if !errors.Is(err, ErrLegacySnapshotFormat) {
+		t.Fatalf("ScanAbsolute error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	destination, err := OpenRootedDestination(nodeDir, nil)
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	_, err = ScanAbsoluteRootedContext(context.Background(), destination, ".", id)
+	if !errors.Is(err, ErrLegacySnapshotFormat) {
+		t.Fatalf("ScanAbsoluteRootedContext error = %v, want ErrLegacySnapshotFormat", err)
+	}
+}
+
+func makeLegacyNodeDir(t *testing.T) string {
+	t.Helper()
+
+	nodeDir := makeNodeDir(t)
+	checksum, err := ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	data := fmt.Sprintf(`apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+kind: Snapshot
+name: legacy
+checksum:
+  algorithm: %s
+  hex: %s
+  short: %s
+`, checksum.Algorithm, checksum.Hex, checksum.Short)
+	if err := os.WriteFile(filepath.Join(nodeDir, SnapshotYAMLName), []byte(data), 0o600); err != nil {
+		t.Fatalf("write legacy snapshot.yaml: %v", err)
+	}
+
+	return nodeDir
 }
 
 func TestVerifyNodeRejectsSemanticSnapshotYAMLTampering(t *testing.T) {

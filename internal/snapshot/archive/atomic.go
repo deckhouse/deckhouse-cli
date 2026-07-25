@@ -1128,13 +1128,22 @@ func (d *RootedDestination) ComputeNodeChecksum(nodeDir string) (NodeChecksum, e
 
 // ReadSnapshotYAML reads snapshot.yaml for one node through the locked view.
 func (d *RootedDestination) ReadSnapshotYAML(nodeDir string) (SnapshotYAML, error) {
+	return d.ReadSnapshotYAMLWithOptions(nodeDir, SnapshotYAMLReadOptions{})
+}
+
+// ReadSnapshotYAMLWithOptions reads snapshot.yaml through the locked view under an explicit
+// compatibility policy.
+func (d *RootedDestination) ReadSnapshotYAMLWithOptions(
+	nodeDir string,
+	options SnapshotYAMLReadOptions,
+) (SnapshotYAML, error) {
 	directory, err := d.openDirectory(nodeDir, false, false)
 	if err != nil {
 		return SnapshotYAML{}, err
 	}
 	defer directory.close()
 
-	return readSnapshotYAML(directory.source)
+	return readSnapshotYAML(directory.source, options)
 }
 
 // FindBlockData classifies one node's block payload through the locked view.
@@ -1191,13 +1200,22 @@ func (d *RootedDestination) WriteChunkMeta(
 
 // VerifyNode verifies one node through the locked rooted view.
 func (d *RootedDestination) VerifyNode(nodeDir string) error {
+	return d.VerifyNodeWithOptions(nodeDir, SnapshotYAMLReadOptions{})
+}
+
+// VerifyNodeWithOptions verifies one node through the locked view under an explicit
+// compatibility policy.
+func (d *RootedDestination) VerifyNodeWithOptions(
+	nodeDir string,
+	options SnapshotYAMLReadOptions,
+) error {
 	directory, err := d.openDirectory(nodeDir, false, false)
 	if err != nil {
 		return err
 	}
 	defer directory.close()
 
-	snapshot, err := readSnapshotYAML(directory.source)
+	snapshot, err := readSnapshotYAML(directory.source, options)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%s: %w", nodeDir, ErrSnapshotYAMLMissing)

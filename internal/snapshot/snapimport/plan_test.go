@@ -216,6 +216,81 @@ func TestBuildPlan_PostOrder(t *testing.T) {
 	}
 }
 
+func TestBuildPlanRequiresExplicitLegacyCompatibility(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "legacy-root",
+	})
+	rewriteArchiveNodeAsLegacy(t, root, nil)
+
+	if _, err := BuildPlan(root); !errors.Is(err, archive.ErrLegacySnapshotFormat) {
+		t.Fatalf("BuildPlan error = %v, want ErrLegacySnapshotFormat", err)
+	}
+
+	plan, err := BuildPlanWithOptions(root, archive.SnapshotYAMLReadOptions{
+		AllowUnauthenticatedLegacy: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlanWithOptions: %v", err)
+	}
+
+	if len(plan) != 1 || plan[0].Name != "legacy-root" {
+		t.Fatalf("legacy plan = %+v, want one legacy-root node", plan)
+	}
+}
+
+func TestBuildPlanRejectsDowngradedSemanticMetadataByDefault(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "original",
+	})
+	rewriteArchiveNodeAsLegacy(t, root, func(fields map[string]interface{}) {
+		fields["name"] = "tampered"
+	})
+
+	if _, err := BuildPlan(root); !errors.Is(err, archive.ErrLegacySnapshotFormat) {
+		t.Fatalf("BuildPlan error = %v, want ErrLegacySnapshotFormat", err)
+	}
+}
+
+func rewriteArchiveNodeAsLegacy(
+	t *testing.T,
+	dir string,
+	rewrite func(map[string]interface{}),
+) {
+	t.Helper()
+
+	path := filepath.Join(dir, archive.SnapshotYAMLName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current snapshot.yaml: %v", err)
+	}
+
+	var fields map[string]interface{}
+	if err := sigsyaml.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal current snapshot.yaml: %v", err)
+	}
+
+	delete(fields, "formatVersion")
+	delete(fields, "metadataChecksum")
+	if rewrite != nil {
+		rewrite(fields)
+	}
+
+	data, err = sigsyaml.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal legacy snapshot.yaml: %v", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy snapshot.yaml: %v", err)
+	}
+}
+
 func TestBuildPlanWithLimits_RejectsBudgets(t *testing.T) {
 	tests := []struct {
 		name      string

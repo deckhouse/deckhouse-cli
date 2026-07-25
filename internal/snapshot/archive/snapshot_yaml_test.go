@@ -25,6 +25,8 @@ import (
 	"strings"
 	"testing"
 
+	sigsyaml "sigs.k8s.io/yaml"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
@@ -150,6 +152,7 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 		wantVersion          int
 		wantMetadataChecksum bool
 		wantErr              error
+		allowLegacy          bool
 	}{
 		{
 			name: "current version round trip",
@@ -183,7 +186,7 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			wantErr: archive.ErrUnsupportedSnapshotFormat,
 		},
 		{
-			name: "legacy unversioned archive",
+			name: "legacy unversioned archive requires explicit compatibility",
 			write: func(t *testing.T, nodeDir string) {
 				t.Helper()
 
@@ -193,6 +196,22 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 				}
 			},
 			wantVersion: archive.SnapshotFormatVersionLegacy,
+			wantErr:     archive.ErrLegacySnapshotFormat,
+			allowLegacy: true,
+		},
+		{
+			name: "explicit zero version requires explicit compatibility",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := []byte("{name: legacy, kind: Snapshot, formatVersion: 0, apiVersion: snapshot.example.io/v1}\n")
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write legacy snapshot.yaml: %v", err)
+				}
+			},
+			wantVersion: archive.SnapshotFormatVersionLegacy,
+			wantErr:     archive.ErrLegacySnapshotFormat,
+			allowLegacy: true,
 		},
 	}
 
@@ -207,7 +226,13 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 					t.Fatalf("ReadSnapshotYAML error = %v, want %v", err, tt.wantErr)
 				}
 
-				return
+				if !tt.allowLegacy {
+					return
+				}
+
+				got, err = archive.ReadSnapshotYAMLWithOptions(nodeDir, archive.SnapshotYAMLReadOptions{
+					AllowUnauthenticatedLegacy: true,
+				})
 			}
 
 			if err != nil {
@@ -224,6 +249,113 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadSnapshotYAMLRejectsDowngradeVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		rewrite func(t *testing.T, current []byte) []byte
+		wantErr error
+	}{
+		{
+			name: "omit formatVersion and metadataChecksum after semantic mutation",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					delete(fields, "formatVersion")
+					delete(fields, "metadataChecksum")
+					fields["name"] = "tampered"
+				})
+			},
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name: "set version zero and omit metadataChecksum",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					fields["formatVersion"] = float64(0)
+					delete(fields, "metadataChecksum")
+				})
+			},
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name: "current version without metadataChecksum",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					delete(fields, "metadataChecksum")
+				})
+			},
+			wantErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "current version with stale checksum after semantic mutation",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					fields["name"] = "tampered"
+				})
+			},
+			wantErr: archive.ErrSnapshotMetadataChecksumMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			if err := archive.WriteSnapshotYAML(nodeDir, archive.SnapshotYAML{
+				APIVersion: "snapshot.example.io/v1",
+				Kind:       "Snapshot",
+				Name:       "original",
+				Checksum:   validChecksum(),
+			}); err != nil {
+				t.Fatalf("WriteSnapshotYAML: %v", err)
+			}
+
+			path := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			current, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read current snapshot.yaml: %v", err)
+			}
+
+			if err := os.WriteFile(path, tt.rewrite(t, current), 0o600); err != nil {
+				t.Fatalf("write downgraded snapshot.yaml: %v", err)
+			}
+
+			_, err = archive.ReadSnapshotYAML(nodeDir)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ReadSnapshotYAML error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func rewriteSnapshotYAMLMap(
+	t *testing.T,
+	data []byte,
+	rewrite func(map[string]interface{}),
+) []byte {
+	t.Helper()
+
+	var fields map[string]interface{}
+	if err := sigsyaml.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal snapshot.yaml map: %v", err)
+	}
+
+	rewrite(fields)
+
+	rewritten, err := sigsyaml.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal snapshot.yaml map: %v", err)
+	}
+
+	return rewritten
 }
 
 func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
@@ -488,7 +620,12 @@ func TestValidateSnapshotYAML(t *testing.T) {
 			sy := base()
 			tc.mutate(&sy)
 
-			err := archive.ValidateSnapshotYAML(sy, tc.hasBlock, tc.hasFS)
+			err := archive.ValidateSnapshotYAMLWithOptions(
+				sy,
+				tc.hasBlock,
+				tc.hasFS,
+				archive.SnapshotYAMLReadOptions{AllowUnauthenticatedLegacy: true},
+			)
 
 			if tc.wantErr {
 				if err == nil {
