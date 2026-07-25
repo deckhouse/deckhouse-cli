@@ -20,18 +20,25 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
@@ -230,6 +237,188 @@ func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
 	if wrapped.ResponseHeaderTimeout != defaultControlPlaneTimeout {
 		t.Fatalf("response header timeout = %v, want %v",
 			wrapped.ResponseHeaderTimeout, defaultControlPlaneTimeout)
+	}
+}
+
+func TestNewDownloadClients_ProgressingDataStreamOutlivesControlTimeout(t *testing.T) {
+	const (
+		controlTimeout  = 400 * time.Millisecond
+		progressEvery   = 150 * time.Millisecond
+		progressChunks  = 6
+		dataIdleTimeout = 2 * time.Second
+		bearerToken     = "download-token"
+	)
+
+	streamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/stream" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		if got := r.Header.Get("Authorization"); got != "Bearer "+bearerToken {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		ticker := time.NewTicker(progressEvery)
+		defer ticker.Stop()
+
+		for range progressChunks {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+			}
+
+			if _, err := w.Write([]byte{'x'}); err != nil {
+				return
+			}
+
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(streamServer.Close)
+
+	source := &rest.Config{
+		Host:        streamServer.URL,
+		APIPath:     "/api",
+		BearerToken: bearerToken,
+		UserAgent:   "download-timeout-test",
+		TLSClientConfig: rest.TLSClientConfig{
+			ServerName: "data-exporter.test",
+		},
+		Impersonate: rest.ImpersonationConfig{
+			UserName: "snapshot-user",
+			Groups:   []string{"snapshot-readers"},
+		},
+	}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		return source, nil
+	})
+
+	controlConfig, err := newCommandRESTConfig(NewCommand(context.Background(), slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	controlConfig.Timeout = controlTimeout
+
+	var (
+		aggInput  *rest.Config
+		dataInput *rest.Config
+	)
+
+	newAggClient := aggClientFactory(func(config *rest.Config, mapper meta.RESTMapper) (*aggapi.Client, error) {
+		aggInput = rest.CopyConfig(config)
+
+		return aggapi.NewClient(nil, mapper), nil
+	})
+	newDataPlaneClient := dataPlaneClientFactory(func(config *rest.Config) *transport.Client {
+		dataInput = rest.CopyConfig(config)
+
+		return transport.NewClientForConfig(config)
+	})
+
+	aggClient, dataClient, err := newDownloadClients(
+		controlConfig,
+		nil,
+		newAggClient,
+		newDataPlaneClient,
+	)
+	if err != nil {
+		t.Fatalf("newDownloadClients: %v", err)
+	}
+
+	if aggClient == nil || dataClient == nil {
+		t.Fatal("newDownloadClients returned a nil client")
+	}
+
+	if controlConfig.Timeout != controlTimeout || aggInput.Timeout != controlTimeout {
+		t.Fatalf("control-plane timeouts = source %v, consumer %v; want %v",
+			controlConfig.Timeout, aggInput.Timeout, controlTimeout)
+	}
+
+	if dataInput.Timeout != 0 {
+		t.Fatalf("data-plane total timeout = %v, want zero", dataInput.Timeout)
+	}
+
+	if dataInput.Host != aggInput.Host ||
+		dataInput.APIPath != aggInput.APIPath ||
+		dataInput.BearerToken != aggInput.BearerToken ||
+		dataInput.UserAgent != aggInput.UserAgent ||
+		dataInput.TLSClientConfig.ServerName != aggInput.TLSClientConfig.ServerName ||
+		dataInput.Impersonate.UserName != aggInput.Impersonate.UserName ||
+		!slices.Equal(dataInput.Impersonate.Groups, aggInput.Impersonate.Groups) ||
+		dataInput.QPS != aggInput.QPS ||
+		dataInput.Burst != aggInput.Burst {
+		t.Fatal("data-plane config lost non-timeout control-plane settings")
+	}
+
+	controlTransport, ok := aggInput.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("control-plane WrapTransport did not return an *http.Transport")
+	}
+
+	dataTransport, ok := dataInput.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("data-plane WrapTransport did not return an *http.Transport")
+	}
+
+	if controlTransport.DialContext == nil || dataTransport.DialContext == nil ||
+		dataTransport.TLSHandshakeTimeout != controlTransport.TLSHandshakeTimeout ||
+		dataTransport.ResponseHeaderTimeout != controlTransport.ResponseHeaderTimeout {
+		t.Fatal("data-plane config lost connection, TLS, or response-header guards")
+	}
+
+	persistentClient, err := dataClient.NewPersistentHTTPClientForOrigin(streamServer.URL)
+	if err != nil {
+		t.Fatalf("build persistent data-plane client: %v", err)
+	}
+
+	fetcher := exporter.NewFetcher(
+		persistentClient,
+		exporter.WithIdleReadTimeout(dataIdleTimeout),
+	)
+	start := time.Now()
+
+	body, err := fetcher.GetFile(context.Background(), streamServer.URL+"/stream")
+	if err != nil {
+		persistentClient.CloseIdleConnections()
+
+		t.Fatalf("open progressing data stream: %v", err)
+	}
+
+	got, readErr := io.ReadAll(body)
+	closeErr := body.Close()
+	elapsed := time.Since(start)
+	persistentClient.CloseIdleConnections()
+
+	if readErr != nil {
+		t.Fatalf("read progressing data stream: %v", readErr)
+	}
+
+	if closeErr != nil {
+		t.Fatalf("close progressing data stream: %v", closeErr)
+	}
+
+	if want := strings.Repeat("x", progressChunks); string(got) != want {
+		t.Fatalf("stream body = %q, want %q", got, want)
+	}
+
+	if elapsed <= controlTimeout {
+		t.Fatalf("stream completed in %v, want longer than control timeout %v", elapsed, controlTimeout)
 	}
 }
 

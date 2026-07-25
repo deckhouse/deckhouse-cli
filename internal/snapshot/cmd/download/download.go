@@ -34,6 +34,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
@@ -266,12 +267,15 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("building runtime client: %w", err)
 	}
 
-	aggClient, err := aggapi.NewClientForConfig(restConfig, kubeClient.RESTMapper())
+	aggClient, dataPlaneClient, err := newDownloadClients(
+		restConfig,
+		kubeClient.RESTMapper(),
+		aggapi.NewClientForConfig,
+		transport.NewClientForConfig,
+	)
 	if err != nil {
-		return fmt.Errorf("building aggregated API client: %w", err)
+		return err
 	}
-
-	dataPlaneClient := transport.NewClientForConfig(restConfig)
 
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	// progress.New defaults to progress.DirectionDownload when WithDirection is
@@ -387,6 +391,27 @@ func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (
 	}
 
 	return config, nil
+}
+
+type aggClientFactory func(*rest.Config, meta.RESTMapper) (*aggapi.Client, error)
+
+type dataPlaneClientFactory func(*rest.Config) *transport.Client
+
+func newDownloadClients(
+	controlPlaneConfig *rest.Config,
+	mapper meta.RESTMapper,
+	newAggClient aggClientFactory,
+	newDataPlaneClient dataPlaneClientFactory,
+) (*aggapi.Client, *transport.Client, error) {
+	aggClient, err := newAggClient(controlPlaneConfig, mapper)
+	if err != nil {
+		return nil, nil, fmt.Errorf("building aggregated API client: %w", err)
+	}
+
+	dataPlaneConfig := rest.CopyConfig(controlPlaneConfig)
+	dataPlaneConfig.Timeout = 0
+
+	return aggClient, newDataPlaneClient(dataPlaneConfig), nil
 }
 
 const downloadLockFileName = ".d8-snapshot-download.lock"
