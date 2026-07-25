@@ -167,7 +167,7 @@ func run(
 	cfg = applyDefaults(cfg)
 
 	if cfg.OpenExport == nil {
-		return fmt.Errorf("pipeline: OpenExport must be set (supply SafeClient+AggClient or set OpenExport directly)")
+		return fmt.Errorf("pipeline: OpenExport must be set (supply TransportClient+AggClient or set OpenExport directly)")
 	}
 
 	if cfg.ManifestSource == nil {

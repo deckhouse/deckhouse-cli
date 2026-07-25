@@ -34,7 +34,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 const (
@@ -128,7 +128,7 @@ type Config struct {
 	ManifestSource source.ManifestSource
 
 	// OpenExport opens a DataExport for the given snapshot leaf NodeRef and
-	// returns an Export ready for data transfer. When nil SafeClient and AggClient
+	// returns an Export ready for data transfer. When nil TransportClient and AggClient
 	// must be non-nil and the production path (exporter.OpenExport) is used.
 	//
 	// leafRef identifies the snapshot leaf CR to target: for CSI VolumeSnapshot
@@ -137,9 +137,9 @@ type Config struct {
 	// targetRef is derived from leafRef via the AggClient RESTMapper.
 	OpenExport func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error)
 
-	// SafeClient is used for DataExport HTTP connections in the production path
+	// TransportClient is used for DataExport HTTP connections in the production path
 	// (when OpenExport is nil).  May be nil in tests that supply OpenExport.
-	SafeClient *safeClient.SafeClient
+	TransportClient *transport.Client
 
 	// ReadinessTimeout is how long OpenExport waits for a DataExport to become
 	// Ready before returning an error.  Defaults to 5 minutes.
@@ -236,8 +236,8 @@ func applyDefaults(cfg Config) Config {
 		cfg.ManifestSource = source.NewAggregatedManifestSource(cfg.AggClient)
 	}
 
-	if cfg.OpenExport == nil && cfg.SafeClient != nil && cfg.AggClient != nil {
-		sc := cfg.SafeClient
+	if cfg.OpenExport == nil && cfg.TransportClient != nil && cfg.AggClient != nil {
+		sc := cfg.TransportClient
 		log := cfg.Log
 		c := cfg.KubeClient
 		timeout := cfg.ReadinessTimeout

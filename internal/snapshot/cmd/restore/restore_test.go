@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"k8s.io/client-go/rest"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 func TestNewCommand_Defaults(t *testing.T) {
@@ -116,6 +118,35 @@ func TestBoundedControlPlaneConfig(t *testing.T) {
 			transport.ResponseHeaderTimeout,
 			restore.DefaultControlPlaneTimeout,
 		)
+	}
+}
+
+func TestNewCommandRESTConfig_ParsesOnceAndBoundsSharedConfig(t *testing.T) {
+	t.Helper()
+
+	calls := 0
+	source := &rest.Config{Host: "https://cluster.example.test"}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		calls++
+
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("REST config parse calls = %d, want 1", calls)
+	}
+
+	if got.Timeout != restore.DefaultControlPlaneTimeout {
+		t.Fatalf("shared timeout = %s, want %s", got.Timeout, restore.DefaultControlPlaneTimeout)
+	}
+
+	if source.Timeout != 0 {
+		t.Fatalf("source timeout = %s, want zero after bounded copy", source.Timeout)
 	}
 }
 

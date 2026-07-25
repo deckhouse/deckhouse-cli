@@ -41,7 +41,7 @@ import (
 	"time"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 func TestBuildSubClients_IsolatesConcurrentExportCAs(t *testing.T) {
@@ -56,14 +56,14 @@ func TestBuildSubClients_IsolatesConcurrentExportCAs(t *testing.T) {
 	)
 	serverBURL := serverURLForHost(t, serverB, "localhost")
 
-	sc, err := safeClient.NewSafeClient()
+	sc, err := transport.NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	type clientPair struct {
-		data       *safeClient.PersistentHTTPClient
-		sourceHash *safeClient.PersistentHTTPClient
+		data       *transport.PersistentHTTPClient
+		sourceHash *transport.PersistentHTTPClient
 	}
 
 	pairs := make([]clientPair, 2)
@@ -159,9 +159,9 @@ func TestBuildSubClients_RejectsInvalidPublishedIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			sc, err := safeClient.NewSafeClient()
+			sc, err := transport.NewClient()
 			if err != nil {
-				t.Fatalf("NewSafeClient: %v", err)
+				t.Fatalf("NewClient: %v", err)
 			}
 
 			dataHTTPClient, sourceHashHTTPClient, err := buildSubClients(sc, &deapi.DataExport{
@@ -211,9 +211,9 @@ func TestBuildSubClients_RejectsWrongCAAndSANBeforeHTTPAuth(t *testing.T) {
 		[]string{"producer.invalid"},
 	)
 
-	sc, err := safeClient.NewSafeClient()
+	sc, err := transport.NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	inheritedCAs := append(serverCAPEM(t, source), serverCAPEM(t, wrongSAN)...)
@@ -308,9 +308,9 @@ func TestBuildSubClients_BindsBothClientsToPublishedOrigin(t *testing.T) {
 		nil,
 	)
 
-	sc, err := safeClient.NewSafeClient()
+	sc, err := transport.NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	dataHTTPClient, sourceHashHTTPClient, err := buildSubClients(sc, &deapi.DataExport{
@@ -328,7 +328,7 @@ func TestBuildSubClients_BindsBothClientsToPublishedOrigin(t *testing.T) {
 	clients := []struct {
 		name   string
 		method string
-		client *safeClient.PersistentHTTPClient
+		client *transport.PersistentHTTPClient
 	}{
 		{name: "ordinary data", method: http.MethodGet, client: dataHTTPClient},
 		{name: "source hash", method: http.MethodHead, client: sourceHashHTTPClient},
@@ -487,7 +487,7 @@ func serverCAPEM(t *testing.T, srv *httptest.Server) []byte {
 
 func requestAndClose(
 	t *testing.T,
-	httpClient *safeClient.PersistentHTTPClient,
+	httpClient *transport.PersistentHTTPClient,
 	method,
 	rawURL string,
 ) {
@@ -519,7 +519,7 @@ func requestAndClose(
 
 func requestWithAuthAndClose(
 	t *testing.T,
-	httpClient *safeClient.PersistentHTTPClient,
+	httpClient *transport.PersistentHTTPClient,
 	method,
 	rawURL,
 	authorization string,
@@ -545,7 +545,7 @@ func requestWithAuthAndClose(
 
 func assertTLSFailure(
 	t *testing.T,
-	httpClient *safeClient.PersistentHTTPClient,
+	httpClient *transport.PersistentHTTPClient,
 	method,
 	rawURL string,
 	want any,
@@ -571,7 +571,7 @@ func assertTLSFailure(
 
 func assertRequestFailure(
 	t *testing.T,
-	httpClient *safeClient.PersistentHTTPClient,
+	httpClient *transport.PersistentHTTPClient,
 	method,
 	rawURL string,
 ) {
@@ -593,7 +593,7 @@ func assertRequestFailure(
 
 func assertAuthenticatedRequestFailure(
 	t *testing.T,
-	httpClient *safeClient.PersistentHTTPClient,
+	httpClient *transport.PersistentHTTPClient,
 	method,
 	rawURL,
 	authorization string,

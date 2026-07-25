@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package client
+package transport
 
 import (
 	"bytes"
@@ -43,16 +43,16 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-// TestSafeClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
+// TestClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
 // QPS/Burst fields to exactly the values passed, and that RESTConfig() (the deep
 // copy callers use to build their own clients, e.g. the aggregated-API client)
 // reflects them.
-func TestSafeClient_SetQPS(t *testing.T) {
+func TestClient_SetQPS(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetQPS(50, 100)
@@ -67,18 +67,18 @@ func TestSafeClient_SetQPS(t *testing.T) {
 	}
 }
 
-// TestSafeClient_SetQPS_DefaultUnchangedWithoutCall asserts that a SafeClient
+// TestClient_SetQPS_DefaultUnchangedWithoutCall asserts that a Client
 // which never calls SetQPS leaves rest.Config's QPS/Burst at their unset zero
 // value (client-go's own client constructors substitute rest.DefaultQPS/
 // DefaultBurst for a zero value at request time) — SetQPS must be strictly
-// opt-in per caller, not a change to NewSafeClient's own default, so commands
+// opt-in per caller, not a change to NewClient's own default, so commands
 // that never call it are unaffected.
-func TestSafeClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
+func TestClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	got := sc.RESTConfig()
@@ -91,15 +91,15 @@ func TestSafeClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
 	}
 }
 
-// TestSafeClient_SetResponseHeaderTimeout_AppliesToTransport asserts that
+// TestClient_SetResponseHeaderTimeout_AppliesToTransport asserts that
 // SetResponseHeaderTimeout installs a WrapTransport that sets exactly the given
 // ResponseHeaderTimeout on the transport rest.HTTPClientFor would build.
-func TestSafeClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
+func TestClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetResponseHeaderTimeout(25 * time.Millisecond)
@@ -119,16 +119,16 @@ func TestSafeClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
 	}
 }
 
-// TestSafeClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport asserts
+// TestClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport asserts
 // that SetResponseHeaderTimeout composes with an already-installed WrapTransport
 // (SetTLSCAData's CA injection) instead of clobbering it: both the RootCAs pool
 // and the response-header timeout must survive.
-func TestSafeClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *testing.T) {
+func TestClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetTLSCAData(nil)
@@ -148,15 +148,15 @@ func TestSafeClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *test
 	}
 }
 
-// TestSafeClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall asserts that a
-// SafeClient which never calls SetResponseHeaderTimeout leaves WrapTransport
-// unset, so every other libsaferequest consumer is unaffected (opt-in only).
-func TestSafeClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall(t *testing.T) {
+// TestClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall asserts that a
+// Client which never calls SetResponseHeaderTimeout leaves WrapTransport
+// unset, so every other snapshot transport consumer is unaffected (opt-in only).
+func TestClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	if sc.RESTConfig().WrapTransport != nil {
@@ -172,15 +172,15 @@ func (stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, http.ErrNotSupported
 }
 
-// TestSafeClient_SetTLSCAData_ClonesTransport asserts that SetTLSCAData's
+// TestClient_SetTLSCAData_ClonesTransport asserts that SetTLSCAData's
 // WrapTransport clones a real *http.Transport and injects the CA pool as
 // RootCAs, leaving the original transport untouched.
-func TestSafeClient_SetTLSCAData_ClonesTransport(t *testing.T) {
+func TestClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetTLSCAData(nil)
@@ -203,16 +203,16 @@ func TestSafeClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 	}
 }
 
-// TestSafeClient_SetTLSCAData_PassThroughNonTransport asserts that when
+// TestClient_SetTLSCAData_PassThroughNonTransport asserts that when
 // WrapTransport receives a RoundTripper that is not an *http.Transport it
 // returns the SAME instance unchanged (non-nil), instead of a typed-nil
 // *http.Transport that would nil-panic on RoundTrip.
-func TestSafeClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
+func TestClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetTLSCAData(nil)
@@ -234,10 +234,10 @@ func TestSafeClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
 	}
 }
 
-// TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall asserts the
+// TestClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall asserts the
 // configured transport aborts a request whose server accepts the connection but
 // never sends response headers, within the response-header timeout.
-func TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T) {
+func TestClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -245,9 +245,9 @@ func TestSafeClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T
 	}))
 	defer srv.Close()
 
-	sc, err := NewSafeClient()
+	sc, err := NewClient()
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 
 	sc.SetResponseHeaderTimeout(75 * time.Millisecond)
@@ -299,7 +299,7 @@ func TestPersistentHTTPClient_ReusesAndClosesConnections(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	sc := &SafeClient{restConfig: &rest.Config{}}
+	sc := &Client{restConfig: &rest.Config{}}
 
 	httpClient, err := sc.NewPersistentHTTPClient()
 	if err != nil {
@@ -373,7 +373,7 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 		}
 	})
 
-	sc := newSharedHTTP2SafeClient(t, srv)
+	sc := newSharedHTTP2Client(t, srv)
 	results := make(chan persistentClientResult, 2)
 
 	for range 2 {
@@ -534,7 +534,7 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 		}
 	})
 
-	sc := newSharedHTTP2SafeClient(t, srv)
+	sc := newSharedHTTP2Client(t, srv)
 	shortClient, err := newPersistentTestClient(sc, srv, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("build short-timeout client: %v", err)
@@ -656,7 +656,7 @@ func TestTLSIdentityClient_PreservesAuthenticationWrappers(t *testing.T) {
 			config := &rest.Config{Host: srv.URL}
 			tc.configure(t, config)
 
-			sc := &SafeClient{restConfig: config}
+			sc := &Client{restConfig: config}
 
 			if err := sc.SetTLSIdentityCAData(certificatePEM(t, srv)); err != nil {
 				t.Fatalf("SetTLSIdentityCAData: %v", err)
@@ -739,7 +739,7 @@ func TestTLSIdentityClient_IsolatesConcurrentOriginsAuthenticationAndCARoots(t *
 		}
 
 		caData := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
-		safeClient := &SafeClient{restConfig: &rest.Config{BearerToken: token}}
+		safeClient := &Client{restConfig: &rest.Config{BearerToken: token}}
 
 		if err := safeClient.SetTLSIdentityCAData(caData); err != nil {
 			t.Fatalf("SetTLSIdentityCAData: %v", err)
@@ -903,7 +903,7 @@ func TestPersistentHTTPClientForOrigin_RejectsCrossOriginBeforeAuth(t *testing.T
 	}))
 	t.Cleanup(source.Close)
 
-	safeClient := &SafeClient{restConfig: &rest.Config{BearerToken: token}}
+	safeClient := &Client{restConfig: &rest.Config{BearerToken: token}}
 	httpClient, err := safeClient.NewPersistentHTTPClientForOrigin(source.URL)
 	if err != nil {
 		t.Fatalf("NewPersistentHTTPClientForOrigin: %v", err)
@@ -982,7 +982,7 @@ func TestTLSIdentityClient_PinsProducerCertificateAndOrigin(t *testing.T) {
 
 	sourceCA := certificatePEM(t, source)
 	unrelatedCA := certificatePEM(t, target)
-	safeClient := &SafeClient{restConfig: &rest.Config{
+	safeClient := &Client{restConfig: &rest.Config{
 		BearerToken: token,
 		TLSClientConfig: rest.TLSClientConfig{
 			CAData:     unrelatedCA,
@@ -1093,7 +1093,7 @@ func TestTLSIdentityClient_FailsClosed(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			safeClient := &SafeClient{restConfig: &rest.Config{
+			safeClient := &Client{restConfig: &rest.Config{
 				BearerToken: "must-not-leak",
 				TLSClientConfig: rest.TLSClientConfig{
 					CAData:   certificatePEM(t, source),
@@ -1203,7 +1203,7 @@ func TestTLSIdentityClient_PreservesCertificateAuth(t *testing.T) {
 	}
 
 	keyData := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey})
-	sc := &SafeClient{restConfig: &rest.Config{
+	sc := &Client{restConfig: &rest.Config{
 		Host: srv.URL,
 		TLSClientConfig: rest.TLSClientConfig{
 			CertData: certData,
@@ -1253,7 +1253,7 @@ func TestTLSIdentityClient_PreservesProxyAndDial(t *testing.T) {
 	defer srv.Close()
 
 	dialer := &net.Dialer{}
-	sc := &SafeClient{restConfig: &rest.Config{
+	sc := &Client{restConfig: &rest.Config{
 		Host: srv.URL,
 		Proxy: func(*http.Request) (*url.URL, error) {
 			proxyCalls.Add(1)
@@ -1305,10 +1305,10 @@ func TestTLSIdentityClient_PreservesProxyAndDial(t *testing.T) {
 	}
 }
 
-func TestSafeClient_SetNetworkTimeouts_ConfiguresEveryTransportPhase(t *testing.T) {
+func TestClient_SetNetworkTimeouts_ConfiguresEveryTransportPhase(t *testing.T) {
 	t.Parallel()
 
-	sc := &SafeClient{restConfig: &rest.Config{}}
+	sc := &Client{restConfig: &rest.Config{}}
 	timeouts := NetworkTimeouts{
 		Connect:        11 * time.Second,
 		TLSHandshake:   12 * time.Second,
@@ -2018,7 +2018,7 @@ func newManualTimeoutClient(t *testing.T, roundTrip http.RoundTripper) (*Persist
 	t.Helper()
 
 	timers := &manualTimerSet{}
-	sc := &SafeClient{
+	sc := &Client{
 		restConfig:       &rest.Config{Transport: roundTrip},
 		idleTimerFactory: timers.new,
 		idleNow:          timers.currentTime,
@@ -2133,7 +2133,7 @@ type persistentClientResult struct {
 	err    error
 }
 
-func newSharedHTTP2SafeClient(t *testing.T, srv *httptest.Server) *SafeClient {
+func newSharedHTTP2Client(t *testing.T, srv *httptest.Server) *Client {
 	t.Helper()
 
 	certificate := srv.Certificate()
@@ -2152,11 +2152,11 @@ func newSharedHTTP2SafeClient(t *testing.T, srv *httptest.Server) *SafeClient {
 	})
 	t.Cleanup(sharedTransport.CloseIdleConnections)
 
-	return &SafeClient{restConfig: &rest.Config{Transport: sharedTransport}}
+	return &Client{restConfig: &rest.Config{Transport: sharedTransport}}
 }
 
 func newPersistentTestClient(
-	sc *SafeClient,
+	sc *Client,
 	srv *httptest.Server,
 	responseHeaderTimeout time.Duration,
 ) (*PersistentHTTPClient, error) {

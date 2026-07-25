@@ -38,7 +38,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 const (
@@ -243,14 +243,10 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagTimeout, err)
 	}
 
-	safeClient.SupportNoAuth = false
-
-	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
-
-	restConfig := boundedControlPlaneConfig(sc.RESTConfig())
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
@@ -304,6 +300,15 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return nil
+}
+
+func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {
+	config, err := load(cmd.PersistentFlags())
+	if err != nil {
+		return nil, err
+	}
+
+	return boundedControlPlaneConfig(config), nil
 }
 
 func boundedControlPlaneConfig(config *rest.Config) *rest.Config {

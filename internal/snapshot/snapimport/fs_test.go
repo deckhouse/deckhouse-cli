@@ -48,11 +48,11 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 // plainHTTPDoer satisfies httpDoer by delegating to http.DefaultClient so tests can
-// reach an httptest.Server without pulling in SafeClient or TLS setup.
+// reach an httptest.Server without pulling in snapshot transport client or TLS setup.
 type plainHTTPDoer struct{}
 
 func (plainHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
@@ -3536,9 +3536,9 @@ current-context: test
 
 	t.Setenv("KUBECONFIG", kubeconfigPath)
 
-	sc, err := safeClient.NewSafeClient(pflag.NewFlagSet("upload-reuse-test", pflag.ContinueOnError))
+	sc, err := transport.NewClient(pflag.NewFlagSet("upload-reuse-test", pflag.ContinueOnError))
 	if err != nil {
-		t.Fatalf("NewSafeClient: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
 	importer.sc = sc
 

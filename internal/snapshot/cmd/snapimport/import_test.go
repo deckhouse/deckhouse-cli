@@ -21,6 +21,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/pflag"
+	"k8s.io/client-go/rest"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 func TestNewCommand_Defaults(t *testing.T) {
@@ -57,6 +63,38 @@ func TestNewCommand_Defaults(t *testing.T) {
 
 	if timeout != 20*time.Minute {
 		t.Fatalf("default --%s: got %s, want 20m", flagTimeout, timeout)
+	}
+}
+
+func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
+	t.Helper()
+
+	calls := 0
+	source := &rest.Config{}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		calls++
+
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("REST config parse calls = %d, want 1", calls)
+	}
+
+	if got != source {
+		t.Fatal("newCommandRESTConfig replaced the parsed config")
+	}
+
+	if got.QPS != snapshotClientQPS || got.Burst != snapshotClientBurst ||
+		got.Timeout != snapimport.DefaultControlRequestTimeout {
+		t.Fatalf("shared tuning = QPS %v, Burst %d, Timeout %s; want QPS %v, Burst %d, Timeout %s",
+			got.QPS, got.Burst, got.Timeout,
+			snapshotClientQPS, snapshotClientBurst, snapimport.DefaultControlRequestTimeout)
 	}
 }
 

@@ -56,8 +56,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -497,7 +497,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 	readyExport := readyFilesystemDataExport(t, srv)
 	require.NoError(t, c.Create(context.Background(), readyExport))
 
-	sc, err := safeClient.NewSafeClient()
+	sc, err := transport.NewClient()
 	require.NoError(t, err)
 
 	cfg := pipeline.Config{

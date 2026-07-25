@@ -31,6 +31,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"k8s.io/client-go/rest"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
@@ -39,7 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 const (
@@ -58,8 +59,8 @@ const (
 )
 
 // snapshotClientQPS/snapshotClientBurst raise the kube client's rate limiter
-// above client-go's built-in defaults (QPS=5, Burst=10) for the SafeClient
-// this command builds — see the SetQPS call site for why. A conservative,
+// above client-go's built-in defaults (QPS=5, Burst=10) for the command-scoped
+// REST configuration. A conservative,
 // well-established kubectl-style bump: enough headroom for the
 // --max-parallel-downloads/--workers defaults without materially increasing
 // load on a healthy API server.
@@ -230,9 +231,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("reading --%s flag: %w", flagCleanup, err)
 	}
 
-	safeClient.SupportNoAuth = false
-
-	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
@@ -246,9 +245,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	// block past the cleanup deadline, silently leaking a DataExport even on a
 	// fully successful run. Set BEFORE building kubeClient/aggClient so both
 	// inherit the higher limits.
-	sc.SetQPS(snapshotClientQPS, snapshotClientBurst)
-
-	kubeClient, err := sc.NewRTClient(
+	kubeClient, err := transport.NewRuntimeClient(
+		restConfig,
 		snapshotapi.AddToScheme,
 		deapi.AddToScheme,
 		snapv1.AddToScheme,
@@ -257,10 +255,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("building runtime client: %w", err)
 	}
 
-	aggClient, err := aggapi.NewClientForConfig(sc.RESTConfig(), kubeClient.RESTMapper())
+	aggClient, err := aggapi.NewClientForConfig(restConfig, kubeClient.RESTMapper())
 	if err != nil {
 		return fmt.Errorf("building aggregated API client: %w", err)
 	}
+
+	dataPlaneClient := transport.NewClientForConfig(restConfig)
 
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	// progress.New defaults to progress.DirectionDownload when WithDirection is
@@ -294,7 +294,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		Compression:          codec,
 		KubeClient:           kubeClient,
 		AggClient:            aggClient,
-		SafeClient:           sc,
+		TransportClient:      dataPlaneClient,
 		SelectedNodeKind:     selectedKind,
 		SelectedNodeName:     selectedName,
 		Progress:             sink,
@@ -330,6 +330,18 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
 
 	return nil
+}
+
+func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {
+	config, err := load(cmd.PersistentFlags())
+	if err != nil {
+		return nil, err
+	}
+
+	config.QPS = snapshotClientQPS
+	config.Burst = snapshotClientBurst
+
+	return config, nil
 }
 
 const downloadLockFileName = ".d8-snapshot-download.lock"

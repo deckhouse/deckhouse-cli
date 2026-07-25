@@ -40,8 +40,8 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -136,11 +136,11 @@ type VolumeImporter interface {
 }
 
 // clusterVolumeImporter is the live VolumeImporter backed by a dynamic client (DataImport
-// CR lifecycle and status) and a SafeClient (authenticated HTTPS byte upload to the
+// CR lifecycle and status) and a snapshot transport client (authenticated HTTPS byte upload to the
 // importer pod, trusting status.ca).
 type clusterVolumeImporter struct {
 	dyn               dynamic.Interface
-	sc                *safeClient.SafeClient
+	sc                *transport.Client
 	newUploadClient   func([]byte, string) (uploadHTTPClient, error)
 	ttl               string
 	poll              time.Duration
@@ -156,7 +156,7 @@ type clusterVolumeImporter struct {
 // no scratch directory for decompressed temporary files is needed.
 func NewClusterVolumeImporter(
 	dyn dynamic.Interface,
-	sc *safeClient.SafeClient,
+	sc *transport.Client,
 	ttl string,
 	wait, poll time.Duration,
 	log *slog.Logger,
@@ -691,7 +691,7 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 		return nil, fmt.Errorf("decode DataImport status.ca: %w", err)
 	}
 
-	if err := safeClient.ValidateHTTPSIdentity(rawURL, ca); err != nil {
+	if err := transport.ValidateHTTPSIdentity(rawURL, ca); err != nil {
 		return nil, fmt.Errorf("validate DataImport upload identity: %w", err)
 	}
 
@@ -710,7 +710,7 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 		return nil, fmt.Errorf("configure DataImport upload TLS identity: %w", err)
 	}
 
-	if err := sub.SetNetworkTimeouts(safeClient.NetworkTimeouts{
+	if err := sub.SetNetworkTimeouts(transport.NetworkTimeouts{
 		Connect:        uploadConnectTimeout,
 		TLSHandshake:   uploadTLSHandshakeTimeout,
 		ResponseHeader: uploadResponseHeaderTimeout,

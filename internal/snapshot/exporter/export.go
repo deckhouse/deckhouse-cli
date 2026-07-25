@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 // dataPlaneResponseHeaderTimeout bounds how long the data-plane client waits for
@@ -35,8 +35,8 @@ import (
 // seconds; this conservative upper bound only guards the pathological case of an
 // endpoint that accepts the connection but never answers. It complements the
 // Fetcher's idle-read watchdog (which guards a stall AFTER headers arrive) and
-// is applied ONLY to this exporter's own SafeClient copy, so no other
-// libsaferequest consumer is affected.
+// is applied ONLY to this exporter's own snapshot transport client copy, so no other
+// snapshot consumer is affected.
 const dataPlaneResponseHeaderTimeout = 2 * time.Minute
 
 // Export holds a resolved DataExport: a ready HTTP endpoint (Fetcher), the
@@ -126,7 +126,7 @@ func OpenExport(
 	kind,
 	leafName,
 	ttl string,
-	sc *safeClient.SafeClient,
+	sc *transport.Client,
 	opts ...EnsureOption,
 ) (*Export, error) {
 	de, err := EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl, opts...)
@@ -162,15 +162,15 @@ func OpenExport(
 // producer computes their response header by synchronously reading the complete
 // file; SourceMD5 applies the tighter size-derived request deadline.
 func buildSubClients(
-	sc *safeClient.SafeClient,
+	sc *transport.Client,
 	de *deapi.DataExport,
-) (*safeClient.PersistentHTTPClient, *safeClient.PersistentHTTPClient, error) {
+) (*transport.PersistentHTTPClient, *transport.PersistentHTTPClient, error) {
 	caBytes, err := base64.StdEncoding.DecodeString(de.Status.CA)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decode DataExport status.ca: %w", err)
 	}
 
-	if err := safeClient.ValidateHTTPSIdentity(de.Status.URL, caBytes); err != nil {
+	if err := transport.ValidateHTTPSIdentity(de.Status.URL, caBytes); err != nil {
 		return nil, nil, fmt.Errorf("validate DataExport download identity: %w", err)
 	}
 

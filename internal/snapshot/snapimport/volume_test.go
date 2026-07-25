@@ -50,8 +50,8 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -1605,13 +1605,13 @@ func TestUploadControlEndpoints_PropagateResponseByteLimit(t *testing.T) {
 					Status:     fmt.Sprintf("%d %s", tc.status, http.StatusText(tc.status)),
 					Header:     header,
 					Body: causalResponseBody{
-						err: safeClient.ErrResponseBodyLimitExceeded,
+						err: transport.ErrResponseBodyLimitExceeded,
 					},
 				}, nil
 			})
 
 			err := tc.run(t, doer)
-			if !errors.Is(err, safeClient.ErrResponseBodyLimitExceeded) {
+			if !errors.Is(err, transport.ErrResponseBodyLimitExceeded) {
 				t.Fatalf("error = %v, want ErrResponseBodyLimitExceeded", err)
 			}
 		})
@@ -1746,7 +1746,7 @@ func TestSendVolumeData_ResponseLimitLeavesResumeOffsetAndSkipsFinished(t *testi
 				Status:     http.StatusText(http.StatusCreated),
 				Header:     header,
 				Body: causalResponseBody{
-					err: safeClient.ErrResponseBodyLimitExceeded,
+					err: transport.ErrResponseBodyLimitExceeded,
 				},
 			}, nil
 		case http.MethodPost:
@@ -1781,7 +1781,7 @@ func TestSendVolumeData_ResponseLimitLeavesResumeOffsetAndSkipsFinished(t *testi
 		func(count int) { progress += count },
 		nil,
 	)
-	if !errors.Is(err, safeClient.ErrResponseBodyLimitExceeded) {
+	if !errors.Is(err, transport.ErrResponseBodyLimitExceeded) {
 		t.Fatalf("sendVolumeData error = %v, want ErrResponseBodyLimitExceeded", err)
 	}
 	if progress != int(resumeOffset) {

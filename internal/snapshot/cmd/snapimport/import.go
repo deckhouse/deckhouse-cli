@@ -33,12 +33,13 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
-	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 const (
@@ -64,8 +65,8 @@ const (
 )
 
 // snapshotClientQPS/snapshotClientBurst raise the kube client's rate limiter
-// above client-go's built-in defaults (QPS=5, Burst=10) for the SafeClient
-// this command builds — see the SetQPS call site for why. Mirrors the same
+// above client-go's built-in defaults (QPS=5, Burst=10) for the command-scoped
+// REST configuration. Mirrors the same
 // pinned values used by `d8 snapshot download`.
 const (
 	snapshotClientQPS   float32 = 50
@@ -205,9 +206,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagAllowExisting, err)
 	}
 
-	safeClient.SupportNoAuth = false
-
-	sc, err := safeClient.NewSafeClient(cmd.PersistentFlags())
+	restConfig, err := newCommandRESTConfig(cmd, transport.NewRESTConfig)
 	if err != nil {
 		return fmt.Errorf("building kube client: %w", err)
 	}
@@ -219,10 +218,8 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	// concurrent requests could make the rate limiter's Wait block long enough
 	// to fail a cleanup/status call. Set BEFORE building kubeClient/aggClient/
 	// dynClient so all three inherit the higher limits.
-	sc.SetQPS(snapshotClientQPS, snapshotClientBurst)
-	sc.SetRequestTimeout(snapimport.DefaultControlRequestTimeout)
-
-	kubeClient, err := sc.NewRTClient(
+	kubeClient, err := transport.NewRuntimeClient(
+		restConfig,
 		snapshotapi.AddToScheme,
 		snapv1.AddToScheme,
 	)
@@ -230,15 +227,17 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("building runtime client: %w", err)
 	}
 
-	aggClient, err := aggapi.NewClientForConfig(sc.RESTConfig(), kubeClient.RESTMapper())
+	aggClient, err := aggapi.NewClientForConfig(restConfig, kubeClient.RESTMapper())
 	if err != nil {
 		return fmt.Errorf("building aggregated API client: %w", err)
 	}
 
-	dynClient, err := dynamic.NewForConfig(sc.RESTConfig())
+	dynClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
 		return fmt.Errorf("building dynamic client: %w", err)
 	}
+
+	dataPlaneClient := transport.NewClientForConfig(restConfig)
 
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
@@ -259,7 +258,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, sc, ttl, timeout, 3*time.Second, runLog)
+	volumes := snapimport.NewClusterVolumeImporter(dynClient, dataPlaneClient, ttl, timeout, 3*time.Second, runLog)
 
 	cfg := snapimport.Config{
 		Namespace:             namespace,
@@ -295,6 +294,19 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 	log.Info("snapshot upload complete", slog.String("namespace", namespace))
 
 	return nil
+}
+
+func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {
+	config, err := load(cmd.PersistentFlags())
+	if err != nil {
+		return nil, err
+	}
+
+	config.QPS = snapshotClientQPS
+	config.Burst = snapshotClientBurst
+	config.Timeout = snapimport.DefaultControlRequestTimeout
+
+	return config, nil
 }
 
 // parseNodeFlag parses a --node flag value "<Kind>/<name>" into its components.

@@ -25,8 +25,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
+	"k8s.io/client-go/rest"
+
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
 func TestNewCommand_Defaults(t *testing.T) {
@@ -74,6 +78,36 @@ func TestNewCommand_Defaults(t *testing.T) {
 
 	if perVol != 4 {
 		t.Fatalf("default per-volume-concurrency: got %d, want 4", perVol)
+	}
+}
+
+func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
+	t.Helper()
+
+	calls := 0
+	source := &rest.Config{}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		calls++
+
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(context.Background(), slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("REST config parse calls = %d, want 1", calls)
+	}
+
+	if got != source {
+		t.Fatal("newCommandRESTConfig replaced the parsed config")
+	}
+
+	if got.QPS != snapshotClientQPS || got.Burst != snapshotClientBurst {
+		t.Fatalf("shared tuning = QPS %v, Burst %d; want QPS %v, Burst %d",
+			got.QPS, got.Burst, snapshotClientQPS, snapshotClientBurst)
 	}
 }
 
