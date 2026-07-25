@@ -118,6 +118,10 @@ Scope and limitations:
     root. To upload an individual disk snapshot from such a tree on its own, use
     --node <DomainDataLeafKind>/<name> (e.g. --node DemoVirtualDiskSnapshot/dvd-1).
   - Both block-volume and filesystem-volume data leaves are supported.
+  - Filesystem archives can upload regular files only. Symlink, hardlink, device, FIFO, and
+    socket entries, plus empty directories other than well-known filesystem-reserved names
+    (for example lost+found), cannot be uploaded: the protocol supports only regular-file
+    PUTs, and creates directories only as a side effect of a file PUT inside them.
   - Uploading requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
     read-only snapshot admin role is not sufficient.`,

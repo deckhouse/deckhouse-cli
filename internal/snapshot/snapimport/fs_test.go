@@ -2191,6 +2191,15 @@ func TestImportFSFromTar_RejectsUnsupportedEntriesBeforeHTTP(t *testing.T) {
 				}
 			}
 
+			for _, fragment := range []string{
+				"known permanent upload protocol limitation",
+				"d8 snapshot upload --help",
+			} {
+				if !strings.Contains(err.Error(), fragment) {
+					t.Errorf("importFSFromTar error %q does not contain %q", err, fragment)
+				}
+			}
+
 			if doer.called {
 				t.Fatal("unsupported full-tar preflight must run before HTTP")
 			}

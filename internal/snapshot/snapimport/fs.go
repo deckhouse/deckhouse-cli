@@ -1668,7 +1668,12 @@ func (c *fsTarDiagnosticCollector) Err() error {
 		message += fmt.Sprintf("; ... %d additional entries omitted", omitted)
 	}
 
-	return fmt.Errorf("unsupported filesystem tar entries (%d): %s", c.count, message)
+	return fmt.Errorf(
+		"known permanent upload protocol limitation: unsupported filesystem tar entries (%d): %s; "+
+			"see 'd8 snapshot upload --help' for the exact unsupported entry kinds",
+		c.count,
+		message,
+	)
 }
 
 func validateSortedFSTar(ctx context.Context, sortedPath string) (fsTarDirectoryCounts, error) {

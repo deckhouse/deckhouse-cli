@@ -166,6 +166,32 @@ func TestNewCommand_Defaults(t *testing.T) {
 	}
 }
 
+func TestNewCommand_DocumentsFilesystemEntryLimitations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "regular file protocol", fragment: "protocol supports only regular-file"},
+		{name: "links", fragment: "Symlink, hardlink"},
+		{name: "special entries", fragment: "device, FIFO, and\n    socket entries"},
+		{name: "empty directories", fragment: "empty directories other than well-known filesystem-reserved names"},
+		{name: "directory side effect", fragment: "creates directories only as a side effect of a file PUT inside them"},
+	}
+
+	commandLong := NewCommand(slog.Default()).Long
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !strings.Contains(commandLong, tc.fragment) {
+				t.Errorf("command Long does not contain %q:\n%s", tc.fragment, commandLong)
+			}
+		})
+	}
+}
+
 func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
 	t.Helper()
 
