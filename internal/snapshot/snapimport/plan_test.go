@@ -216,6 +216,177 @@ func TestBuildPlan_PostOrder(t *testing.T) {
 	}
 }
 
+func TestBuildPlanWithLimits_RejectsBudgets(t *testing.T) {
+	tests := []struct {
+		name      string
+		build     func(t *testing.T) string
+		configure func(limits *PlanLimits)
+		want      string
+	}{
+		{
+			name: "maxDepth",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root"})
+				child := childDir(root, snapshotKind, "child")
+				writeArchiveNode(t, child, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "child",
+				})
+				writeArchiveNode(t, childDir(child, snapshotKind, "grandchild"), archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "grandchild",
+				})
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxDepth = 1
+			},
+			want: "maxDepth",
+		},
+		{
+			name: "maxNodes",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root"})
+				writeArchiveNode(t, childDir(root, snapshotKind, "child-a"), archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "child-a",
+				})
+				writeArchiveNode(t, childDir(root, snapshotKind, "child-b"), archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "child-b",
+				})
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxNodes = 2
+			},
+			want: "maxNodes",
+		},
+		{
+			name: "snapshot maxManifestBytes",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root"})
+				if err := os.WriteFile(
+					filepath.Join(root, archive.SnapshotYAMLName),
+					bytes.Repeat([]byte("#"), 65),
+					0o600,
+				); err != nil {
+					t.Fatalf("write oversized snapshot.yaml: %v", err)
+				}
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxManifestBytes = 64
+			},
+			want: "maxManifestBytes",
+		},
+		{
+			name: "manifest maxManifestBytes",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+					manifests: []map[string]interface{}{{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+					}},
+				})
+
+				entries, err := os.ReadDir(filepath.Join(root, archive.ManifestsDirName))
+				if err != nil {
+					t.Fatalf("read manifests directory: %v", err)
+				}
+
+				path := filepath.Join(root, archive.ManifestsDirName, entries[0].Name())
+				if err := os.WriteFile(path, bytes.Repeat([]byte("#"), 65), 0o600); err != nil {
+					t.Fatalf("write oversized manifest: %v", err)
+				}
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxManifestBytes = 64
+			},
+			want: "maxManifestBytes",
+		},
+		{
+			name: "maxTotalMetadataBytes",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root"})
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxTotalMetadataBytes = 1
+			},
+			want: "maxTotalMetadataBytes",
+		},
+		{
+			name: "maxManifestsPerNode",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+					manifests: []map[string]interface{}{
+						{"apiVersion": "v1", "kind": "ConfigMap"},
+						{"apiVersion": "v1", "kind": "Secret"},
+					},
+				})
+
+				return root
+			},
+			configure: func(limits *PlanLimits) {
+				limits.MaxManifestsPerNode = 1
+			},
+			want: "maxManifestsPerNode",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.build(t)
+			limits := DefaultPlanLimits()
+			test.configure(&limits)
+
+			_, err := BuildPlanWithLimits(root, limits)
+			if !errors.Is(err, ErrPlanBudget) {
+				t.Fatalf("BuildPlanWithLimits() error = %v, want ErrPlanBudget", err)
+			}
+
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("BuildPlanWithLimits() error = %q, want budget name %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildPlanRejectsHostFilesystemSymlinks(t *testing.T) {
 	tests := []struct {
 		name  string

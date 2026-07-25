@@ -17,8 +17,10 @@ limitations under the License.
 package localscan_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -159,6 +161,79 @@ func TestScan_RootWithDirectChildren(t *testing.T) {
 
 	if len(gotChildA.Children) != 0 {
 		t.Errorf("child-a should have no children, got %d", len(gotChildA.Children))
+	}
+}
+
+func TestScanWithLimits_RejectsTraversalBudget(t *testing.T) {
+	tests := []struct {
+		name   string
+		limits localscan.ScanLimits
+		build  func(t *testing.T) string
+		want   string
+	}{
+		{
+			name: "maxDepth",
+			limits: localscan.ScanLimits{
+				MaxDepth: 1,
+				MaxNodes: 10,
+			},
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeNodeYAML(t, root, archive.SnapshotYAML{Kind: "Snapshot", Name: "root"})
+				child := makeChildDir(t, root, "snapshot_child", archive.SnapshotYAML{
+					Kind: "Snapshot",
+					Name: "child",
+				})
+				makeChildDir(t, child, "snapshot_grandchild", archive.SnapshotYAML{
+					Kind: "Snapshot",
+					Name: "grandchild",
+				})
+
+				return root
+			},
+			want: "maxDepth",
+		},
+		{
+			name: "maxNodes",
+			limits: localscan.ScanLimits{
+				MaxDepth: 10,
+				MaxNodes: 2,
+			},
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeNodeYAML(t, root, archive.SnapshotYAML{Kind: "Snapshot", Name: "root"})
+				makeChildDir(t, root, "snapshot_child_a", archive.SnapshotYAML{
+					Kind: "Snapshot",
+					Name: "child-a",
+				})
+				makeChildDir(t, root, "snapshot_child_b", archive.SnapshotYAML{
+					Kind: "Snapshot",
+					Name: "child-b",
+				})
+
+				return root
+			},
+			want: "maxNodes",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.build(t)
+
+			_, err := localscan.ScanWithLimits(root, test.limits)
+			if !errors.Is(err, localscan.ErrScanBudget) {
+				t.Fatalf("ScanWithLimits() error = %v, want ErrScanBudget", err)
+			}
+
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("ScanWithLimits() error = %q, want budget name %q", err, test.want)
+			}
+		})
 	}
 }
 

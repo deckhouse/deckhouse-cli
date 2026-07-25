@@ -29,8 +29,17 @@ import (
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 )
 
-// ErrCycle is returned when a cycle or duplicate reference is detected in the snapshot tree.
-var ErrCycle = errors.New("cycle detected in snapshot tree")
+const (
+	defaultTreeMaxDepth = 64
+	defaultTreeMaxNodes = 10_000
+)
+
+var (
+	// ErrCycle is returned when a cycle or duplicate reference is detected in the snapshot tree.
+	ErrCycle = errors.New("cycle detected in snapshot tree")
+	// ErrTreeBudget is returned when a snapshot tree exceeds a configured traversal limit.
+	ErrTreeBudget = errors.New("snapshot tree traversal budget exceeded")
+)
 
 // ErrLeafNotBound is returned when a VolumeSnapshot visibility-leaf has no namespaced
 // status.data; the leaf is not yet captured and is not ready for download.
@@ -70,13 +79,49 @@ const volumeSnapshotAPIVersion = "snapshot.storage.k8s.io/v1"
 // Returns ErrCycle if a duplicate snapshot ref is encountered.
 // Returns ErrLeafNotBound if a VolumeSnapshot leaf has no status.data.
 func BuildTree(ctx context.Context, c client.Client, namespace, rootName string) (*Node, error) {
+	return BuildTreeWithLimits(ctx, c, namespace, rootName, DefaultTreeLimits())
+}
+
+// DefaultTreeLimits returns the traversal limits used by BuildTree: at most
+// 10,000 nodes and 64 child edges below the root.
+func DefaultTreeLimits() TreeLimits {
+	return TreeLimits{
+		MaxDepth: defaultTreeMaxDepth,
+		MaxNodes: defaultTreeMaxNodes,
+	}
+}
+
+// TreeLimits bounds the number and depth of nodes fetched by BuildTreeWithLimits.
+// The root is at depth zero and counts toward MaxNodes.
+type TreeLimits struct {
+	MaxDepth int
+	MaxNodes int
+}
+
+// BuildTreeWithLimits builds a snapshot tree subject to explicit traversal limits.
+func BuildTreeWithLimits(
+	ctx context.Context,
+	c client.Client,
+	namespace string,
+	rootName string,
+	limits TreeLimits,
+) (*Node, error) {
+	if limits.MaxDepth < 0 {
+		return nil, fmt.Errorf("snapshot tree maxDepth must be non-negative: %w", ErrTreeBudget)
+	}
+
+	if limits.MaxNodes <= 0 {
+		return nil, fmt.Errorf("snapshot tree maxNodes must be positive: %w", ErrTreeBudget)
+	}
+
 	v := &treeBuilder{
 		client:    c,
 		namespace: namespace,
-		seen:      make(map[string]struct{}),
+		limits:    limits,
+		seen:      make(map[string]struct{}, limits.MaxNodes),
 	}
 
-	return v.visit(ctx, rootAPIVersion, "Snapshot", rootName, nil)
+	return v.visit(ctx, rootAPIVersion, "Snapshot", rootName, nil, 0)
 }
 
 // treeBuilder accumulates per-traversal state: the client, the fixed namespace, and
@@ -84,16 +129,21 @@ func BuildTree(ctx context.Context, c client.Client, namespace, rootName string)
 type treeBuilder struct {
 	client    client.Client
 	namespace string
+	limits    TreeLimits
 	seen      map[string]struct{}
 }
 
-func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, parent *Node) (*Node, error) {
-	nodeKey := apiVersion + "/" + kind + "/" + name
-	if _, dup := b.seen[nodeKey]; dup {
-		return nil, fmt.Errorf("ref %s %s/%s: %w", apiVersion, kind, name, ErrCycle)
+func (b *treeBuilder) visit(
+	ctx context.Context,
+	apiVersion string,
+	kind string,
+	name string,
+	parent *Node,
+	depth int,
+) (*Node, error) {
+	if err := b.reserveNode(apiVersion, kind, name, depth); err != nil {
+		return nil, err
 	}
-
-	b.seen[nodeKey] = struct{}{}
 
 	obj, err := fetchUnstructured(ctx, b.client, b.namespace, apiVersion, kind, name)
 	if err != nil {
@@ -128,7 +178,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 	node.Children = make([]*Node, 0, len(domainRefs)+len(leafRefs))
 
 	for _, ref := range domainRefs {
-		child, err := b.visit(ctx, ref.APIVersion, ref.Kind, ref.Name, node)
+		child, err := b.visit(ctx, ref.APIVersion, ref.Kind, ref.Name, node, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +191,7 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 		// status. The aggregator itself carries no own data (Data stays nil); each leaf owns
 		// its captured volume and the PVC manifest (each leaf's own ManifestCheckpoint).
 		for _, leafRef := range leafRefs {
-			leaf, err := b.visitVisibilityLeaf(ctx, leafRef.Name, node)
+			leaf, err := b.visitVisibilityLeaf(ctx, leafRef.Name, node, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("resolve VolumeSnapshot leaf %q: %w", leafRef.Name, err)
 			}
@@ -167,7 +217,16 @@ func (b *treeBuilder) visit(ctx context.Context, apiVersion, kind, name string, 
 // status.sourceRef.name (the captured PVC name).
 //
 // Returns ErrLeafNotBound when the VolumeSnapshot has no status.data (not yet captured).
-func (b *treeBuilder) visitVisibilityLeaf(ctx context.Context, vsName string, parent *Node) (*Node, error) {
+func (b *treeBuilder) visitVisibilityLeaf(
+	ctx context.Context,
+	vsName string,
+	parent *Node,
+	depth int,
+) (*Node, error) {
+	if err := b.reserveNode(volumeSnapshotAPIVersion, "VolumeSnapshot", vsName, depth); err != nil {
+		return nil, err
+	}
+
 	vs, err := fetchUnstructured(ctx, b.client, b.namespace, volumeSnapshotAPIVersion, "VolumeSnapshot", vsName)
 	if err != nil {
 		return nil, fmt.Errorf("fetch VolumeSnapshot %s/%s: %w", b.namespace, vsName, err)
@@ -193,6 +252,40 @@ func (b *treeBuilder) visitVisibilityLeaf(ctx context.Context, vsName string, pa
 		Ready:      parseReadyCondition(vs),
 		Parent:     parent,
 	}, nil
+}
+
+func (b *treeBuilder) reserveNode(apiVersion, kind, name string, depth int) error {
+	if depth > b.limits.MaxDepth {
+		return fmt.Errorf(
+			"snapshot tree maxDepth %d exceeded at %s %s/%s (depth %d; root depth is 0): %w",
+			b.limits.MaxDepth,
+			apiVersion,
+			kind,
+			name,
+			depth,
+			ErrTreeBudget,
+		)
+	}
+
+	if len(b.seen) >= b.limits.MaxNodes {
+		return fmt.Errorf(
+			"snapshot tree maxNodes %d exceeded while adding %s %s/%s: %w",
+			b.limits.MaxNodes,
+			apiVersion,
+			kind,
+			name,
+			ErrTreeBudget,
+		)
+	}
+
+	nodeKey := apiVersion + "/" + kind + "/" + name
+	if _, dup := b.seen[nodeKey]; dup {
+		return fmt.Errorf("ref %s %s/%s: %w", apiVersion, kind, name, ErrCycle)
+	}
+
+	b.seen[nodeKey] = struct{}{}
+
+	return nil
 }
 
 // partitionChildRefs splits childRefs into domain refs (to recurse) and VolumeSnapshot

@@ -19,6 +19,7 @@ package source
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -536,6 +537,90 @@ func TestBuildTree_CycleError(t *testing.T) {
 
 	if !errors.Is(err, ErrCycle) {
 		t.Errorf("expected ErrCycle, got: %v", err)
+	}
+}
+
+func TestBuildTreeWithLimits_RejectsTraversalBudget(t *testing.T) {
+	tests := []struct {
+		name    string
+		limits  TreeLimits
+		objects []*unstructured.Unstructured
+		want    string
+	}{
+		{
+			name: "maxDepth",
+			limits: TreeLimits{
+				MaxDepth: 1,
+				MaxNodes: 10,
+			},
+			objects: []*unstructured.Unstructured{
+				rootSnap("root", "root-uid", []interface{}{
+					childRef(rootAPIVersion, "Snapshot", "child"),
+				}),
+				makeSnap(snapOpts{
+					apiVersion: rootAPIVersion,
+					kind:       "Snapshot",
+					name:       "child",
+					uid:        "child-uid",
+					sourceRef:  namespaceSourceRef(testNS, "child-source-uid"),
+					childRefs: []interface{}{
+						childRef(rootAPIVersion, "Snapshot", "grandchild"),
+					},
+				}),
+				makeSnap(snapOpts{
+					apiVersion: rootAPIVersion,
+					kind:       "Snapshot",
+					name:       "grandchild",
+					uid:        "grandchild-uid",
+					sourceRef:  namespaceSourceRef(testNS, "grandchild-source-uid"),
+				}),
+			},
+			want: "maxDepth",
+		},
+		{
+			name: "maxNodes",
+			limits: TreeLimits{
+				MaxDepth: 10,
+				MaxNodes: 2,
+			},
+			objects: []*unstructured.Unstructured{
+				rootSnap("root", "root-uid", []interface{}{
+					childRef(rootAPIVersion, "Snapshot", "child-a"),
+					childRef(rootAPIVersion, "Snapshot", "child-b"),
+				}),
+				makeSnap(snapOpts{
+					apiVersion: rootAPIVersion,
+					kind:       "Snapshot",
+					name:       "child-a",
+					uid:        "child-a-uid",
+					sourceRef:  namespaceSourceRef(testNS, "child-a-source-uid"),
+				}),
+				makeSnap(snapOpts{
+					apiVersion: rootAPIVersion,
+					kind:       "Snapshot",
+					name:       "child-b",
+					uid:        "child-b-uid",
+					sourceRef:  namespaceSourceRef(testNS, "child-b-source-uid"),
+				}),
+			},
+			want: "maxNodes",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheme := makeScheme(t)
+			c := buildFakeClient(scheme, test.objects)
+
+			_, err := BuildTreeWithLimits(context.Background(), c, testNS, "root", test.limits)
+			if !errors.Is(err, ErrTreeBudget) {
+				t.Fatalf("BuildTreeWithLimits() error = %v, want ErrTreeBudget", err)
+			}
+
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("BuildTreeWithLimits() error = %q, want budget name %q", err, test.want)
+			}
+		})
 	}
 }
 

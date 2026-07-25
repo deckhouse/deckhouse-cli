@@ -29,6 +29,14 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
 
+const (
+	defaultScanMaxDepth = 64
+	defaultScanMaxNodes = 10_000
+)
+
+// ErrScanBudget is returned when an archive tree exceeds a configured scan limit.
+var ErrScanBudget = errors.New("local snapshot scan budget exceeded")
+
 // Node represents a single snapshot node discovered in an offline archive
 // directory tree. Each node corresponds to one directory produced by
 // d8 snapshot download, containing a snapshot.yaml and optional child nodes
@@ -78,6 +86,35 @@ func (n *Node) VolumeCount() int {
 // node and is not an error. A non-directory root, or a root whose snapshot.yaml
 // cannot be read, yields a wrapped error.
 func Scan(root string) (*Node, error) {
+	return ScanWithLimits(root, DefaultScanLimits())
+}
+
+// DefaultScanLimits returns the traversal limits used by Scan: at most
+// 10,000 nodes and 64 child directories below the root.
+func DefaultScanLimits() ScanLimits {
+	return ScanLimits{
+		MaxDepth: defaultScanMaxDepth,
+		MaxNodes: defaultScanMaxNodes,
+	}
+}
+
+// ScanLimits bounds the number and depth of archive nodes visited by ScanWithLimits.
+// The root is at depth zero and counts toward MaxNodes.
+type ScanLimits struct {
+	MaxDepth int
+	MaxNodes int
+}
+
+// ScanWithLimits scans an archive tree subject to explicit traversal limits.
+func ScanWithLimits(root string, limits ScanLimits) (*Node, error) {
+	if limits.MaxDepth < 0 {
+		return nil, fmt.Errorf("local snapshot scan maxDepth must be non-negative: %w", ErrScanBudget)
+	}
+
+	if limits.MaxNodes <= 0 {
+		return nil, fmt.Errorf("local snapshot scan maxNodes must be positive: %w", ErrScanBudget)
+	}
+
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("scan root %s: %w", root, err)
@@ -87,19 +124,49 @@ func Scan(root string) (*Node, error) {
 		return nil, fmt.Errorf("scan root %s: not a directory", root)
 	}
 
-	return scanDir(root, root)
+	scanner := treeScanner{
+		root:   root,
+		limits: limits,
+	}
+
+	return scanner.scanDir(root, 0)
 }
 
-// scanDir reads snapshot.yaml from dir, recursively discovers child nodes
-// under dir/snapshots/, and returns the populated Node. root is the top-level
-// scan root used to compute relative Path values.
-func scanDir(root, dir string) (*Node, error) {
+type treeScanner struct {
+	root      string
+	limits    ScanLimits
+	nodeCount int
+}
+
+// scanDir reads snapshot.yaml from dir and discovers child nodes under dir/snapshots/.
+func (s *treeScanner) scanDir(dir string, depth int) (*Node, error) {
+	if depth > s.limits.MaxDepth {
+		return nil, fmt.Errorf(
+			"local snapshot scan maxDepth %d exceeded at %s (depth %d; root depth is 0): %w",
+			s.limits.MaxDepth,
+			dir,
+			depth,
+			ErrScanBudget,
+		)
+	}
+
+	if s.nodeCount >= s.limits.MaxNodes {
+		return nil, fmt.Errorf(
+			"local snapshot scan maxNodes %d exceeded while adding %s: %w",
+			s.limits.MaxNodes,
+			dir,
+			ErrScanBudget,
+		)
+	}
+
+	s.nodeCount++
+
 	sy, err := archive.ReadSnapshotYAML(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read node at %s: %w", dir, err)
 	}
 
-	rel, err := filepath.Rel(root, dir)
+	rel, err := filepath.Rel(s.root, dir)
 	if err != nil {
 		return nil, fmt.Errorf("relative path for %s: %w", dir, err)
 	}
@@ -133,7 +200,7 @@ func scanDir(root, dir string) (*Node, error) {
 
 		childDir := filepath.Join(snapshotsDir, entry.Name())
 
-		child, err := scanDir(root, childDir)
+		child, err := s.scanDir(childDir, depth+1)
 		if err != nil {
 			return nil, err
 		}

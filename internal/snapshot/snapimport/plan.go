@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,6 +44,17 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 )
+
+const (
+	defaultPlanMaxDepth              = 64
+	defaultPlanMaxNodes              = 10_000
+	defaultPlanMaxManifestBytes      = 16 << 20
+	defaultPlanMaxTotalMetadataBytes = 256 << 20
+	defaultPlanMaxManifestsPerNode   = 10_000
+)
+
+// ErrPlanBudget is returned when archive planning exceeds a configured resource limit.
+var ErrPlanBudget = errors.New("snapshot import plan budget exceeded")
 
 // ChildRef is a direct-child reference for a manifests-and-children-refs-upload payload.
 // The child namespace is implicit (it is always the upload target namespace), mirroring
@@ -130,6 +142,23 @@ type plannedManifest struct {
 	info   os.FileInfo
 }
 
+// PlanLimits bounds archive traversal and metadata retained by BuildPlanWithLimits.
+// The root is at depth zero and counts toward MaxNodes. MaxManifestBytes applies
+// independently to snapshot.yaml and each manifest file.
+type PlanLimits struct {
+	MaxDepth              int
+	MaxNodes              int
+	MaxManifestBytes      int64
+	MaxTotalMetadataBytes int64
+	MaxManifestsPerNode   int
+}
+
+type planBuilder struct {
+	limits        PlanLimits
+	nodeCount     int
+	metadataBytes int64
+}
+
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
 func (n PlannedNode) Ref(namespace string) aggapi.NodeRef {
 	return aggapi.NodeRef{
@@ -158,12 +187,22 @@ func (n PlannedNode) isDomainDataLeaf() bool {
 // (leaves first, root last). Each node's own manifests, direct child refs, and volume
 // data file (if any) are resolved.
 func BuildPlan(rootDir string) ([]PlannedNode, error) {
-	return buildPlan(rootDir, nil)
+	return BuildPlanWithLimits(rootDir, DefaultPlanLimits())
+}
+
+// BuildPlanWithLimits builds an import plan subject to explicit traversal and metadata limits.
+func BuildPlanWithLimits(rootDir string, limits PlanLimits) ([]PlannedNode, error) {
+	return buildPlanWithLimits(rootDir, nil, limits)
 }
 
 func buildPlanFromVerifiedArchive(view *archive.VerifiedArchive) ([]PlannedNode, error) {
+	builder, err := newPlanBuilder(DefaultPlanLimits())
+	if err != nil {
+		return nil, err
+	}
+
 	var plan []PlannedNode
-	if _, err := appendPostOrder(view.RootSource(), &plan); err != nil {
+	if _, err := builder.appendPostOrder(view.RootSource(), &plan, 0); err != nil {
 		return nil, err
 	}
 
@@ -175,7 +214,20 @@ func buildPlanFromVerifiedArchive(view *archive.VerifiedArchive) ([]PlannedNode,
 }
 
 func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, error) {
-	rootDir, err := filepath.Abs(rootDir)
+	return buildPlanWithLimits(rootDir, hook, DefaultPlanLimits())
+}
+
+func buildPlanWithLimits(
+	rootDir string,
+	hook archive.OpenBoundaryHook,
+	limits PlanLimits,
+) ([]PlannedNode, error) {
+	builder, err := newPlanBuilder(limits)
+	if err != nil {
+		return nil, err
+	}
+
+	rootDir, err = filepath.Abs(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve archive path: %w", err)
 	}
@@ -188,7 +240,7 @@ func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, er
 	defer func() { _ = source.Close() }()
 
 	var plan []PlannedNode
-	if _, err := appendPostOrder(source, &plan); err != nil {
+	if _, err := builder.appendPostOrder(source, &plan, 0); err != nil {
 		return nil, err
 	}
 
@@ -197,6 +249,38 @@ func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, er
 	}
 
 	return plan, nil
+}
+
+// DefaultPlanLimits returns the limits used by BuildPlan. Planning visits at most
+// 10,000 nodes and 64 child directories below the root. It retains at most
+// 256 MiB of raw metadata, accepts at most 10,000 manifests per node, and reads
+// at most 16 MiB from snapshot.yaml or one manifest.
+func DefaultPlanLimits() PlanLimits {
+	return PlanLimits{
+		MaxDepth:              defaultPlanMaxDepth,
+		MaxNodes:              defaultPlanMaxNodes,
+		MaxManifestBytes:      defaultPlanMaxManifestBytes,
+		MaxTotalMetadataBytes: defaultPlanMaxTotalMetadataBytes,
+		MaxManifestsPerNode:   defaultPlanMaxManifestsPerNode,
+	}
+}
+
+func newPlanBuilder(limits PlanLimits) (*planBuilder, error) {
+	switch {
+	case limits.MaxDepth < 0:
+		return nil, fmt.Errorf("snapshot import plan maxDepth must be non-negative: %w", ErrPlanBudget)
+	case limits.MaxNodes <= 0:
+		return nil, fmt.Errorf("snapshot import plan maxNodes must be positive: %w", ErrPlanBudget)
+	case limits.MaxManifestBytes <= 0 || limits.MaxManifestBytes == math.MaxInt64:
+		return nil, fmt.Errorf("snapshot import plan maxManifestBytes must be positive and less than %d: %w",
+			int64(math.MaxInt64), ErrPlanBudget)
+	case limits.MaxTotalMetadataBytes <= 0:
+		return nil, fmt.Errorf("snapshot import plan maxTotalMetadataBytes must be positive: %w", ErrPlanBudget)
+	case limits.MaxManifestsPerNode < 0:
+		return nil, fmt.Errorf("snapshot import plan maxManifestsPerNode must be non-negative: %w", ErrPlanBudget)
+	}
+
+	return &planBuilder{limits: limits}, nil
 }
 
 // indexPlanTopology validates canonical node identities and physical parent-child
@@ -333,8 +417,33 @@ func refIdentity(ref ChildRef) string {
 }
 
 // appendPostOrder visits children first (sorted for determinism), then the node itself.
-func appendPostOrder(source *archive.RootedSource, plan *[]PlannedNode) (PlannedNode, error) {
-	node, err := readNode(source)
+func (b *planBuilder) appendPostOrder(
+	source *archive.RootedSource,
+	plan *[]PlannedNode,
+	depth int,
+) (PlannedNode, error) {
+	if depth > b.limits.MaxDepth {
+		return PlannedNode{}, fmt.Errorf(
+			"snapshot import plan maxDepth %d exceeded at %s (depth %d; root depth is 0): %w",
+			b.limits.MaxDepth,
+			source.Path(),
+			depth,
+			ErrPlanBudget,
+		)
+	}
+
+	if b.nodeCount >= b.limits.MaxNodes {
+		return PlannedNode{}, fmt.Errorf(
+			"snapshot import plan maxNodes %d exceeded while adding %s: %w",
+			b.limits.MaxNodes,
+			source.Path(),
+			ErrPlanBudget,
+		)
+	}
+
+	b.nodeCount++
+
+	node, err := b.readNode(source)
 	if err != nil {
 		return PlannedNode{}, err
 	}
@@ -355,7 +464,7 @@ func appendPostOrder(source *archive.RootedSource, plan *[]PlannedNode) (Planned
 				filepath.Join(snapshotsDir.Path(), childName), openErr)
 		}
 
-		childNode, appendErr := appendPostOrder(child, plan)
+		childNode, appendErr := b.appendPostOrder(child, plan, depth+1)
 		closeErr := child.Close()
 
 		if appendErr != nil {
@@ -379,7 +488,7 @@ func appendPostOrder(source *archive.RootedSource, plan *[]PlannedNode) (Planned
 }
 
 // readNode reads a single node directory's snapshot.yaml, own manifests and data file.
-func readNode(source *archive.RootedSource) (PlannedNode, error) {
+func (b *planBuilder) readNode(source *archive.RootedSource) (PlannedNode, error) {
 	dir := source.Path()
 
 	snapshotFile, err := source.OpenRegularFile(archive.SnapshotYAMLName)
@@ -387,29 +496,11 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		return PlannedNode{}, fmt.Errorf("read node %s: %w", dir, err)
 	}
 
-	snapshotInfoBefore, err := snapshotFile.Stat()
+	snapshotPath := filepath.Join(dir, archive.SnapshotYAMLName)
+
+	snapshotData, snapshotInfoBefore, err := b.readMetadataFile(snapshotFile, snapshotPath)
 	if err != nil {
-		return PlannedNode{}, errors.Join(
-			fmt.Errorf("inspect node %s snapshot.yaml: %w", dir, err),
-			wrapPlanFileError("close", filepath.Join(dir, archive.SnapshotYAMLName), snapshotFile.Close()),
-		)
-	}
-
-	snapshotData, readErr := io.ReadAll(snapshotFile)
-	snapshotInfoAfter, statErr := snapshotFile.Stat()
-	closeErr := snapshotFile.Close()
-
-	if readErr != nil || statErr != nil || closeErr != nil {
-		return PlannedNode{}, errors.Join(
-			wrapPlanFileError("read", filepath.Join(dir, archive.SnapshotYAMLName), readErr),
-			wrapPlanFileError("inspect", filepath.Join(dir, archive.SnapshotYAMLName), statErr),
-			wrapPlanFileError("close", filepath.Join(dir, archive.SnapshotYAMLName), closeErr),
-		)
-	}
-
-	if !samePlanFileInfo(snapshotInfoBefore, snapshotInfoAfter) {
-		return PlannedNode{}, fmt.Errorf("node %s snapshot.yaml changed while planning: %w",
-			dir, archive.ErrVerifiedArchiveChanged)
+		return PlannedNode{}, fmt.Errorf("read node %s snapshot.yaml: %w", dir, err)
 	}
 
 	var sy archive.SnapshotYAML
@@ -421,7 +512,7 @@ func readNode(source *archive.RootedSource) (PlannedNode, error) {
 		return PlannedNode{}, fmt.Errorf("node %s: snapshot.yaml missing apiVersion/kind/name", dir)
 	}
 
-	manifests, manifestFiles, err := readManifests(source)
+	manifests, manifestFiles, err := b.readManifests(source)
 	if err != nil {
 		return PlannedNode{}, fmt.Errorf("node %s: %w", dir, err)
 	}
@@ -610,7 +701,9 @@ func dataImportIdentity(node PlannedNode) string {
 }
 
 // readManifests parses every <dir>/manifests/*.yaml file into an unstructured object.
-func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, []plannedManifest, error) {
+func (b *planBuilder) readManifests(
+	source *archive.RootedSource,
+) ([]unstructured.Unstructured, []plannedManifest, error) {
 	manifestsDir, err := source.OpenDirectory(archive.ManifestsDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -638,6 +731,16 @@ func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, [
 
 	sort.Strings(names)
 
+	if len(names) > b.limits.MaxManifestsPerNode {
+		return nil, nil, fmt.Errorf(
+			"snapshot import plan maxManifestsPerNode %d exceeded at %s (%d manifests): %w",
+			b.limits.MaxManifestsPerNode,
+			source.Path(),
+			len(names),
+			ErrPlanBudget,
+		)
+	}
+
 	manifests := make([]unstructured.Unstructured, 0, len(names))
 	files := make([]plannedManifest, 0, len(names))
 
@@ -647,23 +750,11 @@ func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, [
 			return nil, nil, fmt.Errorf("open manifest %s: %w", name, openErr)
 		}
 
-		infoBefore, statBeforeErr := file.Stat()
-		data, readErr := io.ReadAll(file)
-		infoAfter, statAfterErr := file.Stat()
-		closeErr := file.Close()
+		path := filepath.Join(manifestsDir.Path(), name)
 
-		if readErr != nil || statBeforeErr != nil || statAfterErr != nil || closeErr != nil {
-			return nil, nil, errors.Join(
-				wrapPlanFileError("read", name, readErr),
-				wrapPlanFileError("inspect before read", name, statBeforeErr),
-				wrapPlanFileError("inspect after read", name, statAfterErr),
-				wrapPlanFileError("close", name, closeErr),
-			)
-		}
-
-		if !samePlanFileInfo(infoBefore, infoAfter) {
-			return nil, nil, fmt.Errorf("manifest %s changed while planning: %w",
-				name, archive.ErrVerifiedArchiveChanged)
+		data, infoBefore, readErr := b.readMetadataFile(file, path)
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("read manifest %s: %w", name, readErr)
 		}
 
 		var obj map[string]interface{}
@@ -676,6 +767,77 @@ func readManifests(source *archive.RootedSource) ([]unstructured.Unstructured, [
 	}
 
 	return manifests, files, nil
+}
+
+func (b *planBuilder) readMetadataFile(file *os.File, path string) ([]byte, os.FileInfo, error) {
+	infoBefore, statBeforeErr := file.Stat()
+	if statBeforeErr != nil {
+		return nil, nil, errors.Join(
+			wrapPlanFileError("inspect before read", path, statBeforeErr),
+			wrapPlanFileError("close", path, file.Close()),
+		)
+	}
+
+	if infoBefore.Size() > b.limits.MaxManifestBytes {
+		closeErr := file.Close()
+		budgetErr := fmt.Errorf(
+			"snapshot import plan maxManifestBytes %d exceeded by %s (%d bytes): %w",
+			b.limits.MaxManifestBytes,
+			path,
+			infoBefore.Size(),
+			ErrPlanBudget,
+		)
+
+		return nil, nil, errors.Join(budgetErr, wrapPlanFileError("close", path, closeErr))
+	}
+
+	data, readErr := io.ReadAll(io.LimitReader(file, b.limits.MaxManifestBytes+1))
+	infoAfter, statAfterErr := file.Stat()
+	closeErr := file.Close()
+
+	if readErr != nil || statAfterErr != nil || closeErr != nil {
+		return nil, nil, errors.Join(
+			wrapPlanFileError("read", path, readErr),
+			wrapPlanFileError("inspect after read", path, statAfterErr),
+			wrapPlanFileError("close", path, closeErr),
+		)
+	}
+
+	if !samePlanFileInfo(infoBefore, infoAfter) {
+		return nil, nil, fmt.Errorf("metadata file %s changed while planning: %w",
+			path, archive.ErrVerifiedArchiveChanged)
+	}
+
+	if int64(len(data)) > b.limits.MaxManifestBytes {
+		return nil, nil, fmt.Errorf(
+			"snapshot import plan maxManifestBytes %d exceeded by %s: %w",
+			b.limits.MaxManifestBytes,
+			path,
+			ErrPlanBudget,
+		)
+	}
+
+	if err := b.accountMetadata(path, int64(len(data))); err != nil {
+		return nil, nil, err
+	}
+
+	return data, infoBefore, nil
+}
+
+func (b *planBuilder) accountMetadata(path string, size int64) error {
+	if size > b.limits.MaxTotalMetadataBytes-b.metadataBytes {
+		return fmt.Errorf(
+			"snapshot import plan maxTotalMetadataBytes %d exceeded while adding %s (%d bytes already retained): %w",
+			b.limits.MaxTotalMetadataBytes,
+			path,
+			b.metadataBytes,
+			ErrPlanBudget,
+		)
+	}
+
+	b.metadataBytes += size
+
+	return nil
 }
 
 func statAndClosePlanFile(file *os.File, path string) (os.FileInfo, error) {
