@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
@@ -1023,30 +1024,76 @@ func (svc *Service) findExtraImages(ctx context.Context, packageName string, ver
 	return extraImages
 }
 
-// extractExtraImagesJSON extracts extra_images.json from an image.
-func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[string]interface{}, error) {
-	rc := img.Extract()
-	defer rc.Close()
+// errExtraImagesJSONNotFound marks that the image has no extra_images.json.
+// This is a legitimate skip (not every package version declares extra images),
+// distinct from a network/stream error while reading the layer.
+var errExtraImagesJSONNotFound = errors.New("extra_images.json not found in image")
 
-	tr := tar.NewReader(rc)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil, fmt.Errorf("extra_images.json not found in image")
+// extractExtraImagesJSON reads extra_images.json from a package image by scanning
+// its layers directly.
+//
+// Reading via img.Extract() (mutate.Extract) is deliberately avoided: on a
+// mid-layer read failure it flushes an empty tar footer and hands the caller a
+// clean io.EOF, hiding the network error behind the same signal as a genuinely
+// absent file. A direct layer scan surfaces a truncated read as a real error,
+// so the caller can retry a transient failure instead of dropping the version.
+//
+// Returns errExtraImagesJSONNotFound only when every layer is read in full and
+// the file is absent.
+func extractExtraImagesJSON(img interface{ Layers() ([]v1.Layer, error) }) (map[string]interface{}, error) {
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, fmt.Errorf("list image layers: %w", err)
+	}
+
+	// Top layer first, matching the flatten precedence of a layered image.
+	for i := len(layers) - 1; i >= 0; i-- {
+		extraImages, err := findExtraImagesJSONInLayer(layers[i])
+		if errors.Is(err, errExtraImagesJSONNotFound) {
+			continue
 		}
 
 		if err != nil {
 			return nil, err
 		}
 
-		if hdr.Name == "extra_images.json" {
-			var extraImages map[string]interface{}
-			if err := json.NewDecoder(tr).Decode(&extraImages); err != nil {
-				return nil, fmt.Errorf("parse extra_images.json: %w", err)
-			}
+		return extraImages, nil
+	}
 
-			return extraImages, nil
+	return nil, errExtraImagesJSONNotFound
+}
+
+// findExtraImagesJSONInLayer scans one layer's tar for extra_images.json.
+// It returns errExtraImagesJSONNotFound when the layer is read in full without
+// the file, and a wrapped error when the layer read itself fails.
+func findExtraImagesJSONInLayer(layer v1.Layer) (map[string]interface{}, error) {
+	rc, err := layer.Uncompressed()
+	if err != nil {
+		return nil, fmt.Errorf("read layer: %w", err)
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, errExtraImagesJSONNotFound
 		}
+
+		if err != nil {
+			return nil, fmt.Errorf("read layer: %w", err)
+		}
+
+		if filepath.Clean(hdr.Name) != "extra_images.json" {
+			continue
+		}
+
+		var extraImages map[string]interface{}
+		if err := json.NewDecoder(tr).Decode(&extraImages); err != nil {
+			return nil, fmt.Errorf("parse extra_images.json: %w", err)
+		}
+
+		return extraImages, nil
 	}
 }
 
