@@ -345,7 +345,19 @@ func (m *MultiConstraint) HasChannelAlias() bool {
 // mergeConstraints OR-combines an already-registered constraint with an
 // additional one declared for the same name, flattening nested
 // MultiConstraints so repeated declarations stay a single flat list.
+//
+// A nil operand is a bare include (name without @version): it pins no
+// version of its own, so merging it keeps the other side. Two bare includes
+// merge back to nil (still "channels only").
 func mergeConstraints(existing, additional VersionConstraint) VersionConstraint {
+	if existing == nil {
+		return additional
+	}
+
+	if additional == nil {
+		return existing
+	}
+
 	if multi, ok := existing.(*MultiConstraint); ok {
 		multi.constraints = append(multi.constraints, additional)
 		return multi

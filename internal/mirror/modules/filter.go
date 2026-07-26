@@ -65,10 +65,12 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 			return nil, fmt.Errorf("Malformed filter expression %q: empty name", filterExpr)
 		}
 
+		// A bare "--include-module <name>" (no @version) selects the module
+		// for mirroring but pins no version: a nil constraint means "pull
+		// only what the release channels point at", the same behaviour as a
+		// default all-modules pull. An explicit @version is parsed as usual.
 		var constraint VersionConstraint
-		if !hasVersion {
-			constraint, _ = NewSemanticVersionConstraint(">=0.0.0")
-		} else {
+		if hasVersion {
 			var err error
 
 			constraint, err = parseVersionConstraint(versionStr)
@@ -108,9 +110,17 @@ func (f *Filter) Match(mod *Module) bool {
 
 func (f *Filter) Len() int { return len(f.modules) }
 
+// GetConstraint returns the version constraint registered for the module.
+// A bare "--include-module <name>" registers the name with a nil constraint;
+// that reports as "no constraint" (found == false) so callers pull only the
+// versions the release channels point at, never the full registry tag list.
 func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
 	constraint, found := f.modules[moduleName]
-	return constraint, found
+	if !found || constraint == nil {
+		return nil, false
+	}
+
+	return constraint, true
 }
 
 // IsWhitelist reports whether the filter is operating in whitelist mode.
@@ -207,7 +217,7 @@ func parseSemver(v string) (VersionConstraint, error) {
 }
 
 func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
-	constraint, hasConstraint := f.modules[moduleName]
+	constraint, hasConstraint := f.GetConstraint(moduleName)
 	if hasConstraint && constraint.IsExact() {
 		return false
 	}
@@ -239,7 +249,7 @@ func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
 // channel still points at remains reachable through the channel snapshot even
 // when filterOnlyLatestPatches drops it from the constraint set.
 func (f *Filter) VersionsToMirror(mod *Module) []string {
-	constraint, hasConstraint := f.modules[mod.Name]
+	constraint, hasConstraint := f.GetConstraint(mod.Name)
 	if !hasConstraint {
 		return nil
 	}

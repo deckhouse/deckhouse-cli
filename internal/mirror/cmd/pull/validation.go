@@ -217,11 +217,10 @@ func validateProxyRegistryFlag() error {
 			return errors.New("--proxy-registry requires --include-module (or --no-modules to skip module mirroring): the probe needs explicit module names and version anchors to start incrementing from")
 		}
 		// Every --include-module entry must come with an explicit
-		// version part. The implicit ">=0.0.0" fallback used by the
-		// regular pull mode is poisonous for the probe: it starts at
-		// v0.0.0 and stops on the first not-found, silently skipping
-		// any module whose lowest tag is above v0.0.0 / v0.1.0 /
-		// v1.0.0. Bail out loudly so the user picks a real anchor.
+		// version part. A bare include pins no version and pulls only
+		// what the release channels point at - the probe has no lower
+		// bound to increment from and would miss every version tag.
+		// Bail out loudly so the user picks a real anchor.
 		for _, entry := range pullflags.ModulesWhitelist {
 			if !strings.Contains(entry, "@") {
 				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q@^1.0.0); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry))
