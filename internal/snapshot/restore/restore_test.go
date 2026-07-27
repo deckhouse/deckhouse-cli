@@ -1519,6 +1519,115 @@ func TestRun_CanonicalDuplicateIsCoalesced(t *testing.T) {
 	}
 }
 
+type manifestStageFaults struct {
+	stages     []*manifestStage
+	files      []*os.File
+	labels     map[string]string
+	closeErrs  map[string]error
+	removeErrs map[string]error
+	order      []string
+}
+
+func newManifestStageFaults(closeErrs, removeErrs map[string]error) *manifestStageFaults {
+	return &manifestStageFaults{
+		labels:     make(map[string]string),
+		closeErrs:  closeErrs,
+		removeErrs: removeErrs,
+	}
+}
+
+func (f *manifestStageFaults) operations() manifestStageOperations {
+	return manifestStageOperations{
+		created: func(stage *manifestStage) {
+			label := fmt.Sprintf("stage-%d", len(f.stages)+1)
+			f.labels[stage.path] = label
+			f.stages = append(f.stages, stage)
+			f.files = append(f.files, stage.file)
+		},
+		closeFile: func(file *os.File) error {
+			label := f.labels[file.Name()]
+			f.order = append(f.order, "close "+label)
+
+			return errors.Join(file.Close(), f.closeErrs[label])
+		},
+		removeFile: func(path string) error {
+			label := f.labels[path]
+			f.order = append(f.order, "remove "+label)
+
+			if err := f.removeErrs[label]; err != nil {
+				return err
+			}
+
+			return os.Remove(path)
+		},
+	}
+}
+
+func (f *manifestStageFaults) assertCleanup(
+	t *testing.T,
+	runErr error,
+	wantCauses []error,
+	wantOrder []string,
+) {
+	t.Helper()
+
+	if runErr == nil {
+		t.Fatal("Run unexpectedly succeeded despite manifest staging cleanup failure")
+	}
+
+	for _, cause := range wantCauses {
+		if !errors.Is(runErr, cause) {
+			t.Errorf("Run error = %v, want cause %v", runErr, cause)
+		}
+	}
+
+	if !slices.Equal(f.order, wantOrder) {
+		t.Errorf("cleanup order = %v, want %v", f.order, wantOrder)
+	}
+
+	for i, file := range f.files {
+		if _, err := file.Write([]byte("closed")); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("stage-%d descriptor write error = %v, want os.ErrClosed", i+1, err)
+		}
+	}
+
+	residue := make([]string, 0, len(f.stages))
+	for _, stage := range f.stages {
+		if _, err := os.Stat(stage.path); err != nil {
+			t.Errorf("stat known staging residue %q: %v", stage.path, err)
+
+			continue
+		}
+
+		residue = append(residue, stage.path)
+	}
+
+	if len(residue) != len(f.stages) {
+		t.Errorf("known staging residue count = %d, want %d", len(residue), len(f.stages))
+	}
+
+	f.closeErrs = nil
+	f.removeErrs = nil
+
+	for _, stage := range f.stages {
+		path := stage.path
+		if err := stage.cleanup(); err != nil {
+			t.Errorf("cleanup staging residue %q after fault release: %v", path, err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("staging residue %q remains after fault release: %v", path, err)
+		}
+	}
+
+	t.Logf(
+		"cleanup evidence: causes=%d cleanup_order=%v residue=%d descriptors_closed=%d",
+		len(wantCauses),
+		wantOrder,
+		len(residue),
+		len(f.files),
+	)
+}
+
 func TestManifestStage_UsesOneDescriptorAndCleansTemporaryFile(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("TMPDIR", tempDir)
@@ -1532,13 +1641,17 @@ func TestManifestStage_UsesOneDescriptorAndCleansTemporaryFile(t *testing.T) {
 
 	during := countOpenDescriptors(t)
 	if delta := during - before; delta != 1 {
-		stage.cleanup()
+		if cleanupErr := stage.cleanup(); cleanupErr != nil {
+			t.Errorf("cleanup staging after descriptor assertion: %v", cleanupErr)
+		}
 
 		t.Fatalf("open descriptor delta with staging active = %d, want 1", delta)
 	}
 
 	stagePath := stage.path
-	stage.cleanup()
+	if cleanupErr := stage.cleanup(); cleanupErr != nil {
+		t.Fatalf("cleanup staging: %v", cleanupErr)
+	}
 
 	after := countOpenDescriptors(t)
 	if after > before {
@@ -1549,6 +1662,151 @@ func TestManifestStage_UsesOneDescriptorAndCleansTemporaryFile(t *testing.T) {
 	}
 
 	t.Logf("descriptor evidence: baseline=%d staged=%d after_cleanup=%d", before, during, after)
+}
+
+func TestRun_ReportsManifestStageCleanupFailures(t *testing.T) {
+	t.Run("success with remove failure", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("TMPDIR", tempDir)
+
+		removeErr := errors.New("injected original stage remove failure")
+		faults := newManifestStageFaults(nil, map[string]error{"stage-1": removeErr})
+		src := &stubSource{body: mustArray(t, configMapManifest("cleanup-success"))}
+		dyn := newFakeDynamic(readySnapshot())
+		cfg := baseConfig(src, dyn)
+		cfg.manifestStageOps = faults.operations()
+
+		runErr := Run(context.Background(), cfg)
+		faults.assertCleanup(
+			t,
+			runErr,
+			[]error{removeErr},
+			[]string{"close stage-1", "remove stage-1"},
+		)
+	})
+
+	t.Run("late fetch error with close and remove failures", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("TMPDIR", tempDir)
+
+		primaryErr := errors.New("injected late root fetch failure")
+		closeErr := errors.New("injected original stage close failure")
+		removeErr := errors.New("injected original stage remove failure")
+		faults := newManifestStageFaults(
+			map[string]error{"stage-1": closeErr},
+			map[string]error{"stage-1": removeErr},
+		)
+		child := readyDomainDiskSnapshot("nss-child-cleanup")
+		root := snapshotWithChildren(
+			readySnapshot(),
+			snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+		)
+		childRef := aggapi.NodeRef{
+			APIVersion: child.GetAPIVersion(),
+			Kind:       child.GetKind(),
+			Name:       child.GetName(),
+			Namespace:  testNS,
+		}
+		rootRef := aggapi.NodeRef{
+			APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
+			Kind:       snapshotKind,
+			Name:       testSnap,
+			Namespace:  testNS,
+		}
+		src := &stubSource{responses: map[string]stubSourceResponse{
+			nodeRefKey(childRef): {body: mustArray(t, configMapManifest("staged-before-failure"))},
+			nodeRefKey(rootRef):  {err: primaryErr},
+		}}
+		dyn := newFakeDynamic(root, child)
+		cfg := baseConfig(src, dyn)
+		cfg.Mapper = testMapperWithDomain()
+		cfg.manifestStageOps = faults.operations()
+
+		runErr := Run(context.Background(), cfg)
+		faults.assertCleanup(
+			t,
+			runErr,
+			[]error{primaryErr, closeErr, removeErr},
+			[]string{"close stage-1", "remove stage-1"},
+		)
+		assertNoPatchActions(t, dyn)
+	})
+
+	t.Run("cancellation with cleanup failure", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("TMPDIR", tempDir)
+
+		cancelCause := errors.New("injected restore cancellation")
+		removeErr := errors.New("injected canceled stage remove failure")
+		faults := newManifestStageFaults(nil, map[string]error{"stage-1": removeErr})
+		ctx, cancel := context.WithCancelCause(context.Background())
+		t.Cleanup(func() { cancel(nil) })
+
+		src := &stubSource{body: mustArray(t, configMapManifest("canceled-cleanup"))}
+		src.onCall = func() {
+			cancel(cancelCause)
+		}
+		dyn := newFakeDynamic(readySnapshot())
+		cfg := baseConfig(src, dyn)
+		cfg.manifestStageOps = faults.operations()
+
+		runErr := Run(ctx, cfg)
+		faults.assertCleanup(
+			t,
+			runErr,
+			[]error{cancelCause, removeErr},
+			[]string{"close stage-1", "remove stage-1"},
+		)
+		assertNoPatchActions(t, dyn)
+	})
+
+	t.Run("edited stage cleanup is LIFO", func(t *testing.T) {
+		tempDir := t.TempDir()
+		t.Setenv("TMPDIR", tempDir)
+
+		editedContent := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cleanup-edited
+`
+		contentFile := writeEditorContent(t, tempDir, "cleanup-edited.yaml", editedContent)
+		editor := fakeEditorScript(t, tempDir, fmt.Sprintf(`cp '%s' "$1"`, contentFile))
+		t.Setenv("EDITOR", editor)
+		t.Setenv("KUBE_EDITOR", "")
+
+		originalCloseErr := errors.New("injected original stage close failure")
+		originalRemoveErr := errors.New("injected original stage remove failure")
+		editedCloseErr := errors.New("injected edited stage close failure")
+		editedRemoveErr := errors.New("injected edited stage remove failure")
+		faults := newManifestStageFaults(
+			map[string]error{
+				"stage-1": originalCloseErr,
+				"stage-2": editedCloseErr,
+			},
+			map[string]error{
+				"stage-1": originalRemoveErr,
+				"stage-2": editedRemoveErr,
+			},
+		)
+		src := &stubSource{body: mustArray(t, configMapManifest("cleanup-original"))}
+		dyn := newFakeDynamic(readySnapshot())
+		cfg := baseConfig(src, dyn)
+		cfg.Edit = true
+		cfg.manifestStageOps = faults.operations()
+
+		runErr := Run(context.Background(), cfg)
+		faults.assertCleanup(
+			t,
+			runErr,
+			[]error{originalCloseErr, originalRemoveErr, editedCloseErr, editedRemoveErr},
+			[]string{
+				"close stage-2",
+				"remove stage-2",
+				"close stage-1",
+				"remove stage-1",
+			},
+		)
+	})
 }
 
 func TestRun_LatePreflightFailuresCauseZeroPatchAndCleanup(t *testing.T) {

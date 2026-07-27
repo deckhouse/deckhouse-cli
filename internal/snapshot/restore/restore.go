@@ -198,6 +198,7 @@ type Config struct {
 	// lowering the finite aggregate staging budgets.
 	maxStagedManifestBytes   int64
 	maxStagedManifestObjects int
+	manifestStageOps         manifestStageOperations
 
 	// newWaitContext is a test seam for controlling the shared wait boundary.
 	newWaitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -271,11 +272,23 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("resolve restore subtree for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
 
+	return runStagedRestore(ctx, cfg, targets)
+}
+
+func runStagedRestore(ctx context.Context, cfg Config, targets []restoreTarget) error {
+	stages := make(manifestStages, 0, 2)
+	runErr := runWithManifestStages(ctx, cfg, targets, &stages)
+
+	return errors.Join(runErr, stages.cleanup())
+}
+
+func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTarget, stages *manifestStages) error {
 	stage, err := newManifestStage(cfg)
 	if err != nil {
 		return fmt.Errorf("create restore manifest staging: %w", err)
 	}
-	defer stage.cleanup()
+
+	stages.add(stage)
 
 	for i := range targets {
 		target := targets[i]
@@ -354,7 +367,8 @@ func Run(ctx context.Context, cfg Config) error {
 		if stageErr != nil {
 			return fmt.Errorf("create edited restore manifest staging: %w", stageErr)
 		}
-		defer editedStage.cleanup()
+
+		stages.add(editedStage)
 
 		if stageErr = editedStage.add(ctx, cfg, objs); stageErr != nil {
 			return fmt.Errorf("preflight edited restore manifests: %w", stageErr)
@@ -699,6 +713,8 @@ type manifestIdentity struct {
 type manifestStage struct {
 	file         *os.File
 	path         string
+	closeFile    func(*os.File) error
+	removeFile   func(string) error
 	maxBytes     int64
 	maxObjects   int
 	bytesWritten int64
@@ -706,27 +722,88 @@ type manifestStage struct {
 	seen         map[manifestIdentity][sha256.Size]byte
 }
 
+type manifestStageOperations struct {
+	closeFile  func(*os.File) error
+	removeFile func(string) error
+	created    func(*manifestStage)
+}
+
+type manifestStages []*manifestStage
+
 func newManifestStage(cfg Config) (*manifestStage, error) {
 	file, err := os.CreateTemp("", "d8-restore-stage-*.jsonl")
 	if err != nil {
 		return nil, err
 	}
 
-	return &manifestStage{
+	closeFile := cfg.manifestStageOps.closeFile
+	if closeFile == nil {
+		closeFile = func(file *os.File) error {
+			return file.Close()
+		}
+	}
+
+	removeFile := cfg.manifestStageOps.removeFile
+	if removeFile == nil {
+		removeFile = os.Remove
+	}
+
+	stage := &manifestStage{
 		file:       file,
 		path:       file.Name(),
+		closeFile:  closeFile,
+		removeFile: removeFile,
 		maxBytes:   cfg.maxStagedManifestBytes,
 		maxObjects: cfg.maxStagedManifestObjects,
 		seen:       make(map[manifestIdentity][sha256.Size]byte),
-	}, nil
-}
-
-func (s *manifestStage) cleanup() {
-	if s.file != nil {
-		_ = s.file.Close()
 	}
 
-	_ = os.Remove(s.path)
+	if cfg.manifestStageOps.created != nil {
+		cfg.manifestStageOps.created(stage)
+	}
+
+	return stage, nil
+}
+
+func (s *manifestStage) cleanup() error {
+	var closeErr error
+
+	if s.file != nil {
+		file := s.file
+		s.file = nil
+
+		if err := s.closeFile(file); err != nil {
+			closeErr = fmt.Errorf("close restore manifest staging %q: %w", s.path, err)
+		}
+	}
+
+	var removeErr error
+
+	if s.path != "" {
+		if err := s.removeFile(s.path); err != nil {
+			removeErr = fmt.Errorf("remove restore manifest staging %q: %w", s.path, err)
+		} else {
+			s.path = ""
+		}
+	}
+
+	return errors.Join(closeErr, removeErr)
+}
+
+func (s *manifestStages) add(stage *manifestStage) {
+	*s = append(*s, stage)
+}
+
+func (s manifestStages) cleanup() error {
+	cleanupErrs := make([]error, 0, len(s))
+
+	for i := len(s) - 1; i >= 0; i-- {
+		if err := s[i].cleanup(); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+
+	return errors.Join(cleanupErrs...)
 }
 
 func (s *manifestStage) add(ctx context.Context, cfg Config, objs []unstructured.Unstructured) error {
