@@ -16,9 +16,10 @@ limitations under the License.
 
 // Package restore implements in-namespace restore of a snapshot tree.
 //
-// Restore is a single GET against the root Snapshot's manifests-with-data-restoration
-// aggregated subresource (the server compiles the whole subtree, delegating domain
-// subtrees internally) followed by a Server-Side Apply of every returned object.
+// Restore walks the selected namespaced snapshot hierarchy, fetches each node's
+// manifests-with-data-restoration response with scope=node, and stages the complete
+// post-order result before applying any object. This keeps every response bounded
+// while preserving the server compiler's child-before-parent apply order.
 // The compiler already rewrites PVCs with spec.dataSourceRef -> VolumeSnapshot (and a
 // domain controller sets the dataSource on VirtualDiskSnapshot for domain disks), so
 // CSI provisions volume data from the snapshot that already exists in the target
@@ -31,10 +32,13 @@ package restore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -97,6 +101,10 @@ const (
 	// GET plus missingChildProofMaxPages LISTs per child.
 	restoreHierarchyMaxDepth = 64
 	restoreHierarchyMaxNodes = 10_000
+
+	defaultMaxStagedManifestBytes   int64 = 1 << 30
+	defaultMaxStagedManifestObjects       = 1_000_000
+	maxEditableManifestBytes        int64 = aggapi.DefaultMaxResponseBytes
 
 	defaultTimeout      = 10 * time.Minute
 	defaultPollInterval = 2 * time.Second
@@ -186,6 +194,11 @@ type Config struct {
 	// Log receives progress output.
 	Log *slog.Logger
 
+	// maxStagedManifestBytes and maxStagedManifestObjects are test seams for
+	// lowering the finite aggregate staging budgets.
+	maxStagedManifestBytes   int64
+	maxStagedManifestObjects int
+
 	// newWaitContext is a test seam for controlling the shared wait boundary.
 	newWaitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	// silenceApplyLog suppresses the per-object "would apply"/"applied" log line in
@@ -224,10 +237,15 @@ func Run(ctx context.Context, cfg Config) error {
 
 	targetRef := rootRef
 
+	var targetObj *unstructured.Unstructured
+
 	if cfg.SelectedNodeKind == "" {
-		if err := preflightRootSnapshot(ctx, cfg); err != nil {
+		root, err := preflightRootSnapshotObject(ctx, cfg)
+		if err != nil {
 			return fmt.Errorf("preflight %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 		}
+
+		targetObj = root
 	} else {
 		ref, obj, err := cfg.resolveNodeRef(ctx)
 		if err != nil {
@@ -245,57 +263,110 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 
 		targetRef = ref
+		targetObj = obj
 	}
 
-	raw, err := controlPlaneRequest(
-		ctx,
-		cfg.controlPlaneTimeout(),
-		fmt.Sprintf("fetching restore manifests for %s %s/%s", targetRef.Kind, targetRef.Namespace, targetRef.Name),
-		func(requestCtx context.Context) ([]byte, error) {
-			return cfg.Source.RestoreManifestsScoped(requestCtx, targetRef, cfg.Namespace, aggapi.RestoreScopeOptions{
-				Scope:            cfg.Scope,
-				FilterKind:       cfg.FilterKind,
-				FilterName:       cfg.FilterName,
-				FilterAPIVersion: cfg.FilterAPIVersion,
-			})
-		},
-	)
+	targets, err := collectRestoreTargets(ctx, cfg, targetRef, targetObj)
 	if err != nil {
-		return fmt.Errorf("fetch restore manifests for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
+		return fmt.Errorf("resolve restore subtree for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
 	}
 
-	objs, err := decodeManifestArray(raw)
+	stage, err := newManifestStage(cfg)
 	if err != nil {
-		return fmt.Errorf("decode restore manifests for %s/%s: %w", cfg.Namespace, cfg.Snapshot, err)
+		return fmt.Errorf("create restore manifest staging: %w", err)
+	}
+	defer stage.cleanup()
+
+	for i := range targets {
+		target := targets[i]
+
+		opts := aggapi.RestoreScopeOptions{Scope: aggapi.RestoreScopeNode}
+		if len(targets) == 1 {
+			opts.FilterKind = cfg.FilterKind
+			opts.FilterName = cfg.FilterName
+			opts.FilterAPIVersion = cfg.FilterAPIVersion
+		}
+
+		raw, fetchErr := controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("fetching restore manifests for %s %s/%s", target.ref.Kind, target.ref.Namespace, target.ref.Name),
+			func(requestCtx context.Context) ([]byte, error) {
+				return cfg.Source.RestoreManifestsScoped(requestCtx, target.ref, cfg.Namespace, opts)
+			},
+		)
+		if fetchErr != nil {
+			return fmt.Errorf(
+				"fetch restore manifests for node %s %s/%s: %w",
+				target.ref.APIVersion,
+				target.ref.Kind,
+				target.ref.Name,
+				fetchErr,
+			)
+		}
+
+		objs, decodeErr := decodeManifestArray(raw)
+		if decodeErr != nil {
+			return fmt.Errorf(
+				"decode restore manifests for node %s %s/%s: %w",
+				target.ref.APIVersion,
+				target.ref.Kind,
+				target.ref.Name,
+				decodeErr,
+			)
+		}
+
+		if addErr := stage.add(ctx, cfg, objs); addErr != nil {
+			return fmt.Errorf(
+				"preflight restore manifests for node %s %s/%s: %w",
+				target.ref.APIVersion,
+				target.ref.Kind,
+				target.ref.Name,
+				addErr,
+			)
+		}
 	}
 
-	if len(objs) == 0 {
+	if stage.objectCount == 0 {
 		return fmt.Errorf("restore manifests for %s/%s are empty", cfg.Namespace, cfg.Snapshot)
 	}
 
 	if cfg.Edit {
+		if stage.bytesWritten > maxEditableManifestBytes {
+			return fmt.Errorf(
+				"restore edit requires loading %d staged bytes, exceeding the bounded edit limit of %d bytes; retry without --edit or select a smaller subtree",
+				stage.bytesWritten,
+				maxEditableManifestBytes,
+			)
+		}
+
+		objs, loadErr := stage.objects(ctx)
+		if loadErr != nil {
+			return fmt.Errorf("load staged manifests for editing: %w", loadErr)
+		}
+
 		objs, err = editManifests(objs)
 		if err != nil {
 			return fmt.Errorf("restore edit: %w", err)
 		}
-	}
 
-	if err := preflightManifestNamespaces(ctx, cfg, objs); err != nil {
-		return err
-	}
+		editedStage, stageErr := newManifestStage(cfg)
+		if stageErr != nil {
+			return fmt.Errorf("create edited restore manifest staging: %w", stageErr)
+		}
+		defer editedStage.cleanup()
 
-	// Preflight: verify every PVC data-source leaf exists and is ready before
-	// applying anything. The API server does not validate cross-object existence
-	// of spec.dataSourceRef at admission, so an absent leaf causes a PVC to stay
-	// Pending forever without this check.
-	if err := preflightLeaves(ctx, cfg, objs); err != nil {
-		return err
+		if stageErr = editedStage.add(ctx, cfg, objs); stageErr != nil {
+			return fmt.Errorf("preflight edited restore manifests: %w", stageErr)
+		}
+
+		stage = editedStage
 	}
 
 	cfg.Log.Info("applying restore manifests",
 		slog.String("namespace", cfg.Namespace),
 		slog.String("snapshot", cfg.Snapshot),
-		slog.Int("objects", len(objs)))
+		slog.Int("objects", stage.objectCount))
 
 	// Implicit dry-run preflight: validate every object without mutating the cluster.
 	// Any admission failure here aborts before any real apply.
@@ -305,14 +376,14 @@ func Run(ctx context.Context, cfg Config) error {
 	// --dry-run because this is then the only apply pass the user sees output from.
 	dryRunCfg.silenceApplyLog = !cfg.DryRun
 
-	if _, _, err := applyAll(ctx, dryRunCfg, objs); err != nil {
+	if _, _, err := applyStaged(ctx, dryRunCfg, stage); err != nil {
 		return fmt.Errorf("dry-run preflight: %w", err)
 	}
 
 	cfg.Log.Info("validated restore manifests (dry-run)",
 		slog.String("namespace", cfg.Namespace),
 		slog.String("snapshot", cfg.Snapshot),
-		slog.Int("objects", len(objs)))
+		slog.Int("objects", stage.objectCount))
 
 	// With --dry-run, only the validation pass runs; nothing has been mutated.
 	if cfg.DryRun {
@@ -320,12 +391,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
-	pvcs, applied, err := applyAll(ctx, cfg, objs)
+	pvcs, applied, err := applyStaged(ctx, cfg, stage)
 	if err != nil {
 		return fmt.Errorf(
 			"restore apply stopped after %d of %d objects completed; the cluster may be partially applied and the active object's outcome is unknown: %w",
 			applied,
-			len(objs),
+			stage.objectCount,
 			err,
 		)
 	}
@@ -349,6 +420,14 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.ControlPlaneTimeout <= 0 {
 		cfg.ControlPlaneTimeout = DefaultControlPlaneTimeout
+	}
+
+	if cfg.maxStagedManifestBytes <= 0 {
+		cfg.maxStagedManifestBytes = defaultMaxStagedManifestBytes
+	}
+
+	if cfg.maxStagedManifestObjects <= 0 {
+		cfg.maxStagedManifestObjects = defaultMaxStagedManifestObjects
 	}
 
 	if cfg.Log == nil {
@@ -377,6 +456,16 @@ func validate(cfg Config) error {
 		return fmt.Errorf("restore: SelectedNodeKind and SelectedNodeName must be set together")
 	case cfg.SelectedNodeAPIVersion != "" && cfg.SelectedNodeKind == "":
 		return fmt.Errorf("restore: SelectedNodeAPIVersion requires a selected node")
+	case cfg.Scope != "" &&
+		cfg.Scope != aggapi.RestoreScopeSubtree &&
+		cfg.Scope != aggapi.RestoreScopeNode:
+		return fmt.Errorf("restore: Scope must be %q or %q", aggapi.RestoreScopeSubtree, aggapi.RestoreScopeNode)
+	case (cfg.FilterKind == "") != (cfg.FilterName == ""):
+		return fmt.Errorf("restore: FilterKind and FilterName must be set together")
+	case cfg.FilterAPIVersion != "" && cfg.FilterKind == "":
+		return fmt.Errorf("restore: FilterAPIVersion requires FilterKind and FilterName")
+	case cfg.FilterKind != "" && cfg.Scope != aggapi.RestoreScopeNode:
+		return fmt.Errorf("restore: object filter requires Scope=%q", aggapi.RestoreScopeNode)
 	case cfg.Source == nil:
 		return fmt.Errorf("restore: Source must be set")
 	case cfg.Dynamic == nil:
@@ -420,10 +509,16 @@ func preflightManifestNamespaces(ctx context.Context, cfg Config, objs []unstruc
 			)
 		}
 
-		namespaced[i] = isNamespaced
 		if !isNamespaced {
-			continue
+			return fmt.Errorf(
+				"namespace restore does not support cluster-scoped object apiVersion=%q kind=%q name=%q; remove it from the snapshot or edited manifests before retrying",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+			)
 		}
+
+		namespaced[i] = true
 
 		namespace := obj.GetNamespace()
 		if namespace != "" && namespace != cfg.Namespace {
@@ -449,6 +544,361 @@ func preflightManifestNamespaces(ctx context.Context, cfg Config, objs []unstruc
 	}
 
 	return nil
+}
+
+type restoreTarget struct {
+	ref aggapi.NodeRef
+	obj *unstructured.Unstructured
+}
+
+type restoreTargetFrame struct {
+	target    restoreTarget
+	depth     int
+	childRefs []interface{}
+	nextChild int
+}
+
+func collectRestoreTargets(
+	ctx context.Context,
+	cfg Config,
+	rootRef aggapi.NodeRef,
+	rootObj *unstructured.Unstructured,
+) ([]restoreTarget, error) {
+	if cfg.Scope == aggapi.RestoreScopeNode {
+		return []restoreTarget{{ref: rootRef, obj: rootObj}}, nil
+	}
+
+	rootChildRefs, err := snapshotChildRefValues(rootObj)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%s %s/%s: status.childrenSnapshotRefs: %w",
+			rootRef.APIVersion,
+			rootRef.Kind,
+			rootRef.Name,
+			err,
+		)
+	}
+
+	seen := map[string]struct{}{nodeRefKey(rootRef): {}}
+	stack := []restoreTargetFrame{{
+		target:    restoreTarget{ref: rootRef, obj: rootObj},
+		childRefs: rootChildRefs,
+	}}
+	targets := make([]restoreTarget, 0)
+
+	for len(stack) != 0 {
+		if err := hierarchyWalkContextError(ctx); err != nil {
+			return nil, err
+		}
+
+		frame := &stack[len(stack)-1]
+		if frame.nextChild == len(frame.childRefs) {
+			targets = append(targets, frame.target)
+			stack = stack[:len(stack)-1]
+
+			continue
+		}
+
+		childIndex := frame.nextChild
+		frame.nextChild++
+
+		childRef, err := snapshotChildRefAt(frame.childRefs, childIndex)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%s %s/%s: status.childrenSnapshotRefs: %w",
+				frame.target.ref.APIVersion,
+				frame.target.ref.Kind,
+				frame.target.ref.Name,
+				err,
+			)
+		}
+
+		child := aggapi.NodeRef{
+			APIVersion: childRef.APIVersion,
+			Kind:       childRef.Kind,
+			Name:       childRef.Name,
+			Namespace:  cfg.Namespace,
+		}
+		childDepth := frame.depth + 1
+
+		if len(seen) >= restoreHierarchyMaxNodes {
+			return nil, fmt.Errorf(
+				"snapshot hierarchy exceeds node budget of %d while adding %s %s/%s at depth %d",
+				restoreHierarchyMaxNodes,
+				child.APIVersion,
+				child.Kind,
+				child.Name,
+				childDepth,
+			)
+		}
+
+		if childDepth > restoreHierarchyMaxDepth {
+			return nil, fmt.Errorf(
+				"snapshot hierarchy exceeds depth budget of %d at %s %s/%s (depth %d; root depth is 0)",
+				restoreHierarchyMaxDepth,
+				child.APIVersion,
+				child.Kind,
+				child.Name,
+				childDepth,
+			)
+		}
+
+		key := nodeRefKey(child)
+		if _, exists := seen[key]; exists {
+			return nil, duplicateNodeRefError(child)
+		}
+
+		seen[key] = struct{}{}
+
+		childObj, missing, err := cfg.getSnapshotChild(ctx, frame.target.ref, frame.target.obj, child)
+		if err != nil {
+			return nil, fmt.Errorf("get snapshot child %s %s/%s: %w", child.APIVersion, child.Kind, child.Name, err)
+		}
+
+		if missing {
+			return nil, fmt.Errorf(
+				"snapshot subtree is incomplete: child %s %s/%s is missing; reconcile the snapshot hierarchy before retrying",
+				child.APIVersion,
+				child.Kind,
+				child.Name,
+			)
+		}
+
+		if err := preflightSelectedNode(child, childObj); err != nil {
+			return nil, fmt.Errorf("preflight snapshot child %s %s/%s: %w", child.APIVersion, child.Kind, child.Name, err)
+		}
+
+		childRefs, err := snapshotChildRefValues(childObj)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"%s %s/%s: status.childrenSnapshotRefs: %w",
+				child.APIVersion,
+				child.Kind,
+				child.Name,
+				err,
+			)
+		}
+
+		stack = append(stack, restoreTargetFrame{
+			target:    restoreTarget{ref: child, obj: childObj},
+			depth:     childDepth,
+			childRefs: childRefs,
+		})
+	}
+
+	return targets, nil
+}
+
+type manifestIdentity struct {
+	group     string
+	resource  string
+	namespace string
+	name      string
+}
+
+type manifestStage struct {
+	file         *os.File
+	path         string
+	maxBytes     int64
+	maxObjects   int
+	bytesWritten int64
+	objectCount  int
+	seen         map[manifestIdentity][sha256.Size]byte
+}
+
+func newManifestStage(cfg Config) (*manifestStage, error) {
+	file, err := os.CreateTemp("", "d8-restore-stage-*.jsonl")
+	if err != nil {
+		return nil, err
+	}
+
+	return &manifestStage{
+		file:       file,
+		path:       file.Name(),
+		maxBytes:   cfg.maxStagedManifestBytes,
+		maxObjects: cfg.maxStagedManifestObjects,
+		seen:       make(map[manifestIdentity][sha256.Size]byte),
+	}, nil
+}
+
+func (s *manifestStage) cleanup() {
+	if s.file != nil {
+		_ = s.file.Close()
+	}
+
+	_ = os.Remove(s.path)
+}
+
+func (s *manifestStage) add(ctx context.Context, cfg Config, objs []unstructured.Unstructured) error {
+	if err := preflightManifestNamespaces(ctx, cfg, objs); err != nil {
+		return err
+	}
+
+	if err := preflightLeaves(ctx, cfg, objs); err != nil {
+		return err
+	}
+
+	for i := range objs {
+		if err := hierarchyWalkContextError(ctx); err != nil {
+			return err
+		}
+
+		obj := &objs[i]
+
+		identity, err := cfg.manifestIdentity(ctx, obj)
+		if err != nil {
+			return err
+		}
+
+		raw, err := json.Marshal(obj.Object)
+		if err != nil {
+			return fmt.Errorf(
+				"marshal restore manifest apiVersion=%q kind=%q name=%q for staging: %w",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+				err,
+			)
+		}
+
+		digest := sha256.Sum256(raw)
+		// The first post-order occurrence wins only when canonical JSON is
+		// identical. Any semantic difference for the same REST resource,
+		// namespace, and name is a conflict rather than an order-dependent merge.
+		if previous, exists := s.seen[identity]; exists {
+			if previous == digest {
+				continue
+			}
+
+			return fmt.Errorf(
+				"conflicting duplicate restore object apiVersion=%q kind=%q namespace=%q name=%q resolves to %s/%s; remove one conflicting copy before retrying",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetNamespace(),
+				obj.GetName(),
+				identity.group,
+				identity.resource,
+			)
+		}
+
+		if s.objectCount >= s.maxObjects {
+			return fmt.Errorf("restore manifest staging exceeds object budget of %d", s.maxObjects)
+		}
+
+		recordBytes := int64(len(raw) + 1)
+		if recordBytes > s.maxBytes-s.bytesWritten {
+			return fmt.Errorf(
+				"restore manifest staging exceeds temporary-disk byte budget of %d (would require at least %d); select a smaller subtree",
+				s.maxBytes,
+				s.bytesWritten+recordBytes,
+			)
+		}
+
+		if _, err := s.file.Write(raw); err != nil {
+			return fmt.Errorf("write staged restore manifest: %w", err)
+		}
+
+		if _, err := s.file.Write([]byte{'\n'}); err != nil {
+			return fmt.Errorf("terminate staged restore manifest: %w", err)
+		}
+
+		s.seen[identity] = digest
+		s.bytesWritten += recordBytes
+		s.objectCount++
+	}
+
+	return nil
+}
+
+func (cfg Config) manifestIdentity(
+	ctx context.Context,
+	obj *unstructured.Unstructured,
+) (manifestIdentity, error) {
+	if obj.GetAPIVersion() == "" || obj.GetKind() == "" || obj.GetName() == "" {
+		return manifestIdentity{}, fmt.Errorf(
+			"restore manifest identity is incomplete: apiVersion=%q kind=%q name=%q are all required",
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			obj.GetName(),
+		)
+	}
+
+	gvk := obj.GroupVersionKind()
+
+	mapping, err := cfg.restMapping(
+		ctx,
+		fmt.Sprintf(
+			"resolving canonical identity for restore manifest apiVersion=%q kind=%q name=%q",
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			obj.GetName(),
+		),
+		gvk.GroupKind(),
+		gvk.Version,
+	)
+	if err != nil {
+		return manifestIdentity{}, fmt.Errorf(
+			"resolve canonical identity for restore manifest apiVersion=%q kind=%q name=%q: %w",
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			obj.GetName(),
+			err,
+		)
+	}
+
+	return manifestIdentity{
+		group:     mapping.Resource.Group,
+		resource:  mapping.Resource.Resource,
+		namespace: obj.GetNamespace(),
+		name:      obj.GetName(),
+	}, nil
+}
+
+func (s *manifestStage) forEach(
+	ctx context.Context,
+	visit func(*unstructured.Unstructured) error,
+) error {
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind restore manifest staging: %w", err)
+	}
+
+	decoder := json.NewDecoder(s.file)
+
+	for {
+		if err := hierarchyWalkContextError(ctx); err != nil {
+			return err
+		}
+
+		var obj unstructured.Unstructured
+
+		err := decoder.Decode(&obj.Object)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("decode staged restore manifest: %w", err)
+		}
+
+		if err := visit(&obj); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *manifestStage) objects(ctx context.Context) ([]unstructured.Unstructured, error) {
+	objs := make([]unstructured.Unstructured, 0, s.objectCount)
+
+	err := s.forEach(ctx, func(obj *unstructured.Unstructured) error {
+		objs = append(objs, *obj)
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return objs, nil
 }
 
 func manifestNamespaceContextError(ctx context.Context) error {
@@ -621,6 +1071,15 @@ func ValidateNodeAPIVersion(apiVersion string) error {
 
 // preflightRootSnapshot verifies the source Snapshot is Ready and has a bound SnapshotContent.
 func preflightRootSnapshot(ctx context.Context, cfg Config) error {
+	_, err := preflightRootSnapshotObject(ctx, cfg)
+
+	return err
+}
+
+func preflightRootSnapshotObject(
+	ctx context.Context,
+	cfg Config,
+) (*unstructured.Unstructured, error) {
 	ref := aggapi.NodeRef{
 		APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
 		Kind:       snapshotKind,
@@ -630,26 +1089,26 @@ func preflightRootSnapshot(ctx context.Context, cfg Config) error {
 
 	snap, err := cfg.getSnapshotNode(ctx, ref)
 	if err != nil {
-		return fmt.Errorf("get Snapshot: %w", err)
+		return nil, fmt.Errorf("get Snapshot: %w", err)
 	}
 
 	if !isConditionTrue(snap) {
 		status, reason, message := readyConditionDetail(snap, readyConditionType)
 		if status == conditionFalse && source.IsDegradedReason(reason) {
-			return fmt.Errorf("snapshot is DEGRADED (reason=%s: %s): a namespaced child was deleted but "+
+			return nil, fmt.Errorf("snapshot is DEGRADED (reason=%s: %s): a namespaced child was deleted but "+
 				"its data is intact in the content-layer trash; a full-subtree restore of the root is "+
 				"blocked, but --node <ready child> can restore an intact subtree", reason, message)
 		}
 
-		return fmt.Errorf("snapshot is not Ready=True (cannot restore an incomplete snapshot)")
+		return nil, fmt.Errorf("snapshot is not Ready=True (cannot restore an incomplete snapshot)")
 	}
 
 	bound, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
 	if bound == "" {
-		return fmt.Errorf("snapshot has no status.boundSnapshotContentName (not yet bound)")
+		return nil, fmt.Errorf("snapshot has no status.boundSnapshotContentName (not yet bound)")
 	}
 
-	return nil
+	return snap, nil
 }
 
 // preflightSelectedNode verifies the selected subtree root is ready to restore:
@@ -823,25 +1282,44 @@ func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
 	return isConditionTrue(obj)
 }
 
-// applyAll upserts every object in order and returns the refs of restored PVCs.
-func applyAll(ctx context.Context, cfg Config, objs []unstructured.Unstructured) ([]pvcRef, int, error) {
-	var pvcs []pvcRef
+func applyStaged(
+	ctx context.Context,
+	cfg Config,
+	stage *manifestStage,
+) ([]pvcRef, int, error) {
+	pvcs := make([]pvcRef, 0)
+	applied := 0
 
-	for i := range objs {
-		obj := &objs[i]
-
-		ns, err := applyObject(ctx, cfg, obj)
+	err := stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
+		namespace, err := applyObject(ctx, cfg, obj)
 		if err != nil {
-			return nil, i, fmt.Errorf("apply %s/%s %q: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), err)
+			return fmt.Errorf(
+				"apply %s/%s %q: %w",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetName(),
+				err,
+			)
 		}
 
 		if obj.GetKind() == pvcKind {
-			scName, _, _ := unstructured.NestedString(obj.Object, "spec", "storageClassName")
-			pvcs = append(pvcs, pvcRef{namespace: ns, name: obj.GetName(), storageClassName: scName})
+			storageClassName, _, _ := unstructured.NestedString(obj.Object, "spec", "storageClassName")
+			pvcs = append(pvcs, pvcRef{
+				namespace:        namespace,
+				name:             obj.GetName(),
+				storageClassName: storageClassName,
+			})
 		}
+
+		applied++
+
+		return nil
+	})
+	if err != nil {
+		return nil, applied, err
 	}
 
-	return pvcs, len(objs), nil
+	return pvcs, applied, nil
 }
 
 // applyObject applies a single object to the cluster using Server-Side Apply (SSA).
@@ -1233,6 +1711,14 @@ func (cfg Config) resourceFor(
 	mapping, err := cfg.restMapping(ctx, phase, gvk.GroupKind(), gvk.Version)
 	if err != nil {
 		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s: %w", gvk.String(), err)
+	}
+
+	if mapping == nil {
+		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s: REST mapping is nil", gvk.String())
+	}
+
+	if mapping.Scope == nil {
+		return schema.GroupVersionResource{}, false, fmt.Errorf("resolve resource for %s: REST mapping has no scope", gvk.String())
 	}
 
 	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil

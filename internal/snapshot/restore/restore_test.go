@@ -23,9 +23,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	stdruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -65,14 +72,22 @@ var (
 
 // stubSource records the call and returns a canned manifest array body.
 type stubSource struct {
-	body   []byte
-	err    error
-	onCall func()
+	body      []byte
+	err       error
+	onCall    func()
+	responses map[string]stubSourceResponse
 
-	gotRef  aggapi.NodeRef
-	gotNS   string
-	gotOpts aggapi.RestoreScopeOptions
-	calls   int
+	gotRef      aggapi.NodeRef
+	gotNS       string
+	gotOpts     aggapi.RestoreScopeOptions
+	gotRefs     []aggapi.NodeRef
+	gotOptsList []aggapi.RestoreScopeOptions
+	calls       int
+}
+
+type stubSourceResponse struct {
+	body []byte
+	err  error
 }
 
 func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRef, targetNamespace string, opts aggapi.RestoreScopeOptions) ([]byte, error) {
@@ -80,9 +95,15 @@ func (s *stubSource) RestoreManifestsScoped(_ context.Context, ref aggapi.NodeRe
 	s.gotRef = ref
 	s.gotNS = targetNamespace
 	s.gotOpts = opts
+	s.gotRefs = append(s.gotRefs, ref)
+	s.gotOptsList = append(s.gotOptsList, opts)
 
 	if s.onCall != nil {
 		s.onCall()
+	}
+
+	if response, exists := s.responses[nodeRefKey(ref)]; exists {
+		return response.body, response.err
 	}
 
 	return s.body, s.err
@@ -209,6 +230,25 @@ func testMapper() meta.RESTMapper {
 	m.Add(schema.GroupVersionKind{Group: "storage.k8s.io", Version: "v1", Kind: "StorageClass"}, meta.RESTScopeRoot)
 
 	return m
+}
+
+func clusterScopeTestMapper() meta.RESTMapper {
+	groupVersions := []schema.GroupVersion{
+		{Group: "", Version: "v1"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+		{Group: "apiextensions.k8s.io", Version: "v1"},
+		{Group: "rbac.authorization.k8s.io", Version: "v1"},
+		{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1"},
+	}
+	mapper := meta.NewDefaultRESTMapper(groupVersions)
+	mapper.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"}, meta.RESTScopeRoot)
+	mapper.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeRoot)
+
+	return mapper
 }
 
 // addSSAReactor installs a reactor that simulates Server-Side Apply semantics using
@@ -1225,30 +1265,511 @@ func TestRun_AppliesAllObjects(t *testing.T) {
 	}
 }
 
-// TestRun_AppliesClusterScopedObject verifies cluster-scoped objects are applied
-// without a namespace.
-func TestRun_AppliesClusterScopedObject(t *testing.T) {
-	pv := map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolume",
-		"metadata":   map[string]interface{}{"name": "pv-1"},
+func TestRun_RejectsClusterScopedObjectsBeforePatch(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiVersion string
+		kind       string
+		objectName string
+	}{
+		{name: "persistent volume", apiVersion: "v1", kind: "PersistentVolume", objectName: "pv-1"},
+		{name: "custom resource definition", apiVersion: "apiextensions.k8s.io/v1", kind: "CustomResourceDefinition", objectName: "widgets.example.io"},
+		{name: "cluster role", apiVersion: "rbac.authorization.k8s.io/v1", kind: "ClusterRole", objectName: "restore-admin"},
+		{name: "domain-shaped response", apiVersion: domainDiskAPIVersion, kind: "DemoVirtualDiskSnapshot", objectName: "domain-cluster-object"},
 	}
 
-	src := &stubSource{body: mustArray(t, pv)}
-	dyn := newFakeDynamic(readySnapshot())
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := map[string]interface{}{
+				"apiVersion": tc.apiVersion,
+				"kind":       tc.kind,
+				"metadata":   map[string]interface{}{"name": tc.objectName, "namespace": testNS},
+			}
+			src := &stubSource{body: mustArray(t, manifest)}
+			dyn := newFakeDynamic(readySnapshot())
+			cfg := baseConfig(src, dyn)
+			cfg.Mapper = clusterScopeTestMapper()
 
-	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly accepted a cluster-scoped object")
+			}
+
+			for _, part := range []string{
+				`apiVersion="` + tc.apiVersion + `"`,
+				`kind="` + tc.kind + `"`,
+				`name="` + tc.objectName + `"`,
+				"namespace restore does not support cluster-scoped object",
+				"remove it from the snapshot or edited manifests before retrying",
+			} {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("Run error %q does not contain %q", err, part)
+				}
+			}
+
+			assertNoPatchActions(t, dyn)
+		})
+	}
+}
+
+func TestRun_EditRejectsClusterScopedObjectBeforePatch(t *testing.T) {
+	dir := t.TempDir()
+	editedContent := `apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.example.io
+`
+	contentFile := writeEditorContent(t, dir, "cluster-scoped.yaml", editedContent)
+	editor := fakeEditorScript(t, dir, fmt.Sprintf(`cp '%s' "$1"`, contentFile))
+	t.Setenv("EDITOR", editor)
+	t.Setenv("KUBE_EDITOR", "")
+
+	src := &stubSource{body: mustArray(t, configMapManifest("before-edit"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(src, dyn)
+	cfg.Edit = true
+	cfg.Mapper = clusterScopeTestMapper()
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run unexpectedly accepted an edited cluster-scoped object")
+	}
+
+	for _, part := range []string{
+		`apiVersion="apiextensions.k8s.io/v1"`,
+		`kind="CustomResourceDefinition"`,
+		`name="widgets.example.io"`,
+		"namespace restore does not support cluster-scoped object",
+		"remove it from the snapshot or edited manifests before retrying",
+	} {
+		if !strings.Contains(err.Error(), part) {
+			t.Errorf("Run error %q does not contain %q", err, part)
+		}
+	}
+
+	assertNoPatchActions(t, dyn)
+}
+
+func TestRun_StagesAggregateAboveResponseLimitInPostOrder(t *testing.T) {
+	const payloadBytes = 33 << 20
+
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		count := requestCount.Add(1)
+
+		if scope := request.URL.Query().Get("scope"); scope != string(aggapi.RestoreScopeNode) {
+			t.Errorf("request %d scope = %q, want %q", count, scope, aggapi.RestoreScopeNode)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(request.URL.Path, "/nss-child-large/"):
+			writeLargeManifestResponse(t, w, "child-large", payloadBytes)
+		case strings.Contains(request.URL.Path, "/my-snap/"):
+			writeLargeManifestResponse(t, w, "root-large", payloadBytes)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	mapper := testMapperWithDomain()
+	aggClient, err := aggapi.NewClientForConfig(&rest.Config{
+		Host:    server.URL,
+		Timeout: 30 * time.Second,
+	}, mapper)
+	if err != nil {
+		t.Fatalf("NewClientForConfig: %v", err)
+	}
+
+	child := readyDomainDiskSnapshot("nss-child-large")
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+	)
+	dyn := newFakeDynamic(root, child)
+
+	var (
+		patchOrder   []string
+		maxTempBytes int64
+	)
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		patchAction, ok := action.(clienttesting.PatchAction)
+		if !ok {
+			t.Fatalf("patch action has type %T", action)
+		}
+
+		var obj unstructured.Unstructured
+		if err := json.Unmarshal(patchAction.GetPatch(), &obj.Object); err != nil {
+			t.Fatalf("decode patch: %v", err)
+		}
+		patchOrder = append(patchOrder, obj.GetName())
+
+		tempBytes := stagedResourceUsage(t, tempDir)
+		if tempBytes > maxTempBytes {
+			maxTempBytes = tempBytes
+		}
+
+		return true, obj.DeepCopy(), nil
+	})
+
+	stdruntime.GC()
+
+	var baseline stdruntime.MemStats
+	stdruntime.ReadMemStats(&baseline)
+
+	stopSampling := make(chan struct{})
+	heapPeak := make(chan uint64, 1)
+	go sampleHeapPeak(stopSampling, heapPeak, baseline.HeapAlloc)
+
+	cfg := baseConfig(aggClient, dyn)
+	cfg.Mapper = mapper
+	runErr := Run(context.Background(), cfg)
+	close(stopSampling)
+	peakHeap := <-heapPeak
+
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+
+	wantOrder := []string{"child-large", "root-large", "child-large", "root-large"}
+	if !slices.Equal(patchOrder, wantOrder) {
+		t.Fatalf("patch order = %v, want %v", patchOrder, wantOrder)
+	}
+	if requestCount.Load() != 2 {
+		t.Fatalf("aggregated API requests = %d, want 2 bounded node responses", requestCount.Load())
+	}
+
+	if maxTempBytes <= aggapi.DefaultMaxResponseBytes {
+		t.Fatalf("peak staged bytes = %d, want aggregate above per-response limit %d", maxTempBytes, aggapi.DefaultMaxResponseBytes)
+	}
+	if maxTempBytes > 2*payloadBytes+(1<<20) {
+		t.Fatalf("peak staged bytes = %d, want at most %d", maxTempBytes, 2*payloadBytes+(1<<20))
+	}
+
+	const heapGrowthLimit = 768 << 20
+	if growth := peakHeap - baseline.HeapAlloc; growth > heapGrowthLimit {
+		t.Fatalf("peak heap growth = %d bytes, want at most %d", growth, heapGrowthLimit)
+	}
+
+	stageFiles, err := filepath.Glob(filepath.Join(tempDir, "d8-restore-stage-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob staging files: %v", err)
+	}
+	if len(stageFiles) != 0 {
+		t.Fatalf("staging files remain after success: %v", stageFiles)
+	}
+
+	t.Logf(
+		"resource evidence: response_payload_bytes=%d aggregate_staged_bytes=%d heap_growth_bytes=%d apply_order=%v",
+		payloadBytes,
+		maxTempBytes,
+		peakHeap-baseline.HeapAlloc,
+		patchOrder,
+	)
+}
+
+func TestRun_CanonicalDuplicateIsCoalesced(t *testing.T) {
+	child := readyDomainDiskSnapshot("nss-child-duplicate")
+	root := snapshotWithChildren(
+		readySnapshot(),
+		snapshotChildRef(child.GetAPIVersion(), child.GetKind(), child.GetName()),
+	)
+	duplicate := configMapManifest("shared")
+	childRef := aggapi.NodeRef{
+		APIVersion: child.GetAPIVersion(),
+		Kind:       child.GetKind(),
+		Name:       child.GetName(),
+		Namespace:  testNS,
+	}
+	rootRef := aggapi.NodeRef{
+		APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
+		Kind:       snapshotKind,
+		Name:       testSnap,
+		Namespace:  testNS,
+	}
+	src := &stubSource{responses: map[string]stubSourceResponse{
+		nodeRefKey(childRef): {body: mustArray(t, duplicate)},
+		nodeRefKey(rootRef):  {body: mustArray(t, duplicate)},
+	}}
+	dyn := newFakeDynamic(root, child)
+
+	patches := 0
+	dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		patches++
+
+		return false, nil, nil
+	})
+
+	cfg := baseConfig(src, dyn)
+	cfg.Mapper = testMapperWithDomain()
+	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got, err := dyn.Resource(pvGVR).Get(context.Background(), "pv-1", metav1.GetOptions{})
+	if src.calls != 2 {
+		t.Fatalf("bounded node fetches = %d, want 2", src.calls)
+	}
+	if patches != 2 {
+		t.Fatalf("ConfigMap patches = %d, want one dry-run plus one real apply", patches)
+	}
+}
+
+func TestManifestStage_UsesOneDescriptorAndCleansTemporaryFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	before := countOpenDescriptors(t)
+	cfg := applyDefaults(Config{})
+	stage, err := newManifestStage(cfg)
 	if err != nil {
-		t.Fatalf("PersistentVolume not applied: %v", err)
+		t.Fatalf("newManifestStage: %v", err)
 	}
 
-	if got.GetNamespace() != "" {
-		t.Errorf("cluster-scoped object got namespace %q, want empty", got.GetNamespace())
+	during := countOpenDescriptors(t)
+	if delta := during - before; delta != 1 {
+		stage.cleanup()
+
+		t.Fatalf("open descriptor delta with staging active = %d, want 1", delta)
 	}
+
+	stagePath := stage.path
+	stage.cleanup()
+
+	after := countOpenDescriptors(t)
+	if after > before {
+		t.Fatalf("open descriptors after cleanup = %d, baseline %d", after, before)
+	}
+	if _, statErr := os.Stat(stagePath); !os.IsNotExist(statErr) {
+		t.Fatalf("staging path remains after cleanup: stat error = %v", statErr)
+	}
+
+	t.Logf("descriptor evidence: baseline=%d staged=%d after_cleanup=%d", before, during, after)
+}
+
+func TestRun_LatePreflightFailuresCauseZeroPatchAndCleanup(t *testing.T) {
+	childRef := aggapi.NodeRef{
+		APIVersion: domainDiskAPIVersion,
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "nss-child-late",
+		Namespace:  testNS,
+	}
+
+	conflicting := configMapManifest("duplicate")
+	conflicting["data"] = map[string]interface{}{"k": "different"}
+	cancelCause := errors.New("operator canceled during node staging")
+	lateFetchErr := errors.New("late root fetch failure")
+
+	tests := []struct {
+		name          string
+		childResponse stubSourceResponse
+		rootResponse  stubSourceResponse
+		stageBytes    int64
+		stageObjects  int
+		cancelOnCall  int
+		wantCause     error
+		wantText      string
+	}{
+		{
+			name:          "oversized child response",
+			childResponse: stubSourceResponse{err: fmt.Errorf("%w: child exceeds 64 MiB", aggapi.ErrResponseTooLarge)},
+			rootResponse:  stubSourceResponse{body: mustArray(t, configMapManifest("root"))},
+			wantCause:     aggapi.ErrResponseTooLarge,
+		},
+		{
+			name:          "late root fetch failure",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("child"))},
+			rootResponse:  stubSourceResponse{err: lateFetchErr},
+			wantCause:     lateFetchErr,
+		},
+		{
+			name:          "late invalid object",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("child"))},
+			rootResponse: stubSourceResponse{body: mustArray(t, map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]interface{}{},
+			})},
+			wantText: "identity is incomplete",
+		},
+		{
+			name:          "conflicting duplicate",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("duplicate"))},
+			rootResponse:  stubSourceResponse{body: mustArray(t, conflicting)},
+			wantText:      "conflicting duplicate restore object",
+		},
+		{
+			name:          "cancellation after late fetch",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("child"))},
+			rootResponse:  stubSourceResponse{body: mustArray(t, configMapManifest("root"))},
+			cancelOnCall:  2,
+			wantCause:     context.Canceled,
+		},
+		{
+			name:          "temporary disk budget",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("child"))},
+			rootResponse:  stubSourceResponse{body: mustArray(t, configMapManifest("root"))},
+			stageBytes:    128,
+			wantText:      "temporary-disk byte budget",
+		},
+		{
+			name:          "staged object budget",
+			childResponse: stubSourceResponse{body: mustArray(t, configMapManifest("child"))},
+			rootResponse:  stubSourceResponse{body: mustArray(t, configMapManifest("root"))},
+			stageObjects:  1,
+			wantText:      "object budget",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Setenv("TMPDIR", tempDir)
+
+			child := readyDomainDiskSnapshot(childRef.Name)
+			root := snapshotWithChildren(
+				readySnapshot(),
+				snapshotChildRef(childRef.APIVersion, childRef.Kind, childRef.Name),
+			)
+			dyn := newFakeDynamic(root, child)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+
+			src := &stubSource{
+				responses: map[string]stubSourceResponse{
+					nodeRefKey(childRef): tc.childResponse,
+					nodeRefKey(aggapi.NodeRef{
+						APIVersion: snapshotapi.StorageGroup + "/" + snapshotapi.Version,
+						Kind:       snapshotKind,
+						Name:       testSnap,
+						Namespace:  testNS,
+					}): tc.rootResponse,
+				},
+			}
+			if tc.cancelOnCall != 0 {
+				src.onCall = func() {
+					if src.calls == tc.cancelOnCall {
+						cancel(cancelCause)
+					}
+				}
+			}
+
+			cfg := baseConfig(src, dyn)
+			cfg.Mapper = testMapperWithDomain()
+			cfg.maxStagedManifestBytes = tc.stageBytes
+			cfg.maxStagedManifestObjects = tc.stageObjects
+
+			err := Run(ctx, cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Errorf("Run error = %v, want cause %v", err, tc.wantCause)
+			}
+			if tc.cancelOnCall != 0 && !errors.Is(err, cancelCause) {
+				t.Errorf("Run error = %v, want cancellation cause %v", err, cancelCause)
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("Run error = %v, want text %q", err, tc.wantText)
+			}
+
+			assertNoPatchActions(t, dyn)
+
+			stageFiles, globErr := filepath.Glob(filepath.Join(tempDir, "d8-restore-stage-*.jsonl"))
+			if globErr != nil {
+				t.Fatalf("glob staging files: %v", globErr)
+			}
+			if len(stageFiles) != 0 {
+				t.Errorf("staging files remain after failure: %v", stageFiles)
+			}
+		})
+	}
+}
+
+func writeLargeManifestResponse(t *testing.T, w io.Writer, name string, payloadBytes int) {
+	t.Helper()
+
+	if _, err := io.WriteString(w, `[{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"`+name+`"},"data":{"payload":"`); err != nil {
+		return
+	}
+
+	chunk := strings.Repeat("x", 32<<10)
+	remaining := payloadBytes
+	for remaining > 0 {
+		part := min(remaining, len(chunk))
+		if _, err := io.WriteString(w, chunk[:part]); err != nil {
+			return
+		}
+		remaining -= part
+	}
+
+	_, _ = io.WriteString(w, `"}}]`)
+}
+
+func sampleHeapPeak(stop <-chan struct{}, result chan<- uint64, initial uint64) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+
+	peak := initial
+	for {
+		select {
+		case <-stop:
+			result <- peak
+
+			return
+		case <-ticker.C:
+			var stats stdruntime.MemStats
+			stdruntime.ReadMemStats(&stats)
+			if stats.HeapAlloc > peak {
+				peak = stats.HeapAlloc
+			}
+		}
+	}
+}
+
+func stagedResourceUsage(t *testing.T, tempDir string) int64 {
+	t.Helper()
+
+	paths, err := filepath.Glob(filepath.Join(tempDir, "d8-restore-stage-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob staging files: %v", err)
+	}
+
+	var total int64
+	for _, path := range paths {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("stat staging file: %v", statErr)
+		}
+		total += info.Size()
+	}
+
+	return total
+}
+
+func countOpenDescriptors(t *testing.T) int {
+	t.Helper()
+
+	directory, err := os.Open("/dev/fd")
+	if err != nil {
+		t.Skipf("descriptor counting is unavailable: %v", err)
+	}
+	defer func() {
+		if closeErr := directory.Close(); closeErr != nil {
+			t.Errorf("close descriptor directory: %v", closeErr)
+		}
+	}()
+
+	descriptors, err := directory.Readdirnames(-1)
+	if err != nil {
+		t.Skipf("descriptor counting is unavailable: %v", err)
+	}
+
+	return len(descriptors)
 }
 
 func TestRun_ManifestNamespacePreflightRejectsForeignNamespace(t *testing.T) {
@@ -1298,13 +1819,8 @@ func TestRun_ManifestNamespacePreflightAcceptsTargetScope(t *testing.T) {
 	matchingNamespace := configMapManifest("matching-namespace")
 	metadata, _ := matchingNamespace["metadata"].(map[string]interface{})
 	metadata["namespace"] = testNS
-	pv := map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolume",
-		"metadata":   map[string]interface{}{"name": "cluster-scoped"},
-	}
 
-	src := &stubSource{body: mustArray(t, emptyNamespace, matchingNamespace, pv)}
+	src := &stubSource{body: mustArray(t, emptyNamespace, matchingNamespace)}
 	dyn := newFakeDynamic(readySnapshot())
 
 	if err := Run(context.Background(), baseConfig(src, dyn)); err != nil {
@@ -1322,25 +1838,12 @@ func TestRun_ManifestNamespacePreflightAcceptsTargetScope(t *testing.T) {
 		}
 	}
 
-	clusterScoped, err := dyn.Resource(pvGVR).Get(context.Background(), "cluster-scoped", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get PersistentVolume: %v", err)
-	}
-
-	if clusterScoped.GetNamespace() != "" {
-		t.Errorf("PersistentVolume namespace = %q, want empty", clusterScoped.GetNamespace())
-	}
 }
 
 func TestPreflightManifestNamespaces_NormalizesOnlyAfterValidation(t *testing.T) {
 	objs := []unstructured.Unstructured{
 		{Object: configMapManifest("empty")},
 		{Object: configMapManifest("foreign")},
-		{Object: map[string]interface{}{
-			"apiVersion": "v1",
-			"kind":       "PersistentVolume",
-			"metadata":   map[string]interface{}{"name": "cluster-scoped"},
-		}},
 	}
 	objs[1].SetNamespace("other")
 	cfg := Config{
@@ -1362,14 +1865,10 @@ func TestPreflightManifestNamespaces_NormalizesOnlyAfterValidation(t *testing.T)
 		t.Fatalf("preflightManifestNamespaces: %v", err)
 	}
 
-	for i := range objs[:2] {
+	for i := range objs {
 		if objs[i].GetNamespace() != testNS {
 			t.Errorf("namespaced object %d namespace = %q, want %q", i, objs[i].GetNamespace(), testNS)
 		}
-	}
-
-	if objs[2].GetNamespace() != "" {
-		t.Errorf("cluster-scoped object namespace = %q, want unchanged empty namespace", objs[2].GetNamespace())
 	}
 }
 
@@ -2436,6 +2935,16 @@ func TestRun_Validation(t *testing.T) {
 		{"no source", func(c *Config) { c.Source = nil }},
 		{"no dynamic", func(c *Config) { c.Dynamic = nil }},
 		{"no mapper", func(c *Config) { c.Mapper = nil }},
+		{"unknown scope", func(c *Config) { c.Scope = "recursive" }},
+		{"filter kind without name", func(c *Config) {
+			c.Scope = aggapi.RestoreScopeNode
+			c.FilterKind = "ConfigMap"
+		}},
+		{"filter without node scope", func(c *Config) {
+			c.Scope = aggapi.RestoreScopeSubtree
+			c.FilterKind = "ConfigMap"
+			c.FilterName = "cm-1"
+		}},
 	}
 
 	for _, tc := range cases {
@@ -6229,9 +6738,9 @@ func TestRun_ScopeOptions_ForwardedToSource(t *testing.T) {
 		wantOpts aggapi.RestoreScopeOptions
 	}{
 		{
-			name:     "default: zero-value scope options (subtree, no filter)",
+			name:     "default subtree is fetched in bounded node units",
 			scope:    "",
-			wantOpts: aggapi.RestoreScopeOptions{},
+			wantOpts: aggapi.RestoreScopeOptions{Scope: aggapi.RestoreScopeNode},
 		},
 		{
 			name:     "scope=node, no object filter",

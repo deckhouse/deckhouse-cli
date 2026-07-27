@@ -76,9 +76,11 @@ Cross-namespace restore is not a single command: it is a separate procedure that
 the snapshot from the source namespace, re-creates the Snapshot and its volume-snapshot
 leaves in the target namespace, and then runs restore there.
 
-The server compiles the whole subtree in one call; every returned object is applied as-is.
-PersistentVolumeClaims already carry spec.dataSourceRef pointing at the VolumeSnapshot (or
-VirtualDiskSnapshot for domain disks) present in the namespace, so CSI provisions the data.
+The client walks the selected namespaced snapshot hierarchy and asks the server to compile
+one node at a time. Every node response is independently size-bounded, and the complete
+child-before-parent result is staged and validated before the first apply. PersistentVolumeClaims
+already carry spec.dataSourceRef pointing at the VolumeSnapshot (or VirtualDiskSnapshot for
+domain disks) present in the namespace, so CSI provisions the data.
 
 --node restricts the restore to a single node subtree. The positional Snapshot always
 anchors the hierarchy and must exist; the selection may use either the generated snapshot-CR
