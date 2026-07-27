@@ -915,9 +915,10 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 	}
 
 	var (
-		evidenceMu sync.Mutex
-		created    = make(map[string]*deapi.DataExport, 2)
-		deleted    = make(map[string]deleteEvidence, 1)
+		evidenceMu         sync.Mutex
+		lifecycleUIDs      = make([]types.UID, 0, 2)
+		createdByTargetUID = make(map[types.UID]*deapi.DataExport, 2)
+		deleted            = make(map[string]deleteEvidence, 1)
 	)
 
 	c := fake.NewClientBuilder().
@@ -966,7 +967,8 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 				}
 
 				evidenceMu.Lock()
-				created[de.Name] = de.DeepCopy()
+				lifecycleUIDs = append(lifecycleUIDs, targetUID)
+				createdByTargetUID[targetUID] = de.DeepCopy()
 				evidenceMu.Unlock()
 
 				return nil
@@ -1021,14 +1023,17 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 	cfgA.KeepExports = true
 	require.NoError(t, runPipeline(context.Background(), cfgA))
 
-	nameA := exporter.DataExportName(
-		testNS,
-		"demo.deckhouse.io",
-		"virtualdisksnapshots",
-		childKind,
-		diskSnapName,
-		uidA,
-	)
+	evidenceMu.Lock()
+	createdA := createdByTargetUID[uidA]
+	lifecycleUIDsAfterA := append([]types.UID(nil), lifecycleUIDs...)
+	evidenceMu.Unlock()
+
+	require.Equal(t, []types.UID{uidA}, lifecycleUIDsAfterA,
+		"the first Snapshot UID must reach the production DataExport lifecycle")
+	require.NotNil(t, createdA)
+	createdA = createdA.DeepCopy()
+
+	nameA := createdA.Name
 	staleA := new(deapi.DataExport)
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameA}, staleA))
 	staleABefore := staleA.DeepCopy()
@@ -1051,14 +1056,21 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 	cfgB.RunID = runB
 	require.NoError(t, runPipeline(context.Background(), cfgB))
 
-	nameB := exporter.DataExportName(
-		testNS,
-		"demo.deckhouse.io",
-		"virtualdisksnapshots",
-		childKind,
-		diskSnapName,
-		uidB,
-	)
+	evidenceMu.Lock()
+	createdB := createdByTargetUID[uidB]
+	lifecycleUIDsAfterB := append([]types.UID(nil), lifecycleUIDs...)
+	deletedCopy := make(map[string]deleteEvidence, len(deleted))
+	for name, record := range deleted {
+		deletedCopy[name] = record
+	}
+	evidenceMu.Unlock()
+
+	require.Equal(t, []types.UID{uidA, uidB}, lifecycleUIDsAfterB,
+		"both Snapshot incarnations must reach the production DataExport lifecycle with their exact UIDs")
+	require.NotNil(t, createdB)
+	createdB = createdB.DeepCopy()
+
+	nameB := createdB.Name
 	require.NotEqual(t, nameA, nameB)
 	require.LessOrEqual(t, len(nameA), 63)
 	require.LessOrEqual(t, len(nameB), 63)
@@ -1072,15 +1084,6 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameA}, staleAAfter))
 	require.Equal(t, staleABefore, staleAAfter, "UID B must not mutate or delete stale UID A")
 
-	evidenceMu.Lock()
-	createdA := created[nameA]
-	createdB := created[nameB]
-	deletedCopy := deleted[nameB]
-	_, staleDeleted := deleted[nameA]
-	evidenceMu.Unlock()
-
-	require.NotNil(t, createdA)
-	require.NotNil(t, createdB)
 	require.Equal(t, deUIDA, createdA.UID)
 	require.Equal(t, string(uidA), createdA.Annotations[targetUIDAnnotationKey])
 	require.Equal(t, runA, createdA.Annotations[runOwnerAnnotationKey])
@@ -1088,9 +1091,12 @@ func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
 	require.Equal(t, string(uidB), createdB.Annotations[targetUIDAnnotationKey])
 	require.Equal(t, runB, createdB.Annotations[runOwnerAnnotationKey])
 	require.Equal(t, createdA.Spec.TargetRef, createdB.Spec.TargetRef)
-	require.Equal(t, deUIDB, deletedCopy.uid)
-	require.Equal(t, deUIDB, deletedCopy.precondition)
-	require.False(t, staleDeleted)
+
+	deletedB, ok := deletedCopy[nameB]
+	require.True(t, ok)
+	require.Equal(t, deUIDB, deletedB.uid)
+	require.Equal(t, deUIDB, deletedB.precondition)
+	require.NotContains(t, deletedCopy, nameA)
 
 	remainingB := new(deapi.DataExport)
 	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameB}, remainingB)
