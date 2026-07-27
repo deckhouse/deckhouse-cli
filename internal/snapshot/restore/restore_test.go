@@ -3049,24 +3049,27 @@ func TestRun_Wait_WFFCSelectedOrConsumedPollsToBound(t *testing.T) {
 
 func TestRun_Wait_WFFCProvisioningSignals(t *testing.T) {
 	tests := []struct {
-		name        string
-		reason      string
-		message     string
-		wantTimeout bool
-		wantError   []string
+		name          string
+		reason        string
+		message       string
+		wantTimeout   bool
+		wantError     []string
+		minEventLists int
 	}{
 		{
-			name:        "active provisioning polls until timeout",
-			reason:      eventReasonProvisioning,
-			message:     "External provisioner is provisioning volume for claim default/pvc-event",
-			wantTimeout: true,
-			wantError:   []string{"default/pvc-event", "restore wait timeout", "Bound"},
+			name:          "active provisioning polls until timeout",
+			reason:        eventReasonProvisioning,
+			message:       "External provisioner is provisioning volume for claim default/pvc-event",
+			wantTimeout:   true,
+			wantError:     []string{"default/pvc-event", "restore wait timeout", "Bound"},
+			minEventLists: 2,
 		},
 		{
-			name:      "terminal CSI failure preserves cause",
-			reason:    eventReasonProvisioningFailed,
-			message:   "failed to provision volume with StorageClass \"wffc-sc\": rpc error: code = InvalidArgument",
-			wantError: []string{"default/pvc-event", eventReasonProvisioningFailed, "rpc error: code = InvalidArgument"},
+			name:          "terminal CSI failure preserves cause",
+			reason:        eventReasonProvisioningFailed,
+			message:       "failed to provision volume with StorageClass \"wffc-sc\": rpc error: code = InvalidArgument",
+			wantError:     []string{"default/pvc-event", eventReasonProvisioningFailed, "rpc error: code = InvalidArgument"},
+			minEventLists: 1,
 		},
 	}
 
@@ -3109,21 +3112,28 @@ func TestRun_Wait_WFFCProvisioningSignals(t *testing.T) {
 
 			eventLists := 0
 			podLists := 0
+			pvcGets := 0
 			for _, action := range dyn.Actions() {
-				if action.GetVerb() != "list" {
-					continue
-				}
-
-				switch action.GetResource().Resource {
-				case eventResource:
+				switch {
+				case action.GetVerb() == "list" && action.GetResource().Resource == eventResource:
 					eventLists++
-				case podResource:
+				case action.GetVerb() == "list" && action.GetResource().Resource == podResource:
 					podLists++
+				case action.GetVerb() == "get" && action.GetResource().Resource == pvcResource:
+					pvcGets++
 				}
 			}
 
-			if eventLists != 1 || podLists != 1 {
-				t.Errorf("WFFC scan counts: events=%d pods=%d, want 1 each", eventLists, podLists)
+			if eventLists < tc.minEventLists {
+				t.Errorf("Event List count = %d, want at least %d", eventLists, tc.minEventLists)
+			}
+
+			if eventLists > pvcGets-2 {
+				t.Errorf("Event List count = %d exceeds one initial scan plus one per active poll across %d PVC GETs", eventLists, pvcGets)
+			}
+
+			if podLists != 1 {
+				t.Errorf("Pod List count = %d, want 1", podLists)
 			}
 		})
 	}
@@ -3178,6 +3188,144 @@ func TestRun_Wait_WFFCNewestEventSeriesObservationWins(t *testing.T) {
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Run returned timeout instead of the newest terminal Event series cause: %v", err)
+	}
+}
+
+func TestRun_Wait_WFFCActivePollingRechecksTerminalEvents(t *testing.T) {
+	const pvcName = "pvc-late-failure"
+
+	pvc := restoredPVCObject(pvcName, pvcPhasePending, "wffc-sc", false)
+	active := pvcEventObject(
+		"provisioning",
+		pvcName,
+		eventReasonProvisioning,
+		"provisioning started",
+		"2026-07-27T12:00:00Z",
+	)
+	src := &stubSource{body: mustArray(t, pvcManifestSC(pvcName, "", "wffc-sc"))}
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+		pvc,
+		active,
+	)
+
+	var waitCtx *controlledDeadlineContext
+
+	pvcGets := 0
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets++
+
+		switch pvcGets {
+		case 4:
+			failed := pvcEventObject(
+				"provisioning",
+				pvcName,
+				eventReasonProvisioningFailed,
+				"late CSI failure",
+				"2026-07-27T12:00:30Z",
+			)
+			if err := dyn.Tracker().Update(
+				schema.GroupVersionResource{Version: "v1", Resource: eventResource},
+				failed,
+				testNS,
+			); err != nil {
+				return true, nil, err
+			}
+		case 5:
+			waitCtx.expire()
+		}
+
+		return false, nil, nil
+	})
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Hour
+	cfg.newWaitContext = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		waitCtx = newControlledDeadlineContext(parent)
+
+		return waitCtx, func() { waitCtx.cancel() }
+	}
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run reported success after active provisioning became terminal")
+	}
+
+	for _, want := range []string{testNS + "/" + pvcName, eventReasonProvisioningFailed, "late CSI failure"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run returned deadline instead of the late terminal provisioning cause: %v", err)
+	}
+
+	eventLists := 0
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == eventResource {
+			eventLists++
+		}
+	}
+
+	if eventLists != 2 {
+		t.Errorf("Event List count = %d, want initial inspection plus first active poll", eventLists)
+	}
+}
+
+func TestRun_Wait_WFFCProvisioningSuccessSupersedesStaleFailureUntilBound(t *testing.T) {
+	const pvcName = "pvc-retried"
+
+	pvc := restoredPVCObject(pvcName, pvcPhasePending, "wffc-sc", false)
+
+	failed := pvcEventObject(
+		"failed",
+		pvcName,
+		eventReasonProvisioningFailed,
+		"stale CSI failure",
+		"2026-07-27T12:00:00Z",
+	)
+	succeeded := pvcEventObject(
+		"succeeded",
+		pvcName,
+		"ProvisioningSucceeded",
+		"successfully provisioned volume",
+		"2026-07-27T12:00:30Z",
+	)
+	src := &stubSource{body: mustArray(t, pvcManifestSC(pvcName, "", "wffc-sc"))}
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+		pvc,
+		boundPVObject(pvcName),
+		failed,
+		succeeded,
+	)
+
+	pvcGets := 0
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets++
+		if pvcGets <= 3 {
+			return false, nil, nil
+		}
+
+		return true, restoredPVCObject(pvcName, pvcPhaseBound, "wffc-sc", false), nil
+	})
+
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Second
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run rejected a PVC after newer provisioning success: %v", err)
+	}
+
+	if pvcGets != 4 {
+		t.Errorf("PVC GET count = %d, want two preflights, Pending inspection, and provenance-validated Bound poll", pvcGets)
 	}
 }
 
@@ -3250,6 +3398,15 @@ func TestCurrentPVCProvisioningEventPaginationFilteringAndTie(t *testing.T) {
 	active := pvcEventObject("active", pvcName, eventReasonProvisioning, "active", stamp)
 	terminal := pvcEventObject("terminal", pvcName, eventReasonProvisioningFailed, "terminal wins equal tie", stamp)
 	unrelated := pvcEventObject("unrelated", pvcName, "Unrelated", "newer but irrelevant", "2026-07-27T12:01:00Z")
+	foreign := pvcEventObject(
+		"foreign",
+		pvcName,
+		eventReasonProvisioningSucceeded,
+		"newer foreign success",
+		"2026-07-27T12:02:00Z",
+	)
+	foreignInvolvedObject, _ := foreign.Object["involvedObject"].(map[string]interface{})
+	foreignInvolvedObject["uid"] = "uid-foreign"
 
 	base := newFakeDynamic()
 	listCalls := 0
@@ -3283,13 +3440,13 @@ func TestCurrentPVCProvisioningEventPaginationFilteringAndTie(t *testing.T) {
 
 			switch opts.Continue {
 			case "":
-				page := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*active}}
+				page := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*terminal}}
 				page.SetContinue("next")
 
 				return page, true, nil
 			case "next":
 				return &unstructured.UnstructuredList{
-					Items: []unstructured.Unstructured{*unrelated, *terminal},
+					Items: []unstructured.Unstructured{*foreign, *unrelated, *active},
 				}, true, nil
 			default:
 				return nil, true, fmt.Errorf("unexpected continue token %q", opts.Continue)
@@ -3305,7 +3462,7 @@ func TestCurrentPVCProvisioningEventPaginationFilteringAndTie(t *testing.T) {
 	}
 
 	if !got.terminal || got.reason != eventReasonProvisioningFailed || got.message != "terminal wins equal tie" {
-		t.Errorf("latest Event = %+v, want terminal second-page Event to win equal timestamp tie", got)
+		t.Errorf("latest Event = %+v, want terminal first-page Event to win equal timestamp tie", got)
 	}
 
 	if listCalls != 2 {

@@ -97,10 +97,11 @@ const (
 	defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
 	selectedNodeAnnotation        = "volume.kubernetes.io/selected-node"
 
-	eventReasonProvisioning         = "Provisioning"
-	eventReasonExternalProvisioning = "ExternalProvisioning"
-	eventReasonProvisioningFailed   = "ProvisioningFailed"
-	eventReasonFailedBinding        = "FailedBinding"
+	eventReasonProvisioning          = "Provisioning"
+	eventReasonExternalProvisioning  = "ExternalProvisioning"
+	eventReasonProvisioningFailed    = "ProvisioningFailed"
+	eventReasonProvisioningSucceeded = "ProvisioningSucceeded"
+	eventReasonFailedBinding         = "FailedBinding"
 
 	waitScanPageLimit  int64 = 100
 	waitScanMaxPages   int   = 100
@@ -2005,12 +2006,10 @@ func applyObject(
 // part of manifests-with-data-restoration output), so they are intentionally not tracked
 // here; awaiting them would require knowledge of the domain controller's naming/labeling.
 //
-// A PVC whose effective StorageClass volumeBindingMode is WaitForFirstConsumer is checked
-// once (never polled): provisioning does not even start until a Pod schedules against it,
-// so a Pending WFFC PVC with no consumer is a normal, non-blocking state, not a failure to
-// wait out. Polling it against the shared deadline would let one such PVC starve the
-// remaining Immediate PVCs of their fair share of cfg.Timeout, so it is skipped up front,
-// before the deadline is ever consulted for it.
+// A PVC whose effective StorageClass volumeBindingMode is WaitForFirstConsumer is inspected
+// before polling: a Pending claim with no selected node, live consumer, or provisioning
+// observation is a normal, non-blocking state. Once provisioning is active, its PVC and
+// bounded Event history are both rechecked until Bound or a terminal result.
 func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	if len(pvcs) == 0 {
 		return nil
@@ -2030,7 +2029,13 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	cfg.Log.Info("waiting for restored PVCs to bind", slog.Int("count", len(pvcs)))
 
 	bindingModes := make(map[string]string)
-	activeRefs := make([]pvcRef, 0, len(pvcs))
+
+	type waitRef struct {
+		pvc                 pvcRef
+		recheckProvisioning bool
+	}
+
+	activeRefs := make([]waitRef, 0, len(pvcs))
 
 	var (
 		boundCount   int
@@ -2043,7 +2048,8 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 			return fmt.Errorf("resolve volume binding mode for PVC %s/%s: %w", ref.namespace, ref.name, err)
 		}
 
-		if mode == volumeBindingModeWFC {
+		recheckProvisioning := mode == volumeBindingModeWFC
+		if recheckProvisioning {
 			active, bound, err := inspectWFFCPVC(waitCtx, cfg, gvr, ref)
 			if err != nil {
 				return err
@@ -2062,11 +2068,17 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 			}
 		}
 
-		activeRefs = append(activeRefs, ref)
+		activeRefs = append(activeRefs, waitRef{pvc: ref, recheckProvisioning: recheckProvisioning})
 	}
 
-	for _, ref := range activeRefs {
-		if err := waitOnePVCBound(waitCtx, cfg, gvr, ref); err != nil {
+	for _, activeRef := range activeRefs {
+		if err := waitOnePVCBound(
+			waitCtx,
+			cfg,
+			gvr,
+			activeRef.pvc,
+			activeRef.recheckProvisioning,
+		); err != nil {
 			return err
 		}
 
@@ -2230,8 +2242,15 @@ func inspectWFFCPVC(
 }
 
 // waitOnePVCBound polls a single non-terminating Pending PVC until it is Bound or the
-// shared wait context expires. Every other observed state is terminal for restore waiting.
-func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) error {
+// shared wait context expires. Active WFFC claims also recheck bounded Event history on
+// every poll so a provisioning failure is not hidden behind the eventual wait deadline.
+func waitOnePVCBound(
+	ctx context.Context,
+	cfg Config,
+	gvr schema.GroupVersionResource,
+	ref pvcRef,
+	recheckProvisioning bool,
+) error {
 	for {
 		phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
 		if err != nil {
@@ -2245,6 +2264,23 @@ func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 				slog.String("phase", phase))
 
 			return nil
+		}
+
+		if recheckProvisioning {
+			eventState, eventErr := currentPVCProvisioningEvent(ctx, cfg, ref)
+			if eventErr != nil {
+				return eventErr
+			}
+
+			if eventState.terminal {
+				return fmt.Errorf(
+					"restored PVC %s/%s has terminal provisioning event %q: %s",
+					ref.namespace,
+					ref.name,
+					eventState.reason,
+					eventState.message,
+				)
+			}
 		}
 
 		if !sleepCtx(ctx, cfg.PollInterval) {
@@ -2539,6 +2575,8 @@ func getBoundPVIdentity(
 type pvcProvisioningEvent struct {
 	active   bool
 	terminal bool
+	name     string
+	uid      types.UID
 	reason   string
 	message  string
 	stamp    time.Time
@@ -2560,12 +2598,21 @@ func currentPVCProvisioningEvent(
 	var latest pvcProvisioningEvent
 
 	err := scanResourcePages(ctx, cfg, gvr, ref.namespace, selector, func(obj *unstructured.Unstructured) error {
+		if !eventInvolvesPVC(obj, ref) {
+			return nil
+		}
+
 		reason, _, _ := unstructured.NestedString(obj.Object, "reason")
 
-		candidate := pvcProvisioningEvent{reason: reason, stamp: eventTimestamp(obj)}
+		candidate := pvcProvisioningEvent{
+			name:   obj.GetName(),
+			uid:    obj.GetUID(),
+			reason: reason,
+			stamp:  eventTimestamp(obj),
+		}
 
 		switch reason {
-		case eventReasonProvisioning, eventReasonExternalProvisioning:
+		case eventReasonProvisioning, eventReasonExternalProvisioning, eventReasonProvisioningSucceeded:
 			candidate.active = true
 		case eventReasonProvisioningFailed, eventReasonFailedBinding:
 			candidate.terminal = true
@@ -2574,7 +2621,7 @@ func currentPVCProvisioningEvent(
 		}
 
 		candidate.message, _, _ = unstructured.NestedString(obj.Object, "message")
-		if latest.reason == "" || !candidate.stamp.Before(latest.stamp) {
+		if provisioningEventLater(candidate, latest) {
 			latest = candidate
 		}
 
@@ -2590,6 +2637,62 @@ func currentPVCProvisioningEvent(
 	}
 
 	return latest, nil
+}
+
+func eventInvolvesPVC(event *unstructured.Unstructured, ref pvcRef) bool {
+	kind, _, _ := unstructured.NestedString(event.Object, "involvedObject", "kind")
+	namespace, _, _ := unstructured.NestedString(event.Object, "involvedObject", "namespace")
+	name, _, _ := unstructured.NestedString(event.Object, "involvedObject", "name")
+	uid, _, _ := unstructured.NestedString(event.Object, "involvedObject", "uid")
+
+	return kind == pvcKind &&
+		namespace == ref.namespace &&
+		name == ref.name &&
+		types.UID(uid) == ref.uid
+}
+
+func provisioningEventLater(candidate, latest pvcProvisioningEvent) bool {
+	if latest.reason == "" || candidate.stamp.After(latest.stamp) {
+		return true
+	}
+
+	if candidate.stamp.Before(latest.stamp) {
+		return false
+	}
+
+	candidatePriority := provisioningEventPriority(candidate)
+
+	latestPriority := provisioningEventPriority(latest)
+	if candidatePriority != latestPriority {
+		return candidatePriority > latestPriority
+	}
+
+	if candidate.name != latest.name {
+		return candidate.name > latest.name
+	}
+
+	if candidate.uid != latest.uid {
+		return candidate.uid > latest.uid
+	}
+
+	if candidate.reason != latest.reason {
+		return candidate.reason > latest.reason
+	}
+
+	return candidate.message > latest.message
+}
+
+func provisioningEventPriority(event pvcProvisioningEvent) int {
+	switch {
+	case event.terminal:
+		return 3
+	case event.reason == eventReasonProvisioningSucceeded:
+		return 2
+	case event.active:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func eventTimestamp(event *unstructured.Unstructured) time.Time {
