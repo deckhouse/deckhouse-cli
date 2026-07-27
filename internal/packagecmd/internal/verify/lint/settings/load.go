@@ -15,6 +15,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/images"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/oss"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/templates"
 )
 
@@ -35,6 +36,8 @@ type Root struct {
 	Icon icon.LinterSettings
 	// OSS contains runtime settings for the oss metadata linter.
 	OSS oss.LinterSettings
+	// Requirements contains runtime settings for the package requirements linter.
+	Requirements requirements.LinterSettings
 }
 
 // LoadRoot loads lint settings and returns runtime-ready linter settings.
@@ -91,6 +94,10 @@ func defaultLintersSettings() *Root {
 	r.OSS.RulesSettings.Fields.SetLevel("error", nil)
 	r.OSS.RulesSettings.Version.SetLevel("error", nil)
 
+	r.Requirements.Impact = lint.Error.Ptr()
+	r.Requirements.RulesSettings.ModuleGroups.SetLevel("error", nil)
+	r.Requirements.RulesSettings.Constraints.SetLevel("error", nil)
+
 	return r
 }
 
@@ -130,6 +137,10 @@ func remapLintersSettings(cfg Config) *Root {
 	r.OSS.RulesSettings.Parse.SetLevel(cfg.Linters.OSS.Rules.Parse.Impact, lint.Error.Ptr())
 	r.OSS.RulesSettings.Fields.SetLevel(cfg.Linters.OSS.Rules.Fields.Impact, lint.Error.Ptr())
 	r.OSS.RulesSettings.Version.SetLevel(cfg.Linters.OSS.Rules.Version.Impact, lint.Error.Ptr())
+
+	r.Requirements.SetLevel(cfg.Linters.Requirements.Impact)
+	r.Requirements.RulesSettings.ModuleGroups.SetLevel(cfg.Linters.Requirements.Rules.ModuleGroups.Impact, lint.Error.Ptr())
+	r.Requirements.RulesSettings.Constraints.SetLevel(cfg.Linters.Requirements.Rules.Constraints.Impact, lint.Error.Ptr())
 
 	return r
 }

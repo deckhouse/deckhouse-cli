@@ -37,6 +37,48 @@ type Definition struct {
 	Name       string `yaml:"name" json:"name"`
 
 	Descriptions Descriptions `yaml:"descriptions,omitempty" json:"descriptions,omitempty"`
+	Requirements Requirements `yaml:"requirements,omitempty" json:"requirements,omitempty"`
+}
+
+// Requirements are the platform and module dependencies the package declares.
+// It mirrors the contract deckhouse-controller enforces when the package is
+// installed; the plugin only checks that it is well-formed, since no cluster
+// exists at build time.
+type Requirements struct {
+	Kubernetes VersionConstraint   `yaml:"kubernetes,omitempty" json:"kubernetes,omitempty"`
+	Deckhouse  VersionConstraint   `yaml:"deckhouse,omitempty" json:"deckhouse,omitempty"`
+	Modules    ModulesRequirements `yaml:"modules,omitempty" json:"modules,omitempty"`
+}
+
+// VersionConstraint wraps a semver constraint expression. Empty means "no constraint".
+type VersionConstraint struct {
+	Constraint string `yaml:"constraint,omitempty" json:"constraint,omitempty"`
+}
+
+// ModulesRequirements groups module dependencies by how they gate the package:
+//   - Mandatory: the module must be enabled;
+//   - Conditional: enforced only when the module is enabled;
+//   - AnyOf: at least one member of each group must be enabled;
+//   - NoneOf: no member of any group may be enabled.
+type ModulesRequirements struct {
+	Mandatory   []ModuleDependency `yaml:"mandatory,omitempty" json:"mandatory,omitempty"`
+	Conditional []ModuleDependency `yaml:"conditional,omitempty" json:"conditional,omitempty"`
+	AnyOf       []ModuleGroup      `yaml:"anyOf,omitempty" json:"anyOf,omitempty"`
+	NoneOf      []ModuleGroup      `yaml:"noneOf,omitempty" json:"noneOf,omitempty"`
+}
+
+// ModuleDependency is a named module dependency with an optional semver constraint.
+type ModuleDependency struct {
+	Name       string `yaml:"name" json:"name"`
+	Constraint string `yaml:"constraint,omitempty" json:"constraint,omitempty"`
+}
+
+// ModuleGroup is a named group of module dependencies, shared by the AnyOf and
+// NoneOf buckets. Name is required and identifies the group in diagnostics.
+type ModuleGroup struct {
+	Name        string             `yaml:"name" json:"name"`
+	Description string             `yaml:"description,omitempty" json:"description,omitempty"`
+	Modules     []ModuleDependency `yaml:"modules" json:"modules"`
 }
 
 // Descriptions holds localized description text for the package.

@@ -37,7 +37,9 @@ templates/
 └── _helpers/              # хелперы — вызываются через include, сами ресурсов не создают
     ├── quantity_bytes.tpl
     ├── bytes_quantity.tpl
-    └── public_domain.tpl
+    ├── public_domain.tpl
+    ├── ingress_class.tpl
+    └── https.tpl
 ```
 
 Каждый `*.yaml` рендерится в Kubernetes-манифест. Файлы в `_helpers/` (по соглашению с префиксом `_`)
@@ -60,6 +62,8 @@ templates/
 | `.Application.Package.Images` | map «имя образа → ссылка»; доступ через `index … "<name>"` |
 | `.Application.Package.Registry.dockercfg` | dockerconfig для секрета доступа к реестру |
 | `.Platform.applications.publicDomainTemplate` | шаблон публичного FQDN (для хелпера `public_domain`) |
+| `.Platform.applications.ingressClass` | IngressClass для приложений (для хелпера `ingress_class`) |
+| `.Platform.applications.https` | политика HTTPS/TLS: `.mode`, `.certManager.clusterIssuerName` (для хелперов `https_*`) |
 | `.Capabilities.APIVersions.Has "<gvk>"` | есть ли данный API/CRD в кластере |
 
 > Поля `.Application.Settings.*` берутся из схемы `openapi/settings.yaml`: что объявлено там —
@@ -178,7 +182,7 @@ spec:
 
 Хелперы — именованные шаблоны (`{{ define "name" }}…{{ end }}`), вызываемые через
 `{{ include "name" аргумент }}`. Аргумент передаётся один; чтобы отдать несколько значений,
-собирают `list` или `dict`. В приложении доступны три хелпера.
+собирают `list` или `dict`. В приложении доступны следующие хелперы.
 
 ### `quantity_bytes` — quantity → байты
 
@@ -230,6 +234,41 @@ Kubernetes-quantity (строку) в целое число байт.
 - Если в шаблоне платформы не ровно три `%s` — прерывает рендер понятной ошибкой (`fail`).
 - **Для чего:** единообразно строить внешний адрес приложения (Ingress/ссылки), не хардкодя
   доменную схему в каждом манифесте.
+
+### `ingress_class` — IngressClass приложения
+
+[ingress_class.tpl](application/templates/_helpers/ingress_class.tpl) возвращает имя IngressClass,
+которое платформа задала для приложений экосистемы Deckhouse.
+
+```yaml
+ingressClassName: {{ include "ingress_class" . | quote }}
+```
+
+- Аргумент — контекст (`.`); берёт `.Platform.applications.ingressClass` (по умолчанию `nginx`).
+- **Для чего:** не хардкодить класс Ingress-контроллера в манифесте — берётся тот, что настроен в кластере.
+
+### `https_*` — TLS/HTTPS для Ingress
+
+[https.tpl](application/templates/_helpers/https.tpl) — семейство хелперов, читающих политику HTTPS
+платформы из `.Platform.applications.https`. Режимы: `Disabled`, `CertManager`, `CustomCertificate`,
+`OnlyInURI`.
+
+```yaml
+{{- if (include "https_ingress_tls_enabled" .) }}
+  tls:
+    - hosts: [ {{ .Application.Settings.ingress.host }} ]
+      secretName: {{ .Application.Instance.Name }}-ingress-tls
+{{- end }}
+```
+
+- `https_mode` — текущий режим (`.Platform.applications.https.mode`).
+- `https_ingress_tls_enabled` — непустая строка (истинна в `if`), когда для Ingress нужен TLS —
+  то есть в режимах `CertManager` и `CustomCertificate`.
+- `https_cert_manager_cluster_issuer_name` — имя ClusterIssuer cert-manager
+  (`.Platform.applications.https.certManager.clusterIssuerName`, по умолчанию `letsencrypt`) — для
+  аннотации `cert-manager.io/cluster-issuer` или ресурса `Certificate`.
+- **Для чего:** не хардкодить включение TLS и имя issuer в каждом манифесте — берётся политика HTTPS,
+  настроенная в кластере.
 
 
 ---
