@@ -226,7 +226,7 @@ type pvcRef struct {
 	namespace string
 	name      string
 	uid       types.UID
-	// storageClassName is the PVC's spec.storageClassName as applied (may be
+	// storageClassName is the PVC's staged spec.storageClassName (may be
 	// empty; an empty value resolves to the cluster's default StorageClass,
 	// not to Immediate binding, when the effective volumeBindingMode is
 	// resolved in waitPVCsBound).
@@ -235,6 +235,14 @@ type pvcRef struct {
 	desiredSource       pvcSourceIdentity
 	boundPV             *boundPVIdentity
 }
+
+type pvcMutationGuard struct {
+	uid             types.UID
+	resourceVersion string
+	exists          bool
+}
+
+type pvcMutationGuards map[string]pvcMutationGuard
 
 type pvcSourceIdentity struct {
 	dataSourceRef *pvcDataSourceIdentity
@@ -421,7 +429,7 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		slog.String("snapshot", cfg.Snapshot),
 		slog.Int("objects", stage.objectCount))
 
-	if err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
+	if _, err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
 		return err
 	}
 
@@ -433,7 +441,7 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	// --dry-run because this is then the only apply pass the user sees output from.
 	dryRunCfg.silenceApplyLog = !cfg.DryRun
 
-	if _, _, err := applyStaged(ctx, dryRunCfg, stage); err != nil {
+	if _, _, err := applyStaged(ctx, dryRunCfg, stage, nil); err != nil {
 		return fmt.Errorf("dry-run preflight: %w", err)
 	}
 
@@ -447,14 +455,15 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		return nil
 	}
 
-	// Close the admission window before the first real Patch. A target that was
+	// Close the admission window before the first real mutation. A target that was
 	// absent or Pending before dry-run may have become Bound while validation ran.
-	if err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
+	pvcGuards, err := preflightExistingBoundPVCs(ctx, cfg, stage)
+	if err != nil {
 		return fmt.Errorf("post-dry-run PVC preflight: %w", err)
 	}
 
 	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
-	pvcs, applied, err := applyStaged(ctx, cfg, stage)
+	pvcs, applied, err := applyStaged(ctx, cfg, stage, pvcGuards)
 	if err != nil {
 		return fmt.Errorf(
 			"restore apply stopped after %d of %d objects completed; the cluster may be partially applied and the active object's outcome is unknown: %w",
@@ -1408,11 +1417,17 @@ func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
 	return isConditionTrue(obj)
 }
 
-// preflightExistingBoundPVCs rejects stale successful state before any Patch.
-func preflightExistingBoundPVCs(ctx context.Context, cfg Config, stage *manifestStage) error {
+// preflightExistingBoundPVCs rejects stale successful state and records the
+// API-enforced conditions for the real PVC mutation.
+func preflightExistingBoundPVCs(
+	ctx context.Context,
+	cfg Config,
+	stage *manifestStage,
+) (pvcMutationGuards, error) {
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
+	guards := make(pvcMutationGuards)
 
-	return stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
+	err := stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
 		if obj.GetAPIVersion() != "v1" || obj.GetKind() != pvcKind {
 			return nil
 		}
@@ -1432,6 +1447,8 @@ func preflightExistingBoundPVCs(ctx context.Context, cfg Config, stage *manifest
 			},
 		)
 		if kubeerrors.IsNotFound(err) {
+			guards[pvcMutationGuardKey(namespace, obj.GetName())] = pvcMutationGuard{}
+
 			return nil
 		}
 
@@ -1458,14 +1475,46 @@ func preflightExistingBoundPVCs(ctx context.Context, cfg Config, stage *manifest
 			)
 		}
 
+		if pvc.GetUID() == "" {
+			return fmt.Errorf(
+				"preflight restore target PVC %s/%s: API server returned an empty metadata.uid",
+				namespace,
+				obj.GetName(),
+			)
+		}
+
+		if pvc.GetResourceVersion() == "" {
+			return fmt.Errorf(
+				"preflight restore target PVC %s/%s: API server returned an empty metadata.resourceVersion",
+				namespace,
+				obj.GetName(),
+			)
+		}
+
+		guards[pvcMutationGuardKey(namespace, obj.GetName())] = pvcMutationGuard{
+			uid:             pvc.GetUID(),
+			resourceVersion: pvc.GetResourceVersion(),
+			exists:          true,
+		}
+
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return guards, nil
+}
+
+func pvcMutationGuardKey(namespace, name string) string {
+	return namespace + "\x00" + name
 }
 
 func applyStaged(
 	ctx context.Context,
 	cfg Config,
 	stage *manifestStage,
+	pvcGuards pvcMutationGuards,
 ) ([]pvcRef, int, error) {
 	pvcs := make([]pvcRef, 0)
 	applied := 0
@@ -1473,7 +1522,12 @@ func applyStaged(
 	err := stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
 		isPVC := obj.GetAPIVersion() == "v1" && obj.GetKind() == pvcKind
 
-		var desiredSource pvcSourceIdentity
+		var (
+			desiredSource              pvcSourceIdentity
+			desiredStorageClassName    string
+			hasDesiredStorageClassName bool
+			pvcGuard                   *pvcMutationGuard
+		)
 
 		if isPVC {
 			var sourceErr error
@@ -1487,9 +1541,36 @@ func applyStaged(
 					sourceErr,
 				)
 			}
+
+			desiredStorageClassName, hasDesiredStorageClassName, sourceErr = unstructured.NestedString(
+				obj.Object,
+				"spec",
+				"storageClassName",
+			)
+			if sourceErr != nil {
+				return fmt.Errorf(
+					"read desired storageClassName for PVC %s/%s: %w",
+					obj.GetNamespace(),
+					obj.GetName(),
+					sourceErr,
+				)
+			}
+
+			if !cfg.DryRun {
+				guard, found := pvcGuards[pvcMutationGuardKey(obj.GetNamespace(), obj.GetName())]
+				if !found {
+					return fmt.Errorf(
+						"missing real-apply mutation guard for PVC %s/%s",
+						obj.GetNamespace(),
+						obj.GetName(),
+					)
+				}
+
+				pvcGuard = &guard
+			}
 		}
 
-		result, err := applyObject(ctx, cfg, obj)
+		result, err := applyObject(ctx, cfg, obj, pvcGuard)
 		if err != nil {
 			return fmt.Errorf(
 				"apply %s/%s %q: %w",
@@ -1501,12 +1582,28 @@ func applyStaged(
 		}
 
 		if isPVC {
-			if err := validateAppliedPVCSource(result, desiredSource, obj.GetName(), cfg.DryRun); err != nil {
+			if err := validateAppliedPVCIdentity(
+				result,
+				desiredSource,
+				desiredStorageClassName,
+				hasDesiredStorageClassName,
+				pvcGuard,
+				obj.GetName(),
+				cfg.DryRun,
+			); err != nil {
 				return err
 			}
 
 			if !cfg.DryRun {
-				ref, refErr := pvcRefFromApplied(ctx, cfg, result, desiredSource, obj.GetName())
+				ref, refErr := pvcRefFromApplied(
+					ctx,
+					cfg,
+					result,
+					desiredSource,
+					desiredStorageClassName,
+					hasDesiredStorageClassName,
+					obj.GetName(),
+				)
 				if refErr != nil {
 					return fmt.Errorf(
 						"record post-apply identity for PVC %s/%s: %w",
@@ -1531,9 +1628,12 @@ func applyStaged(
 	return pvcs, applied, nil
 }
 
-func validateAppliedPVCSource(
+func validateAppliedPVCIdentity(
 	result applyResult,
-	desired pvcSourceIdentity,
+	desiredSource pvcSourceIdentity,
+	desiredStorageClassName string,
+	hasDesiredStorageClassName bool,
+	guard *pvcMutationGuard,
 	expectedName string,
 	dryRun bool,
 ) error {
@@ -1550,7 +1650,7 @@ func validateAppliedPVCSource(
 		)
 	}
 
-	observed, err := pvcSourceIdentityFromObject(result.object)
+	observedSource, err := pvcSourceIdentityFromObject(result.object)
 	if err != nil {
 		return fmt.Errorf(
 			"read API server response restore source for PVC %s/%s: %w",
@@ -1560,21 +1660,61 @@ func validateAppliedPVCSource(
 		)
 	}
 
-	if desired.matchesObserved(observed) {
-		return nil
-	}
-
 	phase := "real apply"
 	if dryRun {
 		phase = "dry-run apply"
 	}
 
-	return fmt.Errorf(
-		"%s response for PVC %s/%s changed desired dataSource/dataSourceRef identity",
-		phase,
-		result.namespace,
-		expectedName,
+	if !desiredSource.matchesObserved(observedSource) {
+		return fmt.Errorf(
+			"%s response for PVC %s/%s changed desired dataSource/dataSourceRef identity",
+			phase,
+			result.namespace,
+			expectedName,
+		)
+	}
+
+	observedStorageClassName, hasObservedStorageClassName, err := unstructured.NestedString(
+		result.object.Object,
+		"spec",
+		"storageClassName",
 	)
+	if err != nil {
+		return fmt.Errorf(
+			"read %s response storageClassName for PVC %s/%s: %w",
+			phase,
+			result.namespace,
+			expectedName,
+			err,
+		)
+	}
+
+	if hasObservedStorageClassName != hasDesiredStorageClassName ||
+		observedStorageClassName != desiredStorageClassName {
+		return fmt.Errorf(
+			"%s response for PVC %s/%s changed desired storageClassName (expected present=%t value=%q, observed present=%t value=%q)",
+			phase,
+			result.namespace,
+			expectedName,
+			hasDesiredStorageClassName,
+			desiredStorageClassName,
+			hasObservedStorageClassName,
+			observedStorageClassName,
+		)
+	}
+
+	if guard != nil && guard.exists && result.object.GetUID() != guard.uid {
+		return fmt.Errorf(
+			"%s response for PVC %s/%s changed preflight UID (expected %q, observed %q)",
+			phase,
+			result.namespace,
+			expectedName,
+			guard.uid,
+			result.object.GetUID(),
+		)
+	}
+
+	return nil
 }
 
 func pvcRefFromApplied(
@@ -1582,6 +1722,8 @@ func pvcRefFromApplied(
 	cfg Config,
 	result applyResult,
 	desiredSource pvcSourceIdentity,
+	desiredStorageClassName string,
+	hasDesiredStorageClassName bool,
 	expectedName string,
 ) (pvcRef, error) {
 	if result.object == nil {
@@ -1593,21 +1735,12 @@ func pvcRefFromApplied(
 		return pvcRef{}, fmt.Errorf("API server returned an empty metadata.uid")
 	}
 
-	storageClassName, hasStorageClassName, err := unstructured.NestedString(
-		result.object.Object,
-		"spec",
-		"storageClassName",
-	)
-	if err != nil {
-		return pvcRef{}, fmt.Errorf("read applied spec.storageClassName: %w", err)
-	}
-
 	ref := pvcRef{
 		namespace:           result.namespace,
 		name:                expectedName,
 		uid:                 uid,
-		storageClassName:    storageClassName,
-		hasStorageClassName: hasStorageClassName,
+		storageClassName:    desiredStorageClassName,
+		hasStorageClassName: hasDesiredStorageClassName,
 		desiredSource:       desiredSource,
 	}
 
@@ -1726,11 +1859,16 @@ func (desired pvcSourceIdentity) canonical() (pvcDataSourceIdentity, bool) {
 	return pvcDataSourceIdentity{}, false
 }
 
-// applyObject applies a single object to the cluster using Server-Side Apply (SSA).
-// SSA merges only the fields d8 sets; fields owned by other managers (controllers,
-// webhooks) are not touched. Namespaced objects without a namespace inherit the target
-// namespace. It returns the effective namespace and API-server response.
-func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured) (applyResult, error) {
+// applyObject applies a single object to the cluster. It uses Server-Side Apply
+// except when an absent PVC must be created atomically to prevent same-name
+// adoption. Namespaced objects without a namespace inherit the target namespace.
+// It returns the effective namespace and API-server response.
+func applyObject(
+	ctx context.Context,
+	cfg Config,
+	obj *unstructured.Unstructured,
+	pvcGuard *pvcMutationGuard,
+) (applyResult, error) {
 	phase := "applying"
 	if cfg.DryRun {
 		phase = "dry-run applying"
@@ -1767,6 +1905,10 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 	obj.SetManagedFields(nil)
 	delete(obj.Object, "status")
 
+	if pvcGuard != nil && pvcGuard.exists {
+		obj.SetResourceVersion(pvcGuard.resourceVersion)
+	}
+
 	jsonBytes, err := json.Marshal(obj.Object)
 	if err != nil {
 		return applyResult{}, fmt.Errorf("marshal object for apply: %w", err)
@@ -1783,23 +1925,59 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		patchOpts.DryRun = []string{metav1.DryRunAll}
 	}
 
-	applied, patchErr := controlPlaneRequest(
-		ctx,
-		cfg.controlPlaneTimeout(),
-		fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
-		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
-			return ri.Patch(requestCtx, obj.GetName(), types.ApplyPatchType, jsonBytes, patchOpts)
-		},
+	var (
+		applied  *unstructured.Unstructured
+		applyErr error
 	)
-	if patchErr != nil {
+
+	if pvcGuard != nil && !pvcGuard.exists {
+		createOpts := metav1.CreateOptions{FieldManager: fieldManager}
+		applied, applyErr = controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("creating absent PVC %s/%s", ns, obj.GetName()),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Create(requestCtx, obj, createOpts)
+			},
+		)
+	} else {
+		applied, applyErr = controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Patch(requestCtx, obj.GetName(), types.ApplyPatchType, jsonBytes, patchOpts)
+			},
+		)
+	}
+
+	if applyErr != nil {
 		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
 		// surface an actionable error instead of a raw API rejection.
-		if kubeerrors.IsInvalid(patchErr) {
+		if kubeerrors.IsInvalid(applyErr) {
 			return applyResult{}, fmt.Errorf("already exists with immutable fields differing from the snapshot; "+
-				"delete it and re-run restore: %w", patchErr)
+				"delete it and re-run restore: %w", applyErr)
 		}
 
-		return applyResult{}, fmt.Errorf("apply: %w", patchErr)
+		if pvcGuard != nil && kubeerrors.IsConflict(applyErr) {
+			return applyResult{}, fmt.Errorf(
+				"restore target PVC %s/%s changed after preflight; refusing stale mutation: %w",
+				ns,
+				obj.GetName(),
+				applyErr,
+			)
+		}
+
+		if pvcGuard != nil && !pvcGuard.exists && kubeerrors.IsAlreadyExists(applyErr) {
+			return applyResult{}, fmt.Errorf(
+				"restore target PVC %s/%s appeared after preflight; refusing to mutate or reuse it: %w",
+				ns,
+				obj.GetName(),
+				applyErr,
+			)
+		}
+
+		return applyResult{}, fmt.Errorf("apply: %w", applyErr)
 	}
 
 	if !cfg.silenceApplyLog {
@@ -2416,8 +2594,8 @@ func currentPVCProvisioningEvent(
 
 func eventTimestamp(event *unstructured.Unstructured) time.Time {
 	for _, path := range [][]string{
-		{"eventTime"},
 		{"series", "lastObservedTime"},
+		{"eventTime"},
 		{"lastTimestamp"},
 		{"firstTimestamp"},
 	} {

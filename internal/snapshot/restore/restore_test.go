@@ -281,6 +281,9 @@ func addSSAReactor(dyn *dynamicfake.FakeDynamicClient) {
 			if patch.GetUID() == "" {
 				patch.SetUID(types.UID("uid-" + name))
 			}
+			if patch.GetResourceVersion() == "" {
+				patch.SetResourceVersion("1")
+			}
 
 			if createErr := tracker.Create(gvr, patch, ns); createErr != nil {
 				return true, nil, createErr
@@ -300,6 +303,19 @@ func addSSAReactor(dyn *dynamicfake.FakeDynamicClient) {
 		existingUnstr, castOK := existing.(*unstructured.Unstructured)
 		if !castOK {
 			return true, nil, fmt.Errorf("unexpected existing object type %T", existing)
+		}
+
+		if patchResourceVersion := patch.GetResourceVersion(); patchResourceVersion != "" &&
+			patchResourceVersion != existingUnstr.GetResourceVersion() {
+			return true, nil, kubeerrors.NewConflict(
+				gvr.GroupResource(),
+				name,
+				fmt.Errorf(
+					"resourceVersion %q does not match current %q",
+					patchResourceVersion,
+					existingUnstr.GetResourceVersion(),
+				),
+			)
 		}
 
 		merged := existingUnstr.DeepCopy()
@@ -776,6 +792,7 @@ func restoredPVCObject(name, phase, storageClassName string, terminating bool) *
 	metadata, _ := obj["metadata"].(map[string]interface{})
 	metadata["namespace"] = testNS
 	metadata["uid"] = "uid-" + name
+	metadata["resourceVersion"] = "1"
 
 	if phase == pvcPhaseBound {
 		spec, _ := obj["spec"].(map[string]interface{})
@@ -2468,7 +2485,48 @@ func TestRun_AbsentPVCStillRestores(t *testing.T) {
 	for _, dryRun := range []bool{false, true} {
 		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
 			src := &stubSource{body: mustArray(t, pvcManifest("pvc-new", ""))}
-			dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+			base := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+			base.PrependReactor("create", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				createAction, ok := action.(clienttesting.CreateAction)
+				if !ok {
+					return false, nil, nil
+				}
+
+				created, ok := createAction.GetObject().(*unstructured.Unstructured)
+				if !ok {
+					return true, nil, fmt.Errorf("created PVC type = %T", createAction.GetObject())
+				}
+
+				created.SetUID(types.UID("uid-" + created.GetName()))
+				created.SetResourceVersion("1")
+
+				return false, nil, nil
+			})
+
+			var dyn dynamic.Interface = base
+			if !dryRun {
+				dyn = &interceptingDynamicClient{
+					Interface: base,
+					transformPatch: func(
+						gvr schema.GroupVersionResource,
+						namespace string,
+						name string,
+						opts metav1.PatchOptions,
+						result *unstructured.Unstructured,
+					) (*unstructured.Unstructured, error) {
+						if gvr != pvcGVR || len(opts.DryRun) == 0 {
+							return result, nil
+						}
+
+						if err := base.Tracker().Delete(gvr, namespace, name); err != nil {
+							return nil, err
+						}
+
+						return result, nil
+					},
+				}
+			}
+
 			cfg := baseConfig(src, dyn)
 			cfg.DryRun = dryRun
 
@@ -2477,21 +2535,215 @@ func TestRun_AbsentPVCStillRestores(t *testing.T) {
 			}
 
 			patches := 0
-			for _, action := range dyn.Actions() {
+			creates := 0
+			for _, action := range base.Actions() {
 				if action.GetVerb() == "patch" && action.GetResource() == pvcGVR {
 					patches++
 				}
+				if action.GetVerb() == "create" && action.GetResource() == pvcGVR {
+					creates++
+				}
 			}
 
-			wantPatches := 2
+			if patches != 1 {
+				t.Errorf("PVC Patch count = %d, want one dry-run Patch", patches)
+			}
+
+			wantCreates := 1
 			if dryRun {
-				wantPatches = 1
+				wantCreates = 0
 			}
 
-			if patches != wantPatches {
-				t.Errorf("PVC Patch count = %d, want %d", patches, wantPatches)
+			if creates != wantCreates {
+				t.Errorf("PVC Create count = %d, want %d", creates, wantCreates)
 			}
 		})
+	}
+}
+
+func TestRun_PVCAppearingAtRealCreateFailsClosed(t *testing.T) {
+	manifest := pvcManifest("pvc-create-race", "")
+	metadata, _ := manifest["metadata"].(map[string]interface{})
+	metadata["labels"] = map[string]interface{}{"restore-owned": "true"}
+
+	base := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+	base.PrependReactor("create", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		createAction, ok := action.(clienttesting.CreateAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		requested, ok := createAction.GetObject().(*unstructured.Unstructured)
+		if !ok {
+			return true, nil, fmt.Errorf("created PVC type = %T", createAction.GetObject())
+		}
+
+		stale := restoredPVCObject(requested.GetName(), pvcPhaseBound, "", false)
+		stale.SetResourceVersion("2")
+		if err := base.Tracker().Create(pvcGVR, stale, testNS); err != nil {
+			return true, nil, err
+		}
+
+		return true, nil, kubeerrors.NewAlreadyExists(pvcGVR.GroupResource(), stale.GetName())
+	})
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		transformPatch: func(
+			gvr schema.GroupVersionResource,
+			namespace string,
+			name string,
+			opts metav1.PatchOptions,
+			result *unstructured.Unstructured,
+		) (*unstructured.Unstructured, error) {
+			if gvr != pvcGVR || len(opts.DryRun) == 0 {
+				return result, nil
+			}
+
+			if err := base.Tracker().Delete(gvr, namespace, name); err != nil {
+				return nil, err
+			}
+
+			return result, nil
+		},
+	}
+	src := &stubSource{body: mustArray(t, manifest)}
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("Run accepted a PVC that appeared at the real Create boundary")
+	}
+
+	for _, want := range []string{"default/pvc-create-race", "appeared after preflight", "refusing to mutate or reuse"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	current, getErr := base.Tracker().Get(pvcGVR, testNS, "pvc-create-race", metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatalf("get concurrent PVC: %v", getErr)
+	}
+
+	currentPVC, ok := current.(*unstructured.Unstructured)
+	if !ok {
+		t.Fatalf("concurrent PVC type = %T, want *unstructured.Unstructured", current)
+	}
+
+	if currentPVC.GetLabels()["restore-owned"] != "" {
+		t.Fatal("concurrent PVC was mutated by the restore")
+	}
+}
+
+func TestRun_BoundTransitionAtRealPVCPatchFailsClosed(t *testing.T) {
+	manifest := pvcManifestSC("pvc-race", "", "intended-sc")
+	metadata, _ := manifest["metadata"].(map[string]interface{})
+	metadata["labels"] = map[string]interface{}{"restore-owned": "true"}
+
+	pending := restoredPVCObject("pvc-race", pvcPhasePending, "intended-sc", false)
+	pending.SetResourceVersion("1")
+
+	base := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		pending,
+		boundPVObject("pvc-race"),
+	)
+	pvcPatches := 0
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		intercept: func(_ context.Context, verb string, gvr schema.GroupVersionResource, namespace, name string) error {
+			if verb != "patch" || gvr != pvcGVR {
+				return nil
+			}
+
+			pvcPatches++
+			if pvcPatches != 2 {
+				return nil
+			}
+
+			bound := restoredPVCObject(name, pvcPhaseBound, "intended-sc", false)
+			bound.SetResourceVersion("2")
+
+			return base.Tracker().Update(gvr, bound, namespace)
+		},
+	}
+	src := &stubSource{body: mustArray(t, manifest)}
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("Run accepted a PVC that became Bound at the real Patch boundary")
+	}
+
+	for _, want := range []string{"default/pvc-race", "resourceVersion"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	current, getErr := base.Tracker().Get(pvcGVR, testNS, "pvc-race", metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatalf("get transitioned PVC: %v", getErr)
+	}
+
+	currentPVC, ok := current.(*unstructured.Unstructured)
+	if !ok {
+		t.Fatalf("transitioned PVC type = %T, want *unstructured.Unstructured", current)
+	}
+
+	if currentPVC.GetLabels()["restore-owned"] != "" {
+		t.Fatal("stale Bound PVC was successfully mutated by the real apply")
+	}
+
+	if pvcPatches != 2 {
+		t.Errorf("PVC Patch count = %d, want dry-run plus real guarded Patch", pvcPatches)
+	}
+}
+
+func TestRun_RejectsRealApplyStorageClassMutation(t *testing.T) {
+	const (
+		pvcName       = "pvc-admission"
+		intendedClass = "intended-storage-class"
+		mutatedClass  = "wrong-storage-class"
+	)
+
+	existing := restoredPVCObject(pvcName, pvcPhasePending, intendedClass, false)
+	base := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), existing)
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		transformPatch: func(
+			gvr schema.GroupVersionResource,
+			namespace string,
+			_ string,
+			opts metav1.PatchOptions,
+			result *unstructured.Unstructured,
+		) (*unstructured.Unstructured, error) {
+			if gvr != pvcGVR || len(opts.DryRun) != 0 {
+				return result, nil
+			}
+
+			mutated := result.DeepCopy()
+			if err := unstructured.SetNestedField(mutated.Object, mutatedClass, "spec", "storageClassName"); err != nil {
+				return nil, err
+			}
+
+			if err := base.Tracker().Update(gvr, mutated, namespace); err != nil {
+				return nil, err
+			}
+
+			return mutated, nil
+		},
+	}
+	src := &stubSource{body: mustArray(t, pvcManifestSC(pvcName, "", intendedClass))}
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("Run accepted a storageClassName changed by real admission")
+	}
+
+	for _, want := range []string{testNS + "/" + pvcName, "storageClassName", intendedClass, mutatedClass} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
 	}
 }
 
@@ -2874,6 +3126,190 @@ func TestRun_Wait_WFFCProvisioningSignals(t *testing.T) {
 				t.Errorf("WFFC scan counts: events=%d pods=%d, want 1 each", eventLists, podLists)
 			}
 		})
+	}
+}
+
+func TestRun_Wait_WFFCNewestEventSeriesObservationWins(t *testing.T) {
+	pvc := restoredPVCObject("pvc-series", pvcPhasePending, "wffc-sc", false)
+	active := pvcEventObject(
+		"active",
+		"pvc-series",
+		eventReasonProvisioning,
+		"older active provisioning",
+		"2026-07-27T12:00:20.123456789Z",
+	)
+	active.Object["eventTime"] = "2026-07-27T12:00:20.123456789Z"
+
+	failed := pvcEventObject(
+		"failed",
+		"pvc-series",
+		eventReasonProvisioningFailed,
+		"newest repeated CSI failure",
+		"2026-07-27T12:00:00Z",
+	)
+	failed.Object["eventTime"] = "2026-07-27T12:00:00Z"
+	failed.Object["series"] = map[string]interface{}{
+		"lastObservedTime": "2026-07-27T12:00:30.987654321Z",
+	}
+
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-series", "", "wffc-sc"))}
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+		pvc,
+		failed,
+		active,
+	)
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Millisecond
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run reported success for the newest terminal provisioning observation")
+	}
+
+	for _, want := range []string{"default/pvc-series", eventReasonProvisioningFailed, "newest repeated CSI failure"} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Run returned timeout instead of the newest terminal Event series cause: %v", err)
+	}
+}
+
+func TestEventTimestampPrecedenceAndFallback(t *testing.T) {
+	creationTime := time.Date(2026, 7, 27, 12, 0, 40, 0, time.UTC)
+	tests := []struct {
+		name      string
+		fields    map[string]interface{}
+		wantStamp time.Time
+	}{
+		{
+			name: "series observation precedes initial event time",
+			fields: map[string]interface{}{
+				"series":    map[string]interface{}{"lastObservedTime": "2026-07-27T12:00:30.987654321Z"},
+				"eventTime": "2026-07-27T12:00:00.123456789Z",
+			},
+			wantStamp: time.Date(2026, 7, 27, 12, 0, 30, 987654321, time.UTC),
+		},
+		{
+			name: "malformed series falls back to event time",
+			fields: map[string]interface{}{
+				"series":    map[string]interface{}{"lastObservedTime": "not-a-time"},
+				"eventTime": "2026-07-27T12:00:20.123456789Z",
+			},
+			wantStamp: time.Date(2026, 7, 27, 12, 0, 20, 123456789, time.UTC),
+		},
+		{
+			name: "malformed modern timestamps fall back to last timestamp",
+			fields: map[string]interface{}{
+				"series":        map[string]interface{}{"lastObservedTime": "malformed"},
+				"eventTime":     "also-malformed",
+				"lastTimestamp": "2026-07-27T12:00:10Z",
+			},
+			wantStamp: time.Date(2026, 7, 27, 12, 0, 10, 0, time.UTC),
+		},
+		{
+			name:      "missing timestamps fall back to creation timestamp",
+			fields:    map[string]interface{}{},
+			wantStamp: creationTime,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Event",
+				"metadata": map[string]interface{}{
+					"creationTimestamp": creationTime.Format(time.RFC3339Nano),
+				},
+			}}
+			for key, value := range tc.fields {
+				event.Object[key] = value
+			}
+
+			if got := eventTimestamp(event); !got.Equal(tc.wantStamp) {
+				t.Errorf("eventTimestamp() = %s, want %s", got.Format(time.RFC3339Nano), tc.wantStamp.Format(time.RFC3339Nano))
+			}
+		})
+	}
+}
+
+func TestCurrentPVCProvisioningEventPaginationFilteringAndTie(t *testing.T) {
+	const (
+		pvcName = "pvc-pages"
+		pvcUID  = "uid-pvc-pages"
+		stamp   = "2026-07-27T12:00:20.123456789Z"
+	)
+
+	active := pvcEventObject("active", pvcName, eventReasonProvisioning, "active", stamp)
+	terminal := pvcEventObject("terminal", pvcName, eventReasonProvisioningFailed, "terminal wins equal tie", stamp)
+	unrelated := pvcEventObject("unrelated", pvcName, "Unrelated", "newer but irrelevant", "2026-07-27T12:01:00Z")
+
+	base := newFakeDynamic()
+	listCalls := 0
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		interceptList: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			namespace string,
+			opts metav1.ListOptions,
+		) (*unstructured.UnstructuredList, bool, error) {
+			if gvr.Resource != eventResource {
+				return nil, false, nil
+			}
+
+			listCalls++
+			for _, want := range []string{
+				"involvedObject.kind=PersistentVolumeClaim",
+				"involvedObject.namespace=" + testNS,
+				"involvedObject.name=" + pvcName,
+				"involvedObject.uid=" + pvcUID,
+			} {
+				if !contains(opts.FieldSelector, want) {
+					return nil, true, fmt.Errorf("Event selector %q does not contain %q", opts.FieldSelector, want)
+				}
+			}
+
+			if namespace != testNS {
+				return nil, true, fmt.Errorf("Event namespace = %q, want %q", namespace, testNS)
+			}
+
+			switch opts.Continue {
+			case "":
+				page := &unstructured.UnstructuredList{Items: []unstructured.Unstructured{*active}}
+				page.SetContinue("next")
+
+				return page, true, nil
+			case "next":
+				return &unstructured.UnstructuredList{
+					Items: []unstructured.Unstructured{*unrelated, *terminal},
+				}, true, nil
+			default:
+				return nil, true, fmt.Errorf("unexpected continue token %q", opts.Continue)
+			}
+		},
+	}
+	cfg := baseConfig(&stubSource{}, dyn)
+	ref := pvcRef{namespace: testNS, name: pvcName, uid: types.UID(pvcUID)}
+
+	got, err := currentPVCProvisioningEvent(context.Background(), cfg, ref)
+	if err != nil {
+		t.Fatalf("currentPVCProvisioningEvent: %v", err)
+	}
+
+	if !got.terminal || got.reason != eventReasonProvisioningFailed || got.message != "terminal wins equal tie" {
+		t.Errorf("latest Event = %+v, want terminal second-page Event to win equal timestamp tie", got)
+	}
+
+	if listCalls != 2 {
+		t.Errorf("Event List calls = %d, want 2 paginated requests", listCalls)
 	}
 }
 
@@ -3986,8 +4422,9 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
 		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      "pvc-1",
+			"namespace":       testNS,
+			"name":            "pvc-1",
+			"resourceVersion": "1",
 		},
 	}}
 
@@ -4102,7 +4539,7 @@ func TestApplyObject_DryRunOptions(t *testing.T) {
 
 	obj := &unstructured.Unstructured{Object: configMapManifest("cm-1")}
 
-	result, err := applyObject(context.Background(), cfg, obj)
+	result, err := applyObject(context.Background(), cfg, obj, nil)
 	if err != nil {
 		t.Fatalf("applyObject: %v", err)
 	}
