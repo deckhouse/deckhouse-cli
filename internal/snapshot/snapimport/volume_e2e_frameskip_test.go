@@ -99,7 +99,7 @@ func TestPutBlockCompressed_ProductionFrameGeometryResume(t *testing.T) {
 
 	countingFile := &fixtureCountingSeeker{ReadSeeker: file}
 	reader, discarded, err := resolveBlockDecodeReader(
-		context.Background(), countingFile, dataFile, codec.Ext(), resumeOffset, discardLogger(),
+		context.Background(), countingFile, dataFile, codec.Ext(), resumeOffset, totalSize, discardLogger(),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, reader.Close()) })

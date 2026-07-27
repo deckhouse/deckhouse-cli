@@ -18,6 +18,7 @@ package compress
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -838,6 +839,222 @@ func TestZstdDecodedSize_RejectsInvalidStreams(t *testing.T) {
 				t.Errorf("reader position after error = %d, want 0", pos)
 			}
 		})
+	}
+}
+
+func sizedSyntheticFrame(t *testing.T, contentSize int64, fcsBytes int) []byte {
+	t.Helper()
+
+	var (
+		fhd   byte
+		extra []byte
+	)
+
+	switch fcsBytes {
+	case 1:
+		if contentSize < 0 || contentSize > math.MaxUint8 {
+			t.Fatalf("content size %d does not fit one-byte FCS", contentSize)
+		}
+
+		fhd = 0x20
+		extra = []byte{byte(contentSize)}
+	case 2:
+		if contentSize < 256 || contentSize > math.MaxUint16+256 {
+			t.Fatalf("content size %d does not fit two-byte FCS", contentSize)
+		}
+
+		fhd = 0x40
+		extra = append([]byte{0}, binary.LittleEndian.AppendUint16(nil, uint16(contentSize-256))...)
+	case 4:
+		if contentSize < 0 || contentSize > math.MaxUint32 {
+			t.Fatalf("content size %d does not fit four-byte FCS", contentSize)
+		}
+
+		fhd = 0x80
+		extra = append([]byte{0}, binary.LittleEndian.AppendUint32(nil, uint32(contentSize))...)
+	case 8:
+		if contentSize < 0 {
+			t.Fatalf("negative content size %d", contentSize)
+		}
+
+		fhd = 0xC0
+		extra = append([]byte{0}, binary.LittleEndian.AppendUint64(nil, uint64(contentSize))...)
+	default:
+		t.Fatalf("unsupported FCS width %d", fcsBytes)
+	}
+
+	return synthFrame{
+		fhd:         fhd,
+		headerExtra: extra,
+		blocks: []synthBlock{{
+			blockType: blockTypeRLE,
+			last:      true,
+			blockSize: min(contentSize, int64(1)),
+			physical:  []byte{0},
+		}},
+	}.bytes()
+}
+
+func TestLocateZstdRawOffset_MixedContentSizes(t *testing.T) {
+	t.Parallel()
+
+	const hugeSize = int64(1 << 40)
+
+	rawSizes := []int64{5, 300, 70_000, hugeSize}
+	frames := [][]byte{
+		sizedSyntheticFrame(t, rawSizes[0], 1),
+		sizedSyntheticFrame(t, rawSizes[1], 2),
+		sizedSyntheticFrame(t, rawSizes[2], 4),
+		sizedSyntheticFrame(t, rawSizes[3], 8),
+	}
+	compressedOffsets := cumulativeOffsets(frames)
+	stream := bytes.Join(frames, nil)
+	total := rawSizes[0] + rawSizes[1] + rawSizes[2] + rawSizes[3]
+
+	tests := []struct {
+		name             string
+		rawOffset        int64
+		compressedOffset int64
+		rawDiscard       int64
+	}{
+		{name: "start", rawOffset: 0, compressedOffset: compressedOffsets[0]},
+		{name: "inside one-byte FCS frame", rawOffset: 3, compressedOffset: compressedOffsets[0], rawDiscard: 3},
+		{name: "aligned two-byte FCS frame", rawOffset: rawSizes[0], compressedOffset: compressedOffsets[1]},
+		{name: "inside two-byte FCS frame", rawOffset: rawSizes[0] + 123, compressedOffset: compressedOffsets[1], rawDiscard: 123},
+		{name: "aligned four-byte FCS frame", rawOffset: rawSizes[0] + rawSizes[1], compressedOffset: compressedOffsets[2]},
+		{name: "inside four-byte FCS frame", rawOffset: rawSizes[0] + rawSizes[1] + 50_000, compressedOffset: compressedOffsets[2], rawDiscard: 50_000},
+		{name: "aligned eight-byte FCS frame", rawOffset: total - hugeSize, compressedOffset: compressedOffsets[3]},
+		{name: "inside eight-byte FCS frame", rawOffset: total - hugeSize + 50<<30, compressedOffset: compressedOffsets[3], rawDiscard: 50 << 30},
+		{name: "EOF", rawOffset: total, compressedOffset: int64(len(stream))},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader := bytes.NewReader(stream)
+
+			got, err := LocateZstdRawOffset(context.Background(), reader, tc.rawOffset)
+			if err != nil {
+				t.Fatalf("LocateZstdRawOffset: %v", err)
+			}
+
+			if got.CompressedOffset != tc.compressedOffset || got.RawDiscard != tc.rawDiscard || got.DecodedSize != total {
+				t.Errorf("location = %+v, want compressed=%d discard=%d total=%d",
+					got, tc.compressedOffset, tc.rawDiscard, total)
+			}
+
+			position, err := reader.Seek(0, io.SeekCurrent)
+			if err != nil {
+				t.Fatalf("query reader position: %v", err)
+			}
+
+			if position != 0 {
+				t.Errorf("reader position = %d, want 0", position)
+			}
+		})
+	}
+}
+
+func TestLocateZstdRawOffset_RejectsInvalidStreams(t *testing.T) {
+	t.Parallel()
+
+	valid := sizedSyntheticFrame(t, 10, 1)
+	noFCS := synthFrame{
+		fhd:         0,
+		headerExtra: []byte{0},
+		blocks: []synthBlock{{
+			blockType: blockTypeRLE,
+			last:      true,
+			blockSize: 1,
+			physical:  []byte{0},
+		}},
+	}.bytes()
+	overflow := bytes.Join([][]byte{
+		sizedSyntheticFrame(t, math.MaxInt64, 8),
+		sizedSyntheticFrame(t, 1, 1),
+	}, nil)
+
+	tests := []struct {
+		name        string
+		stream      []byte
+		rawOffset   int64
+		wantCorrupt bool
+	}{
+		{name: "missing FCS", stream: noFCS, wantCorrupt: true},
+		{name: "truncated", stream: valid[:len(valid)-1], wantCorrupt: true},
+		{name: "bad magic", stream: append([]byte{valid[0] ^ 0xFF}, valid[1:]...), wantCorrupt: true},
+		{name: "decoded size overflow", stream: overflow, wantCorrupt: true},
+		{name: "offset past EOF", stream: valid, rawOffset: 11},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader := bytes.NewReader(tc.stream)
+
+			_, err := LocateZstdRawOffset(context.Background(), reader, tc.rawOffset)
+			if err == nil {
+				t.Fatal("LocateZstdRawOffset error = nil")
+			}
+
+			if tc.wantCorrupt && !errors.Is(err, ErrCorruptZstdFrame) {
+				t.Fatalf("error = %v, want ErrCorruptZstdFrame", err)
+			}
+
+			position, seekErr := reader.Seek(0, io.SeekCurrent)
+			if seekErr != nil {
+				t.Fatalf("query reader position: %v", seekErr)
+			}
+
+			if position != 0 {
+				t.Errorf("reader position after error = %d, want 0", position)
+			}
+		})
+	}
+}
+
+type cancelingZstdSeeker struct {
+	io.ReadSeeker
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (s *cancelingZstdSeeker) Read(p []byte) (int, error) {
+	n, err := s.ReadSeeker.Read(p)
+	s.reads++
+	if s.reads == 2 {
+		s.cancel()
+	}
+
+	return n, err
+}
+
+func TestLocateZstdRawOffset_HonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	stream := bytes.Repeat(sizedSyntheticFrame(t, 100, 1), 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	reader := &cancelingZstdSeeker{
+		ReadSeeker: bytes.NewReader(stream),
+		cancel:     cancel,
+	}
+
+	_, err := LocateZstdRawOffset(ctx, reader, 50)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+
+	position, seekErr := reader.Seek(0, io.SeekCurrent)
+	if seekErr != nil {
+		t.Fatalf("query reader position: %v", seekErr)
+	}
+
+	if position != 0 {
+		t.Errorf("reader position after cancellation = %d, want 0", position)
 	}
 }
 

@@ -17,6 +17,7 @@ limitations under the License.
 package compress
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -102,7 +103,7 @@ func SkipZstdFrames(rs io.ReadSeeker, n int) (int64, error) {
 		return 0, fmt.Errorf("skip zstd frames: restoring offset: %w", err)
 	}
 
-	w := &frameWalker{rs: rs, end: end, pos: start}
+	w := &frameWalker{ctx: context.Background(), rs: rs, end: end, pos: start}
 
 	for i := range n {
 		if _, err := w.walkFrame(); err != nil {
@@ -150,7 +151,7 @@ func ZstdDecodedSize(rs io.ReadSeeker) (int64, error) {
 		return 0, fmt.Errorf("sum zstd frame content sizes: restoring offset: %w", err)
 	}
 
-	w := &frameWalker{rs: rs, end: end, pos: start}
+	w := &frameWalker{ctx: context.Background(), rs: rs, end: end, pos: start}
 
 	var total int64
 
@@ -201,6 +202,120 @@ func ZstdDecodedSize(rs io.ReadSeeker) (int64, error) {
 	return total, nil
 }
 
+// ZstdRawOffset describes a decoded offset's position in an independent-frame
+// zstd stream. CompressedOffset is the start of the frame containing the
+// requested raw byte, RawDiscard is the decoded prefix within that frame, and
+// DecodedSize is the sum of every frame's mandatory Frame_Content_Size.
+type ZstdRawOffset struct {
+	CompressedOffset int64
+	RawDiscard       int64
+	DecodedSize      int64
+}
+
+// LocateZstdRawOffset locates rawOffset in a concatenation of independent zstd
+// frames without decoding payload bytes. It walks the complete stream so the
+// returned location also proves that every frame is structurally complete,
+// declares Frame_Content_Size, and that their decoded-size sum does not
+// overflow int64.
+//
+// An offset aligned to a frame starts at that frame with zero RawDiscard. An
+// offset inside a frame starts at the preceding compressed boundary and
+// discards only that frame's decoded prefix. EOF returns the compressed end
+// with zero discard. The reader position is restored on every return path.
+func LocateZstdRawOffset(ctx context.Context, rs io.ReadSeeker, rawOffset int64) (ZstdRawOffset, error) {
+	if rawOffset < 0 {
+		return ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset: negative offset %d", rawOffset)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return ZstdRawOffset{}, err
+	}
+
+	start, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset: querying current offset: %w", err)
+	}
+
+	end, err := rs.Seek(0, io.SeekEnd)
+	if err != nil {
+		return ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset: querying end offset: %w", err)
+	}
+
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset: restoring offset: %w", err)
+	}
+
+	w := &frameWalker{ctx: ctx, rs: rs, end: end, pos: start}
+	location := ZstdRawOffset{CompressedOffset: -1}
+
+	frameCount := 0
+
+	for w.pos < w.end {
+		frameStart := w.pos
+		rawStart := location.DecodedSize
+
+		hdr, walkErr := w.walkFrame()
+		if walkErr != nil {
+			return ZstdRawOffset{}, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("locate zstd raw offset: walking frame %d: %w", frameCount, walkErr),
+			)
+		}
+
+		if !hdr.hasContentSize {
+			return ZstdRawOffset{}, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("%w: frame %d has no Frame_Content_Size", ErrCorruptZstdFrame, frameCount),
+			)
+		}
+
+		rawEnd, addErr := addChecked(rawStart, hdr.contentSize)
+		if addErr != nil {
+			return ZstdRawOffset{}, restoreZstdPosition(
+				rs,
+				start,
+				fmt.Errorf("locate zstd raw offset: frame %d: %w", frameCount, addErr),
+			)
+		}
+
+		if location.CompressedOffset < 0 && rawOffset >= rawStart && rawOffset < rawEnd {
+			location.CompressedOffset = frameStart
+			location.RawDiscard = rawOffset - rawStart
+		}
+
+		location.DecodedSize = rawEnd
+		frameCount++
+	}
+
+	if frameCount == 0 {
+		return ZstdRawOffset{}, restoreZstdPosition(
+			rs,
+			start,
+			fmt.Errorf("%w: stream contains no frames", ErrCorruptZstdFrame),
+		)
+	}
+
+	if rawOffset > location.DecodedSize {
+		return ZstdRawOffset{}, restoreZstdPosition(
+			rs,
+			start,
+			fmt.Errorf("raw offset %d is outside decoded stream [0,%d]", rawOffset, location.DecodedSize),
+		)
+	}
+
+	if location.CompressedOffset < 0 {
+		location.CompressedOffset = end
+	}
+
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset: restoring offset after validation: %w", err)
+	}
+
+	return location, nil
+}
+
 func restoreZstdPosition(rs io.ReadSeeker, start int64, cause error) error {
 	if _, err := rs.Seek(start, io.SeekStart); err != nil {
 		return errors.Join(cause, fmt.Errorf("restoring zstd reader offset: %w", err))
@@ -213,6 +328,7 @@ func restoreZstdPosition(rs io.ReadSeeker, start int64, cause error) error {
 // reader, the real end bound (EOF), the running position, and a fixed 8-byte
 // scratch buffer large enough for the widest field read (an 8-byte Frame_Content_Size).
 type frameWalker struct {
+	ctx context.Context
 	rs  io.ReadSeeker
 	end int64
 	pos int64
@@ -230,6 +346,10 @@ type frameHeader struct {
 // without running past the end bound, checking the pos+need arithmetic for
 // overflow so a crafted length can never wrap into a passing range.
 func (w *frameWalker) ensure(need int64) error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+
 	limit, err := addChecked(w.pos, need)
 	if err != nil {
 		return err

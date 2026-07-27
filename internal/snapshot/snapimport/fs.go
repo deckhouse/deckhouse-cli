@@ -1424,20 +1424,19 @@ func uploadFSTarEntry(
 	progress *fileUploadProgress,
 	activate func(),
 ) error {
-	// A fresh (non-resumed) upload lets the stream's own terminal proof stand in for
-	// the separate verification pass below; a resumed upload always needs that pass,
-	// since its live stream may never open a decoder at all (see tarEntryStream.close).
-	freshUpload := offset == 0
-
 	stream := newTarEntryStream(source, tarPath, ext, payloadStart, storedSize, rawSize)
 
 	defer func() {
 		_ = stream.closeDecoder()
 	}()
 
+	if err := stream.prepare(ctx, offset); err != nil {
+		return fmt.Errorf("prepare %s at offset %d: %w", relPath, offset, err)
+	}
+
 	uploadErr := putFile(ctx, client, baseURL, relPath, rawSize, offset, attrs, stream.body, progress, activate)
 
-	folded, closeErr := stream.close(freshUpload && uploadErr == nil)
+	folded, closeErr := stream.close(uploadErr == nil)
 	if err := errors.Join(uploadErr, closeErr); err != nil {
 		return fmt.Errorf("upload %s: %w", relPath, err)
 	}
@@ -2198,8 +2197,16 @@ type tarEntryStream struct {
 	storedSize   int64
 	rawSize      int64
 
-	decoder io.ReadCloser // nil whenever no decode stream is currently open
-	pos     int64         // decoder's next unread raw byte offset; valid only while decoder != nil
+	decoder      io.ReadCloser // nil whenever no decode stream is currently open
+	pos          int64         // decoder's next unread raw byte offset; valid only while decoder != nil
+	skipped      bool          // current decoder started after raw offset zero
+	zstdProof    bool          // complete Frame_Content_Size geometry matched rawSize
+	prepared     bool
+	preparedAt   int64
+	preparedZstd compress.ZstdRawOffset
+
+	locateZstdRawOffset func(context.Context, io.ReadSeeker, int64) (compress.ZstdRawOffset, error)
+	newReader           func(string, io.Reader) (io.ReadCloser, error)
 }
 
 // newTarEntryStream prepares to serve one PUT upload attempt's request bodies for a
@@ -2207,14 +2214,34 @@ type tarEntryStream struct {
 // the entry's stored bytes verbatim, with no decoder ever opened.
 func newTarEntryStream(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) *tarEntryStream {
 	return &tarEntryStream{
-		source:       source,
-		tarPath:      tarPath,
-		ext:          ext,
-		payloadStart: payloadStart,
-		storedSize:   storedSize,
-		rawSize:      rawSize,
-		pos:          -1,
+		source:              source,
+		tarPath:             tarPath,
+		ext:                 ext,
+		payloadStart:        payloadStart,
+		storedSize:          storedSize,
+		rawSize:             rawSize,
+		pos:                 -1,
+		locateZstdRawOffset: compress.LocateZstdRawOffset,
+		newReader:           compress.NewReader,
 	}
+}
+
+func (s *tarEntryStream) prepare(ctx context.Context, offset int64) error {
+	if s.ext != ".zst" {
+		return nil
+	}
+
+	location, err := s.locateZstd(ctx, offset)
+	if err != nil {
+		return err
+	}
+
+	s.prepared = true
+	s.preparedAt = offset
+	s.preparedZstd = location
+	s.zstdProof = true
+
+	return nil
 }
 
 // body implements fileBodyFactory: putFile calls it to obtain the request body for
@@ -2242,9 +2269,14 @@ func (s *tarEntryStream) body(ctx context.Context, offset, size int64) (io.ReadC
 		return nil, err
 	}
 
-	limited := io.LimitReader(s.decoder, size)
+	bodyReader := boundedUploadReader(
+		s.decoder,
+		size,
+		s.rawSize,
+		s.ext == ".zst" && offset+size == s.rawSize,
+	)
 
-	return &fsUploadBody{reader: &tarEntryPositionReader{r: limited, pos: &s.pos}}, nil
+	return &fsUploadBody{reader: &tarEntryPositionReader{r: bodyReader, pos: &s.pos}}, nil
 }
 
 // reopen makes the stream's decoder ready to serve offset next. It is a no-op when the
@@ -2260,17 +2292,40 @@ func (s *tarEntryStream) reopen(ctx context.Context, offset int64) error {
 		return err
 	}
 
-	stored := io.NewSectionReader(s.source, s.payloadStart, s.storedSize)
+	storedOffset := s.payloadStart
+	storedSize := s.storedSize
+	rawDiscard := offset
 
-	decoder, err := compress.NewReader(s.ext, stored)
+	if s.ext == ".zst" {
+		location, err := s.zstdLocation(ctx, offset)
+		if err != nil {
+			return err
+		}
+
+		if location.CompressedOffset > s.storedSize {
+			return fmt.Errorf("zstd compressed offset %d exceeds stored size %d",
+				location.CompressedOffset, s.storedSize)
+		}
+
+		storedOffset += location.CompressedOffset
+		storedSize -= location.CompressedOffset
+		rawDiscard = location.RawDiscard
+		s.skipped = offset > 0
+	} else {
+		s.skipped = false
+	}
+
+	stored := io.NewSectionReader(s.source, storedOffset, storedSize)
+
+	decoder, err := s.newReader(s.ext, stored)
 	if err != nil {
 		return fmt.Errorf("open decompressor for %s: %w", s.tarPath, err)
 	}
 
-	discarded, err := discardDecoded(ctx, decoder, offset)
+	discarded, err := discardDecoded(ctx, decoder, rawDiscard)
 	if err != nil {
 		return errors.Join(
-			fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, offset, err),
+			fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, rawDiscard, err),
 			closeTarEntryDecoder(decoder),
 		)
 	}
@@ -2281,17 +2336,58 @@ func (s *tarEntryStream) reopen(ctx context.Context, offset int64) error {
 	return nil
 }
 
+func (s *tarEntryStream) zstdLocation(ctx context.Context, offset int64) (compress.ZstdRawOffset, error) {
+	if s.prepared && s.preparedAt == offset {
+		location := s.preparedZstd
+		s.prepared = false
+
+		return location, nil
+	}
+
+	return s.locateZstd(ctx, offset)
+}
+
+func (s *tarEntryStream) locateZstd(ctx context.Context, offset int64) (compress.ZstdRawOffset, error) {
+	stored := io.NewSectionReader(s.source, s.payloadStart, s.storedSize)
+
+	location, err := s.locateZstdRawOffset(ctx, stored, offset)
+	if err != nil {
+		return compress.ZstdRawOffset{}, fmt.Errorf("locate zstd raw offset %d in %s: %w", offset, s.tarPath, err)
+	}
+
+	if location.DecodedSize != s.rawSize {
+		return compress.ZstdRawOffset{}, fmt.Errorf(
+			"zstd decoded size %d differs from declared raw size %d",
+			location.DecodedSize,
+			s.rawSize,
+		)
+	}
+
+	s.zstdProof = true
+
+	return location, nil
+}
+
 // close releases the stream's decoder, if any, and reports whether it also produced a
 // terminal decoded-size proof for the entry's declared raw size. attemptFold requests
-// that proof, but close only delivers it when the decoder is still open and has
-// already been read all the way to rawSize — which holds precisely when this PUT
-// attempt started at offset 0 and completed without error, so the same decoder that
-// streamed every chunk covered the entry's whole compressed payload start to finish.
-// Any other case (a resumed attempt, or an entry short enough that its decoder never
-// had to open) reports folded=false, and the caller must run a full
-// verifyTarEntryRawSizeFromSource pass itself.
+// that proof. A decoder that began at byte zero proves every codec directly. A
+// resumed zstd decoder may also prove the suffix because prepare/reopen validated
+// the complete independent-frame geometry without decoding the accepted prefix.
+// Other resumed codecs report folded=false and retain the full verification pass.
 func (s *tarEntryStream) close(attemptFold bool) (bool, error) {
-	if !attemptFold || s.decoder == nil || s.pos != s.rawSize {
+	if !attemptFold {
+		return false, s.closeDecoder()
+	}
+
+	if s.decoder == nil {
+		if s.ext == ".zst" && s.zstdProof && s.preparedAt == s.rawSize {
+			return true, nil
+		}
+
+		return false, nil
+	}
+
+	if s.pos != s.rawSize || s.skipped && (s.ext != ".zst" || !s.zstdProof) {
 		return false, s.closeDecoder()
 	}
 
@@ -2318,6 +2414,7 @@ func (s *tarEntryStream) closeDecoder() error {
 	decoder := s.decoder
 	s.decoder = nil
 	s.pos = -1
+	s.skipped = false
 
 	return closeTarEntryDecoder(decoder)
 }

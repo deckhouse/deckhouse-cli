@@ -41,7 +41,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 const (
@@ -1218,15 +1217,15 @@ func putBlockFromOffset(
 	progress *blockUploadProgress,
 	activate func(),
 ) error {
-	// A compressed full skip still has to prove the archive decodes to exactly totalSize.
-	// A prior run may have durably written the under-declared prefix and then rejected an
-	// extra decoded byte, leaving HEAD at totalSize for this run.
 	if offset == totalSize {
-		if ext != "" {
+		switch ext {
+		case ".zst":
+			return validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
+		case "":
+			return nil
+		default:
 			return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
 		}
-
-		return nil
 	}
 
 	if ext == "" {
@@ -1403,17 +1402,17 @@ func putBlockRawWithPayloadLimit(
 // temporary file first — the whole point of this path is to keep peak disk usage at one
 // copy (the compressed archive) instead of two.
 //
-// RESUME STRATEGY has three cases (see resolveBlockDecodeReader):
+// DECODE STRATEGY has three cases (see resolveBlockDecodeReader):
 //
-//  1. offset == 0: no positioning needed — compress.NewReader(ext, f) from the start.
-//  2. zstd and offset > 0: derive the fixed raw-frame index from
-//     volume.DefaultChunkSize, walk only zstd frame headers to its compressed boundary,
-//     then decode and discard only the intra-frame raw prefix.
-//  3. gzip/lz4, or a failed zstd frame-walk attempt: reset f to byte zero, open a fresh
-//     decoder, and discard offset decoded bytes. Gzip and lz4 deliberately retain this
-//     O(offset) compatibility path because neither codec is user-selectable and neither
-//     has the bounded header-walk integration implemented for zstd. The "none" codec
-//     never reaches this function; putBlock routes it to putBlockRaw.
+//  1. zstd: walk mandatory Frame_Content_Size metadata for every upload, seek to
+//     the compressed boundary preceding offset, then decode and discard only the
+//     intra-frame raw prefix. At offset zero the walk is still required so a
+//     content-size-less stream cannot bypass geometry validation on a fresh upload.
+//  2. gzip/lz4 at offset zero: open a fresh decoder from the start.
+//  3. gzip/lz4 at a resumed offset: reset f to byte zero and discard offset
+//     decoded bytes. These compatibility codecs retain the O(offset) path.
+//     The "none" codec never reaches this function; putBlock routes it to
+//     putBlockRaw.
 func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, source io.ReadSeeker, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
 	return putBlockCompressedWithPayloadLimit(
 		ctx,
@@ -1442,11 +1441,42 @@ func putBlockCompressedWithPayloadLimit(
 	progress *blockUploadProgress,
 	activate func(),
 ) error {
+	return putBlockCompressedWithDependencies(
+		ctx,
+		httpClient,
+		url,
+		source,
+		dataFile,
+		ext,
+		offset,
+		totalSize,
+		payloadLimit,
+		log,
+		progress,
+		activate,
+		defaultBlockDecodeDependencies(),
+	)
+}
+
+func putBlockCompressedWithDependencies(
+	ctx context.Context,
+	httpClient httpDoer,
+	url string,
+	source io.ReadSeeker,
+	dataFile, ext string,
+	offset, totalSize, payloadLimit int64,
+	log *slog.Logger,
+	progress *blockUploadProgress,
+	activate func(),
+	deps blockDecodeDependencies,
+) error {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind compressed block %s: %w", dataFile, err)
 	}
 
-	decodeReader, _, err := resolveBlockDecodeReader(ctx, source, dataFile, ext, offset, log)
+	decodeReader, _, err := resolveBlockDecodeReaderWith(
+		ctx, source, dataFile, ext, offset, totalSize, log, deps,
+	)
 	if err != nil {
 		return err
 	}
@@ -1466,9 +1496,14 @@ func putBlockCompressedWithPayloadLimit(
 
 		requestEnd := offset + min(payloadLimit, totalSize-offset)
 		requestSize := requestEnd - offset
-		limited := io.LimitReader(decodeReader, requestSize)
+		bodyReader := boundedUploadReader(
+			decodeReader,
+			requestSize,
+			totalSize,
+			ext == ".zst" && requestEnd == totalSize,
+		)
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(limited))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(bodyReader))
 		if err != nil {
 			return err
 		}
@@ -1520,7 +1555,9 @@ func putBlockCompressedWithPayloadLimit(
 				return fmt.Errorf("reset compressed block %s before repositioning to offset %d: %w", dataFile, offset, err)
 			}
 
-			decodeReader, _, err = resolveBlockDecodeReader(ctx, source, dataFile, ext, offset, log)
+			decodeReader, _, err = resolveBlockDecodeReaderWith(
+				ctx, source, dataFile, ext, offset, totalSize, log, deps,
+			)
 			if err != nil {
 				return fmt.Errorf("reposition block decoder for %s to offset %d: %w", dataFile, offset, err)
 			}
@@ -1531,21 +1568,25 @@ func putBlockCompressedWithPayloadLimit(
 		offset = next
 	}
 
-	// Zstd resume paths may have skipped whole compressed frames whose payload checksums
-	// were never decoded in this invocation. Re-decode the complete stream before
-	// finalisation so a frame that yielded its declared bytes before a terminal checksum
-	// error cannot be accepted on a later retry.
 	if ext == ".zst" {
-		if decodeReader != nil {
-			if closeErr := decodeReader.Close(); closeErr != nil {
-				return fmt.Errorf("%w for %s before payload verification: %w",
-					errFailedBlockDecoderClose, dataFile, closeErr)
-			}
-
-			decodeReader = nil
+		if decodeReader == nil {
+			return validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
 		}
 
-		return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
+		var probe [1]byte
+
+		n, readErr := decodeReader.Read(probe[:])
+		if n > 0 {
+			return fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
+				"(extra bytes found after the declared total); the archive may be corrupt or was built by a mismatched d8 version",
+				dataFile, totalSize)
+		}
+
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, readErr)
+		}
+
+		return nil
 	}
 
 	// Safety net: totalSize came from the archive's captured metadata (leaf.Size), never
@@ -1571,6 +1612,77 @@ func putBlockCompressedWithPayloadLimit(
 	}
 
 	return nil
+}
+
+type terminalProofReader struct {
+	reader    io.Reader
+	remaining int64
+	totalSize int64
+}
+
+func boundedUploadReader(reader io.Reader, size, totalSize int64, terminalProof bool) io.Reader {
+	if terminalProof {
+		return &terminalProofReader{
+			reader:    reader,
+			remaining: size,
+			totalSize: totalSize,
+		}
+	}
+
+	return io.LimitReader(reader, size)
+}
+
+func (r *terminalProofReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if r.remaining <= 0 {
+		return r.reader.Read(p)
+	}
+
+	if r.remaining > 1 {
+		readSize := min(int64(len(p)), r.remaining-1)
+		n, err := r.reader.Read(p[:readSize])
+		r.remaining -= int64(n)
+
+		return n, err
+	}
+
+	var last [1]byte
+
+	n, err := r.reader.Read(last[:])
+	if n != 1 {
+		if err == nil {
+			err = io.ErrNoProgress
+		}
+
+		return 0, err
+	}
+
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, err
+	}
+
+	if err == nil {
+		var probe [1]byte
+
+		probeN, probeErr := r.reader.Read(probe[:])
+		switch {
+		case probeN > 0:
+			return 0, fmt.Errorf("decoded stream exceeds declared size %d", r.totalSize)
+		case errors.Is(probeErr, io.EOF):
+		case probeErr != nil:
+			return 0, probeErr
+		default:
+			return 0, io.ErrNoProgress
+		}
+	}
+
+	p[0] = last[0]
+	r.remaining = 0
+
+	return 1, nil
 }
 
 func verifyCompressedBlockSizeFromSource(ctx context.Context, source io.ReadSeeker, dataFile, ext string, totalSize int64) error {
@@ -1694,34 +1806,48 @@ func wrapCompressedBlockDecoderCloseError(dataFile string, err error) error {
 }
 
 type blockDecodeDependencies struct {
-	skipZstdFrames func(io.ReadSeeker, int) (int64, error)
-	newReader      func(string, io.Reader) (io.ReadCloser, error)
+	locateZstdRawOffset func(context.Context, io.ReadSeeker, int64) (compress.ZstdRawOffset, error)
+	newReader           func(string, io.Reader) (io.ReadCloser, error)
+}
+
+func defaultBlockDecodeDependencies() blockDecodeDependencies {
+	return blockDecodeDependencies{
+		locateZstdRawOffset: compress.LocateZstdRawOffset,
+		newReader:           compress.NewReader,
+	}
 }
 
 // resolveBlockDecodeReader returns a decode reader positioned at the requested
-// decompressed offset. Production zstd frames use volume.DefaultChunkSize; tests
-// can pass their own geometry to resolveBlockDecodeReaderWith. The discarded count
-// is zero for a fresh upload, at most one frame for a successful zstd frame-skip,
-// and offset for the byte-zero gzip/lz4/zstd fallback.
-func resolveBlockDecodeReader(ctx context.Context, f io.ReadSeeker, dataFile, ext string, offset int64, log *slog.Logger) (io.ReadCloser, int64, error) {
-	deps := blockDecodeDependencies{
-		skipZstdFrames: compress.SkipZstdFrames,
-		newReader:      compress.NewReader,
-	}
-
-	return resolveBlockDecodeReaderWith(ctx, f, dataFile, ext, offset, volume.DefaultChunkSize, log, deps)
+// decompressed offset. Zstd always validates the complete mandatory content-size
+// geometry before opening its decoder. The discarded count is zero for a fresh
+// or frame-aligned zstd upload, less than the containing frame for an unaligned
+// zstd resume, and offset for the byte-zero gzip/lz4 fallback.
+func resolveBlockDecodeReader(
+	ctx context.Context,
+	f io.ReadSeeker,
+	dataFile, ext string,
+	offset, totalSize int64,
+	log *slog.Logger,
+) (io.ReadCloser, int64, error) {
+	return resolveBlockDecodeReaderWith(
+		ctx, f, dataFile, ext, offset, totalSize, log, defaultBlockDecodeDependencies(),
+	)
 }
 
 func resolveBlockDecodeReaderWith(
 	ctx context.Context,
 	f io.ReadSeeker,
 	dataFile, ext string,
-	offset, chunkSize int64,
+	offset, totalSize int64,
 	log *slog.Logger,
 	deps blockDecodeDependencies,
 ) (io.ReadCloser, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
+	}
+
+	if ext == ".zst" {
+		return resolveZstdFrameDecodeReader(ctx, f, dataFile, offset, totalSize, deps)
 	}
 
 	if offset == 0 {
@@ -1733,27 +1859,6 @@ func resolveBlockDecodeReaderWith(
 		return decodeReader, 0, nil
 	}
 
-	if ext == ".zst" {
-		decodeReader, skipped, fastErr := resolveZstdFrameDecodeReader(ctx, f, dataFile, offset, chunkSize, deps)
-		if fastErr == nil {
-			return decodeReader, skipped, nil
-		}
-
-		if errors.Is(fastErr, context.Canceled) || errors.Is(fastErr, context.DeadlineExceeded) {
-			return nil, 0, fastErr
-		}
-
-		if errors.Is(fastErr, errFailedBlockDecoderClose) {
-			return nil, 0, fastErr
-		}
-
-		log.Warn("zstd frame-skip resume failed; falling back to byte-zero discard",
-			slog.String("file", dataFile),
-			slog.Any("error", fastErr))
-
-		return discardFromStart(ctx, f, dataFile, ext, offset, log, deps.newReader, fastErr)
-	}
-
 	return discardFromStart(ctx, f, dataFile, ext, offset, log, deps.newReader, nil)
 }
 
@@ -1761,42 +1866,47 @@ func resolveZstdFrameDecodeReader(
 	ctx context.Context,
 	f io.ReadSeeker,
 	dataFile string,
-	offset, chunkSize int64,
+	offset, totalSize int64,
 	deps blockDecodeDependencies,
 ) (io.ReadCloser, int64, error) {
-	if chunkSize <= 0 {
-		return nil, 0, fmt.Errorf("zstd frame size must be positive, got %d", chunkSize)
-	}
-
-	chunkIndex := offset / chunkSize
-	intra := offset % chunkSize
-
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 
-	frameOffset, err := deps.skipZstdFrames(f, int(chunkIndex))
+	location, err := deps.locateZstdRawOffset(ctx, f, offset)
 	if err != nil {
-		return nil, 0, fmt.Errorf("locating zstd frame %d for %s: %w", chunkIndex, dataFile, err)
+		return nil, 0, fmt.Errorf("locating zstd raw offset %d for %s: %w", offset, dataFile, err)
+	}
+
+	if err := validateCompressedBlockSize(dataFile, location.DecodedSize, totalSize); err != nil {
+		return nil, 0, err
 	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
 
-	if _, err := f.Seek(frameOffset, io.SeekStart); err != nil {
-		return nil, 0, fmt.Errorf("seeking %s to zstd frame %d at compressed offset %d: %w", dataFile, chunkIndex, frameOffset, err)
+	if _, err := f.Seek(location.CompressedOffset, io.SeekStart); err != nil {
+		return nil, 0, fmt.Errorf("seeking %s to zstd frame at compressed offset %d: %w",
+			dataFile, location.CompressedOffset, err)
 	}
 
 	decodeReader, err := deps.newReader(".zst", f)
 	if err != nil {
-		return nil, 0, fmt.Errorf("open zstd decompressor for %s at frame %d: %w", dataFile, chunkIndex, err)
+		return nil, 0, fmt.Errorf("open zstd decompressor for %s at compressed offset %d: %w",
+			dataFile, location.CompressedOffset, err)
 	}
 
-	skipped, err := discardDecoded(ctx, decodeReader, intra)
+	skipped, err := discardDecoded(ctx, decodeReader, location.RawDiscard)
 	if err != nil {
-		discardErr := fmt.Errorf("discarding intra-frame prefix for %s at raw offset %d (got %d of %d bytes): %w",
-			dataFile, offset, skipped, intra, err)
+		discardErr := fmt.Errorf(
+			"discarding intra-frame prefix for %s at raw offset %d (got %d of %d bytes): %w",
+			dataFile,
+			offset,
+			skipped,
+			location.RawDiscard,
+			err,
+		)
 
 		closeErr := decodeReader.Close()
 		if closeErr != nil {
@@ -1807,6 +1917,30 @@ func resolveZstdFrameDecodeReader(
 	}
 
 	return decodeReader, skipped, nil
+}
+
+func validateZstdBlockGeometry(
+	ctx context.Context,
+	source io.ReadSeeker,
+	dataFile string,
+	totalSize, offset int64,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	resetAuthenticatedRead(source)
+
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind compressed block %s for zstd geometry validation: %w", dataFile, err)
+	}
+
+	location, err := compress.LocateZstdRawOffset(ctx, source, offset)
+	if err != nil {
+		return fmt.Errorf("validate zstd geometry for %s: %w", dataFile, err)
+	}
+
+	return validateCompressedBlockSize(dataFile, location.DecodedSize, totalSize)
 }
 
 // discardFromStart resets f unconditionally before opening the fallback decoder.

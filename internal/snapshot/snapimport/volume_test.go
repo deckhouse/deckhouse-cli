@@ -51,7 +51,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 // recordingDoer captures the requests putBlock/postFinished send and returns canned responses.
@@ -528,12 +527,9 @@ func writeEncodedBlockFile(t *testing.T, path, codecName string, payload []byte)
 
 	mid := len(payload) / 2
 	for _, part := range [][]byte{payload[:mid], payload[mid:]} {
-		frame, encErr := codec.EncodeFrame(part)
-		if encErr != nil {
-			t.Fatalf("EncodeFrame: %v", encErr)
+		if err := codec.EncodeFrameStream(&buf, bytes.NewReader(part), int64(len(part))); err != nil {
+			t.Fatalf("EncodeFrameStream: %v", err)
 		}
-
-		buf.Write(frame)
 	}
 
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
@@ -1194,12 +1190,21 @@ func TestPutBlock_RawAndZstdBoundLifetimeSuccessRollbackCycles(t *testing.T) {
 			}
 
 			stats := source.AuthenticatedReadStats()
-			maxAuthenticatedBytes := int64(wantPUTs) * int64(len(encoded))
+			authenticatedFactor := int64(1)
+			if tc.ext == ".zst" {
+				// Every server-selected zstd offset performs one bounded metadata
+				// walk in addition to reading its request body. Reusing one archive
+				// authentication index is intentionally deferred to UPLOADAUTH-1.
+				authenticatedFactor = 2
+			}
+
+			maxAuthenticatedBytes := authenticatedFactor * int64(wantPUTs) * int64(len(encoded))
 			if stats.SourceBytes > maxAuthenticatedBytes || stats.HashedBytes > maxAuthenticatedBytes {
 				t.Errorf("authenticated source work = %+v, want at most fixed %d bytes", stats, maxAuthenticatedBytes)
 			}
-			if stats.ChunkLoads > int64(wantPUTs) {
-				t.Errorf("authenticated chunk loads = %d, want at most fixed %d", stats.ChunkLoads, wantPUTs)
+			maxChunkLoads := authenticatedFactor * int64(wantPUTs)
+			if stats.ChunkLoads > maxChunkLoads {
+				t.Errorf("authenticated chunk loads = %d, want at most fixed %d", stats.ChunkLoads, maxChunkLoads)
 			}
 
 			wantHighWater := payloadLimit + int64(maxBlockConflictReplays)*(payloadLimit-1)
@@ -1402,14 +1407,27 @@ func TestResolveBlockDecodeReader_ResumedSuffixMatches(t *testing.T) {
 			}
 			defer file.Close()
 
-			decodeReader, discarded, err := resolveBlockDecodeReader(context.Background(), file, dataFile, tc.ext, offset, discardLogger())
+			decodeReader, discarded, err := resolveBlockDecodeReader(
+				context.Background(),
+				file,
+				dataFile,
+				tc.ext,
+				offset,
+				int64(len(payload)),
+				discardLogger(),
+			)
 			if err != nil {
 				t.Fatalf("resolveBlockDecodeReader: %v", err)
 			}
 			defer decodeReader.Close()
 
-			if discarded != offset {
-				t.Fatalf("discarded = %d, want %d", discarded, offset)
+			wantDiscarded := offset
+			if tc.ext == ".zst" {
+				wantDiscarded = offset - int64(len(payload)/2)
+			}
+
+			if discarded != wantDiscarded {
+				t.Fatalf("discarded = %d, want %d", discarded, wantDiscarded)
 			}
 
 			rest, err := io.ReadAll(decodeReader)
@@ -1939,22 +1957,28 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 	t.Parallel()
 
 	const (
-		chunkSize = int64(100)
-		intra     = int64(73)
+		frameRawStart = int64(100)
+		intra         = int64(73)
 	)
 
-	offset := chunkSize + intra
+	offset := frameRawStart + intra
+	totalSize := offset + int64(len("wanted-suffix"))
 	source := bytes.NewReader([]byte("compressed-prefix-frame-suffix"))
 	decoded := append(bytes.Repeat([]byte("d"), int(intra)), []byte("wanted-suffix")...)
 
-	var gotFrame int
 	var gotCompressedOffset int64
 
 	deps := blockDecodeDependencies{
-		skipZstdFrames: func(_ io.ReadSeeker, frame int) (int64, error) {
-			gotFrame = frame
+		locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, rawOffset int64) (compress.ZstdRawOffset, error) {
+			if rawOffset != offset {
+				t.Fatalf("locator raw offset = %d, want %d", rawOffset, offset)
+			}
 
-			return 7, nil
+			return compress.ZstdRawOffset{
+				CompressedOffset: 7,
+				RawDiscard:       intra,
+				DecodedSize:      totalSize,
+			}, nil
 		},
 		newReader: func(ext string, src io.Reader) (io.ReadCloser, error) {
 			if ext != ".zst" {
@@ -1983,7 +2007,7 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 		"data.bin.zst",
 		".zst",
 		offset,
-		chunkSize,
+		totalSize,
 		discardLogger(),
 		deps,
 	)
@@ -1996,10 +2020,6 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 		}
 	})
 
-	if gotFrame != 1 {
-		t.Errorf("walker frame = %d, want 1", gotFrame)
-	}
-
 	if gotCompressedOffset != 7 {
 		t.Errorf("decoder compressed offset = %d, want 7", gotCompressedOffset)
 	}
@@ -2008,8 +2028,8 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 		t.Errorf("discarded = %d, want intra-frame %d", discarded, intra)
 	}
 
-	if discarded >= chunkSize {
-		t.Errorf("discarded = %d, want less than fixed frame size %d", discarded, chunkSize)
+	if discarded >= frameRawStart {
+		t.Errorf("discarded = %d, want less than containing frame size %d", discarded, frameRawStart)
 	}
 
 	got, err := io.ReadAll(reader)
@@ -2019,6 +2039,488 @@ func TestResolveBlockDecodeReader_ZstdSkipsWholeFrames(t *testing.T) {
 
 	if string(got) != "wanted-suffix" {
 		t.Errorf("resolved suffix = %q, want %q", got, "wanted-suffix")
+	}
+}
+
+type logicalDecodeReader struct {
+	remaining int64
+	decoded   int64
+	closed    bool
+}
+
+func (r *logicalDecodeReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+
+	n := min(int64(len(p)), r.remaining)
+	r.remaining -= n
+	r.decoded += n
+
+	return int(n), nil
+}
+
+func (r *logicalDecodeReader) Close() error {
+	r.closed = true
+
+	return nil
+}
+
+type logicalSuffixDoer struct {
+	t             *testing.T
+	decoder       *logicalDecodeReader
+	totalSize     int64
+	expected      int64
+	wireBytes     int64
+	prefixDecoded int64
+	requests      int
+	buf           []byte
+}
+
+func (d *logicalSuffixDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	d.t.Helper()
+
+	if req.Method != http.MethodPut {
+		return nil, fmt.Errorf("unexpected method %s", req.Method)
+	}
+
+	offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parse X-Offset: %w", err)
+	}
+
+	if offset != d.expected {
+		return nil, fmt.Errorf("PUT offset %d, want %d", offset, d.expected)
+	}
+
+	if d.requests == 0 {
+		d.prefixDecoded = d.decoder.decoded
+	}
+
+	var requestBytes int64
+
+	for {
+		n, readErr := req.Body.Read(d.buf)
+		requestBytes += int64(n)
+
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+
+		if readErr != nil {
+			_ = req.Body.Close()
+
+			return nil, readErr
+		}
+
+		if n == 0 {
+			_ = req.Body.Close()
+
+			return nil, io.ErrNoProgress
+		}
+	}
+
+	if err := req.Body.Close(); err != nil {
+		return nil, err
+	}
+
+	if requestBytes != req.ContentLength {
+		return nil, fmt.Errorf("request body bytes %d, want Content-Length %d", requestBytes, req.ContentLength)
+	}
+
+	d.requests++
+	d.wireBytes += requestBytes
+	d.expected += requestBytes
+
+	header := http.Header{}
+	header.Set("X-Next-Offset", strconv.FormatInt(d.expected, 10))
+
+	status := http.StatusNoContent
+	if d.expected == d.totalSize {
+		status = http.StatusCreated
+	}
+
+	return newTestHTTPResponse(status, header), nil
+}
+
+func TestZstdBlockAndFilesystemResume_Logical400GiB(t *testing.T) {
+	const (
+		gib       = int64(1 << 30)
+		totalSize = 400 * gib
+		frameSize = 64 * 1024 * 1024
+	)
+
+	tests := []struct {
+		name       string
+		offset     int64
+		rawDiscard int64
+	}{
+		{name: "aligned", offset: 50 * gib},
+		{name: "unaligned", offset: 50 * gib, rawDiscard: 17 * 1024 * 1024},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("block", func(t *testing.T) {
+				decoder := &logicalDecodeReader{remaining: tc.rawDiscard + totalSize - tc.offset}
+				locatorCalls := 0
+				deps := blockDecodeDependencies{
+					locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, offset int64) (compress.ZstdRawOffset, error) {
+						locatorCalls++
+						if offset != tc.offset {
+							t.Fatalf("locator offset = %d, want %d", offset, tc.offset)
+						}
+
+						return compress.ZstdRawOffset{
+							CompressedOffset: 7,
+							RawDiscard:       tc.rawDiscard,
+							DecodedSize:      totalSize,
+						}, nil
+					},
+					newReader: func(ext string, _ io.Reader) (io.ReadCloser, error) {
+						if ext != ".zst" {
+							t.Fatalf("decoder extension = %q, want .zst", ext)
+						}
+
+						return decoder, nil
+					},
+				}
+				doer := &logicalSuffixDoer{
+					t:         t,
+					decoder:   decoder,
+					totalSize: totalSize,
+					expected:  tc.offset,
+					buf:       make([]byte, blockPutPayloadLimit),
+				}
+				progress := &blockUploadProgress{credited: tc.offset}
+
+				err := putBlockCompressedWithDependencies(
+					context.Background(),
+					doer,
+					"https://importer.test/block",
+					bytes.NewReader([]byte("compressed-metadata")),
+					"data.bin.zst",
+					".zst",
+					tc.offset,
+					totalSize,
+					blockPutPayloadLimit,
+					discardLogger(),
+					progress,
+					nil,
+					deps,
+				)
+				if err != nil {
+					t.Fatalf("putBlockCompressedWithDependencies: %v", err)
+				}
+
+				if doer.wireBytes != totalSize-tc.offset {
+					t.Errorf("wire bytes = %d, want %d", doer.wireBytes, totalSize-tc.offset)
+				}
+
+				if doer.prefixDecoded != tc.rawDiscard {
+					t.Errorf("decoded prefix = %d, want %d", doer.prefixDecoded, tc.rawDiscard)
+				}
+
+				if doer.prefixDecoded >= frameSize && tc.rawDiscard > 0 {
+					t.Errorf("decoded prefix = %d, want less than one %d-byte frame", doer.prefixDecoded, frameSize)
+				}
+
+				if locatorCalls != 1 {
+					t.Errorf("locator calls = %d, want 1", locatorCalls)
+				}
+
+				if !decoder.closed {
+					t.Error("decoder was not closed")
+				}
+			})
+
+			t.Run("filesystem", func(t *testing.T) {
+				decoder := &logicalDecodeReader{remaining: tc.rawDiscard + totalSize - tc.offset}
+				locatorCalls := 0
+				stream := newTarEntryStream(
+					bytes.NewReader([]byte("compressed-metadata")),
+					"data.tar",
+					".zst",
+					0,
+					int64(len("compressed-metadata")),
+					totalSize,
+				)
+				stream.locateZstdRawOffset = func(_ context.Context, _ io.ReadSeeker, offset int64) (compress.ZstdRawOffset, error) {
+					locatorCalls++
+					if offset != tc.offset {
+						t.Fatalf("locator offset = %d, want %d", offset, tc.offset)
+					}
+
+					return compress.ZstdRawOffset{
+						CompressedOffset: 7,
+						RawDiscard:       tc.rawDiscard,
+						DecodedSize:      totalSize,
+					}, nil
+				}
+				stream.newReader = func(ext string, _ io.Reader) (io.ReadCloser, error) {
+					if ext != ".zst" {
+						t.Fatalf("decoder extension = %q, want .zst", ext)
+					}
+
+					return decoder, nil
+				}
+
+				if err := stream.prepare(context.Background(), tc.offset); err != nil {
+					t.Fatalf("prepare: %v", err)
+				}
+
+				doer := &logicalSuffixDoer{
+					t:         t,
+					decoder:   decoder,
+					totalSize: totalSize,
+					expected:  tc.offset,
+					buf:       make([]byte, blockPutPayloadLimit),
+				}
+				progress := &fileUploadProgress{credited: tc.offset}
+
+				err := putFile(
+					context.Background(),
+					doer,
+					"https://importer.test",
+					"large.bin",
+					totalSize,
+					tc.offset,
+					fileAttrs{},
+					stream.body,
+					progress,
+					nil,
+				)
+				if err != nil {
+					t.Fatalf("putFile: %v", err)
+				}
+
+				folded, closeErr := stream.close(true)
+				if closeErr != nil {
+					t.Fatalf("close stream: %v", closeErr)
+				}
+
+				if !folded {
+					t.Fatal("resumed zstd suffix did not fold its terminal proof")
+				}
+
+				if doer.wireBytes != totalSize-tc.offset {
+					t.Errorf("wire bytes = %d, want %d", doer.wireBytes, totalSize-tc.offset)
+				}
+
+				if doer.prefixDecoded != tc.rawDiscard {
+					t.Errorf("decoded prefix = %d, want %d", doer.prefixDecoded, tc.rawDiscard)
+				}
+
+				if doer.prefixDecoded >= frameSize && tc.rawDiscard > 0 {
+					t.Errorf("decoded prefix = %d, want less than one %d-byte frame", doer.prefixDecoded, frameSize)
+				}
+
+				if locatorCalls != 1 {
+					t.Errorf("locator calls = %d, want 1", locatorCalls)
+				}
+
+				if !decoder.closed {
+					t.Error("decoder was not closed")
+				}
+			})
+		})
+	}
+}
+
+func TestZstdFreshUploadDecodesExactlyOnce(t *testing.T) {
+	const totalSize = int64(2*blockPutPayloadLimit + 17)
+
+	t.Run("block", func(t *testing.T) {
+		decoder := &logicalDecodeReader{remaining: totalSize}
+		locatorCalls := 0
+		deps := blockDecodeDependencies{
+			locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, offset int64) (compress.ZstdRawOffset, error) {
+				locatorCalls++
+				if offset != 0 {
+					t.Fatalf("fresh locator offset = %d, want 0", offset)
+				}
+
+				return compress.ZstdRawOffset{DecodedSize: totalSize}, nil
+			},
+			newReader: func(string, io.Reader) (io.ReadCloser, error) {
+				return decoder, nil
+			},
+		}
+		doer := &logicalSuffixDoer{
+			t:         t,
+			decoder:   decoder,
+			totalSize: totalSize,
+			buf:       make([]byte, blockPutPayloadLimit),
+		}
+		progress := &blockUploadProgress{}
+
+		err := putBlockCompressedWithDependencies(
+			context.Background(),
+			doer,
+			"https://importer.test/block",
+			bytes.NewReader(nil),
+			"data.bin.zst",
+			".zst",
+			0,
+			totalSize,
+			blockPutPayloadLimit,
+			discardLogger(),
+			progress,
+			nil,
+			deps,
+		)
+		if err != nil {
+			t.Fatalf("putBlockCompressedWithDependencies: %v", err)
+		}
+
+		if doer.wireBytes != totalSize || decoder.decoded != totalSize {
+			t.Errorf("wire=%d decoded=%d, want exactly %d each", doer.wireBytes, decoder.decoded, totalSize)
+		}
+		if locatorCalls != 1 {
+			t.Errorf("locator calls = %d, want one metadata preflight", locatorCalls)
+		}
+	})
+
+	t.Run("filesystem", func(t *testing.T) {
+		decoder := &logicalDecodeReader{remaining: totalSize}
+		locatorCalls := 0
+		stream := newTarEntryStream(bytes.NewReader(nil), "data.tar", ".zst", 0, 0, totalSize)
+		stream.locateZstdRawOffset = func(_ context.Context, _ io.ReadSeeker, offset int64) (compress.ZstdRawOffset, error) {
+			locatorCalls++
+			if offset != 0 {
+				t.Fatalf("fresh locator offset = %d, want 0", offset)
+			}
+
+			return compress.ZstdRawOffset{DecodedSize: totalSize}, nil
+		}
+		stream.newReader = func(string, io.Reader) (io.ReadCloser, error) {
+			return decoder, nil
+		}
+
+		if err := stream.prepare(context.Background(), 0); err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+
+		doer := &logicalSuffixDoer{
+			t:         t,
+			decoder:   decoder,
+			totalSize: totalSize,
+			buf:       make([]byte, blockPutPayloadLimit),
+		}
+		progress := &fileUploadProgress{}
+
+		err := putFile(
+			context.Background(),
+			doer,
+			"https://importer.test",
+			"fresh.bin",
+			totalSize,
+			0,
+			fileAttrs{},
+			stream.body,
+			progress,
+			nil,
+		)
+		if err != nil {
+			t.Fatalf("putFile: %v", err)
+		}
+
+		folded, closeErr := stream.close(true)
+		if closeErr != nil {
+			t.Fatalf("close stream: %v", closeErr)
+		}
+
+		if !folded {
+			t.Fatal("fresh stream did not fold terminal proof")
+		}
+
+		if doer.wireBytes != totalSize || decoder.decoded != totalSize {
+			t.Errorf("wire=%d decoded=%d, want exactly %d each", doer.wireBytes, decoder.decoded, totalSize)
+		}
+		if locatorCalls != 1 {
+			t.Errorf("locator calls = %d, want one metadata preflight", locatorCalls)
+		}
+	})
+}
+
+func TestZstdFreshUploadRejectsMissingFCSBeforePUT(t *testing.T) {
+	payload := bytes.Repeat([]byte("missing-fcs-"), 200)
+	codec, err := compress.New("zstd", 0)
+	if err != nil {
+		t.Fatalf("create zstd codec: %v", err)
+	}
+
+	var encoded bytes.Buffer
+	if err := codec.EncodeFrameStream(&encoded, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatalf("encode zstd frame: %v", err)
+	}
+
+	withoutFCS := removeZstdContentSize(t, encoded.Bytes())
+
+	tests := []struct {
+		name string
+		run  func(testHTTPDoer) error
+	}{
+		{
+			name: "block",
+			run: func(doer testHTTPDoer) error {
+				return putBlockCompressedWithDependencies(
+					context.Background(),
+					doer,
+					"https://importer.test/block",
+					bytes.NewReader(withoutFCS),
+					"data.bin.zst",
+					".zst",
+					0,
+					int64(len(payload)),
+					blockPutPayloadLimit,
+					discardLogger(),
+					&blockUploadProgress{},
+					nil,
+					defaultBlockDecodeDependencies(),
+				)
+			},
+		},
+		{
+			name: "filesystem",
+			run: func(doer testHTTPDoer) error {
+				return uploadFSTarEntry(
+					context.Background(),
+					doer,
+					"https://importer.test",
+					"file.bin",
+					"data.tar",
+					bytes.NewReader(withoutFCS),
+					".zst",
+					0,
+					int64(len(withoutFCS)),
+					int64(len(payload)),
+					0,
+					fileAttrs{},
+					&fileUploadProgress{},
+					nil,
+				)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				requests++
+
+				return nil, errors.New("HTTP request must not be sent")
+			})
+
+			err := tc.run(doer)
+			if !errors.Is(err, compress.ErrCorruptZstdFrame) {
+				t.Fatalf("error = %v, want ErrCorruptZstdFrame", err)
+			}
+			if requests != 0 {
+				t.Errorf("HTTP requests = %d, want 0", requests)
+			}
+		})
 	}
 }
 
@@ -2068,9 +2570,9 @@ func TestResolveBlockDecodeReader_ZstdCorruptionDoesNotYieldSuffix(t *testing.T)
 			})
 
 			reader, _, resolveErr := resolveBlockDecodeReaderWith(
-				context.Background(), file, path, ".zst", chunkSize+1, chunkSize, discardLogger(), blockDecodeDependencies{
-					skipZstdFrames: compress.SkipZstdFrames,
-					newReader:      compress.NewReader,
+				context.Background(), file, path, ".zst", chunkSize+1, 2*chunkSize, discardLogger(), blockDecodeDependencies{
+					locateZstdRawOffset: compress.LocateZstdRawOffset,
+					newReader:           compress.NewReader,
 				},
 			)
 			if resolveErr != nil {
@@ -2090,19 +2592,13 @@ func TestResolveBlockDecodeReader_ZstdCorruptionDoesNotYieldSuffix(t *testing.T)
 	}
 }
 
-func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
+func TestResolveBlockDecodeReader_CompatibilityCodecsResetToByteZero(t *testing.T) {
 	t.Parallel()
 
-	walkerErr := errors.New("walker failed")
-	decodeErr := errors.New("decoder failed")
-
 	tests := []struct {
-		name      string
-		ext       string
-		failFirst bool
+		name string
+		ext  string
 	}{
-		{name: "zstd: walker failure", ext: ".zst"},
-		{name: "zstd: decoder failure after source consumption", ext: ".zst", failFirst: true},
 		{name: "gzip: byte-zero fallback", ext: ".gz"},
 		{name: "lz4: byte-zero fallback", ext: ".lz4"},
 	}
@@ -2116,13 +2612,6 @@ func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
 			source := bytes.NewReader([]byte("encoded-source"))
 			decoderCalls := 0
 			deps := blockDecodeDependencies{
-				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
-					if tc.failFirst {
-						return 3, nil
-					}
-
-					return 0, walkerErr
-				},
 				newReader: func(_ string, src io.Reader) (io.ReadCloser, error) {
 					decoderCalls++
 
@@ -2132,20 +2621,8 @@ func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
 						t.Fatalf("query source offset: %v", err)
 					}
 
-					if tc.failFirst && decoderCalls == 1 {
-						if pos != 3 {
-							t.Fatalf("fast decoder source offset = %d, want 3", pos)
-						}
-
-						if _, err := seeker.Seek(2, io.SeekCurrent); err != nil {
-							t.Fatalf("consume source before injected decoder failure: %v", err)
-						}
-
-						return nil, decodeErr
-					}
-
 					if pos != 0 {
-						t.Fatalf("fallback decoder source offset = %d, want byte zero", pos)
+						t.Fatalf("decoder source offset = %d, want byte zero", pos)
 					}
 
 					return &testReadCloser{reader: strings.NewReader("01234wanted")}, nil
@@ -2158,7 +2635,7 @@ func TestResolveBlockDecodeReader_FallbacksResetToByteZero(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				offset,
-				volume.DefaultChunkSize,
+				int64(len("01234wanted")),
 				discardLogger(),
 				deps,
 			)
@@ -2197,10 +2674,9 @@ func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
 		name           string
 		ext            string
 		closeErr       error
-		wantFallback   bool
 		wantCloseError bool
 	}{
-		{name: "zstd fast discard failure falls back after close", ext: ".zst", wantFallback: true},
+		{name: "zstd intra-frame discard failure closes decoder", ext: ".zst"},
 		{name: "zstd fast discard and close failures are preserved", ext: ".zst", closeErr: closeErr, wantCloseError: true},
 		{name: "gzip fallback discard and close failures are preserved", ext: ".gz", closeErr: closeErr, wantCloseError: true},
 	}
@@ -2210,20 +2686,19 @@ func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
 			t.Parallel()
 
 			failedDecoder := &testReadCloser{reader: errorReader{err: readErr}, closeErr: tc.closeErr}
-			fallbackDecoder := &testReadCloser{reader: strings.NewReader("01234wanted")}
 			decoderCalls := 0
 
 			deps := blockDecodeDependencies{
-				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
-					return 0, nil
+				locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, _ int64) (compress.ZstdRawOffset, error) {
+					return compress.ZstdRawOffset{
+						RawDiscard:  5,
+						DecodedSize: 10,
+					}, nil
 				},
 				newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
 					decoderCalls++
-					if decoderCalls == 1 {
-						return failedDecoder, nil
-					}
 
-					return fallbackDecoder, nil
+					return failedDecoder, nil
 				},
 			}
 
@@ -2233,7 +2708,7 @@ func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				5,
-				volume.DefaultChunkSize,
+				10,
 				discardLogger(),
 				deps,
 			)
@@ -2242,35 +2717,22 @@ func TestResolveBlockDecodeReader_ClosesFailedDecoders(t *testing.T) {
 				t.Fatal("failed decoder was not closed")
 			}
 
+			if !errors.Is(err, readErr) {
+				t.Errorf("error %v does not preserve discard failure", err)
+			}
 			if tc.wantCloseError {
-				if !errors.Is(err, readErr) {
-					t.Errorf("error %v does not preserve discard failure", err)
-				}
-
 				if !errors.Is(err, closeErr) {
 					t.Errorf("error %v does not preserve close failure", err)
 				}
-
-				if reader != nil {
-					t.Fatal("reader returned together with decoder close error")
-				}
-
-				return
 			}
 
-			if err != nil {
-				t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+			if reader != nil {
+				t.Fatal("reader returned together with discard failure")
 			}
 
-			if !tc.wantFallback || decoderCalls != 2 {
-				t.Fatalf("decoder calls = %d, want fast attempt plus fallback", decoderCalls)
+			if decoderCalls != 1 {
+				t.Fatalf("decoder calls = %d, want 1", decoderCalls)
 			}
-
-			t.Cleanup(func() {
-				if closeErr := reader.Close(); closeErr != nil {
-					t.Errorf("close fallback reader: %v", closeErr)
-				}
-			})
 		})
 	}
 }
@@ -2283,17 +2745,16 @@ func (r errorReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
-func TestResolveBlockDecodeReader_ResetFailureIsReturned(t *testing.T) {
+func TestResolveBlockDecodeReader_ZstdLocatorFailureIsReturned(t *testing.T) {
 	t.Parallel()
 
 	walkerErr := errors.New("walker failed")
-	resetErr := errors.New("reset failed")
 	deps := blockDecodeDependencies{
-		skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
-			return 0, walkerErr
+		locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, _ int64) (compress.ZstdRawOffset, error) {
+			return compress.ZstdRawOffset{}, walkerErr
 		},
 		newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
-			t.Fatal("decoder must not open when reset fails")
+			t.Fatal("decoder must not open when locator fails")
 
 			return nil, nil
 		},
@@ -2301,28 +2762,24 @@ func TestResolveBlockDecodeReader_ResetFailureIsReturned(t *testing.T) {
 
 	reader, _, err := resolveBlockDecodeReaderWith(
 		context.Background(),
-		&resetFailSeeker{err: resetErr},
+		bytes.NewReader([]byte("source")),
 		"data.bin.zst",
 		".zst",
 		1,
-		volume.DefaultChunkSize,
+		2,
 		discardLogger(),
 		deps,
 	)
 	if reader != nil {
-		t.Fatal("reader returned when reset failed")
+		t.Fatal("reader returned when locator failed")
 	}
 
 	if !errors.Is(err, walkerErr) {
 		t.Errorf("error %v does not preserve walker failure", err)
 	}
-
-	if !errors.Is(err, resetErr) {
-		t.Errorf("error %v does not preserve reset failure", err)
-	}
 }
 
-func TestResolveBlockDecodeReader_BoundarySeekFailureFallsBackFromZero(t *testing.T) {
+func TestResolveBlockDecodeReader_BoundarySeekFailureIsReturned(t *testing.T) {
 	t.Parallel()
 
 	seekErr := errors.New("boundary seek failed")
@@ -2332,20 +2789,17 @@ func TestResolveBlockDecodeReader_BoundarySeekFailureFallsBackFromZero(t *testin
 		boundaryErr: seekErr,
 	}
 	deps := blockDecodeDependencies{
-		skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
-			return 7, nil
+		locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, _ int64) (compress.ZstdRawOffset, error) {
+			return compress.ZstdRawOffset{
+				CompressedOffset: 7,
+				RawDiscard:       5,
+				DecodedSize:      10,
+			}, nil
 		},
-		newReader: func(_ string, src io.Reader) (io.ReadCloser, error) {
-			pos, err := src.(io.Seeker).Seek(0, io.SeekCurrent)
-			if err != nil {
-				t.Fatalf("query fallback source offset: %v", err)
-			}
+		newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
+			t.Fatal("decoder must not open after boundary seek failure")
 
-			if pos != 0 {
-				t.Fatalf("fallback source offset = %d, want byte zero", pos)
-			}
-
-			return &testReadCloser{reader: strings.NewReader("01234wanted")}, nil
+			return nil, nil
 		},
 	}
 
@@ -2355,34 +2809,21 @@ func TestResolveBlockDecodeReader_BoundarySeekFailureFallsBackFromZero(t *testin
 		"data.bin.zst",
 		".zst",
 		5,
-		volume.DefaultChunkSize,
+		10,
 		discardLogger(),
 		deps,
 	)
-	if err != nil {
-		t.Fatalf("resolveBlockDecodeReaderWith: %v", err)
+	if reader != nil {
+		t.Fatal("reader returned after boundary seek failure")
 	}
-	t.Cleanup(func() {
-		if closeErr := reader.Close(); closeErr != nil {
-			t.Errorf("close fallback reader: %v", closeErr)
-		}
-	})
-
+	if discarded != 0 {
+		t.Errorf("discarded = %d, want 0 after boundary seek failure", discarded)
+	}
 	if !source.failed {
 		t.Fatal("frame-boundary Seek failure was not injected")
 	}
-
-	if discarded != 5 {
-		t.Errorf("discarded = %d, want fallback offset 5", discarded)
-	}
-
-	got, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read fallback suffix: %v", err)
-	}
-
-	if string(got) != "wanted" {
-		t.Errorf("fallback suffix = %q, want %q", got, "wanted")
+	if !errors.Is(err, seekErr) {
+		t.Fatalf("error = %v, want boundary seek failure", err)
 	}
 }
 
@@ -2409,8 +2850,11 @@ func TestResolveBlockDecodeReader_DiscardHonorsContextAndBound(t *testing.T) {
 			cancelReader := &cancelAfterRead{cancel: cancel}
 			failedDecoder := &testReadCloser{reader: cancelReader}
 			deps := blockDecodeDependencies{
-				skipZstdFrames: func(_ io.ReadSeeker, _ int) (int64, error) {
-					return 0, nil
+				locateZstdRawOffset: func(_ context.Context, _ io.ReadSeeker, offset int64) (compress.ZstdRawOffset, error) {
+					return compress.ZstdRawOffset{
+						RawDiscard:  offset,
+						DecodedSize: offset + 1,
+					}, nil
 				},
 				newReader: func(_ string, _ io.Reader) (io.ReadCloser, error) {
 					return failedDecoder, nil
@@ -2423,7 +2867,7 @@ func TestResolveBlockDecodeReader_DiscardHonorsContextAndBound(t *testing.T) {
 				"data.bin"+tc.ext,
 				tc.ext,
 				int64(blockDiscardBufferSize*2),
-				volume.DefaultChunkSize,
+				int64(blockDiscardBufferSize*2+1),
 				discardLogger(),
 				deps,
 			)
@@ -2877,7 +3321,7 @@ func TestSendVolumeData_CompressedFullSkipRequiresExactDecodedSize(t *testing.T)
 		{name: "error: zstd extra", codec: "zstd", ext: ".zst", totalSize: int64(len(payload) - 1), wantErr: true},
 		{name: "error: zstd truncated", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: truncateLastByte, wantErr: true},
 		{name: "error: zstd corrupt", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: mutateFirstByte, wantErr: true},
-		{name: "error: zstd checksum after exact bytes", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: corruptZstdChecksum, wantErr: true},
+		{name: "success: zstd accepted full prefix needs no re-decode", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), mutate: corruptZstdChecksum},
 		{name: "error: zstd content size less", codec: "zstd", ext: ".zst", totalSize: int64(len(payload)), noFCS: true, wantErr: true},
 		{name: "success: gzip exact", codec: "gzip", ext: ".gz", totalSize: int64(len(payload))},
 		{name: "error: gzip short", codec: "gzip", ext: ".gz", totalSize: int64(len(payload) + 1), wantErr: true},
@@ -3122,12 +3566,12 @@ func TestSendVolumeData_TwoRunCompressedUndercountNeverFinalizes(t *testing.T) {
 		}
 	}
 
-	if int64(len(written)) != totalSize {
-		t.Errorf("durably written bytes = %d, want declared total %d", len(written), totalSize)
+	if len(written) != 0 {
+		t.Errorf("durably written bytes = %d, want 0 because the terminal proof rejects the request body", len(written))
 	}
 
-	if putCount != 1 {
-		t.Errorf("PUT count = %d, want 1 from the first run only", putCount)
+	if putCount != 0 {
+		t.Errorf("successful PUT count = %d, want 0", putCount)
 	}
 
 	if finishedCount != 0 {
@@ -3194,12 +3638,12 @@ func TestSendVolumeData_TwoRunZstdChecksumErrorNeverFinalizes(t *testing.T) {
 		}
 	}
 
-	if !bytes.Equal(written, payload) {
-		t.Errorf("durably written bytes differ from the %d decoded bytes emitted before checksum failure", len(payload))
+	if !bytes.Equal(written, payload[:len(payload)-1]) {
+		t.Errorf("durably written bytes = %d, want the checksum-safe prefix of %d bytes", len(written), len(payload)-1)
 	}
 
-	if putCount != 1 {
-		t.Errorf("PUT count = %d, want 1 from the first run only", putCount)
+	if putCount != 2 {
+		t.Errorf("PUT count = %d, want one bounded terminal-proof attempt per run", putCount)
 	}
 
 	if finishedCount != 0 {
@@ -3217,10 +3661,17 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 		totalSize int64
 		mutate    func([]byte) []byte
 		wantErr   bool
+		wantPUTs  int
 	}{
-		{name: "success: exact", totalSize: int64(len(payload))},
+		{name: "success: exact", totalSize: int64(len(payload)), wantPUTs: 1},
 		{name: "error: extra decoded byte", totalSize: int64(len(payload) - 1), wantErr: true},
-		{name: "error: terminal checksum after exact bytes", totalSize: int64(len(payload)), mutate: corruptZstdChecksum, wantErr: true},
+		{
+			name:      "error: terminal checksum after exact bytes",
+			totalSize: int64(len(payload)),
+			mutate:    corruptZstdChecksum,
+			wantErr:   true,
+			wantPUTs:  1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3287,8 +3738,8 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 				}
 			}
 
-			if putCount != 1 {
-				t.Errorf("PUT count = %d, want one producer conflict", putCount)
+			if putCount != tc.wantPUTs {
+				t.Errorf("PUT count = %d, want %d", putCount, tc.wantPUTs)
 			}
 		})
 	}
@@ -3389,7 +3840,7 @@ func (s *restoredMutationProofSource) ResetAuthenticatedRead() {
 	resetAuthenticatedRead(s.blockArchiveSource)
 }
 
-func TestPutBlockFromSource_ZstdFullSkipProofHonorsCancellation(t *testing.T) {
+func TestPutBlockFromSource_ZstdFullSkipUsesMetadataWithoutDecoder(t *testing.T) {
 	t.Parallel()
 
 	payload := randomPayload(t, 2*blockDiscardBufferSize)
@@ -3401,17 +3852,14 @@ func TestPutBlockFromSource_ZstdFullSkipProofHonorsCancellation(t *testing.T) {
 		t.Fatalf("read zstd fixture: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
 	source := &cancelingProofSource{
 		reader: bytes.NewReader(encoded),
-		cancel: cancel,
+		cancel: func() {},
 	}
 	doer := &recordingDoer{resumeOffset: int64(len(payload))}
 
 	err = putBlockFromSource(
-		ctx,
+		context.Background(),
 		doer,
 		"https://importer.local/block",
 		dataFile,
@@ -3422,16 +3870,16 @@ func TestPutBlockFromSource_ZstdFullSkipProofHonorsCancellation(t *testing.T) {
 		nil,
 		nil,
 	)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("putBlockFromSource error = %v, want context.Canceled", err)
+	if err != nil {
+		t.Fatalf("putBlockFromSource: %v", err)
 	}
 
-	if !source.decodeRead {
-		t.Fatal("cancellation did not occur during the terminal decoding proof")
+	if source.decodeRead {
+		t.Fatal("full accepted prefix unexpectedly opened a decoding proof")
 	}
 
-	if source.maxRead > 64*1024 {
-		t.Errorf("largest source read = %d, want <= fixed 64 KiB decoder input", source.maxRead)
+	if source.maxRead > 8 {
+		t.Errorf("largest source read = %d, want <= 8-byte frame metadata", source.maxRead)
 	}
 
 	if !slices.Equal(doer.methods, []string{http.MethodHead}) {

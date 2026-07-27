@@ -875,7 +875,11 @@ func encodeEntry(t *testing.T, codecName string, content []byte) (string, []byte
 
 	var buf bytes.Buffer
 
-	if err := codec.EncodeStream(&buf, bytes.NewReader(content)); err != nil {
+	if codecName == "zstd" {
+		if err := codec.EncodeFrameStream(&buf, bytes.NewReader(content), int64(len(content))); err != nil {
+			t.Fatalf("EncodeFrameStream(%q): %v", codecName, err)
+		}
+	} else if err := codec.EncodeStream(&buf, bytes.NewReader(content)); err != nil {
 		t.Fatalf("EncodeStream(%q): %v", codecName, err)
 	}
 
@@ -5924,12 +5928,11 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 			build: func(t *testing.T) string {
 				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
 			},
-			wantErrSub: "exceeds declared",
-			// A fresh upload's putFile succeeds outright (the live stream never reads past
-			// the declared, smaller size), so only tarEntryStream.close's folded probe can
-			// catch the extra data — its error is wrapped by uploadFSTarEntry's "upload %s"
-			// path, never by the separate verify pass's "verify plaintext size for %s" path.
-			wantErrPrefix: "upload file.bin: ",
+			wantErrSub: "differs from declared raw size",
+			// Fresh zstd now validates the complete Frame_Content_Size geometry before
+			// opening a PUT body, so an unusable or mismatched geometry cannot bypass
+			// preflight merely because no resume positioning was needed.
+			wantErrPrefix: "prepare file.bin at offset 0: ",
 		},
 		{
 			name: "fresh under-size",
@@ -5949,13 +5952,11 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 			build: func(t *testing.T) string {
 				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
 			},
-			wantErrSub: "exceeds declared",
-			// A resumed upload never attempts the fold (attemptFold requires offset == 0),
-			// so tarEntryStream.close reports folded=false and uploadFSTarEntry must fall
-			// back to the separate verifyTarEntryRawSizeFromSource pass to catch the extra
-			// data — proven here by requiring its distinct "verify plaintext size for %s"
-			// error prefix instead of the fresh case's "upload %s" prefix.
-			wantErrPrefix: "verify plaintext size for file.bin: ",
+			wantErrSub: "differs from declared raw size",
+			// Resumed zstd validates the complete Frame_Content_Size geometry before
+			// opening a PUT body, so the mismatch fails without re-decoding the
+			// server-accepted prefix.
+			wantErrPrefix: "prepare file.bin at offset ",
 		},
 		{
 			name:         "resumed under-size",
