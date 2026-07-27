@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
@@ -39,6 +40,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
@@ -690,7 +693,10 @@ func (svc *Service) pullInternalDigestImages(ctx context.Context, moduleName str
 // pullExtraImages discovers extra images declared by each module version and
 // pulls them into per-extra layouts (modules/<name>/extra/<extra-name>/).
 func (svc *Service) pullExtraImages(ctx context.Context, moduleName string, versions []string, downloadList *ImageDownloadList) error {
-	extraImagesByName := svc.findExtraImages(ctx, moduleName, versions)
+	extraImagesByName, err := svc.findExtraImages(ctx, moduleName, versions)
+	if err != nil {
+		return fmt.Errorf("find extra images for module %s: %w", moduleName, err)
+	}
 
 	for extraName, images := range extraImagesByName {
 		if len(images) == 0 {
@@ -875,10 +881,13 @@ type extraImageInfo struct {
 	FullRef string
 }
 
-// findExtraImages finds extra images from module images.
+// findExtraImages finds extra images declared across the given module versions.
 // Returns a map where key is extra image name, value is list of image refs to pull.
 // Extra images are stored under: modules/<name>/extra/<extra-name>:<tag>
-func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) map[string][]extraImageInfo {
+//
+// A persistent registry error while reading a version is returned, so the pull
+// fails loudly instead of producing a bundle silently missing extra images.
+func (svc *Service) findExtraImages(ctx context.Context, moduleName string, versions []string) (map[string][]extraImageInfo, error) {
 	// Map of extra-name -> list of images to pull
 	extraImages := make(map[string][]extraImageInfo)
 
@@ -894,16 +903,14 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 			tag = parts[1]
 		}
 
-		img, err := svc.modulesService.Module(moduleName).GetImage(ctx, tag)
+		extraImagesJSON, err := svc.getExtraImagesJSON(ctx, moduleName, tag)
 		if err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to get module image %s:%s: %v", moduleName, tag, err))
-			continue
+			return nil, err
 		}
 
-		// Try to extract extra_images.json
-		extraImagesJSON, err := extractExtraImagesJSON(img)
-		if err != nil {
-			continue // No extra_images.json in this version
+		// No extra_images.json in this version
+		if extraImagesJSON == nil {
+			continue
 		}
 
 		for imageName, tagValue := range extraImagesJSON {
@@ -931,33 +938,152 @@ func (svc *Service) findExtraImages(ctx context.Context, moduleName string, vers
 		}
 	}
 
-	return extraImages
+	return extraImages, nil
 }
 
-// extractExtraImagesJSON extracts extra_images.json from an image
-func extractExtraImagesJSON(img interface{ Extract() io.ReadCloser }) (map[string]interface{}, error) {
-	rc := img.Extract()
-	defer rc.Close()
+// Retry policy for reading extra_images.json during discovery, mirroring the
+// puller's image-pull retry. Package vars so tests can shrink the delay.
+var (
+	extraImagesFetchRetries    = uint(5)
+	extraImagesFetchRetryDelay = 10 * time.Second
+)
 
-	tr := tar.NewReader(rc)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil, fmt.Errorf("extra_images.json not found in image")
+// getExtraImagesJSON reads and parses extra_images.json from a module version image.
+//
+// A version without extra images is not an error: returns (nil, nil) when the
+// version image is absent or has no extra_images.json. Transient registry
+// errors are retried; a persistent error is returned so the caller fails the
+// pull rather than silently dropping extra images.
+func (svc *Service) getExtraImagesJSON(ctx context.Context, moduleName, tag string) (map[string]interface{}, error) {
+	var extraImagesJSON map[string]interface{}
+
+	// Set when the version legitimately has no extra images. Signaled out of
+	// band because the retry payload returns only an error: on a clean skip it
+	// returns nil so RunTask stops instead of retrying.
+	noExtraImages := false
+
+	err := retry.RunTask(
+		ctx,
+		svc.userLogger,
+		fmt.Sprintf("Reading extra_images.json of %s:%s", moduleName, tag),
+		task.WithConstantRetries(extraImagesFetchRetries, extraImagesFetchRetryDelay, func(ctx context.Context) error {
+			// Fetch the module version image
+			img, err := svc.modulesService.Module(moduleName).GetImage(ctx, tag)
+			if err != nil {
+				// Image tag absent: nothing to read, skip without retrying
+				if errors.Is(err, client.ErrImageNotFound) {
+					noExtraImages = true
+
+					return nil
+				}
+
+				// Transient error: let RunTask retry
+				return err
+			}
+
+			// Read extra_images.json out of the image
+			data, err := extractExtraImagesJSON(img)
+			if err != nil {
+				// This version declares no extra images, skip without retrying
+				if errors.Is(err, errExtraImagesJSONNotFound) {
+					noExtraImages = true
+
+					return nil
+				}
+
+				// Transient error: let RunTask retry
+				return err
+			}
+
+			extraImagesJSON = data
+
+			return nil
+		}))
+
+	// If retry failed
+	if err != nil {
+		return nil, err
+	}
+
+	// Version has no extra images
+	if noExtraImages {
+		return nil, nil
+	}
+
+	// extra_images.json found and parsed
+	return extraImagesJSON, nil
+}
+
+// errExtraImagesJSONNotFound marks that the image has no extra_images.json.
+// This is a legitimate skip (not every module version declares extra images),
+// distinct from a network/stream error while reading the layer.
+var errExtraImagesJSONNotFound = errors.New("extra_images.json not found in image")
+
+// extractExtraImagesJSON reads extra_images.json from a module image by scanning
+// its layers directly.
+//
+// Reading via img.Extract() (mutate.Extract) is deliberately avoided: on a
+// mid-layer read failure it flushes an empty tar footer and hands the caller a
+// clean io.EOF, hiding the network error behind the same signal as a genuinely
+// absent file. A direct layer scan surfaces a truncated read as a real error,
+// so the caller can retry a transient failure instead of dropping the version.
+//
+// Returns errExtraImagesJSONNotFound only when every layer is read in full and
+// the file is absent.
+func extractExtraImagesJSON(img interface{ Layers() ([]v1.Layer, error) }) (map[string]interface{}, error) {
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, fmt.Errorf("list image layers: %w", err)
+	}
+
+	// Top layer first, matching the flatten precedence of a layered image.
+	for i := len(layers) - 1; i >= 0; i-- {
+		extraImages, err := findExtraImagesJSONInLayer(layers[i])
+		if errors.Is(err, errExtraImagesJSONNotFound) {
+			continue
 		}
 
 		if err != nil {
 			return nil, err
 		}
 
-		if hdr.Name == "extra_images.json" {
-			var extraImages map[string]interface{}
-			if err := json.NewDecoder(tr).Decode(&extraImages); err != nil {
-				return nil, fmt.Errorf("parse extra_images.json: %w", err)
-			}
+		return extraImages, nil
+	}
 
-			return extraImages, nil
+	return nil, errExtraImagesJSONNotFound
+}
+
+// findExtraImagesJSONInLayer scans one layer's tar for extra_images.json.
+// It returns errExtraImagesJSONNotFound when the layer is read in full without
+// the file, and a wrapped error when the layer read itself fails.
+func findExtraImagesJSONInLayer(layer v1.Layer) (map[string]interface{}, error) {
+	rc, err := layer.Uncompressed()
+	if err != nil {
+		return nil, fmt.Errorf("read layer: %w", err)
+	}
+	defer rc.Close()
+
+	tr := tar.NewReader(rc)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil, errExtraImagesJSONNotFound
 		}
+
+		if err != nil {
+			return nil, fmt.Errorf("read layer: %w", err)
+		}
+
+		if filepath.Clean(hdr.Name) != "extra_images.json" {
+			continue
+		}
+
+		var extraImages map[string]interface{}
+		if err := json.NewDecoder(tr).Decode(&extraImages); err != nil {
+			return nil, fmt.Errorf("parse extra_images.json: %w", err)
+		}
+
+		return extraImages, nil
 	}
 }
 
