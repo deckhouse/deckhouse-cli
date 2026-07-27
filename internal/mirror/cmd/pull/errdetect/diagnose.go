@@ -33,6 +33,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
@@ -369,7 +370,7 @@ const categoryShellRedirect = "Invalid version constraint (possible shell redire
 // empty constraint. The resulting "empty constraint" error gives no hint as to what went wrong.
 //
 // This function recognises that pattern by combining two signals:
-//  1. The error message contains "empty constraint".
+//  1. The parser rejected the expression with modules.ErrEmptyConstraint.
 //  2. At least one raw flag value ends with '@' (the version separator), which
 //     means the constraint part was empty before parsing even began.
 //
@@ -379,18 +380,16 @@ const categoryShellRedirect = "Invalid version constraint (possible shell redire
 // Returns nil when neither signal is present, so callers can fall through to
 // their normal error path without double-wrapping.
 func DiagnoseConstraintParseError(err error, flagName string, rawValues ...string) *diagnostic.HelpfulError {
-	if err == nil {
-		return nil
-	}
-
-	if !strings.Contains(err.Error(), "empty constraint") {
+	if !errors.Is(err, modules.ErrEmptyConstraint) {
 		return nil
 	}
 
 	looksLikeRedirect := false
+
 	for _, v := range rawValues {
 		if strings.HasSuffix(strings.TrimSpace(v), "@") {
 			looksLikeRedirect = true
+
 			break
 		}
 	}

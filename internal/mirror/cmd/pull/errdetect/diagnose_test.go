@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
@@ -127,30 +128,39 @@ func TestDiagnoseConstraintParseError_NilError(t *testing.T) {
 	assert.Nil(t, DiagnoseConstraintParseError(nil, "include-module", "console@"))
 }
 
-func TestDiagnoseConstraintParseError_NoEmptyConstraintInMessage(t *testing.T) {
-	// Error message unrelated to constraints — should not be diagnosed.
+func TestDiagnoseConstraintParseError_UnrelatedError(t *testing.T) {
 	err := errors.New("something completely different")
 	assert.Nil(t, DiagnoseConstraintParseError(err, "include-module", "console@"))
 }
 
-func TestDiagnoseConstraintParseError_EmptyConstraintButNoAtSuffix(t *testing.T) {
-	// "empty constraint" in message but none of the raw values ends with '@'.
-	// Could be a genuine parse error from a quoted but empty value "console@",
-	// not a shell redirect. Return nil so the caller uses its own message.
-	err := errors.New("parse constraint: empty constraint")
-	assert.Nil(t, DiagnoseConstraintParseError(err, "include-module", "console"))
+func TestDiagnoseConstraintParseError_MalformedConstraintIsNotDiagnosed(t *testing.T) {
+	// A constraint that is present but invalid is the user's own typo.
+	_, err := modules.NewFilter([]string{"console@^^1.0"}, modules.FilterTypeWhitelist)
+	require.Error(t, err)
+	assert.Nil(t, DiagnoseConstraintParseError(err, "include-module", "console@^^1.0"))
 }
 
-func TestDiagnoseConstraintParseError_ShellRedirectDetected(t *testing.T) {
+func TestDiagnoseConstraintParseError_EmptyConstraintButNoAtSuffix(t *testing.T) {
+	// No raw value ends with '@', so the constraint was not cut off by the
+	// shell. Return nil and let the caller use its own message.
+	assert.Nil(t, DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "console"))
+}
+
+func TestDiagnoseConstraintParseError_RealFilterError(t *testing.T) {
 	// shell-redirect scenario:
 	//   --include-module console@>=1.43.2  (no quotes)
 	// Shell hands cobra "console@" and redirects "=1.43.2" to a file.
-	err := errors.New("parse constraint for 'console': empty constraint")
+	// The error must be recognised as produced by modules.NewFilter, not as a
+	// string this package spells out for itself.
+	_, err := modules.NewFilter([]string{"console@"}, modules.FilterTypeWhitelist)
+	require.Error(t, err)
+
 	diag := DiagnoseConstraintParseError(err, "include-module", "console@")
-	require.NotNil(t, diag, "should produce a diagnostic when value ends with '@' and error contains 'empty constraint'")
+	require.NotNil(t, diag)
 	assert.Equal(t, categoryShellRedirect, diag.Category)
-	assert.True(t, errors.Is(diag, err), "original error must be accessible via errors.Is")
+	assert.True(t, errors.Is(diag, modules.ErrEmptyConstraint), "original error must stay reachable via errors.Is")
 	require.NotEmpty(t, diag.Suggestions)
+
 	solutions := allSolutions(diag)
 	assert.Contains(t, solutions, "include-module", "solution should name the affected flag")
 	assert.Contains(t, solutions, `"module-name@>=1.43.2"`, "solution should show a quoted example")
@@ -158,27 +168,21 @@ func TestDiagnoseConstraintParseError_ShellRedirectDetected(t *testing.T) {
 
 func TestDiagnoseConstraintParseError_MultipleValuesOneTriggersDetect(t *testing.T) {
 	// Several --include-module entries; only one ends with '@'.
-	err := errors.New("parse constraint: empty constraint")
-	diag := DiagnoseConstraintParseError(err, "include-module", "cert-manager@^1.0.0", "console@", "ingress-nginx@~2.0.0")
+	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "cert-manager@^1.0.0", "console@", "ingress-nginx@~2.0.0")
 	require.NotNil(t, diag)
 	assert.Equal(t, categoryShellRedirect, diag.Category)
 }
 
 func TestDiagnoseConstraintParseError_WhitespaceTrimmedAtSuffix(t *testing.T) {
-	// Value with trailing space after '@' should still be detected.
-	err := errors.New("empty constraint")
-	diag := DiagnoseConstraintParseError(err, "include-platform", ">=1.64 ")
-	assert.Nil(t, diag, "a plain value without '@' should not trigger the shell-redirect hint")
-
-	diag = DiagnoseConstraintParseError(err, "include-module", "console@ ")
+	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "console@ ")
 	require.NotNil(t, diag, "trailing whitespace after '@' should still be detected after TrimSpace")
 }
 
 func TestDiagnoseConstraintParseError_FlagNameAppearsInSolution(t *testing.T) {
-	err := errors.New("empty constraint")
 	for _, flagName := range []string{"include-module", "include-package", "include-platform"} {
-		diag := DiagnoseConstraintParseError(err, flagName, "foo@")
+		diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, flagName, "foo@")
 		require.NotNil(t, diag)
+
 		solutions := allSolutions(diag)
 		assert.Contains(t, solutions, flagName, "solution text should reference the flag that was passed")
 	}
