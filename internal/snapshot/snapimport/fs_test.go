@@ -5702,124 +5702,139 @@ func (s *countingFSTarSource) Stat() (os.FileInfo, error) {
 // Before the fix, tarEntryBodyFactoryFromSource reopened a fresh decoder positioned at
 // byte zero on every chunk and discarded forward to the current offset, so the
 // archive's stored bytes were re-read and re-decoded on every one of the entry's PUT
-// chunks: total work grew with roughly chunkCount*(chunkCount+1)/2 stored-size
-// traversals, not chunkCount. This test drives a single compressed entry across eight
-// PUT chunks with no conflicts (the ordinary, non-resuming path the bug affected) and
-// asserts the underlying archive file's total bytes read stays within a small constant
-// multiple of the entry's stored size — a bound the pre-fix quadratic behavior blows
-// through by roughly chunkCount/2 (an 8-chunk run would need 36 traversals, not the
-// handful this test allows for the fixed linear-scaling stream plus preflight
-// overhead).
+// chunks. It is table-driven across two different chunk counts (3 and 8) specifically
+// because a single data point cannot distinguish "linear" from "quadratic with a small
+// constant factor": a bound loose enough to pass at one chunk count could easily still
+// pass, uninformatively, at a smaller one even on the unfixed code. Measured directly
+// against base_sha, the pre-fix ratio of archive bytes read to the entry's stored size
+// grows with chunk count (roughly 4.8x at 3 chunks, 6.4x at 8 — see maxTraversals
+// below); the fixed stream stays close to 1x at both, which is what "linear in entry
+// size, not entry size x chunk count" means in practice.
 func TestImportFSFromTarSource_LargeCompressedEntryDecodeWorkIsLinear(t *testing.T) {
-	const chunkCount = 8
-
-	payloadSize := int64(chunkCount-1)*blockPutPayloadLimit + 12345
-	pattern := []byte("linear-not-quadratic-decode-work-regression-test-fixture. ")
-	content := bytes.Repeat(pattern, int(payloadSize)/len(pattern)+2)
-	content = content[:payloadSize]
-
-	ext, stored := encodeEntry(t, "zstd", content)
-
-	var tarBuf bytes.Buffer
-
-	tw := tar.NewWriter(&tarBuf)
-	addTarEntryMetadata(t, tw, "large.bin"+ext, "large.bin", "zstd", payloadSize, stored, 0o640, 5, 6, time.Unix(100, 0).UTC())
-
-	if err := tw.Close(); err != nil {
-		t.Fatalf("close tar writer: %v", err)
+	tests := []struct {
+		name       string
+		chunkCount int64
+	}{
+		{name: "3 chunks", chunkCount: 3},
+		{name: "8 chunks", chunkCount: 8},
 	}
 
-	tarPath := filepath.Join(t.TempDir(), "data.tar")
-	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
-		t.Fatalf("write data.tar: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payloadSize := (tc.chunkCount-1)*blockPutPayloadLimit + 12345
+			pattern := []byte("linear-not-quadratic-decode-work-regression-test-fixture. ")
+			content := bytes.Repeat(pattern, int(payloadSize)/len(pattern)+2)
+			content = content[:payloadSize]
 
-	file, err := os.Open(tarPath)
-	if err != nil {
-		t.Fatalf("open data.tar: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := file.Close(); err != nil {
-			t.Errorf("close data.tar: %v", err)
-		}
-	})
+			ext, stored := encodeEntry(t, "zstd", content)
 
-	source := &countingFSTarSource{file: file}
+			var tarBuf bytes.Buffer
 
-	putCount := 0
+			tw := tar.NewWriter(&tarBuf)
+			addTarEntryMetadata(t, tw, "large.bin"+ext, "large.bin", "zstd", payloadSize, stored, 0o640, 5, 6, time.Unix(100, 0).UTC())
 
-	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodHead {
-			return fileHTTPResponse(http.StatusNotFound, nil), nil
-		}
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar writer: %v", err)
+			}
 
-		if req.Method != http.MethodPut {
-			return nil, fmt.Errorf("unexpected method %s", req.Method)
-		}
+			tarPath := filepath.Join(t.TempDir(), "data.tar")
+			if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+				t.Fatalf("write data.tar: %v", err)
+			}
 
-		putCount++
+			file, err := os.Open(tarPath)
+			if err != nil {
+				t.Fatalf("open data.tar: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := file.Close(); err != nil {
+					t.Errorf("close data.tar: %v", err)
+				}
+			})
 
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, fmt.Errorf("read request body: %w", err)
-		}
+			source := &countingFSTarSource{file: file}
 
-		offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("parse X-Offset: %w", err)
-		}
+			putCount := 0
 
-		requestEnd := offset + int64(len(body))
-		if requestEnd > payloadSize || !bytes.Equal(body, content[offset:requestEnd]) {
-			return nil, fmt.Errorf("body at offset %d is not the exact raw suffix", offset)
-		}
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodHead {
+					return fileHTTPResponse(http.StatusNotFound, nil), nil
+				}
 
-		if requestEnd == payloadSize {
-			return fileHTTPResponse(http.StatusCreated, http.Header{
-				"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
-			}), nil
-		}
+				if req.Method != http.MethodPut {
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
 
-		return fileHTTPResponse(http.StatusNoContent, http.Header{
-			"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
-		}), nil
-	})
+				putCount++
 
-	if err := importFSFromTarSource(
-		context.Background(),
-		doer,
-		"https://import.example",
-		tarPath,
-		source,
-		discardLogger(),
-		nil,
-		nil,
-		nil,
-	); err != nil {
-		t.Fatalf("import filesystem tar: %v", err)
-	}
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					return nil, fmt.Errorf("read request body: %w", err)
+				}
 
-	if putCount != chunkCount {
-		t.Fatalf("PUT count = %d, want %d", putCount, chunkCount)
-	}
+				offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("parse X-Offset: %w", err)
+				}
 
-	storedSize := int64(len(stored))
+				requestEnd := offset + int64(len(body))
+				if requestEnd > payloadSize || !bytes.Equal(body, content[offset:requestEnd]) {
+					return nil, fmt.Errorf("body at offset %d is not the exact raw suffix", offset)
+				}
 
-	// The pre-fix factory reopened from byte zero and re-decoded on every chunk, so its
-	// total archive-read bytes grew roughly as chunkCount*(chunkCount+1)/2 = 36 stored-size
-	// traversals for this 8-chunk run. The fixed stream opens its decoder once and only
-	// ever continues forward, so total bytes read should stay within a handful of
-	// stored-size traversals regardless of chunk count: a few fixed preflight passes
-	// over headers (which do not touch entry bodies) plus the one upload pass and its
-	// folded terminal probe. Six traversals is comfortably above that fixed overhead and
-	// comfortably below the quadratic figure.
-	const maxTraversals = 6
+				if requestEnd == payloadSize {
+					return fileHTTPResponse(http.StatusCreated, http.Header{
+						"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
+					}), nil
+				}
 
-	maxBytes := maxTraversals * storedSize
-	if got := source.bytes; got > maxBytes {
-		t.Errorf("archive bytes read = %d (%.1f stored-size traversals of %d bytes), want at most %d (%d traversals): "+
-			"decode/authenticated-read work must scale with entry size, not with entry size x chunk count",
-			got, float64(got)/float64(storedSize), storedSize, maxBytes, maxTraversals)
+				return fileHTTPResponse(http.StatusNoContent, http.Header{
+					"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
+				}), nil
+			})
+
+			if err := importFSFromTarSource(
+				context.Background(),
+				doer,
+				"https://import.example",
+				tarPath,
+				source,
+				discardLogger(),
+				nil,
+				nil,
+				nil,
+			); err != nil {
+				t.Fatalf("import filesystem tar: %v", err)
+			}
+
+			if int64(putCount) != tc.chunkCount {
+				t.Fatalf("PUT count = %d, want %d", putCount, tc.chunkCount)
+			}
+
+			storedSize := int64(len(stored))
+			ratio := float64(source.bytes) / float64(storedSize)
+
+			t.Logf("chunkCount=%d storedSize=%d bytesRead=%d ratio=%.2fx", tc.chunkCount, storedSize, source.bytes, ratio)
+
+			// Measured against base_sha, the pre-fix reopen-from-zero-every-chunk factory
+			// reads roughly 4.8x stored size at 3 chunks and 6.4x at 8 — growing with chunk
+			// count, as expected of quadratic work. The fixed stream reopens only on the
+			// first chunk (plus its folded terminal probe on the already-open decoder), so
+			// its total read stays close to a single traversal regardless of chunk count.
+			// Three traversals sits with real margin above that ~1x fixed-code baseline at
+			// the smallest chunk count tested (3) while sitting well below the smallest
+			// pre-fix ratio observed (4.8x at that same chunk count) — so this bound
+			// actually discriminates linear from quadratic at every chunk count exercised
+			// here, not just at the largest one.
+			const maxTraversals = 3
+
+			maxBytes := maxTraversals * storedSize
+			if source.bytes > maxBytes {
+				t.Errorf("archive bytes read = %d (%.2fx stored size of %d bytes), want at most %d (%dx): "+
+					"decode/authenticated-read work must scale with entry size, not with entry size x chunk count",
+					source.bytes, ratio, storedSize, maxBytes, maxTraversals)
+			}
+		})
 	}
 }
 
@@ -5898,10 +5913,11 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 	content := bytes.Repeat([]byte("expected-server-bytes-"), 256)
 
 	tests := []struct {
-		name         string
-		resumeOffset int64 // 0 means a fresh, non-resumed upload
-		build        func(t *testing.T) string
-		wantErrSub   string
+		name          string
+		resumeOffset  int64 // 0 means a fresh, non-resumed upload
+		build         func(t *testing.T) string
+		wantErrSub    string
+		wantErrPrefix string // asserts which of the two rejection paths actually fired
 	}{
 		{
 			name: "fresh over-size",
@@ -5909,6 +5925,11 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
 			},
 			wantErrSub: "exceeds declared",
+			// A fresh upload's putFile succeeds outright (the live stream never reads past
+			// the declared, smaller size), so only tarEntryStream.close's folded probe can
+			// catch the extra data — its error is wrapped by uploadFSTarEntry's "upload %s"
+			// path, never by the separate verify pass's "verify plaintext size for %s" path.
+			wantErrPrefix: "upload file.bin: ",
 		},
 		{
 			name: "fresh under-size",
@@ -5929,6 +5950,12 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
 			},
 			wantErrSub: "exceeds declared",
+			// A resumed upload never attempts the fold (attemptFold requires offset == 0),
+			// so tarEntryStream.close reports folded=false and uploadFSTarEntry must fall
+			// back to the separate verifyTarEntryRawSizeFromSource pass to catch the extra
+			// data — proven here by requiring its distinct "verify plaintext size for %s"
+			// error prefix instead of the fresh case's "upload %s" prefix.
+			wantErrPrefix: "verify plaintext size for file.bin: ",
 		},
 		{
 			name:         "resumed under-size",
@@ -5998,6 +6025,10 @@ func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T)
 
 			if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
 				t.Fatalf("importFSFromTar error = %v, want containing %q", err, tc.wantErrSub)
+			}
+
+			if tc.wantErrPrefix != "" && !strings.HasPrefix(err.Error(), tc.wantErrPrefix) {
+				t.Fatalf("importFSFromTar error = %v, want prefix %q", err, tc.wantErrPrefix)
 			}
 		})
 	}

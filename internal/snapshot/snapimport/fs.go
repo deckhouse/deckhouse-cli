@@ -35,7 +35,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -1369,31 +1368,11 @@ func uploadFSTarFromScan(
 			ModTime: hdr.ModTime,
 		}
 
-		// A fresh (non-resumed) upload lets the stream's own terminal proof stand in for
-		// the separate verification pass below; a resumed upload always needs that pass,
-		// since its live stream may never open a decoder at all (see tarEntryStream.close).
-		freshUpload := offset == 0
-
-		stream := newTarEntryStream(source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
-
-		uploadErr := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
-			stream.body, progress, activate)
-
-		folded, closeErr := stream.close(freshUpload && uploadErr == nil)
-		if err := errors.Join(uploadErr, closeErr); err != nil {
-			return errors.Join(
-				fmt.Errorf("upload %s: %w", relPath, err),
-				closeFSTarSequence(sequence),
-			)
-		}
-
-		if !folded {
-			if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
-				return errors.Join(
-					fmt.Errorf("verify plaintext size for %s: %w", relPath, err),
-					closeFSTarSequence(sequence),
-				)
-			}
+		if err := uploadFSTarEntry(
+			ctx, client, baseURL, relPath, tarPath, source, ext,
+			payloadStart, hdr.Size, metadata.RawSize, offset, attrs, progress, activate,
+		); err != nil {
+			return errors.Join(err, closeFSTarSequence(sequence))
 		}
 	}
 
@@ -1422,6 +1401,53 @@ func uploadFSTarFromScan(
 		log.Warn("filesystem import skipped unsupported entries due to --skip-unsupported-fs-entries",
 			slog.Uint64("entry_count", scan.unsupportedEntryCount),
 			slog.String("entries", scan.unsupportedEntrySummary))
+	}
+
+	return nil
+}
+
+// uploadFSTarEntry uploads one filesystem tar entry's payload starting at offset and,
+// unless that upload already produced its own terminal proof (see tarEntryStream.close),
+// runs the separate verifyTarEntryRawSizeFromSource pass. It owns the entry's
+// tarEntryStream for the whole call, so the deferred close below is scoped to this one
+// entry — not the caller's per-tar loop — and is a safety net only: the explicit close
+// a few lines down is what normally runs first and makes this one a no-op, guarding
+// against a future change accidentally skipping that explicit cleanup instead.
+func uploadFSTarEntry(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, relPath, tarPath string,
+	source io.ReaderAt,
+	ext string,
+	payloadStart, storedSize, rawSize, offset int64,
+	attrs fileAttrs,
+	progress *fileUploadProgress,
+	activate func(),
+) error {
+	// A fresh (non-resumed) upload lets the stream's own terminal proof stand in for
+	// the separate verification pass below; a resumed upload always needs that pass,
+	// since its live stream may never open a decoder at all (see tarEntryStream.close).
+	freshUpload := offset == 0
+
+	stream := newTarEntryStream(source, tarPath, ext, payloadStart, storedSize, rawSize)
+
+	defer func() {
+		_ = stream.closeDecoder()
+	}()
+
+	uploadErr := putFile(ctx, client, baseURL, relPath, rawSize, offset, attrs, stream.body, progress, activate)
+
+	folded, closeErr := stream.close(freshUpload && uploadErr == nil)
+	if err := errors.Join(uploadErr, closeErr); err != nil {
+		return fmt.Errorf("upload %s: %w", relPath, err)
+	}
+
+	if folded {
+		return nil
+	}
+
+	if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, storedSize, rawSize); err != nil {
+		return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
 	}
 
 	return nil
@@ -2137,11 +2163,13 @@ func addRawSize(total, size int64) (int64, error) {
 	return total + size, nil
 }
 
+// fsUploadBody adapts one PUT chunk's io.Reader into the io.ReadCloser putFile's
+// request bodies need. Its Close is always a no-op: a raw entry's section reader has
+// nothing to release, and a compressed entry's decoder is owned and closed by its
+// tarEntryStream — once per entry, not once per chunk — never by any single chunk's
+// body.
 type fsUploadBody struct {
-	reader    io.Reader
-	closers   []io.Closer
-	closeOnce sync.Once
-	closeErr  error
+	reader io.Reader
 }
 
 func (b *fsUploadBody) Read(p []byte) (int, error) {
@@ -2149,18 +2177,7 @@ func (b *fsUploadBody) Read(p []byte) (int, error) {
 }
 
 func (b *fsUploadBody) Close() error {
-	b.closeOnce.Do(func() {
-		closeErrs := make([]error, 0, len(b.closers))
-		for _, closer := range b.closers {
-			if err := closer.Close(); err != nil {
-				closeErrs = append(closeErrs, err)
-			}
-		}
-
-		b.closeErr = errors.Join(closeErrs...)
-	})
-
-	return b.closeErr
+	return nil
 }
 
 // tarEntryStream serves putFile's successive PUT chunks for one filesystem tar entry
