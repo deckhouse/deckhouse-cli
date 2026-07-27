@@ -157,33 +157,41 @@ func TestDiagnoseConstraintParseError_RealFilterError(t *testing.T) {
 
 	diag := DiagnoseConstraintParseError(err, "include-module", "console@")
 	require.NotNil(t, diag)
-	assert.Equal(t, categoryShellRedirect, diag.Category)
+	assert.Equal(t, categoryEmptyConstraint, diag.Category)
 	assert.True(t, errors.Is(diag, modules.ErrEmptyConstraint), "original error must stay reachable via errors.Is")
 	require.NotEmpty(t, diag.Suggestions)
+	assert.Contains(t, diag.Suggestions[0].Cause, `"console@"`, "cause should quote the value the parser rejected")
 
 	solutions := allSolutions(diag)
-	assert.Contains(t, solutions, "include-module", "solution should name the affected flag")
-	assert.Contains(t, solutions, `"module-name@>=1.43.2"`, "solution should show a quoted example")
+	assert.Contains(t, solutions, "--include-module", "solution should name the affected flag")
+	assert.Contains(t, solutions, `"console@>=1.43.2"`, "quotes go around the whole value, not just the constraint")
 }
 
-func TestDiagnoseConstraintParseError_MultipleValuesOneTriggersDetect(t *testing.T) {
+func TestDiagnoseConstraintParseError_NamesTheBrokenEntry(t *testing.T) {
 	// Several --include-module entries; only one ends with '@'.
-	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "cert-manager@^1.0.0", "console@", "ingress-nginx@~2.0.0")
+	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "cert-manager@^1.0.0", "console@ ", "ingress-nginx@~2.0.0")
 	require.NotNil(t, diag)
-	assert.Equal(t, categoryShellRedirect, diag.Category)
+	assert.Equal(t, categoryEmptyConstraint, diag.Category)
+	assert.Contains(t, diag.Suggestions[0].Cause, `"console@"`, "cause should name the broken entry, trimmed, not the intact ones")
 }
 
-func TestDiagnoseConstraintParseError_WhitespaceTrimmedAtSuffix(t *testing.T) {
-	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "console@ ")
-	require.NotNil(t, diag, "trailing whitespace after '@' should still be detected after TrimSpace")
+func TestDiagnoseConstraintParseError_CausesAreSingleLine(t *testing.T) {
+	// Format() indents only the first line of a cause.
+	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "console@")
+	require.Len(t, diag.Suggestions, 2, "both the shell and the empty-variable cause are offered")
+
+	for _, s := range diag.Suggestions {
+		assert.NotContains(t, s.Cause, "\n", "cause must stay on one line")
+	}
 }
 
 func TestDiagnoseConstraintParseError_FlagNameAppearsInSolution(t *testing.T) {
-	for _, flagName := range []string{"include-module", "include-package", "include-platform"} {
+	for _, flagName := range []string{"exclude-module", "include-package", "exclude-package"} {
 		diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, flagName, "foo@")
 		require.NotNil(t, diag)
 
 		solutions := allSolutions(diag)
-		assert.Contains(t, solutions, flagName, "solution text should reference the flag that was passed")
+		assert.Contains(t, solutions, "--"+flagName, "solution text should reference the flag that was passed")
+		assert.NotContains(t, solutions, "--include-module", "no solution may hardcode a different flag")
 	}
 }

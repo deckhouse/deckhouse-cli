@@ -38,20 +38,21 @@ import (
 )
 
 const (
-	categoryEOF           = "Connection terminated unexpectedly (EOF)"
-	categoryTLS           = "TLS/certificate verification failed"
-	categoryAuth          = "Authentication failed"
-	categoryAuth401       = "Authentication failed (HTTP 401 Unauthorized)"
-	categoryAuth403       = "Access denied (HTTP 403 Forbidden)"
-	categoryRateLimit     = "Rate limited by registry (HTTP 429 Too Many Requests)"
-	categoryServerError   = "Registry server error"
-	categoryDNS           = "DNS resolution failed"
-	categoryTimeout       = "Operation timed out"
-	categoryNetwork       = "Network connection failed"
-	categoryDiskFull      = "Disk space exhausted"
-	categoryPermission    = "Permission denied"
-	categoryImageNotFound = "Image not found in registry"
-	categoryRepoNotFound  = "Repository not found in registry"
+	categoryEOF             = "Connection terminated unexpectedly (EOF)"
+	categoryTLS             = "TLS/certificate verification failed"
+	categoryAuth            = "Authentication failed"
+	categoryAuth401         = "Authentication failed (HTTP 401 Unauthorized)"
+	categoryAuth403         = "Access denied (HTTP 403 Forbidden)"
+	categoryRateLimit       = "Rate limited by registry (HTTP 429 Too Many Requests)"
+	categoryServerError     = "Registry server error"
+	categoryDNS             = "DNS resolution failed"
+	categoryTimeout         = "Operation timed out"
+	categoryNetwork         = "Network connection failed"
+	categoryDiskFull        = "Disk space exhausted"
+	categoryPermission      = "Permission denied"
+	categoryImageNotFound   = "Image not found in registry"
+	categoryRepoNotFound    = "Repository not found in registry"
+	categoryEmptyConstraint = "Version constraint is missing after '@'"
 )
 
 // Diagnose analyzes an error and returns a *diagnostic.HelpfulError
@@ -355,60 +356,57 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	return nil
 }
 
-const categoryShellRedirect = "Invalid version constraint (possible shell redirection)"
-
-// DiagnoseConstraintParseError checks whether an "empty constraint" error from
-// modules.ParseVersionConstraint or modules.NewFilter was most likely caused by
-// the shell eating part of the flag value because the user forgot to quote it.
+// DiagnoseConstraintParseError explains a filter expression that carries the
+// '@' separator with nothing after it, e.g. "console@".
 //
-// When a user types:
+// The usual cause is quoting. An unquoted value is split by the shell before
+// d8 ever sees it:
 //
-//	d8 mirror pull ... --include-module console@>=1.43.2 ./bundle
+//	--include-module console@>=1.43.2
 //
-// the shell interprets '>' as output redirection and '=1.43.2' as the target
-// file name, so cobra receives the flag value "console@" — a name with an
-// empty constraint. The resulting "empty constraint" error gives no hint as to what went wrong.
+// bash keeps the word "console@" and turns ">=1.43.2" into an output
+// redirection into a file named "=1.43.2". A script interpolating a version
+// variable that expanded to nothing lands on the same value, so both causes
+// are offered.
 //
-// This function recognises that pattern by combining two signals:
-//  1. The parser rejected the expression with modules.ErrEmptyConstraint.
-//  2. At least one raw flag value ends with '@' (the version separator), which
-//     means the constraint part was empty before parsing even began.
-//
-// flagName is the CLI flag name used in the suggestion text (e.g. "include-module").
-// rawValues are the exact strings cobra stored for that flag.
-//
-// Returns nil when neither signal is present, so callers can fall through to
-// their normal error path without double-wrapping.
+// flagName names the flag in the suggestion text (e.g. "include-module").
+// rawValues are the exact strings cobra stored for that flag. The first one
+// ending with '@' is the entry the parser rejected; it is reported to the user
+// and its absence keeps the hint away from flags whose values have no
+// "name@constraint" shape.
 func DiagnoseConstraintParseError(err error, flagName string, rawValues ...string) *diagnostic.HelpfulError {
 	if !errors.Is(err, modules.ErrEmptyConstraint) {
 		return nil
 	}
 
-	looksLikeRedirect := false
+	offender := ""
 
 	for _, v := range rawValues {
-		if strings.HasSuffix(strings.TrimSpace(v), "@") {
-			looksLikeRedirect = true
+		if v = strings.TrimSpace(v); strings.HasSuffix(v, "@") {
+			offender = v
 
 			break
 		}
 	}
 
-	if !looksLikeRedirect {
+	if offender == "" {
 		return nil
 	}
 
 	return &diagnostic.HelpfulError{
-		Category:    categoryShellRedirect,
+		Category:    categoryEmptyConstraint,
 		OriginalErr: err,
 		Suggestions: []diagnostic.Suggestion{
 			{
-				Cause: "The shell interpreted '>' as output redirection instead of passing it to d8.\n" +
-					"The constraint part after '@' was never received — perhaps you forgot to quote the flag value?",
+				Cause: fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --%s only got %q", flagName, offender),
 				Solutions: []string{
-					`Wrap the constraint in double quotes: --` + flagName + ` "module-name@>=1.43.2"`,
-					`Example: d8 mirror pull --license='****' --include-module console@">=1.43.2" ./console`,
+					fmt.Sprintf(`Quote the whole value: --%s "%s>=1.43.2"`, flagName, offender),
+					fmt.Sprintf(`Example: d8 mirror pull --license='****' --%s "console@>=1.43.2" ./console`, flagName),
 				},
+			},
+			{
+				Cause:     "The version came from a variable that expanded to nothing",
+				Solutions: []string{fmt.Sprintf("Check what the calling script puts after '@' in --%s", flagName)},
 			},
 		},
 	}

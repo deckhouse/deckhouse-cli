@@ -481,6 +481,7 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 			if diag := errdetect.DiagnoseConstraintParseError(err, "include-module", pullflags.ModulesWhitelist...); diag != nil {
 				return nil, diag
 			}
+
 			return nil, fmt.Errorf("Prepare module filter: %w", err)
 		}
 
@@ -489,6 +490,10 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 
 	filter, err := modules.NewFilter(pullflags.ModulesBlacklist, modules.FilterTypeBlacklist)
 	if err != nil {
+		if diag := errdetect.DiagnoseConstraintParseError(err, "exclude-module", pullflags.ModulesBlacklist...); diag != nil {
+			return nil, diag
+		}
+
 		return nil, fmt.Errorf("Prepare module filter: %w", err)
 	}
 
@@ -505,6 +510,7 @@ func (p *Puller) createPackageFilter() (*modules.Filter, error) {
 			if diag := errdetect.DiagnoseConstraintParseError(err, "include-package", pullflags.PackagesWhitelist...); diag != nil {
 				return nil, diag
 			}
+
 			return nil, fmt.Errorf("Prepare package filter: %w", err)
 		}
 
@@ -513,6 +519,10 @@ func (p *Puller) createPackageFilter() (*modules.Filter, error) {
 
 	filter, err := modules.NewFilter(pullflags.PackagesBlacklist, modules.FilterTypeBlacklist)
 	if err != nil {
+		if diag := errdetect.DiagnoseConstraintParseError(err, "exclude-package", pullflags.PackagesBlacklist...); diag != nil {
+			return nil, diag
+		}
+
 		return nil, fmt.Errorf("Prepare package filter: %w", err)
 	}
 

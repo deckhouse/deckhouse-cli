@@ -168,6 +168,7 @@ func parseAndValidateVersionFlags() error {
 			if diag := errdetect.DiagnoseConstraintParseError(err, "include-platform", pullflags.PlatformConstraintString); diag != nil {
 				return diag
 			}
+
 			return fmt.Errorf("Parse --include-platform constraint: %w", err)
 		}
 	}
