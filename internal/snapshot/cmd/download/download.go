@@ -79,10 +79,8 @@ const (
 
 var commandRESTConfigLoader = transport.NewRESTConfig
 
-// NewCommand builds the `d8 snapshot download` cobra command. Per the code-style
-// §4 Cobra pattern the CALLER owns the root context: it is threaded in here and
-// captured by the thin RunE below, rather than recovered from cmd.Context().
-func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
+// NewCommand builds the `d8 snapshot download` cobra command.
+func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           cmdUse + " [flags] <snapshot>",
 		Short:         "Download a snapshot to a local directory tree",
@@ -103,7 +101,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
   d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Run(ctx, log, cmd, args)
+			return Run(cmd.Context(), log, cmd, args)
 		},
 	}
 
@@ -129,9 +127,8 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 }
 
 // Run validates flags, builds the pipeline config, and executes the download.
-// It derives a signal-cancellable context from the caller-owned ctx (threaded in
-// via NewCommand, per code-style §4) so that Ctrl-C (SIGINT) and SIGTERM cleanly
-// stop the download.
+// It derives a signal-cancellable context from the Cobra execution context so
+// that Ctrl-C (SIGINT) and SIGTERM cleanly stop the download.
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -450,6 +447,10 @@ func acquireOutputLock(outputDir string) (*archive.Lock, error) {
 func acquireOutputLockContext(ctx context.Context, outputDir string) (*archive.Lock, error) {
 	lock, err := archive.AcquireWriteLockContext(ctx, outputDir)
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, ctx.Err()) {
+			return nil, fmt.Errorf("locking output directory %s: %w", outputDir, cause)
+		}
+
 		if errors.Is(err, archive.ErrArchiveLocked) {
 			return nil, fmt.Errorf(
 				"%w: %s (finish or stop the other download/upload first, or choose a different --%s)",
