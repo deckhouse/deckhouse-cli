@@ -8,14 +8,17 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 )
 
-// Rule purpose: require every rendered object's name to start with the application instance prefix so cluster resources are scoped to the instance.
+// Rule purpose: require every rendered object's name to start with the d8a- application
+// marker followed by the instance name, so cluster resources are recognizable as
+// Deckhouse-application-owned and scoped to the instance.
 
 // InstancePrefixRuleID is the stable identifier used to reference this rule in configuration.
 const InstancePrefixRuleID = "instance-prefix"
 
-// instancePrefix is the prefix every rendered object's name must start with.
-// It tracks the hardcoded verify-time instance name from internal/packages.Render.
-const instancePrefix = "test-"
+// instancePrefix is the prefix every rendered object's name must start with: the fixed
+// d8a- application marker plus the hardcoded verify-time instance name from
+// internal/packages.Render.
+const instancePrefix = "d8a-test-"
 
 // InstancePrefixRule asserts every rendered object's name starts with the instance prefix.
 type InstancePrefixRule struct {
@@ -42,6 +45,6 @@ func (r *InstancePrefixRule) Check(_ context.Context) {
 		r.collector.With(
 			diag.ObjectID(obj.ObjectID()),
 			diag.Path(obj.FilePath),
-		).Error("object name does not start with the instance prefix")
+		).Error("object name does not start with the required d8a- instance prefix")
 	}
 }
