@@ -91,8 +91,8 @@ type Config struct {
 	TTL string
 
 	// RunID is an opaque per-run identifier that scopes DataExport ownership to
-	// this single download run. Because the DataExport CR name is deterministic
-	// (exporter.DataExportName → de-<leaf>), two concurrent runs downloading the
+	// this single download run. Because the DataExport CR name is deterministic,
+	// two concurrent runs downloading the
 	// same leaf into DIFFERENT output directories resolve to the SAME CR; RunID
 	// lets each run stamp the CRs it creates (exporter.WithRunOwner) and refuse to
 	// delete a CR another live run owns (exporter.ReleaseDataExport), so neither
@@ -136,6 +136,21 @@ type Config struct {
 	// for domain snapshot CRs they carry the domain group and kind. The DataExport
 	// targetRef is derived from leafRef via the AggClient RESTMapper.
 	OpenExport func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error)
+
+	// OpenExportWithAcquisition opens an export and returns operation-scoped
+	// cleanup evidence for the exact DataExport acquired while opening it. The
+	// acquisition may be non-nil together with an error when EnsureDataExport
+	// succeeded but WaitReady or transport setup failed; callers must retain it
+	// so that exact object is still cleaned up. The production path populates
+	// this callback. Tests and alternative transports that need cleanup evidence
+	// may supply it directly; OpenExport remains the compatibility path for
+	// implementations that do not manage DataExport lifecycle.
+	OpenExportWithAcquisition func(
+		ctx context.Context,
+		namespace string,
+		leafRef aggapi.NodeRef,
+		ttl string,
+	) (*exporter.Export, *exporter.DataExportAcquisition, error)
 
 	// TransportClient is used for DataExport HTTP connections in the production path
 	// (when OpenExport is nil).  May be nil in tests that supply OpenExport.
@@ -236,7 +251,8 @@ func applyDefaults(cfg Config) Config {
 		cfg.ManifestSource = source.NewAggregatedManifestSource(cfg.AggClient)
 	}
 
-	if cfg.OpenExport == nil && cfg.TransportClient != nil && cfg.AggClient != nil {
+	if cfg.OpenExport == nil && cfg.OpenExportWithAcquisition == nil &&
+		cfg.TransportClient != nil && cfg.AggClient != nil {
 		sc := cfg.TransportClient
 		log := cfg.Log
 		c := cfg.KubeClient
@@ -244,41 +260,45 @@ func applyDefaults(cfg Config) Config {
 		aggClient := cfg.AggClient
 		runID := cfg.RunID
 
-		cfg.OpenExport = func(ctx context.Context, namespace string, leafRef aggapi.NodeRef, ttl string) (*exporter.Export, error) {
+		cfg.OpenExportWithAcquisition = func(
+			ctx context.Context,
+			namespace string,
+			leafRef aggapi.NodeRef,
+			ttl string,
+		) (*exporter.Export, *exporter.DataExportAcquisition, error) {
 			group, resource, kind, err := aggClient.LeafDataExportTarget(leafRef)
 			if err != nil {
-				return nil, fmt.Errorf("resolve DataExport target for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
+				return nil, nil, fmt.Errorf("resolve DataExport target for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
 			}
 
-			// Stamp this run's ownership on the deterministic de-<leaf> CR BEFORE
-			// OpenExport reuses it, so a concurrent run downloading the same leaf
-			// into a different output dir is detected here (WARN) and its live
-			// export is never deleted by this run's release (inv #10b). OpenExport's
-			// own EnsureDataExport then idempotently re-fetches this stamped CR.
-			//
-			// This stamp-Ensure runs under the RAW run ctx (no deadline); the
-			// ReadinessTimeout-derived waitCtx below bounds only OpenExport. If it
-			// observes the CR TERMINATING and the finalizer never unwinds (downed
-			// controller), an unbounded terminating wait would hang the whole run
-			// forever with no output (code-style §6). WithTerminatingWaitTimeout
-			// caps that wait at ReadinessTimeout on top of ctx.
 			owner := exporter.WithRunOwner(runID, log)
 			termWait := exporter.WithTerminatingWaitTimeout(timeout)
 
-			if _, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafRef.Name, ttl, owner, termWait); err != nil {
-				return nil, fmt.Errorf("stamp DataExport ownership for %s/%s: %w", leafRef.Kind, leafRef.Name, err)
-			}
+			var acquisition *exporter.DataExportAcquisition
 
 			waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
 			defer waitCancel()
 
-			// Pass the same ownership into OpenExport so that if the CR vanishes
-			// between the stamp-Ensure above and OpenExport's inner Ensure (the
-			// terminating-window recreate), the fresh CR is stamped by THIS run
-			// rather than recreated unstamped (inv #10b). termWait keeps OpenExport's
-			// inner terminating wait explicitly bounded too (belt-and-braces with
-			// the already-bounded waitCtx).
-			return exporter.OpenExport(waitCtx, log, c, namespace, group, resource, kind, leafRef.Name, ttl, sc, owner, termWait)
+			exp, openErr := exporter.OpenExport(
+				waitCtx,
+				log,
+				c,
+				namespace,
+				group,
+				resource,
+				kind,
+				leafRef.Name,
+				ttl,
+				sc,
+				owner,
+				termWait,
+				exporter.WithAcquisition(&acquisition),
+			)
+			if openErr != nil {
+				return nil, acquisition, openErr
+			}
+
+			return exp, acquisition, nil
 		}
 	}
 

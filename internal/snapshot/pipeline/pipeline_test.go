@@ -42,11 +42,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vbauerster/mpb/v8/decor"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
@@ -71,6 +76,51 @@ const (
 	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
 	childKind         = "VirtualDiskSnapshot"
 )
+
+func diskSnapshotDataExportName() string {
+	return exporter.DataExportName(
+		testNS,
+		"demo.deckhouse.io",
+		"virtualdisksnapshots",
+		childKind,
+		diskSnapName,
+	)
+}
+
+type dataExportTargetMapping struct {
+	apiVersion string
+	kind       string
+	resource   string
+}
+
+func dataExportAggClient(t *testing.T, mappings ...dataExportTargetMapping) *aggapi.Client {
+	t.Helper()
+
+	groupVersions := make([]schema.GroupVersion, 0, len(mappings))
+	for _, mapping := range mappings {
+		gv, err := schema.ParseGroupVersion(mapping.apiVersion)
+		require.NoError(t, err)
+
+		groupVersions = append(groupVersions, gv)
+	}
+
+	mapper := meta.NewDefaultRESTMapper(groupVersions)
+	for _, mapping := range mappings {
+		gv, err := schema.ParseGroupVersion(mapping.apiVersion)
+		require.NoError(t, err)
+
+		gvk := gv.WithKind(mapping.kind)
+		plural := gv.WithResource(mapping.resource)
+		singular := gv.WithResource(strings.TrimSuffix(mapping.resource, "s"))
+		mapper.AddSpecific(gvk, plural, singular, meta.RESTScopeNamespace)
+	}
+
+	return aggapi.NewClient(nil, mapper)
+}
+
+func authenticatedTestTransportClient() *transport.Client {
+	return transport.NewClientForConfig(&rest.Config{BearerToken: "test-token"})
+}
 
 // snapObj is a builder for an unstructured snapshot-tree object described purely by its
 // namespaced status fragments (status.sourceRef / status.data / status.childrenSnapshotRefs) —
@@ -539,6 +589,262 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 	})
 }
 
+func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
+	t.Parallel()
+
+	const (
+		leafName = "shared-snapshot"
+		runID    = "run-mixed-gvk"
+	)
+
+	targets := []struct {
+		apiVersion string
+		group      string
+		resource   string
+		kind       string
+		uid        types.UID
+		payload    []byte
+	}{
+		{
+			apiVersion: "alpha.example.io/v1",
+			group:      "alpha.example.io",
+			resource:   "alphasnapshots",
+			kind:       "AlphaSnapshot",
+			uid:        "uid-alpha-export",
+			payload:    bytes.Repeat([]byte("A"), 300),
+		},
+		{
+			apiVersion: "beta.example.io/v1",
+			group:      "beta.example.io",
+			resource:   "betasnapshots",
+			kind:       "BetaSnapshot",
+			uid:        "uid-beta-export",
+			payload:    bytes.Repeat([]byte("B"), 300),
+		},
+	}
+
+	var (
+		started   atomic.Int64
+		startOnce sync.Once
+	)
+
+	bothStarted := make(chan struct{})
+	servers := make(map[string]*httptest.Server, len(targets))
+
+	for _, target := range targets {
+		payload := target.payload
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodHead {
+				if started.Add(1) == int64(len(targets)) {
+					startOnce.Do(func() { close(bothStarted) })
+				}
+
+				select {
+				case <-bothStarted:
+				case <-r.Context().Done():
+					return
+				}
+			}
+
+			http.ServeContent(w, r, "data", time.Time{}, bytes.NewReader(payload))
+		}))
+		t.Cleanup(server.Close)
+
+		servers[target.kind] = server
+	}
+
+	root := snapObj{
+		apiVersion: storageAPIVersion,
+		kind:       "Snapshot",
+		namespace:  testNS,
+		name:       rootSnapshot,
+		uid:        "uid-mixed-root",
+		sourceRef:  namespaceSourceRefMap(testNS, "uid-ns"),
+		children: []map[string]interface{}{
+			childRefMap(targets[0].apiVersion, targets[0].kind, leafName),
+			childRefMap(targets[1].apiVersion, targets[1].kind, leafName),
+		},
+	}.build()
+
+	objects := []client.Object{root}
+	for i, target := range targets {
+		objects = append(objects, snapObj{
+			apiVersion: target.apiVersion,
+			kind:       target.kind,
+			namespace:  testNS,
+			name:       leafName,
+			uid:        fmt.Sprintf("uid-leaf-%d", i),
+			data:       pvcData(testNS, fmt.Sprintf("pvc-%d", i), fmt.Sprintf("uid-pvc-%d", i), fmt.Sprintf("vsc-%d", i)),
+		}.build())
+	}
+
+	type deleteRecord struct {
+		name            string
+		uid             types.UID
+		preconditionUID types.UID
+	}
+
+	var (
+		evidenceMu sync.Mutex
+		created    = make(map[string]*deapi.DataExport, len(targets))
+		deleted    = make(map[string]deleteRecord, len(targets))
+	)
+
+	c := fake.NewClientBuilder().
+		WithScheme(buildScheme(t)).
+		WithObjects(objects...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.CreateOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Create(ctx, obj, opts...)
+				}
+
+				var targetUID types.UID
+				for _, target := range targets {
+					if de.Spec.TargetRef.Kind == target.kind {
+						targetUID = target.uid
+					}
+				}
+
+				server := servers[de.Spec.TargetRef.Kind]
+				if server == nil || targetUID == "" {
+					return fmt.Errorf("unexpected DataExport target: %+v", de.Spec.TargetRef)
+				}
+
+				certificate := server.Certificate()
+				caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+
+				de.UID = targetUID
+				de.Status = deapi.DataExportStatus{
+					URL:        server.URL,
+					CA:         base64.StdEncoding.EncodeToString(caPEM),
+					VolumeMode: "Block",
+					Conditions: []metav1.Condition{{
+						Type:   "Ready",
+						Status: metav1.ConditionTrue,
+						Reason: "PodReady",
+					}},
+				}
+
+				if err := cl.Create(ctx, de, opts...); err != nil {
+					return err
+				}
+
+				evidenceMu.Lock()
+				created[de.Name] = de.DeepCopy()
+				evidenceMu.Unlock()
+
+				return nil
+			},
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Delete(ctx, obj, opts...)
+				}
+
+				deleteOptions := client.DeleteOptions{}
+				deleteOptions.ApplyOptions(opts)
+
+				record := deleteRecord{name: de.Name, uid: de.UID}
+				if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+					record.preconditionUID = *deleteOptions.Preconditions.UID
+				}
+
+				evidenceMu.Lock()
+				deleted[de.Name] = record
+				evidenceMu.Unlock()
+
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	mappings := make([]dataExportTargetMapping, 0, len(targets))
+	for _, target := range targets {
+		mappings = append(mappings, dataExportTargetMapping{
+			apiVersion: target.apiVersion,
+			kind:       target.kind,
+			resource:   target.resource,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            t.TempDir(),
+		Workers:              2,
+		PerVolumeConcurrency: 1,
+		MaxParallelDownloads: 2,
+		KubeClient:           c,
+		AggClient:            dataExportAggClient(t, mappings...),
+		ManifestSource:       testManifestSource(),
+		TransportClient:      authenticatedTestTransportClient(),
+		RunID:                runID,
+		ReadinessTimeout:     5 * time.Second,
+	}
+
+	require.NoError(t, runPipeline(ctx, cfg))
+	require.Equal(t, int64(len(targets)), started.Load(),
+		"both different-GVK leaves must enter transfer concurrently")
+
+	evidenceMu.Lock()
+	createdCopy := make(map[string]*deapi.DataExport, len(created))
+	for name, de := range created {
+		createdCopy[name] = de.DeepCopy()
+	}
+	deletedCopy := make(map[string]deleteRecord, len(deleted))
+	for name, record := range deleted {
+		deletedCopy[name] = record
+	}
+	evidenceMu.Unlock()
+
+	require.Len(t, createdCopy, len(targets))
+	require.Len(t, deletedCopy, len(targets))
+
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		name := exporter.DataExportName(testNS, target.group, target.resource, target.kind, leafName)
+		names = append(names, name)
+
+		de := createdCopy[name]
+		require.NotNil(t, de, "production path must create the expected canonical DataExport")
+		require.Equal(t, target.uid, de.UID)
+		require.Equal(t, runID, de.Annotations["snapshot.deckhouse.io/download-run-id"])
+		require.Equal(t, deapi.TargetRefSpec{
+			Group:    target.group,
+			Resource: target.resource,
+			Kind:     target.kind,
+			Name:     leafName,
+		}, de.Spec.TargetRef)
+
+		record, ok := deletedCopy[name]
+		require.True(t, ok, "each acquired DataExport must be independently cleaned up")
+		require.Equal(t, target.uid, record.uid)
+		require.Equal(t, target.uid, record.preconditionUID,
+			"cleanup must use the exact acquired UID as its delete precondition")
+
+		remaining := new(deapi.DataExport)
+		getErr := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: name}, remaining)
+		require.True(t, apierrors.IsNotFound(getErr), "owned DataExport %q must be removed", name)
+	}
+
+	require.NotEqual(t, names[0], names[1], "same-name leaves with different GVK must never alias")
+}
+
 func TestPipeline_ClosesExportHTTPClientsOnEveryTransferExit(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		first := &pipelineIdleCloser{}
@@ -664,7 +970,7 @@ func readyFilesystemDataExport(t *testing.T, srv *httptest.Server) *deapi.DataEx
 
 	return &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      exporter.DataExportName(diskSnapName),
+			Name:      diskSnapshotDataExportName(),
 			Namespace: testNS,
 		},
 		Spec: deapi.DataexportSpec{
@@ -823,6 +1129,246 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 	assertNoIdentityMarkers(t, outputDir)
 }
 
+func TestPipeline_ProductionTargetMismatchNeverCleansUpCollision(t *testing.T) {
+	t.Parallel()
+
+	const runID = "run-colliding-leaf"
+
+	cases := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{name: "unstamped collision"},
+		{
+			name:        "same-run collision",
+			annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			deName := diskSnapshotDataExportName()
+			foreignRef := deapi.TargetRefSpec{
+				Group:    "foreign.example.io",
+				Resource: "foreignsnapshots",
+				Kind:     "ForeignSnapshot",
+				Name:     diskSnapName,
+			}
+			collision := &deapi.DataExport{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        deName,
+					Namespace:   testNS,
+					UID:         "uid-collision",
+					Annotations: tc.annotations,
+				},
+				Spec: deapi.DataexportSpec{TTL: "2h", TargetRef: foreignRef},
+			}
+
+			var deleteCalls atomic.Int64
+
+			c := buildFakeClientBuilder(t).
+				WithObjects(collision).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(
+						ctx context.Context,
+						cl client.WithWatch,
+						obj client.Object,
+						opts ...client.DeleteOption,
+					) error {
+						if _, ok := obj.(*deapi.DataExport); ok {
+							deleteCalls.Add(1)
+						}
+
+						return cl.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			cfg := pipeline.Config{
+				Namespace:    testNS,
+				RootSnapshot: rootSnapshot,
+				OutputDir:    t.TempDir(),
+				Workers:      1,
+				KubeClient:   c,
+				AggClient: dataExportAggClient(t, dataExportTargetMapping{
+					apiVersion: childAPIVersion,
+					kind:       childKind,
+					resource:   "virtualdisksnapshots",
+				}),
+				ManifestSource:   testManifestSource(),
+				TransportClient:  authenticatedTestTransportClient(),
+				RunID:            runID,
+				ReadinessTimeout: time.Second,
+			}
+
+			err := runPipeline(context.Background(), cfg)
+			require.ErrorIs(t, err, exporter.ErrTargetRefMismatch)
+			require.Zero(t, deleteCalls.Load(),
+				"a target mismatch must not gain cleanup authority from name or run annotation")
+
+			preserved := new(deapi.DataExport)
+			require.NoError(t, c.Get(
+				context.Background(),
+				types.NamespacedName{Namespace: testNS, Name: deName},
+				preserved,
+			))
+			require.Equal(t, types.UID("uid-collision"), preserved.UID)
+			require.Equal(t, tc.annotations, preserved.Annotations)
+			require.Equal(t, foreignRef, preserved.Spec.TargetRef)
+		})
+	}
+}
+
+func TestPipeline_ProductionWaitFailureCleansExactAcquisition(t *testing.T) {
+	const runID = "run-wait-failure"
+
+	cases := []struct {
+		name        string
+		cancelRun   bool
+		wantContext error
+	}{
+		{
+			name:        "readiness error",
+			wantContext: context.DeadlineExceeded,
+		},
+		{
+			name:        "cancellation",
+			cancelRun:   true,
+			wantContext: context.Canceled,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const acquiredUID = types.UID("uid-wait-acquired")
+
+			created := make(chan struct{})
+			var createOnce sync.Once
+
+			var (
+				evidenceMu      sync.Mutex
+				createdEvidence *deapi.DataExport
+				deletedUID      types.UID
+				preconditionUID types.UID
+			)
+
+			c := buildFakeClientBuilder(t).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(
+						ctx context.Context,
+						cl client.WithWatch,
+						obj client.Object,
+						opts ...client.CreateOption,
+					) error {
+						de, ok := obj.(*deapi.DataExport)
+						if !ok {
+							return cl.Create(ctx, obj, opts...)
+						}
+
+						de.UID = acquiredUID
+						if err := cl.Create(ctx, de, opts...); err != nil {
+							return err
+						}
+
+						evidenceMu.Lock()
+						createdEvidence = de.DeepCopy()
+						evidenceMu.Unlock()
+						createOnce.Do(func() { close(created) })
+
+						return nil
+					},
+					Delete: func(
+						ctx context.Context,
+						cl client.WithWatch,
+						obj client.Object,
+						opts ...client.DeleteOption,
+					) error {
+						de, ok := obj.(*deapi.DataExport)
+						if !ok {
+							return cl.Delete(ctx, obj, opts...)
+						}
+
+						deleteOptions := client.DeleteOptions{}
+						deleteOptions.ApplyOptions(opts)
+
+						evidenceMu.Lock()
+						deletedUID = de.UID
+						if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+							preconditionUID = *deleteOptions.Preconditions.UID
+						}
+						evidenceMu.Unlock()
+
+						return cl.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			readinessTimeout := 50 * time.Millisecond
+			if tc.cancelRun {
+				readinessTimeout = 5 * time.Second
+			}
+
+			cfg := pipeline.Config{
+				Namespace:    testNS,
+				RootSnapshot: rootSnapshot,
+				OutputDir:    t.TempDir(),
+				Workers:      1,
+				KubeClient:   c,
+				AggClient: dataExportAggClient(t, dataExportTargetMapping{
+					apiVersion: childAPIVersion,
+					kind:       childKind,
+					resource:   "virtualdisksnapshots",
+				}),
+				ManifestSource:   testManifestSource(),
+				TransportClient:  authenticatedTestTransportClient(),
+				RunID:            runID,
+				ReadinessTimeout: readinessTimeout,
+				ReleaseTimeout:   time.Second,
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if tc.cancelRun {
+				go func() {
+					<-created
+					cancel()
+				}()
+			}
+
+			err := runPipeline(ctx, cfg)
+			require.ErrorIs(t, err, tc.wantContext)
+
+			evidenceMu.Lock()
+			var createdCopy *deapi.DataExport
+			if createdEvidence != nil {
+				createdCopy = createdEvidence.DeepCopy()
+			}
+
+			deletedUIDCopy := deletedUID
+			preconditionUIDCopy := preconditionUID
+			evidenceMu.Unlock()
+
+			require.NotNil(t, createdCopy)
+			require.Equal(t, acquiredUID, createdCopy.UID)
+			require.Equal(t, runID, createdCopy.Annotations["snapshot.deckhouse.io/download-run-id"])
+			require.Equal(t, acquiredUID, deletedUIDCopy)
+			require.Equal(t, acquiredUID, preconditionUIDCopy,
+				"wait failure cleanup must retain exact UID acquisition evidence")
+
+			remaining := new(deapi.DataExport)
+			getErr := c.Get(context.Background(), types.NamespacedName{
+				Namespace: testNS,
+				Name:      diskSnapshotDataExportName(),
+			}, remaining)
+			require.True(t, apierrors.IsNotFound(getErr),
+				"the exact DataExport acquired before WaitReady failed must be removed")
+		})
+	}
+}
+
 // TestPipeline_OpenExportErrorReleasesCleanly is a regression guard for a
 // live-reproduced leak: OpenExport's production implementation creates the
 // DataExport CR (EnsureDataExport) BEFORE waiting for it to become Ready
@@ -836,14 +1382,30 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 	t.Parallel()
 
+	const runID = "run-open-error"
+
 	c := buildFakeClient(t)
 	outputDir := t.TempDir()
 
-	deName := exporter.DataExportName(diskSnapName)
+	deName := diskSnapshotDataExportName()
 
 	de := &deapi.DataExport{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
-		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+		TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        deName,
+			Namespace:   testNS,
+			UID:         "uid-open-error",
+			Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: "2h",
+			TargetRef: deapi.TargetRefSpec{
+				Group:    "demo.deckhouse.io",
+				Resource: "virtualdisksnapshots",
+				Kind:     childKind,
+				Name:     diskSnapName,
+			},
+		},
 	}
 	require.NoError(t, c.Create(context.Background(), de))
 
@@ -853,8 +1415,32 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 		OutputDir:    outputDir,
 		Workers:      1,
 		KubeClient:   c,
-		OpenExport: func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return nil, errors.New("simulated WaitReady cancellation after EnsureDataExport created the CR")
+		RunID:        runID,
+		OpenExportWithAcquisition: func(
+			ctx context.Context,
+			namespace string,
+			leafRef aggapi.NodeRef,
+			ttl string,
+		) (*exporter.Export, *exporter.DataExportAcquisition, error) {
+			var acquisition *exporter.DataExportAcquisition
+
+			_, ensureErr := exporter.EnsureDataExport(
+				ctx,
+				c,
+				namespace,
+				"demo.deckhouse.io",
+				"virtualdisksnapshots",
+				childKind,
+				leafRef.Name,
+				ttl,
+				exporter.WithRunOwner(runID, slog.Default()),
+				exporter.WithAcquisition(&acquisition),
+			)
+			if ensureErr != nil {
+				return nil, nil, ensureErr
+			}
+
+			return nil, acquisition, errors.New("simulated WaitReady cancellation after EnsureDataExport acquired the CR")
 		},
 	}
 
@@ -917,12 +1503,27 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 	outputDir := t.TempDir()
 
 	const releaseTimeout = 20 * time.Millisecond
+	const runID = "run-slow-open"
 
-	deName := exporter.DataExportName(diskSnapName)
+	deName := diskSnapshotDataExportName()
 
 	de := &deapi.DataExport{
-		TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
-		ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+		TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        deName,
+			Namespace:   testNS,
+			UID:         "uid-slow-open",
+			Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL: "2h",
+			TargetRef: deapi.TargetRefSpec{
+				Group:    "demo.deckhouse.io",
+				Resource: "virtualdisksnapshots",
+				Kind:     childKind,
+				Name:     diskSnapName,
+			},
+		},
 	}
 	require.NoError(t, c.Create(context.Background(), de))
 
@@ -933,14 +1534,44 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 		Workers:        1,
 		KubeClient:     c,
 		ReleaseTimeout: releaseTimeout,
-		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+		RunID:          runID,
+		OpenExportWithAcquisition: func(
+			ctx context.Context,
+			namespace string,
+			leafRef aggapi.NodeRef,
+			ttl string,
+		) (*exporter.Export, *exporter.DataExportAcquisition, error) {
 			// Simulate WaitReady taking longer than ReleaseTimeout, mirroring the
 			// live repro where WaitReady alone took ~30s against a fixed 30s
 			// budget. A pre-fix cleanupCtx created before this sleep would
 			// already be expired by the time release runs.
 			time.Sleep(3 * releaseTimeout)
 
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			var acquisition *exporter.DataExportAcquisition
+
+			_, ensureErr := exporter.EnsureDataExport(
+				ctx,
+				c,
+				namespace,
+				"demo.deckhouse.io",
+				"virtualdisksnapshots",
+				childKind,
+				leafRef.Name,
+				ttl,
+				exporter.WithRunOwner(runID, slog.Default()),
+				exporter.WithAcquisition(&acquisition),
+			)
+			if ensureErr != nil {
+				return nil, nil, ensureErr
+			}
+
+			return exporter.NewExport(
+				namespace,
+				deName,
+				"Block",
+				srv.URL,
+				exporter.NewFetcher(srv.Client()),
+			), acquisition, nil
 		},
 	}
 
@@ -1792,6 +2423,12 @@ func makeBlockServer(t *testing.T, rawData []byte) *httptest.Server {
 func buildFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
+	return buildFakeClientBuilder(t).Build()
+}
+
+func buildFakeClientBuilder(t *testing.T) *fake.ClientBuilder {
+	t.Helper()
+
 	scheme := buildScheme(t)
 
 	// Root Snapshot: cluster-scoped Namespace source (no sourceRef.namespace) with one child ref.
@@ -1813,8 +2450,7 @@ func buildFakeClient(t *testing.T) client.Client {
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(root, diskSnap).
-		Build()
+		WithObjects(root, diskSnap)
 }
 
 // buildScheme registers all types needed by the pipeline test.
@@ -3965,6 +4601,8 @@ func TestPipeline_KeepExports(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			const runID = "run-keep-exports"
+
 			rawBlock := bytes.Repeat([]byte("K"), 300)
 			srv := makeBlockServer(t, rawBlock)
 
@@ -3976,11 +4614,25 @@ func TestPipeline_KeepExports(t *testing.T) {
 			// The pipeline releases by the deterministic name derived from the leaf's
 			// own node-ref name (exporter.DataExportName), not from whatever name the
 			// OpenExport stub happens to hand back — release must find this object.
-			deName := exporter.DataExportName(diskSnapName)
+			deName := diskSnapshotDataExportName()
 
 			de := &deapi.DataExport{
-				TypeMeta:   metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
-				ObjectMeta: metav1.ObjectMeta{Name: deName, Namespace: testNS},
+				TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        deName,
+					Namespace:   testNS,
+					UID:         "uid-keep-exports",
+					Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+				},
+				Spec: deapi.DataexportSpec{
+					TTL: "2h",
+					TargetRef: deapi.TargetRefSpec{
+						Group:    "demo.deckhouse.io",
+						Resource: "virtualdisksnapshots",
+						Kind:     childKind,
+						Name:     diskSnapName,
+					},
+				},
 			}
 			require.NoError(t, c.Create(context.Background(), de))
 
@@ -3992,8 +4644,38 @@ func TestPipeline_KeepExports(t *testing.T) {
 				PerVolumeConcurrency: 1,
 				KubeClient:           c,
 				KeepExports:          tc.keepExports,
-				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-					return exporter.NewExport(namespace, deName, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				RunID:                runID,
+				OpenExportWithAcquisition: func(
+					ctx context.Context,
+					namespace string,
+					leafRef aggapi.NodeRef,
+					ttl string,
+				) (*exporter.Export, *exporter.DataExportAcquisition, error) {
+					var acquisition *exporter.DataExportAcquisition
+
+					_, ensureErr := exporter.EnsureDataExport(
+						ctx,
+						c,
+						namespace,
+						"demo.deckhouse.io",
+						"virtualdisksnapshots",
+						childKind,
+						leafRef.Name,
+						ttl,
+						exporter.WithRunOwner(runID, slog.Default()),
+						exporter.WithAcquisition(&acquisition),
+					)
+					if ensureErr != nil {
+						return nil, nil, ensureErr
+					}
+
+					return exporter.NewExport(
+						namespace,
+						deName,
+						"Block",
+						srv.URL,
+						exporter.NewFetcher(srv.Client()),
+					), acquisition, nil
 				},
 			}
 

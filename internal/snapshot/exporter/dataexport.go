@@ -18,14 +18,17 @@ package exporter
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
@@ -35,12 +38,12 @@ import (
 // terminal state and can no longer be used for data transfer.
 var ErrExpired = errors.New("DataExport expired")
 
-// ErrTargetRefMismatch is returned by EnsureDataExport when a live, same-named
+// ErrTargetRefMismatch is returned by EnsureDataExport when a same-named
 // DataExport CR already exists but its Spec.TargetRef names a DIFFERENT object
-// than the request. The CR name is derived from the leaf name alone
-// (DataExportName encodes neither group nor kind), so a same-named CR can alias
-// a different object; reusing its endpoint would download the wrong object's
-// bytes. EnsureDataExport refuses instead of silently reusing or deleting it.
+// than the request. This can occur after a hash collision or when a DataExport
+// was created manually under the deterministic name. Reusing its endpoint would
+// download the wrong object's bytes. EnsureDataExport refuses instead of
+// silently reusing or deleting it.
 var ErrTargetRefMismatch = errors.New("existing DataExport targets a different object")
 
 // defaultDataExportTTL is the fallback TTL used for DataExport when the caller
@@ -81,17 +84,66 @@ const dataExportGonePollInterval = 500 * time.Millisecond
 const dataExportGoneLogEveryN = 30
 
 // runOwnerAnnotation records the download run that CREATED (and therefore owns) a
-// DataExport CR. The CR name is deterministic (DataExportName → de-<leaf>), so two
+// DataExport CR. The CR name is deterministic, so two
 // concurrent download runs targeting the same leaf resolve to the SAME CR; this
 // annotation lets each run tell "the CR I created" from "a CR another live run
 // created" so a run never deletes or hijacks another run's in-flight export
 // (inv #10b). The value is an opaque per-run hex ID (pipeline.Config.RunID).
 const runOwnerAnnotation = "snapshot.deckhouse.io/download-run-id"
 
-// DataExportName derives a deterministic DataExport CR name from the snapshot
-// leaf CR name. The result fits in a DNS-1123 label.
-func DataExportName(leafName string) string {
-	return "de-" + leafName
+// DataExportName derives a deterministic DataExport CR name from the canonical
+// namespaced target identity. The readable leaf prefix is normalized only for
+// display; the hash covers the original, unnormalized identity so identities
+// that normalize alike remain distinct. The result is a DNS-1123 label no
+// longer than 63 bytes, which also satisfies Kubernetes object-name limits.
+func DataExportName(namespace, group, resource, kind, leafName string) string {
+	const (
+		prefix       = "de-"
+		hashLength   = 20
+		maxNameBytes = 63
+	)
+
+	identity := strings.Join([]string{namespace, group, resource, kind, leafName}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	hash := fmt.Sprintf("%x", sum[:])[:hashLength]
+
+	readable := normalizeDNSLabel(leafName)
+	maxReadable := maxNameBytes - len(prefix) - 1 - len(hash)
+
+	if len(readable) > maxReadable {
+		readable = strings.Trim(readable[:maxReadable], "-")
+	}
+
+	if readable == "" {
+		return prefix + hash
+	}
+
+	return prefix + readable + "-" + hash
+}
+
+func normalizeDNSLabel(value string) string {
+	var normalized strings.Builder
+
+	lastDash := false
+
+	for _, char := range strings.ToLower(value) {
+		valid := char >= 'a' && char <= 'z' || char >= '0' && char <= '9'
+		if valid {
+			normalized.WriteRune(char)
+
+			lastDash = false
+
+			continue
+		}
+
+		if normalized.Len() > 0 && !lastDash {
+			normalized.WriteByte('-')
+
+			lastDash = true
+		}
+	}
+
+	return strings.Trim(normalized.String(), "-")
 }
 
 // targetRefMatches reports whether an existing DataExport's targetRef refers to
@@ -141,10 +193,60 @@ type ensureOptions struct {
 	runID              string
 	log                *slog.Logger
 	terminatingTimeout time.Duration
+	acquisition        **DataExportAcquisition
 }
 
 // EnsureOption configures optional behavior of EnsureDataExport.
 type EnsureOption func(*ensureOptions)
+
+// DataExportAcquisition is operation-scoped evidence that EnsureDataExport
+// successfully acquired one exact DataExport object. Its fields are private so
+// cleanup callers must obtain it from WithAcquisition rather than infer deletion
+// authority from a deterministic name or run annotation.
+type DataExportAcquisition struct {
+	namespace          string
+	name               string
+	uid                types.UID
+	targetRef          deapi.TargetRefSpec
+	runID              string
+	ownerAtAcquisition string
+}
+
+// Name returns the acquired DataExport name.
+func (a *DataExportAcquisition) Name() string {
+	if a == nil {
+		return ""
+	}
+
+	return a.name
+}
+
+// UID returns the exact UID observed when the DataExport was acquired.
+func (a *DataExportAcquisition) UID() types.UID {
+	if a == nil {
+		return ""
+	}
+
+	return a.uid
+}
+
+// TargetRef returns the exact targetRef observed when the DataExport was acquired.
+func (a *DataExportAcquisition) TargetRef() deapi.TargetRefSpec {
+	if a == nil {
+		return deapi.TargetRefSpec{}
+	}
+
+	return a.targetRef
+}
+
+// WithAcquisition records operation-scoped cleanup evidence when
+// EnsureDataExport successfully returns an exact DataExport. The output remains
+// nil on every pre-acquisition failure, including a targetRef mismatch.
+func WithAcquisition(out **DataExportAcquisition) EnsureOption {
+	return func(o *ensureOptions) {
+		o.acquisition = out
+	}
+}
 
 // WithTerminatingWaitTimeout bounds the wait EnsureDataExport performs when it
 // observes the DataExport already TERMINATING (DeletionTimestamp set) and must
@@ -175,6 +277,27 @@ func WithRunOwner(runID string, log *slog.Logger) EnsureOption {
 		o.runID = runID
 		o.log = log
 	}
+}
+
+func (o ensureOptions) recordAcquisition(de *deapi.DataExport) error {
+	if o.acquisition == nil {
+		return nil
+	}
+
+	if de.UID == "" {
+		return fmt.Errorf("acquire DataExport %q: API server returned an empty UID", de.Name)
+	}
+
+	*o.acquisition = &DataExportAcquisition{
+		namespace:          de.Namespace,
+		name:               de.Name,
+		uid:                de.UID,
+		targetRef:          de.Spec.TargetRef,
+		runID:              o.runID,
+		ownerAtAcquisition: de.Annotations[runOwnerAnnotation],
+	}
+
+	return nil
 }
 
 // warnIfForeign logs a WARN when this run is adopting a live DataExport that a
@@ -236,12 +359,23 @@ func EnsureDataExport(
 		opt(&o)
 	}
 
-	deName := DataExportName(leafName)
+	if o.acquisition != nil {
+		*o.acquisition = nil
+	}
+
+	deName := DataExportName(namespace, group, resource, kind, leafName)
 
 	existing := new(deapi.DataExport)
 
 	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, existing)
 	if err == nil {
+		// Validate identity before any lifecycle action. In particular, an
+		// expired or terminating collision is foreign to this operation and must
+		// not be deleted, waited out, or otherwise mutated to make progress.
+		if !targetRefMatches(existing.Spec.TargetRef, group, resource, kind, leafName) {
+			return nil, targetRefMismatchError(deName, existing.Spec.TargetRef, group, resource, kind, leafName)
+		}
+
 		switch {
 		case existing.DeletionTimestamp != nil:
 			// The CR is TERMINATING: an interrupted run's release defer (or the
@@ -268,22 +402,14 @@ func EnsureDataExport(
 			}
 
 		case !dataExportExpired(existing.Status.Conditions):
-			// Live, non-terminating CR. The CR name (de-<leaf>) encodes only the
-			// leaf name, so a same-named CR may actually target a DIFFERENT object
-			// (a CSI VolumeSnapshot and a domain snapshot CR sharing metadata.name,
-			// or a stale live CR left by a previous run pointing elsewhere). Reusing
-			// such an endpoint would silently stream the wrong object's bytes into
-			// this node dir, where they finalize and checksum as complete forever.
-			// Refuse to adopt on a targetRef mismatch — never silently reuse, never
-			// silently delete another target's live export; the operator resolves it.
-			if !targetRefMatches(existing.Spec.TargetRef, group, resource, kind, leafName) {
-				return nil, targetRefMismatchError(deName, existing.Spec.TargetRef, group, resource, kind, leafName)
-			}
-
 			// If a different run owns it, this run is adopting a foreign export
 			// read-only and must not release it (warnIfForeign logs the adoption).
 			// Ownership is intentionally NOT changed on adoption.
 			o.warnIfForeign(existing, deName)
+
+			if err := o.recordAcquisition(existing); err != nil {
+				return nil, err
+			}
 
 			return existing, nil
 
@@ -352,6 +478,10 @@ func EnsureDataExport(
 	// overwhelmingly common case — passes unchanged.
 	if !targetRefMatches(fetched.Spec.TargetRef, group, resource, kind, leafName) {
 		return nil, targetRefMismatchError(deName, fetched.Spec.TargetRef, group, resource, kind, leafName)
+	}
+
+	if err := o.recordAcquisition(fetched); err != nil {
+		return nil, err
 	}
 
 	return fetched, nil
@@ -523,48 +653,62 @@ func WaitReady(
 	}
 }
 
-// ReleaseDataExport deletes the DataExport named deName in namespace, but only
-// when this run may safely do so. If the CR is owned by a DIFFERENT download run
-// (runOwnerAnnotation set to another non-empty runID), it is a live export that
-// the other run created: this run leaves it in place — the owner (or its TTL)
-// reclaims it — and logs the skip, so a run never tears down another live run's
-// in-flight export (inv #10b). A CR this run owns (owner == runID) or an
-// unstamped CR (owner == "", legacy behavior) is deleted with a UID deletion
-// precondition: if the object was replaced between the Get and the Delete the
-// precondition fails with Conflict, which — like NotFound — is treated as a
-// successful, idempotent release (the object we observed is already gone). An
-// empty runID disables the ownership check (unconditional delete); log may be nil.
-func ReleaseDataExport(ctx context.Context, c client.Client, log *slog.Logger, namespace, deName, runID string) error {
+// ReleaseDataExport deletes only the exact DataExport represented by acquisition.
+// Deterministic name or matching run annotation alone never grants authority.
+// UID, targetRef, and observed owner must all still match; a foreign owner is
+// never deleted. UID-precondition conflicts and NotFound are idempotent success.
+func ReleaseDataExport(
+	ctx context.Context,
+	c client.Client,
+	log *slog.Logger,
+	acquisition *DataExportAcquisition,
+) error {
+	if acquisition == nil || acquisition.uid == "" {
+		return errors.New("release DataExport: valid acquisition evidence is required")
+	}
+
 	de := new(deapi.DataExport)
 
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, de)
+	err := c.Get(ctx, client.ObjectKey{Namespace: acquisition.namespace, Name: acquisition.name}, de)
 	if kubeerrors.IsNotFound(err) {
 		return nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("get DataExport %q before delete: %w", deName, err)
+		return fmt.Errorf("get DataExport %q before delete: %w", acquisition.name, err)
 	}
 
-	if owner := de.Annotations[runOwnerAnnotation]; runID != "" && owner != "" && owner != runID {
+	owner := de.Annotations[runOwnerAnnotation]
+	if de.UID != acquisition.uid ||
+		de.Spec.TargetRef != acquisition.targetRef ||
+		owner != acquisition.ownerAtAcquisition {
 		if log != nil {
-			log.Warn("skipping DataExport release owned by another download run",
-				slog.String("name", deName),
+			log.Warn("skipping DataExport release because acquired identity changed",
+				slog.String("name", acquisition.name),
+				slog.String("acquired_uid", string(acquisition.uid)),
+				slog.String("current_uid", string(de.UID)),
+				slog.String("acquired_owner", acquisition.ownerAtAcquisition),
 				slog.String("owner", owner),
-				slog.String("run_id", runID))
+				slog.String("run_id", acquisition.runID))
 		}
 
 		return nil
 	}
 
-	// Guard the delete with a UID precondition to close the check-then-delete
-	// race: a Conflict means the CR we observed was already replaced (e.g. a new
-	// run recreated it after TTL), so it is not ours to delete — treat it, like
-	// NotFound, as a successful idempotent release.
-	uid := de.UID
-	if delErr := c.Delete(ctx, de, client.Preconditions{UID: &uid}); delErr != nil &&
+	if owner != "" && owner != acquisition.runID {
+		if log != nil {
+			log.Warn("skipping DataExport release owned by another download run",
+				slog.String("name", acquisition.name),
+				slog.String("owner", owner),
+				slog.String("run_id", acquisition.runID))
+		}
+
+		return nil
+	}
+
+	if delErr := c.Delete(ctx, de, client.Preconditions{UID: &acquisition.uid}); delErr != nil &&
 		!kubeerrors.IsNotFound(delErr) && !kubeerrors.IsConflict(delErr) {
-		return fmt.Errorf("delete DataExport %q: %w", deName, delErr)
+		return fmt.Errorf("delete DataExport %q: %w", acquisition.name, delErr)
 	}
 
 	return nil

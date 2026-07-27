@@ -166,8 +166,10 @@ func run(
 
 	cfg = applyDefaults(cfg)
 
-	if cfg.OpenExport == nil {
-		return fmt.Errorf("pipeline: OpenExport must be set (supply TransportClient+AggClient or set OpenExport directly)")
+	if cfg.OpenExport == nil && cfg.OpenExportWithAcquisition == nil {
+		return fmt.Errorf(
+			"pipeline: export opener must be set (supply TransportClient+AggClient or set OpenExport directly)",
+		)
 	}
 
 	if cfg.ManifestSource == nil {
@@ -1290,49 +1292,55 @@ func downloadVolumeBinding(
 		}()
 	}
 
-	// Register the release-by-name defer BEFORE calling cfg.OpenExport, so it
-	// runs on EVERY return path — including when OpenExport itself fails, e.g.
-	// ctx is cancelled while still polling WaitReady. cfg.OpenExport's
-	// production implementation creates the DataExport CR (EnsureDataExport)
-	// BEFORE waiting for it to become Ready (WaitReady); a cancellation during
-	// that wait previously returned before any cleanup defer was registered,
-	// permanently leaking the DataExport until its TTL expired. Releasing by
-	// the deterministic name (rather than through the *exporter.Export OpenExport
-	// would have returned) works even when OpenExport never returned one:
-	// exporter.ReleaseDataExport treats NotFound as success, so this defer is a
-	// safe no-op on the paths where no DataExport was ever created.
-	//
-	// The release timeout is deliberately derived FRESH, right here inside the
-	// closure, at the moment it actually runs — NOT once up front before
-	// cfg.OpenExport. This closure only executes at function return, i.e. after
-	// the full OpenExport (EnsureDataExport + WaitReady) AND the entire volume
-	// transfer have already completed, which routinely exceeds ReleaseTimeout for
-	// any real-sized volume. A single timeout created before that work would
-	// already be expired by the time release is attempted, failing the release
-	// Get immediately even on a fully successful download (live-reproduced).
-	// Deriving from
-	// context.WithoutCancel(ctx) keeps release running when ctx itself is
-	// cancelled (e.g. by errgroup on sibling error or by SIGINT).
-	defer func() {
-		if cfg.KeepExports {
-			cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
-				slog.String("leaf", displayLabel))
+	var (
+		exp         *exporter.Export
+		acquisition *exporter.DataExportAcquisition
+		err         error
+	)
 
-			return
-		}
+	if cfg.OpenExportWithAcquisition != nil {
+		exp, acquisition, err = cfg.OpenExportWithAcquisition(ctx, namespace, leafRef, cfg.TTL)
+	} else {
+		exp, err = cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
+	}
 
-		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ReleaseTimeout)
-		defer releaseCancel()
+	// Cleanup authority is registered only after the opener proves that this
+	// exact operation acquired a DataExport and returns its UID-bound capability.
+	// The production opener returns that evidence even when WaitReady or
+	// transport setup fails, so those error/cancellation paths still clean up.
+	// A deterministic name or matching run annotation alone never authorizes a
+	// delete. The timeout is derived fresh when cleanup runs and ignores parent
+	// cancellation so successful, failed, and interrupted transfers receive the
+	// same bounded cleanup attempt.
+	if acquisition != nil {
+		defer func() {
+			if cfg.KeepExports {
+				cfg.Log.Info("leaving DataExport in cluster (--cleanup=false)",
+					slog.String("leaf", displayLabel),
+					slog.String("data_export", acquisition.Name()),
+					slog.String("data_export_uid", string(acquisition.UID())))
 
-		deName := exporter.DataExportName(leafRef.Name)
-		if relErr := exporter.ReleaseDataExport(releaseCtx, cfg.KubeClient, cfg.Log, namespace, deName, cfg.RunID); relErr != nil {
-			cfg.Log.Warn("failed to release DataExport",
-				slog.String("leaf", displayLabel),
-				slog.String("error", relErr.Error()))
-		}
-	}()
+				return
+			}
 
-	exp, err := cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
+			releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ReleaseTimeout)
+			defer releaseCancel()
+
+			if relErr := exporter.ReleaseDataExport(
+				releaseCtx,
+				cfg.KubeClient,
+				cfg.Log,
+				acquisition,
+			); relErr != nil {
+				cfg.Log.Warn("failed to release DataExport",
+					slog.String("leaf", displayLabel),
+					slog.String("data_export", acquisition.Name()),
+					slog.String("data_export_uid", string(acquisition.UID())),
+					slog.String("error", relErr.Error()))
+			}
+		}()
+	}
+
 	if err != nil {
 		downloadErr = fmt.Errorf("open DataExport for %s: %w", displayLabel, err)
 
