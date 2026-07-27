@@ -48,6 +48,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -75,6 +76,9 @@ const (
 	storageAPIVersion = "state-snapshotter.deckhouse.io/v1alpha1"
 	childAPIVersion   = "demo.deckhouse.io/v1alpha1"
 	childKind         = "VirtualDiskSnapshot"
+
+	runOwnerAnnotationKey  = "snapshot.deckhouse.io/download-run-id"
+	targetUIDAnnotationKey = "snapshot.deckhouse.io/target-uid"
 )
 
 func diskSnapshotDataExportName() string {
@@ -84,6 +88,7 @@ func diskSnapshotDataExportName() string {
 		"virtualdisksnapshots",
 		childKind,
 		diskSnapName,
+		types.UID(diskSnapUID),
 	)
 }
 
@@ -569,6 +574,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 				leafRef.Name,
 				ttl,
 				sc,
+				exporter.WithTargetUID(types.UID(diskSnapUID)),
 			)
 		},
 	}
@@ -598,28 +604,31 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 	)
 
 	targets := []struct {
-		apiVersion string
-		group      string
-		resource   string
-		kind       string
-		uid        types.UID
-		payload    []byte
+		apiVersion    string
+		group         string
+		resource      string
+		kind          string
+		snapshotUID   types.UID
+		dataExportUID types.UID
+		payload       []byte
 	}{
 		{
-			apiVersion: "alpha.example.io/v1",
-			group:      "alpha.example.io",
-			resource:   "alphasnapshots",
-			kind:       "AlphaSnapshot",
-			uid:        "uid-alpha-export",
-			payload:    bytes.Repeat([]byte("A"), 300),
+			apiVersion:    "alpha.example.io/v1",
+			group:         "alpha.example.io",
+			resource:      "alphasnapshots",
+			kind:          "AlphaSnapshot",
+			snapshotUID:   "uid-alpha-snapshot",
+			dataExportUID: "uid-alpha-export",
+			payload:       bytes.Repeat([]byte("A"), 300),
 		},
 		{
-			apiVersion: "beta.example.io/v1",
-			group:      "beta.example.io",
-			resource:   "betasnapshots",
-			kind:       "BetaSnapshot",
-			uid:        "uid-beta-export",
-			payload:    bytes.Repeat([]byte("B"), 300),
+			apiVersion:    "beta.example.io/v1",
+			group:         "beta.example.io",
+			resource:      "betasnapshots",
+			kind:          "BetaSnapshot",
+			snapshotUID:   "uid-beta-snapshot",
+			dataExportUID: "uid-beta-export",
+			payload:       bytes.Repeat([]byte("B"), 300),
 		},
 	}
 
@@ -673,7 +682,7 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 			kind:       target.kind,
 			namespace:  testNS,
 			name:       leafName,
-			uid:        fmt.Sprintf("uid-leaf-%d", i),
+			uid:        string(target.snapshotUID),
 			data:       pvcData(testNS, fmt.Sprintf("pvc-%d", i), fmt.Sprintf("uid-pvc-%d", i), fmt.Sprintf("vsc-%d", i)),
 		}.build())
 	}
@@ -705,22 +714,22 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 					return cl.Create(ctx, obj, opts...)
 				}
 
-				var targetUID types.UID
+				var dataExportUID types.UID
 				for _, target := range targets {
 					if de.Spec.TargetRef.Kind == target.kind {
-						targetUID = target.uid
+						dataExportUID = target.dataExportUID
 					}
 				}
 
 				server := servers[de.Spec.TargetRef.Kind]
-				if server == nil || targetUID == "" {
+				if server == nil || dataExportUID == "" {
 					return fmt.Errorf("unexpected DataExport target: %+v", de.Spec.TargetRef)
 				}
 
 				certificate := server.Certificate()
 				caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
 
-				de.UID = targetUID
+				de.UID = dataExportUID
 				de.Status = deapi.DataExportStatus{
 					URL:        server.URL,
 					CA:         base64.StdEncoding.EncodeToString(caPEM),
@@ -817,13 +826,21 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 
 	names := make([]string, 0, len(targets))
 	for _, target := range targets {
-		name := exporter.DataExportName(testNS, target.group, target.resource, target.kind, leafName)
+		name := exporter.DataExportName(
+			testNS,
+			target.group,
+			target.resource,
+			target.kind,
+			leafName,
+			target.snapshotUID,
+		)
 		names = append(names, name)
 
 		de := createdCopy[name]
 		require.NotNil(t, de, "production path must create the expected canonical DataExport")
-		require.Equal(t, target.uid, de.UID)
-		require.Equal(t, runID, de.Annotations["snapshot.deckhouse.io/download-run-id"])
+		require.Equal(t, target.dataExportUID, de.UID)
+		require.Equal(t, runID, de.Annotations[runOwnerAnnotationKey])
+		require.Equal(t, string(target.snapshotUID), de.Annotations[targetUIDAnnotationKey])
 		require.Equal(t, deapi.TargetRefSpec{
 			Group:    target.group,
 			Resource: target.resource,
@@ -833,8 +850,8 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 
 		record, ok := deletedCopy[name]
 		require.True(t, ok, "each acquired DataExport must be independently cleaned up")
-		require.Equal(t, target.uid, record.uid)
-		require.Equal(t, target.uid, record.preconditionUID,
+		require.Equal(t, target.dataExportUID, record.uid)
+		require.Equal(t, target.dataExportUID, record.preconditionUID,
 			"cleanup must use the exact acquired UID as its delete precondition")
 
 		remaining := new(deapi.DataExport)
@@ -843,6 +860,363 @@ func TestPipeline_ProductionMixedGVKUsesDistinctOwnedDataExports(t *testing.T) {
 	}
 
 	require.NotEqual(t, names[0], names[1], "same-name leaves with different GVK must never alias")
+}
+
+func TestPipeline_ProductionSnapshotUIDRecreationIsolated(t *testing.T) {
+	t.Parallel()
+
+	const (
+		uidA   = types.UID("uid-snapshot-a")
+		uidB   = types.UID("uid-snapshot-b")
+		runA   = "run-snapshot-a"
+		runB   = "run-snapshot-b"
+		deUIDA = types.UID("uid-dataexport-a")
+		deUIDB = types.UID("uid-dataexport-b")
+	)
+
+	type serverEvidence struct {
+		server   *httptest.Server
+		requests atomic.Int64
+	}
+
+	servers := map[types.UID]*serverEvidence{}
+	for _, targetUID := range []types.UID{uidA, uidB} {
+		evidence := new(serverEvidence)
+		evidence.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			evidence.requests.Add(1)
+			http.ServeContent(w, r, "data", time.Time{}, bytes.NewReader(bytes.Repeat([]byte(targetUID), 40)))
+		}))
+		t.Cleanup(evidence.server.Close)
+
+		servers[targetUID] = evidence
+	}
+
+	root := snapObj{
+		apiVersion: storageAPIVersion,
+		kind:       "Snapshot",
+		namespace:  testNS,
+		name:       rootSnapshot,
+		uid:        "uid-recreation-root",
+		sourceRef:  namespaceSourceRefMap(testNS, "uid-ns"),
+		children:   []map[string]interface{}{childRefMap(childAPIVersion, childKind, diskSnapName)},
+	}.build()
+	childA := snapObj{
+		apiVersion: childAPIVersion,
+		kind:       childKind,
+		namespace:  testNS,
+		name:       diskSnapName,
+		uid:        string(uidA),
+		data:       pvcData(testNS, sourcePVCName, "uid-pvc-a", "vsc-a"),
+	}.build()
+
+	type deleteEvidence struct {
+		uid          types.UID
+		precondition types.UID
+	}
+
+	var (
+		evidenceMu sync.Mutex
+		created    = make(map[string]*deapi.DataExport, 2)
+		deleted    = make(map[string]deleteEvidence, 1)
+	)
+
+	c := fake.NewClientBuilder().
+		WithScheme(buildScheme(t)).
+		WithObjects(root, childA).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.CreateOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Create(ctx, obj, opts...)
+				}
+
+				targetUID := types.UID(de.Annotations[targetUIDAnnotationKey])
+				serverEvidence := servers[targetUID]
+				if serverEvidence == nil {
+					return fmt.Errorf("unexpected target UID annotation %q", targetUID)
+				}
+
+				switch targetUID {
+				case uidA:
+					de.UID = deUIDA
+				case uidB:
+					de.UID = deUIDB
+				}
+
+				certificate := serverEvidence.server.Certificate()
+				caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+				de.Status = deapi.DataExportStatus{
+					URL:        serverEvidence.server.URL,
+					CA:         base64.StdEncoding.EncodeToString(caPEM),
+					VolumeMode: "Block",
+					Conditions: []metav1.Condition{{
+						Type:   "Ready",
+						Status: metav1.ConditionTrue,
+						Reason: "PodReady",
+					}},
+				}
+
+				if err := cl.Create(ctx, de, opts...); err != nil {
+					return err
+				}
+
+				evidenceMu.Lock()
+				created[de.Name] = de.DeepCopy()
+				evidenceMu.Unlock()
+
+				return nil
+			},
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Delete(ctx, obj, opts...)
+				}
+
+				deleteOptions := client.DeleteOptions{}
+				deleteOptions.ApplyOptions(opts)
+				record := deleteEvidence{uid: de.UID}
+				if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+					record.precondition = *deleteOptions.Preconditions.UID
+				}
+
+				evidenceMu.Lock()
+				deleted[de.Name] = record
+				evidenceMu.Unlock()
+
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	baseConfig := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		AggClient: dataExportAggClient(t, dataExportTargetMapping{
+			apiVersion: childAPIVersion,
+			kind:       childKind,
+			resource:   "virtualdisksnapshots",
+		}),
+		ManifestSource:   testManifestSource(),
+		TransportClient:  authenticatedTestTransportClient(),
+		ReadinessTimeout: 5 * time.Second,
+		ReleaseTimeout:   time.Second,
+	}
+
+	cfgA := baseConfig
+	cfgA.OutputDir = t.TempDir()
+	cfgA.RunID = runA
+	cfgA.KeepExports = true
+	require.NoError(t, runPipeline(context.Background(), cfgA))
+
+	nameA := exporter.DataExportName(
+		testNS,
+		"demo.deckhouse.io",
+		"virtualdisksnapshots",
+		childKind,
+		diskSnapName,
+		uidA,
+	)
+	staleA := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameA}, staleA))
+	staleABefore := staleA.DeepCopy()
+	requestsAAfterFirstRun := servers[uidA].requests.Load()
+	require.Positive(t, requestsAAfterFirstRun)
+
+	require.NoError(t, c.Delete(context.Background(), childA))
+	childB := snapObj{
+		apiVersion: childAPIVersion,
+		kind:       childKind,
+		namespace:  testNS,
+		name:       diskSnapName,
+		uid:        string(uidB),
+		data:       pvcData(testNS, sourcePVCName, "uid-pvc-b", "vsc-b"),
+	}.build()
+	require.NoError(t, c.Create(context.Background(), childB))
+
+	cfgB := baseConfig
+	cfgB.OutputDir = t.TempDir()
+	cfgB.RunID = runB
+	require.NoError(t, runPipeline(context.Background(), cfgB))
+
+	nameB := exporter.DataExportName(
+		testNS,
+		"demo.deckhouse.io",
+		"virtualdisksnapshots",
+		childKind,
+		diskSnapName,
+		uidB,
+	)
+	require.NotEqual(t, nameA, nameB)
+	require.LessOrEqual(t, len(nameA), 63)
+	require.LessOrEqual(t, len(nameB), 63)
+	require.Empty(t, validation.IsDNS1123Label(nameA))
+	require.Empty(t, validation.IsDNS1123Label(nameB))
+	require.Equal(t, requestsAAfterFirstRun, servers[uidA].requests.Load(),
+		"UID B must never stream from stale UID A")
+	require.Positive(t, servers[uidB].requests.Load())
+
+	staleAAfter := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameA}, staleAAfter))
+	require.Equal(t, staleABefore, staleAAfter, "UID B must not mutate or delete stale UID A")
+
+	evidenceMu.Lock()
+	createdA := created[nameA]
+	createdB := created[nameB]
+	deletedCopy := deleted[nameB]
+	_, staleDeleted := deleted[nameA]
+	evidenceMu.Unlock()
+
+	require.NotNil(t, createdA)
+	require.NotNil(t, createdB)
+	require.Equal(t, deUIDA, createdA.UID)
+	require.Equal(t, string(uidA), createdA.Annotations[targetUIDAnnotationKey])
+	require.Equal(t, runA, createdA.Annotations[runOwnerAnnotationKey])
+	require.Equal(t, deUIDB, createdB.UID)
+	require.Equal(t, string(uidB), createdB.Annotations[targetUIDAnnotationKey])
+	require.Equal(t, runB, createdB.Annotations[runOwnerAnnotationKey])
+	require.Equal(t, createdA.Spec.TargetRef, createdB.Spec.TargetRef)
+	require.Equal(t, deUIDB, deletedCopy.uid)
+	require.Equal(t, deUIDB, deletedCopy.precondition)
+	require.False(t, staleDeleted)
+
+	remainingB := new(deapi.DataExport)
+	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: nameB}, remainingB)
+	require.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestPipeline_ProductionCreateGetCancellationCleansExactAcquisition(t *testing.T) {
+	t.Parallel()
+
+	const (
+		runID       = "run-create-get-cancel"
+		acquiredUID = types.UID("uid-created-before-get-cancel")
+	)
+
+	deName := diskSnapshotDataExportName()
+
+	var (
+		dataExportGets atomic.Int32
+		evidenceMu     sync.Mutex
+		created        *deapi.DataExport
+		deletedUID     types.UID
+		precondition   types.UID
+	)
+
+	c := buildFakeClientBuilder(t).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				key client.ObjectKey,
+				obj client.Object,
+				opts ...client.GetOption,
+			) error {
+				if _, ok := obj.(*deapi.DataExport); ok && key.Name == deName {
+					if dataExportGets.Add(1) == 2 {
+						return fmt.Errorf("deterministic post-create get cancellation: %w", context.Canceled)
+					}
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.CreateOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Create(ctx, obj, opts...)
+				}
+
+				de.UID = acquiredUID
+				if err := cl.Create(ctx, de, opts...); err != nil {
+					return err
+				}
+
+				evidenceMu.Lock()
+				created = de.DeepCopy()
+				evidenceMu.Unlock()
+
+				return nil
+			},
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if !ok {
+					return cl.Delete(ctx, obj, opts...)
+				}
+
+				deleteOptions := client.DeleteOptions{}
+				deleteOptions.ApplyOptions(opts)
+
+				evidenceMu.Lock()
+				deletedUID = de.UID
+				if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+					precondition = *deleteOptions.Preconditions.UID
+				}
+				evidenceMu.Unlock()
+
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	cfg := pipeline.Config{
+		Namespace:    testNS,
+		RootSnapshot: rootSnapshot,
+		OutputDir:    t.TempDir(),
+		Workers:      1,
+		KubeClient:   c,
+		AggClient: dataExportAggClient(t, dataExportTargetMapping{
+			apiVersion: childAPIVersion,
+			kind:       childKind,
+			resource:   "virtualdisksnapshots",
+		}),
+		ManifestSource:   testManifestSource(),
+		TransportClient:  authenticatedTestTransportClient(),
+		RunID:            runID,
+		ReadinessTimeout: time.Second,
+		ReleaseTimeout:   time.Second,
+	}
+
+	err := runPipeline(context.Background(), cfg)
+	require.ErrorIs(t, err, context.Canceled)
+
+	evidenceMu.Lock()
+	createdCopy := created
+	deletedUIDCopy := deletedUID
+	preconditionCopy := precondition
+	evidenceMu.Unlock()
+
+	require.NotNil(t, createdCopy)
+	require.Equal(t, acquiredUID, createdCopy.UID)
+	require.Equal(t, diskSnapUID, createdCopy.Annotations[targetUIDAnnotationKey])
+	require.Equal(t, runID, createdCopy.Annotations[runOwnerAnnotationKey])
+	require.Equal(t, acquiredUID, deletedUIDCopy)
+	require.Equal(t, acquiredUID, preconditionCopy)
+
+	remaining := new(deapi.DataExport)
+	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: deName}, remaining)
+	require.True(t, apierrors.IsNotFound(getErr))
 }
 
 func TestPipeline_ClosesExportHTTPClientsOnEveryTransferExit(t *testing.T) {
@@ -970,8 +1344,9 @@ func readyFilesystemDataExport(t *testing.T, srv *httptest.Server) *deapi.DataEx
 
 	return &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      diskSnapshotDataExportName(),
-			Namespace: testNS,
+			Name:        diskSnapshotDataExportName(),
+			Namespace:   testNS,
+			Annotations: map[string]string{targetUIDAnnotationKey: diskSnapUID},
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: "2h",
@@ -1392,10 +1767,13 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 	de := &deapi.DataExport{
 		TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        deName,
-			Namespace:   testNS,
-			UID:         "uid-open-error",
-			Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+			Name:      deName,
+			Namespace: testNS,
+			UID:       "uid-open-error",
+			Annotations: map[string]string{
+				runOwnerAnnotationKey:  runID,
+				targetUIDAnnotationKey: diskSnapUID,
+			},
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: "2h",
@@ -1433,6 +1811,7 @@ func TestPipeline_OpenExportErrorReleasesCleanly(t *testing.T) {
 				childKind,
 				leafRef.Name,
 				ttl,
+				exporter.WithTargetUID(types.UID(diskSnapUID)),
 				exporter.WithRunOwner(runID, slog.Default()),
 				exporter.WithAcquisition(&acquisition),
 			)
@@ -1510,10 +1889,13 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 	de := &deapi.DataExport{
 		TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        deName,
-			Namespace:   testNS,
-			UID:         "uid-slow-open",
-			Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+			Name:      deName,
+			Namespace: testNS,
+			UID:       "uid-slow-open",
+			Annotations: map[string]string{
+				runOwnerAnnotationKey:  runID,
+				targetUIDAnnotationKey: diskSnapUID,
+			},
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: "2h",
@@ -1558,6 +1940,7 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 				childKind,
 				leafRef.Name,
 				ttl,
+				exporter.WithTargetUID(types.UID(diskSnapUID)),
 				exporter.WithRunOwner(runID, slog.Default()),
 				exporter.WithAcquisition(&acquisition),
 			)
@@ -4619,10 +5002,13 @@ func TestPipeline_KeepExports(t *testing.T) {
 			de := &deapi.DataExport{
 				TypeMeta: metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"},
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        deName,
-					Namespace:   testNS,
-					UID:         "uid-keep-exports",
-					Annotations: map[string]string{"snapshot.deckhouse.io/download-run-id": runID},
+					Name:      deName,
+					Namespace: testNS,
+					UID:       "uid-keep-exports",
+					Annotations: map[string]string{
+						runOwnerAnnotationKey:  runID,
+						targetUIDAnnotationKey: diskSnapUID,
+					},
 				},
 				Spec: deapi.DataexportSpec{
 					TTL: "2h",
@@ -4662,6 +5048,7 @@ func TestPipeline_KeepExports(t *testing.T) {
 						childKind,
 						leafRef.Name,
 						ttl,
+						exporter.WithTargetUID(types.UID(diskSnapUID)),
 						exporter.WithRunOwner(runID, slog.Default()),
 						exporter.WithAcquisition(&acquisition),
 					)

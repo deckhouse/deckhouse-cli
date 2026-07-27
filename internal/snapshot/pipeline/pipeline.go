@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
@@ -166,7 +167,8 @@ func run(
 
 	cfg = applyDefaults(cfg)
 
-	if cfg.OpenExport == nil && cfg.OpenExportWithAcquisition == nil {
+	if cfg.OpenExport == nil && cfg.OpenExportWithAcquisition == nil &&
+		cfg.OpenExportWithTargetAcquisition == nil {
 		return fmt.Errorf(
 			"pipeline: export opener must be set (supply TransportClient+AggClient or set OpenExport directly)",
 		)
@@ -1015,6 +1017,7 @@ func processVolumeNode(
 			cfg,
 			destination,
 			task.node.Ref(),
+			task.node.UID,
 			task.node.DisplayLabel(),
 			task.node.Namespace,
 			dest,
@@ -1122,6 +1125,7 @@ func downloadOwnDataRooted(
 		cfg,
 		destination,
 		node.Ref(),
+		node.UID,
 		node.DisplayLabel(),
 		node.Namespace,
 		dest,
@@ -1252,6 +1256,7 @@ func downloadVolumeBinding(
 	cfg Config,
 	destination *archive.RootedDestination,
 	leafRef aggapi.NodeRef,
+	targetUID types.UID,
 	displayLabel string,
 	namespace string,
 	dest volumeDestPaths,
@@ -1298,9 +1303,12 @@ func downloadVolumeBinding(
 		err         error
 	)
 
-	if cfg.OpenExportWithAcquisition != nil {
+	switch {
+	case cfg.OpenExportWithTargetAcquisition != nil:
+		exp, acquisition, err = cfg.OpenExportWithTargetAcquisition(ctx, namespace, leafRef, targetUID, cfg.TTL)
+	case cfg.OpenExportWithAcquisition != nil:
 		exp, acquisition, err = cfg.OpenExportWithAcquisition(ctx, namespace, leafRef, cfg.TTL)
-	} else {
+	default:
 		exp, err = cfg.OpenExport(ctx, namespace, leafRef, cfg.TTL)
 	}
 

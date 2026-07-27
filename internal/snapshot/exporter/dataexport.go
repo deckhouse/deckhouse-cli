@@ -46,6 +46,16 @@ var ErrExpired = errors.New("DataExport expired")
 // silently reusing or deleting it.
 var ErrTargetRefMismatch = errors.New("existing DataExport targets a different object")
 
+// ErrTargetUIDMismatch is returned by EnsureDataExport when an observed
+// DataExport is not stamped for the exact Snapshot CR UID requested by the
+// caller. The targetRef contract does not carry UID, so the client-owned
+// annotation is the authoritative lifecycle discriminator.
+var ErrTargetUIDMismatch = errors.New("existing DataExport targets a different object UID")
+
+// ErrTargetUIDRequired is returned when a caller attempts to open a DataExport
+// lifecycle without the exact Snapshot CR UID.
+var ErrTargetUIDRequired = errors.New("snapshot target UID is required")
+
 // defaultDataExportTTL is the fallback TTL used for DataExport when the caller
 // passes an empty string. Snapshot transfers can be large, so we use a longer
 // default than the 2-minute interactive default.
@@ -91,19 +101,25 @@ const dataExportGoneLogEveryN = 30
 // (inv #10b). The value is an opaque per-run hex ID (pipeline.Config.RunID).
 const runOwnerAnnotation = "snapshot.deckhouse.io/download-run-id"
 
+// targetUIDAnnotation binds a DataExport to the exact Snapshot CR incarnation.
+// DataExport targetRef has no UID field, so GVK/name alone cannot distinguish a
+// deleted and recreated Snapshot.
+const targetUIDAnnotation = "snapshot.deckhouse.io/target-uid"
+
 // DataExportName derives a deterministic DataExport CR name from the canonical
-// namespaced target identity. The readable leaf prefix is normalized only for
-// display; the hash covers the original, unnormalized identity so identities
-// that normalize alike remain distinct. The result is a DNS-1123 label no
-// longer than 63 bytes, which also satisfies Kubernetes object-name limits.
-func DataExportName(namespace, group, resource, kind, leafName string) string {
+// namespaced target identity, including the exact Snapshot CR UID. The readable
+// leaf prefix is normalized only for display; the hash covers the original,
+// unnormalized identity so identities that normalize alike remain distinct.
+// The result is a DNS-1123 label no longer than 63 bytes, which also satisfies
+// Kubernetes object-name limits.
+func DataExportName(namespace, group, resource, kind, leafName string, targetUID types.UID) string {
 	const (
 		prefix       = "de-"
 		hashLength   = 20
 		maxNameBytes = 63
 	)
 
-	identity := strings.Join([]string{namespace, group, resource, kind, leafName}, "\x00")
+	identity := strings.Join([]string{namespace, group, resource, kind, leafName, string(targetUID)}, "\x00")
 	sum := sha256.Sum256([]byte(identity))
 	hash := fmt.Sprintf("%x", sum[:])[:hashLength]
 
@@ -188,9 +204,18 @@ func targetRefMismatchError(deName string, got deapi.TargetRefSpec, group, resou
 	)
 }
 
+func targetUIDMismatchError(deName string, got string, want types.UID) error {
+	return fmt.Errorf(
+		"%w: DataExport %q has target UID annotation %q, but this request is for UID %q; "+
+			"leave the existing DataExport untouched and retry with its original Snapshot or remove it explicitly",
+		ErrTargetUIDMismatch, deName, got, want,
+	)
+}
+
 // ensureOptions carries optional per-run ownership context for EnsureDataExport.
 type ensureOptions struct {
 	runID              string
+	targetUID          types.UID
 	log                *slog.Logger
 	terminatingTimeout time.Duration
 	acquisition        **DataExportAcquisition
@@ -208,6 +233,7 @@ type DataExportAcquisition struct {
 	name               string
 	uid                types.UID
 	targetRef          deapi.TargetRefSpec
+	targetUID          types.UID
 	runID              string
 	ownerAtAcquisition string
 }
@@ -239,12 +265,29 @@ func (a *DataExportAcquisition) TargetRef() deapi.TargetRefSpec {
 	return a.targetRef
 }
 
+// TargetUID returns the exact Snapshot CR UID bound to the acquisition.
+func (a *DataExportAcquisition) TargetUID() types.UID {
+	if a == nil {
+		return ""
+	}
+
+	return a.targetUID
+}
+
 // WithAcquisition records operation-scoped cleanup evidence when
 // EnsureDataExport successfully returns an exact DataExport. The output remains
 // nil on every pre-acquisition failure, including a targetRef mismatch.
 func WithAcquisition(out **DataExportAcquisition) EnsureOption {
 	return func(o *ensureOptions) {
 		o.acquisition = out
+	}
+}
+
+// WithTargetUID binds the DataExport lifecycle to the exact Snapshot CR
+// incarnation. EnsureDataExport rejects calls that omit it.
+func WithTargetUID(targetUID types.UID) EnsureOption {
+	return func(o *ensureOptions) {
+		o.targetUID = targetUID
 	}
 }
 
@@ -293,6 +336,7 @@ func (o ensureOptions) recordAcquisition(de *deapi.DataExport) error {
 		name:               de.Name,
 		uid:                de.UID,
 		targetRef:          de.Spec.TargetRef,
+		targetUID:          o.targetUID,
 		runID:              o.runID,
 		ownerAtAcquisition: de.Annotations[runOwnerAnnotation],
 	}
@@ -319,19 +363,21 @@ func (o ensureOptions) warnIfForeign(de *deapi.DataExport, deName string) {
 		slog.String("run_id", o.runID))
 }
 
-// ownerAnnotations returns the annotation map stamping runID as the owning run,
-// or nil when runID is empty (legacy callers that do not track ownership).
-func ownerAnnotations(runID string) map[string]string {
-	if runID == "" {
-		return nil
+// lifecycleAnnotations always stamps the target Snapshot UID and additionally
+// stamps runID when the caller tracks per-run ownership.
+func lifecycleAnnotations(runID string, targetUID types.UID) map[string]string {
+	annotations := map[string]string{targetUIDAnnotation: string(targetUID)}
+	if runID != "" {
+		annotations[runOwnerAnnotation] = runID
 	}
 
-	return map[string]string{runOwnerAnnotation: runID}
+	return annotations
 }
 
 // EnsureDataExport idempotently creates a DataExport in namespace targeting
-// the snapshot leaf CR identified by {group, kind, leafName} with the given
-// TTL (empty → "2h"). Returns the DataExport object (newly created or pre-existing).
+// the snapshot leaf CR identified by {group, kind, leafName, target UID} with
+// the given TTL (empty → "2h"). Returns the DataExport object (newly created
+// or pre-existing).
 //
 // group and kind must identify a namespaced snapshot CR (e.g.
 // "snapshot.storage.k8s.io" / "VolumeSnapshot" for a CSI VolumeSnapshot leaf, or
@@ -363,7 +409,11 @@ func EnsureDataExport(
 		*o.acquisition = nil
 	}
 
-	deName := DataExportName(namespace, group, resource, kind, leafName)
+	if o.targetUID == "" {
+		return nil, fmt.Errorf("%w for %s/%s", ErrTargetUIDRequired, namespace, leafName)
+	}
+
+	deName := DataExportName(namespace, group, resource, kind, leafName, o.targetUID)
 
 	existing := new(deapi.DataExport)
 
@@ -374,6 +424,10 @@ func EnsureDataExport(
 		// not be deleted, waited out, or otherwise mutated to make progress.
 		if !targetRefMatches(existing.Spec.TargetRef, group, resource, kind, leafName) {
 			return nil, targetRefMismatchError(deName, existing.Spec.TargetRef, group, resource, kind, leafName)
+		}
+
+		if existing.Annotations[targetUIDAnnotation] != string(o.targetUID) {
+			return nil, targetUIDMismatchError(deName, existing.Annotations[targetUIDAnnotation], o.targetUID)
 		}
 
 		switch {
@@ -443,7 +497,7 @@ func EnsureDataExport(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        deName,
 			Namespace:   namespace,
-			Annotations: ownerAnnotations(o.runID),
+			Annotations: lifecycleAnnotations(o.runID, o.targetUID),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -456,8 +510,21 @@ func EnsureDataExport(
 		},
 	}
 
-	if err := c.Create(ctx, de); err != nil && !kubeerrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("create DataExport %q: %w", deName, err)
+	createErr := c.Create(ctx, de)
+	created := createErr == nil
+
+	switch {
+	case created:
+		// Create returns the API-server-populated object. Retain its exact UID
+		// before any subsequent call can fail or observe cancellation.
+		if err := o.recordAcquisition(de); err != nil {
+			return nil, err
+		}
+	case kubeerrors.IsAlreadyExists(createErr):
+		// This operation did not create the object. Acquisition remains nil
+		// until the re-fetched object passes every identity check below.
+	default:
+		return nil, fmt.Errorf("create DataExport %q: %w", deName, createErr)
 	}
 
 	// Re-fetch so the returned object carries the server-assigned resource version.
@@ -480,7 +547,18 @@ func EnsureDataExport(
 		return nil, targetRefMismatchError(deName, fetched.Spec.TargetRef, group, resource, kind, leafName)
 	}
 
-	if err := o.recordAcquisition(fetched); err != nil {
+	if fetched.Annotations[targetUIDAnnotation] != string(o.targetUID) {
+		return nil, targetUIDMismatchError(deName, fetched.Annotations[targetUIDAnnotation], o.targetUID)
+	}
+
+	if created {
+		if fetched.UID != de.UID {
+			return nil, fmt.Errorf(
+				"DataExport %q UID changed after create: created %q, fetched %q",
+				deName, de.UID, fetched.UID,
+			)
+		}
+	} else if err := o.recordAcquisition(fetched); err != nil {
 		return nil, err
 	}
 
@@ -655,8 +733,9 @@ func WaitReady(
 
 // ReleaseDataExport deletes only the exact DataExport represented by acquisition.
 // Deterministic name or matching run annotation alone never grants authority.
-// UID, targetRef, and observed owner must all still match; a foreign owner is
-// never deleted. UID-precondition conflicts and NotFound are idempotent success.
+// UID, targetRef, target UID annotation, and observed owner must all still
+// match; a foreign owner is never deleted. UID-precondition conflicts and
+// NotFound are idempotent success.
 func ReleaseDataExport(
 	ctx context.Context,
 	c client.Client,
@@ -679,14 +758,19 @@ func ReleaseDataExport(
 	}
 
 	owner := de.Annotations[runOwnerAnnotation]
+
+	targetUID := types.UID(de.Annotations[targetUIDAnnotation])
 	if de.UID != acquisition.uid ||
 		de.Spec.TargetRef != acquisition.targetRef ||
+		targetUID != acquisition.targetUID ||
 		owner != acquisition.ownerAtAcquisition {
 		if log != nil {
 			log.Warn("skipping DataExport release because acquired identity changed",
 				slog.String("name", acquisition.name),
 				slog.String("acquired_uid", string(acquisition.uid)),
 				slog.String("current_uid", string(de.UID)),
+				slog.String("acquired_target_uid", string(acquisition.targetUID)),
+				slog.String("target_uid", string(targetUID)),
 				slog.String("acquired_owner", acquisition.ownerAtAcquisition),
 				slog.String("owner", owner),
 				slog.String("run_id", acquisition.runID))

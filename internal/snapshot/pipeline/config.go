@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/semaphore"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/deckhouse-cli/internal/progress"
@@ -141,14 +142,26 @@ type Config struct {
 	// cleanup evidence for the exact DataExport acquired while opening it. The
 	// acquisition may be non-nil together with an error when EnsureDataExport
 	// succeeded but WaitReady or transport setup failed; callers must retain it
-	// so that exact object is still cleaned up. The production path populates
-	// this callback. Tests and alternative transports that need cleanup evidence
-	// may supply it directly; OpenExport remains the compatibility path for
-	// implementations that do not manage DataExport lifecycle.
+	// so that exact object is still cleaned up. Tests and alternative transports
+	// that need cleanup evidence may supply it directly; the UID-aware production
+	// path uses OpenExportWithTargetAcquisition. OpenExport remains the
+	// compatibility path for implementations that do not manage DataExport
+	// lifecycle.
 	OpenExportWithAcquisition func(
 		ctx context.Context,
 		namespace string,
 		leafRef aggapi.NodeRef,
+		ttl string,
+	) (*exporter.Export, *exporter.DataExportAcquisition, error)
+
+	// OpenExportWithTargetAcquisition is the UID-aware production lifecycle
+	// callback. It carries the exact Snapshot CR UID in addition to leafRef so
+	// DataExport naming and adoption cannot cross Snapshot incarnations.
+	OpenExportWithTargetAcquisition func(
+		ctx context.Context,
+		namespace string,
+		leafRef aggapi.NodeRef,
+		targetUID types.UID,
 		ttl string,
 	) (*exporter.Export, *exporter.DataExportAcquisition, error)
 
@@ -252,6 +265,7 @@ func applyDefaults(cfg Config) Config {
 	}
 
 	if cfg.OpenExport == nil && cfg.OpenExportWithAcquisition == nil &&
+		cfg.OpenExportWithTargetAcquisition == nil &&
 		cfg.TransportClient != nil && cfg.AggClient != nil {
 		sc := cfg.TransportClient
 		log := cfg.Log
@@ -260,10 +274,11 @@ func applyDefaults(cfg Config) Config {
 		aggClient := cfg.AggClient
 		runID := cfg.RunID
 
-		cfg.OpenExportWithAcquisition = func(
+		cfg.OpenExportWithTargetAcquisition = func(
 			ctx context.Context,
 			namespace string,
 			leafRef aggapi.NodeRef,
+			targetUID types.UID,
 			ttl string,
 		) (*exporter.Export, *exporter.DataExportAcquisition, error) {
 			group, resource, kind, err := aggClient.LeafDataExportTarget(leafRef)
@@ -272,6 +287,7 @@ func applyDefaults(cfg Config) Config {
 			}
 
 			owner := exporter.WithRunOwner(runID, log)
+			target := exporter.WithTargetUID(targetUID)
 			termWait := exporter.WithTerminatingWaitTimeout(timeout)
 
 			var acquisition *exporter.DataExportAcquisition
@@ -290,6 +306,7 @@ func applyDefaults(cfg Config) Config {
 				leafRef.Name,
 				ttl,
 				sc,
+				target,
 				owner,
 				termWait,
 				exporter.WithAcquisition(&acquisition),

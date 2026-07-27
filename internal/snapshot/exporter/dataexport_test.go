@@ -21,8 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +49,10 @@ import (
 // DataExport CRs a download run creates. It is duplicated here as a literal (the
 // production constant is unexported) so a rename of the on-wire key fails a test.
 const runOwnerAnnotationKey = "snapshot.deckhouse.io/download-run-id"
+
+const targetUIDAnnotationKey = "snapshot.deckhouse.io/target-uid"
+
+const testTargetUID types.UID = "uid-target-snapshot"
 
 // captureWarnLogger returns a logger that writes WARN+ records as text into buf so
 // tests can assert the foreign-owner adoption/skip messages and their attributes.
@@ -78,7 +84,33 @@ func volumeSnapshotDataExportName(namespace, leafName string) string {
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
+}
+
+func ensureDataExport(
+	ctx context.Context,
+	c client.Client,
+	namespace,
+	group,
+	resource,
+	kind,
+	leafName,
+	ttl string,
+	opts ...exporter.EnsureOption,
+) (*deapi.DataExport, error) {
+	opts = append(opts, exporter.WithTargetUID(testTargetUID))
+
+	return exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl, opts...)
+}
+
+func targetAnnotations(runID string) map[string]string {
+	annotations := map[string]string{targetUIDAnnotationKey: string(testTargetUID)}
+	if runID != "" {
+		annotations[runOwnerAnnotationKey] = runID
+	}
+
+	return annotations
 }
 
 func volumeSnapshotTargetRef(leafName string) deapi.TargetRefSpec {
@@ -139,8 +171,8 @@ func TestDataExportName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := exporter.DataExportName(tc.namespace, tc.group, tc.resource, tc.kind, tc.leafName)
-			again := exporter.DataExportName(tc.namespace, tc.group, tc.resource, tc.kind, tc.leafName)
+			got := exporter.DataExportName(tc.namespace, tc.group, tc.resource, tc.kind, tc.leafName, testTargetUID)
+			again := exporter.DataExportName(tc.namespace, tc.group, tc.resource, tc.kind, tc.leafName, testTargetUID)
 
 			assert.Equal(t, got, again, "the same canonical identity must be deterministic")
 			assert.LessOrEqual(t, len(got), 63, "name must fit the DNS-1123 label boundary")
@@ -148,21 +180,37 @@ func TestDataExportName(t *testing.T) {
 		})
 	}
 
-	base := exporter.DataExportName("tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "same-name")
+	base := exporter.DataExportName(
+		"tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "same-name", testTargetUID)
 	distinct := map[string]string{
-		"namespace": exporter.DataExportName("tenant-b", "demo.example.io", "widgets", "WidgetSnapshot", "same-name"),
-		"group":     exporter.DataExportName("tenant-a", "other.example.io", "widgets", "WidgetSnapshot", "same-name"),
-		"resource":  exporter.DataExportName("tenant-a", "demo.example.io", "otherwidgets", "WidgetSnapshot", "same-name"),
-		"kind":      exporter.DataExportName("tenant-a", "demo.example.io", "widgets", "OtherSnapshot", "same-name"),
-		"name":      exporter.DataExportName("tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "other-name"),
+		"namespace": exporter.DataExportName(
+			"tenant-b", "demo.example.io", "widgets", "WidgetSnapshot", "same-name", testTargetUID),
+		"group": exporter.DataExportName(
+			"tenant-a", "other.example.io", "widgets", "WidgetSnapshot", "same-name", testTargetUID),
+		"resource": exporter.DataExportName(
+			"tenant-a", "demo.example.io", "otherwidgets", "WidgetSnapshot", "same-name", testTargetUID),
+		"kind": exporter.DataExportName(
+			"tenant-a", "demo.example.io", "widgets", "OtherSnapshot", "same-name", testTargetUID),
+		"name": exporter.DataExportName(
+			"tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "other-name", testTargetUID),
+		"uid": exporter.DataExportName(
+			"tenant-a",
+			"demo.example.io",
+			"widgets",
+			"WidgetSnapshot",
+			"same-name",
+			types.UID("uid-other"),
+		),
 	}
 
 	for dimension, got := range distinct {
 		assert.NotEqual(t, base, got, "changing %s must change the DataExport name", dimension)
 	}
 
-	normalizedA := exporter.DataExportName("tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "disk_snap")
-	normalizedB := exporter.DataExportName("tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "disk-snap")
+	normalizedA := exporter.DataExportName(
+		"tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "disk_snap", testTargetUID)
+	normalizedB := exporter.DataExportName(
+		"tenant-a", "demo.example.io", "widgets", "WidgetSnapshot", "disk-snap", testTargetUID)
 	assert.NotEqual(t, normalizedA, normalizedB,
 		"identities that normalize to the same readable prefix must remain distinct")
 }
@@ -184,11 +232,11 @@ func TestEnsureDataExport_Creates(t *testing.T) {
 
 	ctx := context.Background()
 
-	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	de, err := ensureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, de)
 
-	assert.Equal(t, exporter.DataExportName(namespace, group, resource, kind, leafName), de.Name)
+	assert.Equal(t, exporter.DataExportName(namespace, group, resource, kind, leafName, testTargetUID), de.Name)
 	assert.Equal(t, namespace, de.Namespace)
 	assert.Equal(t, group, de.Spec.TargetRef.Group)
 	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
@@ -223,11 +271,11 @@ func TestEnsureDataExport_DomainLeaf(t *testing.T) {
 
 	ctx := context.Background()
 
-	de, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	de, err := ensureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, de)
 
-	assert.Equal(t, exporter.DataExportName(namespace, group, resource, kind, leafName), de.Name)
+	assert.Equal(t, exporter.DataExportName(namespace, group, resource, kind, leafName, testTargetUID), de.Name)
 	assert.Equal(t, group, de.Spec.TargetRef.Group)
 	assert.Equal(t, resource, de.Spec.TargetRef.Resource)
 	assert.Equal(t, kind, de.Spec.TargetRef.Kind)
@@ -240,7 +288,7 @@ func TestEnsureDataExport_DefaultTTL(t *testing.T) {
 	scheme := newDEScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	de, err := exporter.EnsureDataExport(context.Background(), c, "ns",
+	de, err := ensureDataExport(context.Background(), c, "ns",
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, "leaf-vs", "")
 	require.NoError(t, err)
 
@@ -261,11 +309,11 @@ func TestEnsureDataExport_Idempotent(t *testing.T) {
 
 	ctx := context.Background()
 
-	de1, err := exporter.EnsureDataExport(ctx, c, namespace,
+	de1, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h")
 	require.NoError(t, err)
 
-	de2, err := exporter.EnsureDataExport(ctx, c, namespace,
+	de2, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h")
 	require.NoError(t, err)
 
@@ -289,14 +337,15 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 		ttl       = "1h"
 	)
 
-	deName := exporter.DataExportName(namespace, group, resource, kind, leafName)
+	deName := exporter.DataExportName(namespace, group, resource, kind, leafName, testTargetUID)
 
 	scheme := newDEScheme(t)
 
 	stale := &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      deName,
-			Namespace: namespace,
+			Name:        deName,
+			Namespace:   namespace,
+			Annotations: targetAnnotations(""),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -324,7 +373,7 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 
 	ctx := context.Background()
 
-	fresh, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	fresh, err := ensureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
 	require.NoError(t, err)
 	require.NotNil(t, fresh)
 
@@ -341,7 +390,7 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 
 	// A second call against the now-fresh (non-Expired) object must be idempotent,
 	// matching TestEnsureDataExport_Idempotent's happy-path contract.
-	again, err := exporter.EnsureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
+	again, err := ensureDataExport(ctx, c, namespace, group, resource, kind, leafName, ttl)
 	require.NoError(t, err)
 	assert.Equal(t, fresh.Name, again.Name)
 	assert.Equal(t, fresh.ResourceVersion, again.ResourceVersion)
@@ -356,6 +405,7 @@ func makeReadyDE(namespace, leafName, baseURL, volumeMode string) *deapi.DataExp
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
 
 	return &deapi.DataExport{
@@ -423,6 +473,7 @@ func TestWaitReady_Expired(t *testing.T) {
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
 
 	scheme := newDEScheme(t)
@@ -468,6 +519,7 @@ func TestWaitReady_DeadlineExceeded(t *testing.T) {
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
 
 	scheme := newDEScheme(t)
@@ -508,6 +560,7 @@ func TestWaitReady_DeadlineError_ContainsHintAndStatus(t *testing.T) {
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
 
 	scheme := newDEScheme(t)
@@ -559,6 +612,7 @@ func TestWaitReady_ContextCancelled(t *testing.T) {
 		aggapi.VolumeSnapshotResource,
 		aggapi.VolumeSnapshotKind,
 		leafName,
+		testTargetUID,
 	)
 
 	scheme := newDEScheme(t)
@@ -595,9 +649,10 @@ func TestReleaseDataExport_Deletes(t *testing.T) {
 
 	de := &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      deName,
-			Namespace: namespace,
-			UID:       types.UID("uid-release"),
+			Name:        deName,
+			Namespace:   namespace,
+			UID:         types.UID("uid-release"),
+			Annotations: targetAnnotations(""),
 		},
 		Spec: deapi.DataexportSpec{TTL: "1h", TargetRef: volumeSnapshotTargetRef(leafName)},
 	}
@@ -608,7 +663,7 @@ func TestReleaseDataExport_Deletes(t *testing.T) {
 
 	var acquisition *exporter.DataExportAcquisition
 
-	_, err := exporter.EnsureDataExport(ctx, c, namespace,
+	_, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithAcquisition(&acquisition))
 	require.NoError(t, err)
@@ -633,9 +688,10 @@ func TestReleaseDataExport_Idempotent(t *testing.T) {
 	scheme := newDEScheme(t)
 	de := &deapi.DataExport{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      volumeSnapshotDataExportName(namespace, leafName),
-			Namespace: namespace,
-			UID:       types.UID("uid-idempotent-release"),
+			Name:        volumeSnapshotDataExportName(namespace, leafName),
+			Namespace:   namespace,
+			UID:         types.UID("uid-idempotent-release"),
+			Annotations: targetAnnotations(""),
 		},
 		Spec: deapi.DataexportSpec{TTL: "1h", TargetRef: volumeSnapshotTargetRef(leafName)},
 	}
@@ -643,7 +699,7 @@ func TestReleaseDataExport_Idempotent(t *testing.T) {
 
 	var acquisition *exporter.DataExportAcquisition
 
-	_, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	_, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithAcquisition(&acquisition))
 	require.NoError(t, err)
@@ -667,7 +723,7 @@ func TestEnsureDataExport_StampsRunOwnerOnCreate(t *testing.T) {
 	scheme := newDEScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	de, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	de, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithRunOwner(runID, slog.Default()))
 	require.NoError(t, err)
@@ -701,7 +757,7 @@ func TestEnsureDataExport_AdoptsForeignLiveCRWithWarn(t *testing.T) {
 			Name:        deName,
 			Namespace:   namespace,
 			UID:         types.UID("uid-foreign-owner"),
-			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+			Annotations: targetAnnotations(ownerRun),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: "1h",
@@ -721,7 +777,7 @@ func TestEnsureDataExport_AdoptsForeignLiveCRWithWarn(t *testing.T) {
 	var buf bytes.Buffer
 	var acquisition *exporter.DataExportAcquisition
 
-	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+	got, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithRunOwner(adopterRun, captureWarnLogger(&buf)),
 		exporter.WithAcquisition(&acquisition))
@@ -766,7 +822,7 @@ func TestReleaseDataExport_OwnerDeletesWithUIDPrecondition(t *testing.T) {
 			Name:        deName,
 			Namespace:   namespace,
 			UID:         types.UID("uid-123"),
-			Annotations: map[string]string{runOwnerAnnotationKey: runID},
+			Annotations: targetAnnotations(runID),
 		},
 		Spec: deapi.DataexportSpec{TTL: "1h", TargetRef: volumeSnapshotTargetRef(leafName)},
 	}
@@ -795,7 +851,7 @@ func TestReleaseDataExport_OwnerDeletesWithUIDPrecondition(t *testing.T) {
 
 	var acquisition *exporter.DataExportAcquisition
 
-	_, err := exporter.EnsureDataExport(ctx, c, namespace,
+	_, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithRunOwner(runID, slog.Default()),
 		exporter.WithAcquisition(&acquisition))
@@ -833,7 +889,7 @@ func TestReleaseDataExport_UIDConflictTreatedAsSuccess(t *testing.T) {
 			Name:        deName,
 			Namespace:   namespace,
 			UID:         types.UID("uid-old"),
-			Annotations: map[string]string{runOwnerAnnotationKey: runID},
+			Annotations: targetAnnotations(runID),
 		},
 		Spec: deapi.DataexportSpec{TTL: "1h", TargetRef: volumeSnapshotTargetRef(leafName)},
 	}
@@ -849,7 +905,7 @@ func TestReleaseDataExport_UIDConflictTreatedAsSuccess(t *testing.T) {
 
 	var acquisition *exporter.DataExportAcquisition
 
-	_, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	_, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 		exporter.WithRunOwner(runID, slog.Default()),
 		exporter.WithAcquisition(&acquisition))
@@ -890,6 +946,12 @@ func TestReleaseDataExport_ChangedAcquiredIdentityIsNotDeleted(t *testing.T) {
 				de.Spec.TargetRef.Kind = "OtherSnapshot"
 			},
 		},
+		{
+			name: "target UID annotation changed",
+			mutate: func(de *deapi.DataExport) {
+				de.Annotations[targetUIDAnnotationKey] = "uid-recreated-snapshot"
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -902,7 +964,7 @@ func TestReleaseDataExport_ChangedAcquiredIdentityIsNotDeleted(t *testing.T) {
 					Name:        deName,
 					Namespace:   namespace,
 					UID:         types.UID("uid-acquired"),
-					Annotations: map[string]string{runOwnerAnnotationKey: runID},
+					Annotations: targetAnnotations(runID),
 				},
 				Spec: deapi.DataexportSpec{TTL: "1h", TargetRef: volumeSnapshotTargetRef(leafName)},
 			}
@@ -924,7 +986,7 @@ func TestReleaseDataExport_ChangedAcquiredIdentityIsNotDeleted(t *testing.T) {
 
 			var acquisition *exporter.DataExportAcquisition
 
-			_, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+			_, err := ensureDataExport(context.Background(), c, namespace,
 				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
 				exporter.WithRunOwner(runID, slog.Default()),
 				exporter.WithAcquisition(&acquisition))
@@ -972,7 +1034,7 @@ func TestEnsureDataExport_ExpiredForeignCRRecreatedWithOwnership(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        deName,
 			Namespace:   namespace,
-			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+			Annotations: targetAnnotations(ownerRun),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -1000,7 +1062,7 @@ func TestEnsureDataExport_ExpiredForeignCRRecreatedWithOwnership(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	fresh, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	fresh, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(freshRun, captureWarnLogger(&buf)))
 	require.NoError(t, err)
@@ -1052,7 +1114,7 @@ func TestEnsureDataExport_WaitsOutTerminatingCRThenCreatesStamped(t *testing.T) 
 			Namespace:         namespace,
 			DeletionTimestamp: &now,
 			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
-			Annotations:       map[string]string{runOwnerAnnotationKey: oldOwner},
+			Annotations:       targetAnnotations(oldOwner),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -1091,7 +1153,7 @@ func TestEnsureDataExport_WaitsOutTerminatingCRThenCreatesStamped(t *testing.T) 
 
 	var buf bytes.Buffer
 
-	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	got, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(newOwner, captureWarnLogger(&buf)))
 	require.NoError(t, err)
@@ -1130,6 +1192,7 @@ func TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline(t *testing.T)
 			Namespace:         namespace,
 			DeletionTimestamp: &now,
 			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
+			Annotations:       targetAnnotations(""),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -1147,7 +1210,7 @@ func TestEnsureDataExport_TerminatingCRNeverGoneReturnsCtxDeadline(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+	got, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl)
 	require.Error(t, err)
 	assert.Nil(t, got, "no CR may be returned while the terminating CR is still present")
@@ -1169,6 +1232,7 @@ func makeStuckTerminatingDE(namespace, leafName string) *deapi.DataExport {
 			Namespace:         namespace,
 			DeletionTimestamp: &now,
 			Finalizers:        []string{"dataexport.deckhouse.io/test-hold"},
+			Annotations:       targetAnnotations(""),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: "1h",
@@ -1207,7 +1271,7 @@ func TestEnsureDataExport_TerminatingWaitBoundedByOption(t *testing.T) {
 
 	// A deadline-less parent ctx (the raw run ctx the pipeline stamp-Ensure used):
 	// only WithTerminatingWaitTimeout bounds the wait here.
-	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	got, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithTerminatingWaitTimeout(50*time.Millisecond))
 	elapsed := time.Since(start)
@@ -1244,7 +1308,7 @@ func TestEnsureDataExport_TerminatingWaitLogsPeriodically(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	_, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	_, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(runID, captureInfoLogger(&buf)),
 		exporter.WithTerminatingWaitTimeout(50*time.Millisecond))
@@ -1349,7 +1413,7 @@ func TestEnsureDataExport_RefusesTargetRefMismatch(t *testing.T) {
 			ctx := context.Background()
 			var acquisition *exporter.DataExportAcquisition
 
-			got, err := exporter.EnsureDataExport(ctx, c, namespace,
+			got, err := ensureDataExport(ctx, c, namespace,
 				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 				exporter.WithRunOwner(runID, slog.Default()),
 				exporter.WithAcquisition(&acquisition))
@@ -1405,7 +1469,7 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAcrossRuns(t *testing.T) {
 			Name:        deName,
 			Namespace:   namespace,
 			UID:         types.UID("uid-match"),
-			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+			Annotations: targetAnnotations(ownerRun),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -1433,7 +1497,7 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAcrossRuns(t *testing.T) {
 
 	var buf bytes.Buffer
 
-	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+	got, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(adopterRun, captureWarnLogger(&buf)))
 	require.NoError(t, err)
@@ -1496,16 +1560,17 @@ func TestEnsureDataExport_AdoptsWhenServerPrunedResourceOrKind(t *testing.T) {
 
 			existing := &deapi.DataExport{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      deName,
-					Namespace: namespace,
-					UID:       types.UID("uid-pruned"),
+					Name:        deName,
+					Namespace:   namespace,
+					UID:         types.UID("uid-pruned"),
+					Annotations: targetAnnotations(""),
 				},
 				Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: tc.existingRef},
 			}
 
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
 
-			got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+			got, err := ensureDataExport(context.Background(), c, namespace,
 				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, tc.leafName, ttl)
 			require.NoError(t, err, "a pruned-but-matching targetRef must still be adopted")
 			require.NotNil(t, got)
@@ -1536,7 +1601,7 @@ func TestEnsureDataExport_LiveCRAdoptedNotRecreated(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        deName,
 			Namespace:   namespace,
-			Annotations: map[string]string{runOwnerAnnotationKey: ownerRun},
+			Annotations: targetAnnotations(ownerRun),
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
@@ -1560,7 +1625,7 @@ func TestEnsureDataExport_LiveCRAdoptedNotRecreated(t *testing.T) {
 			},
 		}).Build()
 
-	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	got, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(otherRun, slog.Default()))
 	require.NoError(t, err)
@@ -1616,7 +1681,7 @@ func TestEnsureDataExport_RefusesTargetRefMismatchAfterCreateRace(t *testing.T) 
 						Name:        deName,
 						Namespace:   namespace,
 						UID:         types.UID("uid-foreign"),
-						Annotations: map[string]string{runOwnerAnnotationKey: runID},
+						Annotations: targetAnnotations(runID),
 					},
 					Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: foreignRef},
 				}
@@ -1633,7 +1698,7 @@ func TestEnsureDataExport_RefusesTargetRefMismatchAfterCreateRace(t *testing.T) 
 	ctx := context.Background()
 	var acquisition *exporter.DataExportAcquisition
 
-	got, err := exporter.EnsureDataExport(ctx, c, namespace,
+	got, err := ensureDataExport(ctx, c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(runID, slog.Default()),
 		exporter.WithAcquisition(&acquisition))
@@ -1692,7 +1757,7 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace(t *testing.T) {
 						Name:        deName,
 						Namespace:   namespace,
 						UID:         types.UID("uid-winner"),
-						Annotations: map[string]string{runOwnerAnnotationKey: runID},
+						Annotations: targetAnnotations(runID),
 					},
 					Spec: deapi.DataexportSpec{TTL: ttl, TargetRef: matchingRef},
 				}
@@ -1708,7 +1773,7 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace(t *testing.T) {
 
 	var acquisition *exporter.DataExportAcquisition
 
-	got, err := exporter.EnsureDataExport(context.Background(), c, namespace,
+	got, err := ensureDataExport(context.Background(), c, namespace,
 		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, ttl,
 		exporter.WithRunOwner(runID, slog.Default()),
 		exporter.WithAcquisition(&acquisition))
@@ -1728,4 +1793,291 @@ func TestEnsureDataExport_AdoptsMatchingTargetRefAfterCreateRace(t *testing.T) {
 	getErr := c.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: deName}, check)
 	assert.True(t, apierrors.IsNotFound(getErr),
 		"the exact matching create-race winner acquired by this operation must be released")
+}
+
+func TestEnsureDataExport_RequiresTargetUID(t *testing.T) {
+	t.Parallel()
+
+	var acquisition *exporter.DataExportAcquisition
+
+	got, err := exporter.EnsureDataExport(
+		context.Background(),
+		fake.NewClientBuilder().WithScheme(newDEScheme(t)).Build(),
+		"test-ns",
+		aggapi.VolumeSnapshotGroup,
+		aggapi.VolumeSnapshotResource,
+		aggapi.VolumeSnapshotKind,
+		"missing-uid",
+		"1h",
+		exporter.WithAcquisition(&acquisition),
+	)
+	require.ErrorIs(t, err, exporter.ErrTargetUIDRequired)
+	assert.Nil(t, got)
+	assert.Nil(t, acquisition)
+}
+
+func TestEnsureDataExport_RefusesTargetUIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "uid-collision"
+		runID     = "run-requester"
+	)
+
+	cases := []struct {
+		name      string
+		targetUID string
+	}{
+		{name: "missing annotation"},
+		{name: "different annotation", targetUID: "uid-old-snapshot"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			deName := volumeSnapshotDataExportName(namespace, leafName)
+			annotations := map[string]string{runOwnerAnnotationKey: runID}
+			if tc.targetUID != "" {
+				annotations[targetUIDAnnotationKey] = tc.targetUID
+			}
+
+			existing := &deapi.DataExport{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        deName,
+					Namespace:   namespace,
+					UID:         "uid-existing-export",
+					Annotations: annotations,
+				},
+				Spec: deapi.DataexportSpec{
+					TTL:       "1h",
+					TargetRef: volumeSnapshotTargetRef(leafName),
+				},
+			}
+
+			deleteCalled := false
+			c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(
+						ctx context.Context,
+						cl client.WithWatch,
+						obj client.Object,
+						opts ...client.DeleteOption,
+					) error {
+						deleteCalled = true
+
+						return cl.Delete(ctx, obj, opts...)
+					},
+				}).Build()
+
+			var acquisition *exporter.DataExportAcquisition
+
+			got, err := ensureDataExport(
+				context.Background(),
+				c,
+				namespace,
+				aggapi.VolumeSnapshotGroup,
+				aggapi.VolumeSnapshotResource,
+				aggapi.VolumeSnapshotKind,
+				leafName,
+				"1h",
+				exporter.WithRunOwner(runID, slog.Default()),
+				exporter.WithAcquisition(&acquisition),
+			)
+			require.ErrorIs(t, err, exporter.ErrTargetUIDMismatch)
+			assert.Nil(t, got)
+			assert.Nil(t, acquisition)
+			assert.False(t, deleteCalled)
+
+			preserved := new(deapi.DataExport)
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{
+				Namespace: namespace,
+				Name:      deName,
+			}, preserved))
+			assert.Equal(t, types.UID("uid-existing-export"), preserved.UID)
+			assert.Equal(t, annotations, preserved.Annotations)
+		})
+	}
+}
+
+func TestEnsureDataExport_CreateSuccessGetCancellationRetainsAcquisition(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "create-get-cancel"
+		runID     = "run-create-get-cancel"
+	)
+
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+	createdUID := types.UID("uid-created-before-cancel")
+
+	var (
+		dataExportGets atomic.Int32
+		deletedUID     types.UID
+		precondition   types.UID
+	)
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				key client.ObjectKey,
+				obj client.Object,
+				opts ...client.GetOption,
+			) error {
+				if _, ok := obj.(*deapi.DataExport); ok && key.Name == deName {
+					if dataExportGets.Add(1) == 2 {
+						return fmt.Errorf("post-create get: %w", context.Canceled)
+					}
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.CreateOption,
+			) error {
+				de, ok := obj.(*deapi.DataExport)
+				if ok {
+					de.UID = createdUID
+				}
+
+				return cl.Create(ctx, obj, opts...)
+			},
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				deletedUID = obj.GetUID()
+
+				deleteOptions := client.DeleteOptions{}
+				deleteOptions.ApplyOptions(opts)
+				if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+					precondition = *deleteOptions.Preconditions.UID
+				}
+
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+
+	var acquisition *exporter.DataExportAcquisition
+
+	got, err := ensureDataExport(
+		context.Background(),
+		c,
+		namespace,
+		aggapi.VolumeSnapshotGroup,
+		aggapi.VolumeSnapshotResource,
+		aggapi.VolumeSnapshotKind,
+		leafName,
+		"1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithAcquisition(&acquisition),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, got)
+	require.NotNil(t, acquisition)
+	assert.Equal(t, deName, acquisition.Name())
+	assert.Equal(t, createdUID, acquisition.UID())
+	assert.Equal(t, testTargetUID, acquisition.TargetUID())
+
+	require.NoError(t, exporter.ReleaseDataExport(context.Background(), c, slog.Default(), acquisition))
+	assert.Equal(t, createdUID, deletedUID)
+	assert.Equal(t, createdUID, precondition)
+
+	remaining := new(deapi.DataExport)
+	getErr := c.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: deName}, remaining)
+	assert.True(t, apierrors.IsNotFound(getErr))
+}
+
+func TestEnsureDataExport_AlreadyExistsUIDMismatchNeverAcquires(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "already-exists-uid-collision"
+		runID     = "run-already-exists"
+	)
+
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var deleteCalled atomic.Bool
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				_ client.Object,
+				_ ...client.CreateOption,
+			) error {
+				foreign := &deapi.DataExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      deName,
+						Namespace: namespace,
+						UID:       "uid-race-winner",
+						Annotations: map[string]string{
+							runOwnerAnnotationKey:  runID,
+							targetUIDAnnotationKey: "uid-other-snapshot",
+						},
+					},
+					Spec: deapi.DataexportSpec{
+						TTL:       "1h",
+						TargetRef: volumeSnapshotTargetRef(leafName),
+					},
+				}
+				if err := cl.Create(ctx, foreign); err != nil {
+					return err
+				}
+
+				return apierrors.NewAlreadyExists(
+					schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+					deName,
+				)
+			},
+			Delete: func(
+				context.Context,
+				client.WithWatch,
+				client.Object,
+				...client.DeleteOption,
+			) error {
+				deleteCalled.Store(true)
+
+				return nil
+			},
+		}).Build()
+
+	var acquisition *exporter.DataExportAcquisition
+
+	got, err := ensureDataExport(
+		context.Background(),
+		c,
+		namespace,
+		aggapi.VolumeSnapshotGroup,
+		aggapi.VolumeSnapshotResource,
+		aggapi.VolumeSnapshotKind,
+		leafName,
+		"1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithAcquisition(&acquisition),
+	)
+	require.ErrorIs(t, err, exporter.ErrTargetUIDMismatch)
+	assert.Nil(t, got)
+	assert.Nil(t, acquisition)
+	assert.False(t, deleteCalled.Load())
+
+	preserved := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{
+		Namespace: namespace,
+		Name:      deName,
+	}, preserved))
+	assert.Equal(t, types.UID("uid-race-winner"), preserved.UID)
+	assert.Equal(t, "uid-other-snapshot", preserved.Annotations[targetUIDAnnotationKey])
 }
