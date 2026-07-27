@@ -135,26 +135,20 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		&PlatformConstraintString,
 		"include-platform",
 		"",
-		`Select platform releases to download by a semver constraint expression, using the same dialect as --include-module's version part.
+		`Select platform releases to download by a semver constraint. Same dialect as the version part of --include-module.
 Conflicts with --since-version and --deckhouse-tag.
 
-Semver constraints (caret, tilde, range) keep only the highest patch in each (major, minor) series, mirroring the release-discovery rules used for full pulls.
-Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
-Use the exact-tag form (=) when you need to pin a specific tag, optionally propagating it to a release channel via the +channel suffix.
+Always quote the value: > and < are shell redirections.
 
-Examples (available platform versions: v1.63.x, v1.64.x, v1.65.x, v1.66.x, v1.67.x, v1.68.x, v1.69.x, v1.70.x, v1.71.x):
+A constraint keeps the latest patch in each minor it covers. Versions named with >= or <= are kept as well. An exact tag (=) pins one release and propagates it to the release channels, just like --deckhouse-tag.
 
---include-platform ">=1.64 <=1.68" → bounded range: latest patch per minor in v1.64..v1.68, anchors v1.64.0 and v1.68.0 always preserved if present in the registry.
-
---include-platform "~1.65.0" → semver ~ constraint (>=1.65.0 <1.66.0): latest v1.65.x patch only.
-
---include-platform "^1.65.0" → semver ^ constraint (>=1.65.0 <2.0.0): latest patch per minor starting at v1.65.x.
-
---include-platform "1.65.0" → bare version, expands to >=1.65.0 <2.0.0 (same major line): keep latest patch per minor starting at v1.65.x. Same result as ^1.65.0 here because platform is always major >= 1; shorthand kept for parity with --include-module.
-
---include-platform "=v1.65.3" → exact-tag pin: only v1.65.3 is pulled and propagated to all default release channels, just like --deckhouse-tag.
-
---include-platform "=v1.65.3+stable" → exact-tag pin with channel suffix: only v1.65.3 is pulled (channel propagation matches --deckhouse-tag).`,
+Given platform releases v1.63.x .. v1.71.x:
+  ">=1.64 <=1.68"   latest patch per minor in v1.64..v1.68, plus v1.64.0 and v1.68.0
+  "~1.65.0"         latest v1.65.x patch
+  "^1.65.0"         latest patch per minor from v1.65.x up
+  "1.65.0"          same as ^1.65.0 here: platform majors are always >= 1
+  "=v1.65.3"        only v1.65.3, published to every release channel
+  "=v1.65.3+stable" only v1.65.3, published to stable`,
 	)
 	flagSet.StringVar(
 		&DeckhouseTag,
@@ -173,49 +167,31 @@ Examples (available platform versions: v1.63.x, v1.64.x, v1.65.x, v1.66.x, v1.67
 		"include-module",
 		"i",
 		nil,
-		`Whitelist specific modules for downloading. Use one flag per each module. Disables blacklisting by --exclude-module."
+		`Whitelist specific modules for downloading. Format is "module-name[@constraint]". Use one flag per each module. Disables blacklisting by --exclude-module.
 
-Without a version part (module-name), only the versions the release channels currently point at are pulled - the same set as a default pull with no filters.
+Quote the whole value when the constraint uses >= or <=: --include-module "module-name@>=1.3.0". Unquoted, the shell takes > as a redirection and d8 receives a module with no version.
 
-Semver constraints (caret, tilde, range) keep only the highest patch in each (major, minor) series, mirroring how platform releases are discovered.
-Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
-Use the exact-tag form (=) when you need a specific older patch unconditionally.
+A constraint keeps the latest patch in each minor it covers, plus whatever the release channels point at. Versions named with >= or <= are kept as well. An exact tag (=) pins one tag and publishes it to the release channels.
 
-A bare version with no operator (module-name@1.3.0) means "this version or newer within the same major line" and keeps the latest patch per minor. It expands to >=X.Y.Z <(major+1).0.0, treating major 0 like any other major: module-name@0.4.0 spans the whole 0.x line (>=0.4.0 <1.0.0), NOT just the 0.4 minor as a caret (^0.4.0 = >=0.4.0 <0.5.0) would. Prefer this bare form for step-by-step upgrades — it captures every intermediate minor and needs no shell quoting.
+Given v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1:
+  module-name                     only what the release channels point at, like a pull with no filters
+  module-name@1.3.0               >=1.3.0 <2.0.0, same major line: v1.3.3, v1.4.1
+  module-name@~1.3.0              >=1.3.0 <1.4.0: v1.3.3
+  module-name@^1.3.0              >=1.3.0 <2.0.0: v1.3.3, v1.4.1
+  "module-name@>=1.3.0"           the same, plus the named v1.3.0
+  "module-name@>=1.3.0 <=1.4.0"   v1.3.0, v1.3.3, v1.4.0
+  module-name@=v1.3.0             only v1.3.0, published to every release channel
+  module-name@=v1.3.0+stable      only v1.3.0, published to stable
+  module-name@=bobV1              only the bobV1 tag
 
-Shell note: >= and <= contain the redirection metacharacters > and <, so an unquoted module-name@>=1.3.0 is mangled by bash/zsh (it strips the operator and redirects into a file named "=1.3.0", leaving the module with an empty version). Quote the whole value when you use these operators: --include-module module-name@">=1.3.0". The bare-version form above avoids this entirely.
-
-Example:
-Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1
-
-module-name → no version part: pull only the versions the release channels currently point at (same as a default pull).
-
-module-name@1.3.0 → bare version, expands to >=1.3.0 <2.0.0 (same major line): keep latest patch per minor — includes v1.3.3 (1.3.x) and v1.4.1 (1.4.x). Versions currently pinned by release channels are pulled in addition.
-
-module-name@~1.3.0 → semver ~ constraint (>=1.3.0 <1.4.0): keep latest patch per minor in range — includes v1.3.3. Versions currently pinned by release channels are pulled in addition.
-
-module-name@^1.3.0 → semver ^ constraint (>=1.3.0 <2.0.0): keep latest patch per minor — includes v1.3.3, v1.4.1. For a 0.x version the caret locks the minor (^0.4.0 = >=0.4.0 <0.5.0), so use the bare form instead when you want the whole 0.x line.
-
-module-name@">=1.3.0" → range constraint with explicit >= anchor (quote in shell): keep latest patch per minor AND the named anchor v1.3.0 — includes v1.3.0 (anchor), v1.3.3 (1.3.x latest), v1.4.1 (1.4.x latest).
-
-module-name@">=1.3.0 <=1.4.0" → both anchors honoured (quote in shell): includes v1.3.0, v1.3.3, v1.4.0; v1.4.1 is excluded by the upper bound.
-
-module-name@=v1.3.0 → exact tag match: include only v1.3.0 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
-
-module-name@=bobV1 → exact tag match: include only bobV1 and publish it to all release channels (alpha, beta, early-access, stable, rock-solid).
-
-module-name@=v1.3.0+stable → exact tag match: include only v1.3.0 and publish it to stable channel
-
-0.x example — available versions for <module-name>: v0.4.2, v0.4.4, v0.5.3, v0.6.1, v0.7.2
-module-name@0.4.0 → bare version, expands to >=0.4.0 <1.0.0: keep latest patch per minor across the whole 0.x line — includes v0.4.4, v0.5.3, v0.6.1, v0.7.2.
-		`,
+For a 0.x module the bare form spans the whole 0.x line (0.4.0 means >=0.4.0 <1.0.0) while the caret locks the minor (^0.4.0 means >=0.4.0 <0.5.0).`,
 	)
 	flagSet.StringArrayVarP(
 		&ModulesBlacklist,
 		"exclude-module",
 		"e",
 		nil,
-		`Blacklist specific modules from downloading. Format is "module-name[@version]". Use one flag per each module. Overridden by use of --include-module."`,
+		`Blacklist specific modules from downloading. Format is "module-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each module. Overridden by use of --include-module.`,
 	)
 	flagSet.StringVar(
 		&ModulesPathSuffix,
@@ -227,15 +203,15 @@ module-name@0.4.0 → bare version, expands to >=0.4.0 <1.0.0: keep latest patch
 		&PackagesWhitelist,
 		"include-package",
 		nil,
-		`Whitelist specific packages for downloading. Use one flag per each package. Disables blacklisting by --exclude-package.
+		`Whitelist specific packages for downloading. Format is "package-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each package. Disables blacklisting by --exclude-package.
 
-Packages are mirrored exactly like modules (same name@version constraint dialect), but live under the packages/ registry segment with their release metadata under packages/<name>/version. Note that most version ranges must be put in quotes so that your shell will treat them as a single argument.`,
+Packages live under the packages/ registry segment, with release metadata under packages/<name>/version.`,
 	)
 	flagSet.StringArrayVar(
 		&PackagesBlacklist,
 		"exclude-package",
 		nil,
-		`Blacklist specific packages from downloading. Format is "package-name[@version]". Use one flag per each package. Overridden by use of --include-package.`,
+		`Blacklist specific packages from downloading. Format is "package-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each package. Overridden by use of --include-package.`,
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,
