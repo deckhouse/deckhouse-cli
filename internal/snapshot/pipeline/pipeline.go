@@ -218,10 +218,13 @@ func run(
 	g.SetLimit(cfg.Workers)
 
 	// nodeErrs collects one error per failed node. Guarded by nodeErrsMu because
-	// up to cfg.Workers goroutines append to it concurrently.
+	// up to cfg.Workers goroutines append to it concurrently. taskErrs indexes the same
+	// failures by node so the bottom-up publication pass below can tell which nodes are
+	// blocked without re-scanning nodeErrs.
 	var (
 		nodeErrsMu sync.Mutex
 		nodeErrs   []error
+		taskErrs   = make(map[*source.Node]error, len(tasks))
 	)
 
 	for _, t := range tasks {
@@ -232,6 +235,7 @@ func run(
 				nodeErrsMu.Lock()
 
 				nodeErrs = append(nodeErrs, err)
+				taskErrs[task.node] = err
 
 				nodeErrsMu.Unlock()
 			}
@@ -248,6 +252,67 @@ func run(
 		// Unreachable in practice: every g.Go closure above unconditionally
 		// returns nil. Handled rather than discarded in case that ever changes.
 		nodeErrs = append(nodeErrs, err)
+	}
+
+	// Publish snapshot.yaml strictly bottom-up now that every node's own data/manifests
+	// have finished downloading (or failed) above: a node's ChildrenChecksum authenticates
+	// its direct children's identities and digests (AC-1), so it can only be computed AND
+	// trusted once every direct child directory holds its own final, finalized content —
+	// publishing a parent before that would either commit to an incomplete child set or
+	// require re-publishing the parent later, silently rewriting an already-authenticated
+	// digest. tasks is in DFS preorder (collectDFS appends a node before its children), so
+	// iterating in reverse visits every node's descendants (including all of its direct
+	// children) before the node itself.
+	//
+	// A node is skipped (never finalized) when it already failed processing above, or when
+	// any of its DIRECT children failed or is itself unfinalized (source.Node.Children is
+	// only ever the direct child list, never the full descendant set) — a partially
+	// downloaded/failed subtree must never be committed into a parent's authenticated
+	// commitment (AC-2: fail before mutation on a hybrid tree extends to fail before
+	// publication on an incomplete one). An already-resumed-complete node (task.done) is
+	// re-finalized only if one of its direct children was freshly (re)published this run,
+	// since that is the only way its previously-committed ChildrenChecksum could now be stale.
+	failed := make(map[*source.Node]bool, len(tasks))
+	republished := make(map[*source.Node]bool, len(tasks))
+	// Publication writes only local, already-downloaded content and must not be aborted by a
+	// cancellation that arrived after every node's transfer already finished successfully:
+	// the caller's success/failure result must depend only on whether nodes actually failed
+	// (see the parentCtx.Err() check below run() already makes for the SAME reason).
+	publicationCtx := context.WithoutCancel(ctx)
+
+	for i := len(tasks) - 1; i >= 0; i-- {
+		task := tasks[i]
+
+		blockedByChild := false
+		needsPublication := !task.done
+
+		for _, child := range task.node.Children {
+			blockedByChild = blockedByChild || failed[child]
+			needsPublication = needsPublication || republished[child]
+		}
+
+		if taskErrs[task.node] != nil || blockedByChild {
+			failed[task.node] = true
+
+			continue
+		}
+
+		if !needsPublication {
+			continue
+		}
+
+		if err := volume.FinalizeNodeRootedContext(publicationCtx, destination, task.nodeDir, task.node); err != nil {
+			nodeErrs = append(nodeErrs, fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err))
+			failed[task.node] = true
+
+			continue
+		}
+
+		republished[task.node] = true
+
+		cfg.Log.Info("node complete",
+			slog.String("kind", task.node.Kind),
+			slog.String("name", task.node.DisplayLabel()))
 	}
 
 	// Defensive sweep: guarantee every pre-created stream is terminally settled
@@ -937,11 +1002,10 @@ func processNode(
 		}
 	}
 
-	if err := volume.FinalizeNodeRootedContext(ctx, destination, task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
-	}
-
-	cfg.Log.Info("node complete",
+	// snapshot.yaml is NOT written here: run's bottom-up publication pass finalizes every
+	// node (this one included) only after its direct children are themselves finalized, so
+	// the ChildrenChecksum it commits to authenticates their final content.
+	cfg.Log.Info("node data prepared",
 		slog.String("kind", task.node.Kind),
 		slog.String("name", task.node.DisplayLabel()))
 
@@ -1027,11 +1091,10 @@ func processVolumeNode(
 		}
 	}
 
-	if err := volume.FinalizeNodeRootedContext(ctx, destination, task.nodeDir, task.node); err != nil {
-		return fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err)
-	}
-
-	cfg.Log.Info("node complete",
+	// snapshot.yaml is NOT written here: run's bottom-up publication pass finalizes every
+	// node (this one included; a volume leaf has no children of its own, but its parent's
+	// commitment still needs it finalized first) after all direct children are finalized.
+	cfg.Log.Info("node data prepared",
 		slog.String("kind", task.node.Kind),
 		slog.String("name", task.node.DisplayLabel()))
 

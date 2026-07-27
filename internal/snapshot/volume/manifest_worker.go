@@ -222,16 +222,32 @@ func finalizeNodeContext(
 		return fmt.Errorf("compute checksum for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
+	// The direct-child commitment is computed from whatever children are on disk at this
+	// point, so callers MUST finalize every child (recursively) before finalizing a parent:
+	// the pipeline's bottom-up publication order (pipeline.run) guarantees this.
+	var childrenChecksum archive.NodeChecksum
+
+	if destination == nil {
+		childrenChecksum, err = archive.ComputeNodeChildrenChecksum(nodeDir)
+	} else {
+		childrenChecksum, err = destination.ComputeNodeChildrenChecksum(nodeDir)
+	}
+
+	if err != nil {
+		return fmt.Errorf("compute children checksum for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
 	sy := archive.SnapshotYAML{
-		APIVersion:      node.APIVersion,
-		Kind:            node.Kind,
-		Name:            node.Name,
-		Namespace:       node.Namespace,
-		UID:             string(node.UID),
-		SourceName:      sourceObjectName(node.SourceRef),
-		SourceObjectRef: buildSourceObjectRef(node.SourceRef),
-		Checksum:        checksum,
-		Volumes:         buildVolumesList(node),
+		APIVersion:       node.APIVersion,
+		Kind:             node.Kind,
+		Name:             node.Name,
+		Namespace:        node.Namespace,
+		UID:              string(node.UID),
+		SourceName:       sourceObjectName(node.SourceRef),
+		SourceObjectRef:  buildSourceObjectRef(node.SourceRef),
+		Checksum:         checksum,
+		ChildrenChecksum: &childrenChecksum,
+		Volumes:          buildVolumesList(node),
 	}
 
 	if err := writeSnapshotYAML(ctx, destination, nodeDir, sy); err != nil {

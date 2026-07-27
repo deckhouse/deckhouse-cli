@@ -156,11 +156,6 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 				t.Helper()
 
 				root := t.TempDir()
-				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
-					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-					Kind:       "Snapshot",
-					Name:       "root",
-				})
 				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
 				if err := os.MkdirAll(filepath.Join(child, archive.ManifestsDirName), 0o755); err != nil {
 					t.Fatalf("create child manifests: %v", err)
@@ -180,6 +175,15 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 					Name:       "child",
 				})
 
+				// Finalize root last, once its only direct child is itself already
+				// finalized on disk, so root's ChildrenChecksum authenticates the real
+				// child set (see finalizeVerifiedNode's bottom-up contract).
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
+				})
+
 				return root
 			},
 			limits: localscan.DefaultScanLimits(),
@@ -190,11 +194,6 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 				t.Helper()
 
 				root := t.TempDir()
-				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
-					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-					Kind:       "Snapshot",
-					Name:       "root",
-				})
 				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
 				if err := os.MkdirAll(filepath.Join(child, archive.ManifestsDirName), 0o755); err != nil {
 					t.Fatalf("create child manifests: %v", err)
@@ -209,6 +208,15 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 					Kind:       "Snapshot",
 					Name:       "child",
+				})
+
+				// Finalize root only once the (still-uncorrupted) child is finalized,
+				// so root's ChildrenChecksum is valid before the manifest is tampered
+				// with below to trigger the child's own NodeChecksum mismatch.
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
 				})
 
 				if err := os.WriteFile(manifest, []byte("corrupt"), 0o600); err != nil {
@@ -242,11 +250,6 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 				t.Helper()
 
 				root := t.TempDir()
-				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
-					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
-					Kind:       "Snapshot",
-					Name:       "root",
-				})
 				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
 				if err := os.MkdirAll(child, 0o755); err != nil {
 					t.Fatalf("create child: %v", err)
@@ -256,6 +259,12 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
 					Kind:       "Snapshot",
 					Name:       "child",
+				})
+
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{
+					APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+					Kind:       "Snapshot",
+					Name:       "root",
 				})
 
 				return root
@@ -296,12 +305,23 @@ func TestScanVerifiedChecksEveryNodeAndPreservesLimits(t *testing.T) {
 	}
 }
 
+// finalizeVerifiedNode computes and writes both NodeChecksum and ChildrenChecksum for dir,
+// matching the pipeline's bottom-up publication contract (see pipeline.run): callers MUST
+// finalize every direct child (recursively) before finalizing dir, or the ChildrenChecksum
+// computed here will not match the child set a later verification pass observes on disk.
 func finalizeVerifiedNode(t *testing.T, dir string, sy archive.SnapshotYAML) {
 	t.Helper()
 
 	if err := os.MkdirAll(filepath.Join(dir, archive.ManifestsDirName), 0o755); err != nil {
 		t.Fatalf("create manifests directory for %s: %v", dir, err)
 	}
+
+	childrenChecksum, err := archive.ComputeNodeChildrenChecksum(dir)
+	if err != nil {
+		t.Fatalf("compute children checksum for %s: %v", dir, err)
+	}
+
+	sy.ChildrenChecksum = &childrenChecksum
 
 	checksum, err := archive.ComputeNodeChecksum(dir)
 	if err != nil {
@@ -310,6 +330,157 @@ func finalizeVerifiedNode(t *testing.T, dir string, sy archive.SnapshotYAML) {
 
 	sy.Checksum = checksum
 	writeNodeYAML(t, dir, sy)
+}
+
+// TestScanVerified_RejectsHybridTree proves ScanVerifiedWithLimitsAndOptions — the production
+// entry point behind `d8 snapshot local get`/`describe` — rejects every hybrid-tree shape
+// AC-2 lists (added, removed, replaced, or duplicated children) both at the root's direct
+// children and one level deeper (multi-level), and never a false positive on a valid tree.
+func TestScanVerified_RejectsHybridTree(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T) string
+		wantErr error
+	}{
+		{
+			name: "added child not in the commitment",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				childA := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-a")
+				finalizeVerifiedNode(t, childA, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child-a"})
+				// Root's commitment is computed and stored here, over {child-a} only.
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+				// child-b is added to disk AFTER root's commitment was written and never
+				// authenticated by it: a textbook hybrid-tree addition.
+				childB := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-b")
+				finalizeVerifiedNode(t, childB, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child-b"})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "removed child still referenced by the commitment",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				childA := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-a")
+				finalizeVerifiedNode(t, childA, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child-a"})
+				childB := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-b")
+				finalizeVerifiedNode(t, childB, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child-b"})
+				// Root commits to {child-a, child-b}.
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+				if err := os.RemoveAll(childB); err != nil {
+					t.Fatalf("remove child-b: %v", err)
+				}
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "replaced child identity without re-finalizing the parent",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "original"})
+				// Root's commitment authenticates the "original" identity at this path.
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+				// The child subtree at the SAME path is now swapped for a different, internally
+				// self-consistent child (its own NodeChecksum/ChildrenChecksum are valid), but
+				// root's stale commitment still names the old identity/digest.
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "replaced"})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "duplicate direct child identity",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				dupSY := archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "dup", Namespace: "ns"}
+				childA := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-a")
+				finalizeVerifiedNode(t, childA, dupSY)
+				childB := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child-b")
+				finalizeVerifiedNode(t, childB, dupSY)
+
+				// Root can never legitimately finalize over these two children (their shared
+				// identity makes ComputeNodeChildrenChecksum itself fail), so its own
+				// commitment is fabricated from an unrelated, single-child snapshot below —
+				// any stored value is equally unable to authenticate this on-disk duplicate.
+				other := t.TempDir()
+				finalizeVerifiedNode(t, filepath.Join(other, archive.SnapshotsDirName, "snapshot_solo"),
+					archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "solo"})
+				borrowedChecksum, err := archive.ComputeNodeChildrenChecksum(other)
+				if err != nil {
+					t.Fatalf("compute unrelated children checksum: %v", err)
+				}
+
+				if err := os.MkdirAll(filepath.Join(root, archive.ManifestsDirName), 0o755); err != nil {
+					t.Fatalf("create root manifests: %v", err)
+				}
+
+				rootChecksum, err := archive.ComputeNodeChecksum(root)
+				if err != nil {
+					t.Fatalf("compute root checksum: %v", err)
+				}
+
+				writeNodeYAML(t, root, archive.SnapshotYAML{
+					Kind: "Snapshot", APIVersion: "v1", Name: "root",
+					Checksum: rootChecksum, ChildrenChecksum: &borrowedChecksum,
+				})
+
+				return root
+			},
+			wantErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "multi-level: grandchild swap invalidates the child's own commitment",
+			prepare: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+				grandchild := filepath.Join(child, archive.SnapshotsDirName, "snapshot_grandchild")
+
+				finalizeVerifiedNode(t, grandchild, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "original-gc"})
+				// child's commitment authenticates {original-gc}.
+				finalizeVerifiedNode(t, child, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child"})
+				// root's commitment authenticates {child} (computed AFTER child was finalized).
+				finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+				// The grandchild is swapped without re-finalizing its parent (child): child's
+				// stored commitment now diverges from the actual on-disk grandchild.
+				finalizeVerifiedNode(t, grandchild, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "replaced-gc"})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := test.prepare(t)
+
+			if _, err := localscan.ScanVerifiedWithLimitsAndOptions(
+				root, localscan.DefaultScanLimits(), archive.SnapshotYAMLReadOptions{},
+			); !errors.Is(err, test.wantErr) {
+				t.Fatalf("ScanVerifiedWithLimitsAndOptions() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
 }
 
 func TestScan_RootWithDirectChildren(t *testing.T) {

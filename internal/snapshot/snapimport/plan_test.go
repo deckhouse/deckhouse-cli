@@ -149,6 +149,53 @@ func childDir(parent, kind, name string) string {
 	return filepath.Join(parent, archive.SnapshotsDirName, archive.NodeDirName(kind, name))
 }
 
+// finalizeArchiveChildrenChecksums rewrites every node's ChildrenChecksum under dir (dir
+// included) from its actual on-disk direct children, recursing depth-first so grandchildren
+// are finalized before their parents. writeArchiveNode always writes an empty ChildrenChecksum
+// (it has no way to know a node's children, which are typically written by later, separate
+// calls in the SAME fixture-building function); test fixtures that build a multi-node tree
+// call this once, after every node in the tree exists on disk, so parents authenticate their
+// real child set the way the production pipeline's bottom-up finalize does (see
+// pipeline.run and volume.finalizeNodeContext). ChildrenChecksum is independent of
+// NodeChecksum (archive.ComputeNodeChecksum only hashes the node's own manifests/), so
+// rewriting it here never invalidates a NodeChecksum already computed by writeArchiveNode.
+func finalizeArchiveChildrenChecksums(t *testing.T, dir string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(dir, archive.SnapshotsDirName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			entries = nil
+		} else {
+			t.Fatalf("read %s: %v", filepath.Join(dir, archive.SnapshotsDirName), err)
+		}
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+
+		finalizeArchiveChildrenChecksums(t, filepath.Join(dir, archive.SnapshotsDirName, e.Name()))
+	}
+
+	childrenChecksum, err := archive.ComputeNodeChildrenChecksum(dir)
+	if err != nil {
+		t.Fatalf("compute children checksum for %s: %v", dir, err)
+	}
+
+	sy, err := archive.ReadSnapshotYAMLWithOptions(dir, archive.SnapshotYAMLReadOptions{AllowUnauthenticatedLegacy: true})
+	if err != nil {
+		t.Fatalf("read snapshot.yaml for %s: %v", dir, err)
+	}
+
+	sy.ChildrenChecksum = &childrenChecksum
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("rewrite snapshot.yaml with children checksum for %s: %v", dir, err)
+	}
+}
+
 // buildTwoLevelArchive writes a root Snapshot with one CSI VolumeSnapshot block leaf and
 // returns the root dir.
 func buildTwoLevelArchive(t *testing.T) string {
@@ -173,6 +220,8 @@ func buildTwoLevelArchive(t *testing.T) string {
 		manifests:  []map[string]interface{}{{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "pvc-1"}}},
 		blockData:  []byte("rawbytes"),
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	return root
 }

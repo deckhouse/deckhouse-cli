@@ -40,8 +40,9 @@ const (
 	// SnapshotFormatVersionLegacy identifies archives written before explicit envelope versioning.
 	// Version zero is accepted only through an explicit unauthenticated compatibility option.
 	SnapshotFormatVersionLegacy = 0
-	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal.
-	SnapshotFormatVersionCurrent = 1
+	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal. Version 2 adds
+	// the mandatory authenticated direct-child commitment (ChildrenChecksum).
+	SnapshotFormatVersionCurrent = 2
 )
 
 // sha256HexLen is the length of a hex-encoded SHA-256 digest (32 bytes → 64 hex chars).
@@ -82,7 +83,9 @@ var ErrSnapshotMetadataChecksumMismatch = errors.New("snapshot.yaml metadata che
 
 // SnapshotYAMLReadOptions controls compatibility when decoding snapshot.yaml. The zero value
 // fails closed. AllowUnauthenticatedLegacy must be selected explicitly by migration or
-// inspection callers that accept legacy metadata without an integrity checksum.
+// inspection callers that accept legacy metadata without an integrity checksum. It never
+// bypasses the mandatory authenticated ChildrenChecksum direct-child commitment: every
+// snapshot.yaml, legacy or current, must carry one.
 type SnapshotYAMLReadOptions struct {
 	AllowUnauthenticatedLegacy bool
 }
@@ -116,6 +119,13 @@ type SnapshotYAML struct {
 	SourceObjectRef *SourceObjectRef `json:"sourceObjectRef,omitempty"`
 	// Checksum is the locally-computed node integrity digest.
 	Checksum NodeChecksum `json:"checksum"`
+	// ChildrenChecksum authenticates the canonical set of this node's direct children: their
+	// identities (apiVersion/kind/name/namespace/uid) and their own Checksum/ChildrenChecksum
+	// digests. A node with no children commits to EmptyChildrenChecksum. It is mandatory on
+	// every snapshot.yaml (see validateSnapshotEnvelope): local inspection, upload, and
+	// restore all fail closed on an archive that lacks it, and on any archive whose physical
+	// direct-child set does not match the committed one (a "hybrid tree").
+	ChildrenChecksum *NodeChecksum `json:"childrenChecksum,omitempty"`
 	// MetadataChecksum covers the canonical versioned envelope except this field itself.
 	// It is absent only on compatible legacy version-zero archives.
 	MetadataChecksum *NodeChecksum `json:"metadataChecksum,omitempty"`
@@ -136,6 +146,11 @@ type snapshotYAMLWire SnapshotYAML
 func (sy SnapshotYAML) MarshalJSON() ([]byte, error) {
 	sy.FormatVersion = SnapshotFormatVersionCurrent
 	sy.MetadataChecksum = nil
+
+	if sy.ChildrenChecksum == nil {
+		empty := EmptyChildrenChecksum()
+		sy.ChildrenChecksum = &empty
+	}
 
 	checksum, err := computeSnapshotMetadataChecksum(sy)
 	if err != nil {
@@ -195,10 +210,14 @@ func validateSnapshotEnvelope(sy SnapshotYAML, options SnapshotYAMLReadOptions) 
 				sy.FormatVersion, ErrLegacySnapshotFormat)
 		}
 
-		return nil
+		return validateChildrenChecksumPresent(sy)
 	case SnapshotFormatVersionCurrent:
 	default:
 		return fmt.Errorf("%d: %w", sy.FormatVersion, ErrUnsupportedSnapshotFormat)
+	}
+
+	if err := validateChildrenChecksumPresent(sy); err != nil {
+		return err
 	}
 
 	if sy.MetadataChecksum == nil {
@@ -218,6 +237,22 @@ func validateSnapshotEnvelope(sy SnapshotYAML, options SnapshotYAMLReadOptions) 
 	if got.Hex != sy.MetadataChecksum.Hex {
 		return fmt.Errorf("stored %q computed %q: %w",
 			sy.MetadataChecksum.Hex, got.Hex, ErrSnapshotMetadataChecksumMismatch)
+	}
+
+	return nil
+}
+
+// validateChildrenChecksumPresent enforces the mandatory authenticated direct-child commitment.
+// It applies to every format version, including legacy: AllowUnauthenticatedLegacy relaxes only
+// the envelope/metadataChecksum requirement, never the child-topology commitment (AC-3).
+func validateChildrenChecksumPresent(sy SnapshotYAML) error {
+	if sy.ChildrenChecksum == nil {
+		return fmt.Errorf("format version %d requires childrenChecksum: %w",
+			sy.FormatVersion, ErrInvalidSnapshotYAML)
+	}
+
+	if err := validateChecksum(*sy.ChildrenChecksum); err != nil {
+		return fmt.Errorf("childrenChecksum: %w", err)
 	}
 
 	return nil
@@ -352,6 +387,11 @@ type archiveDirectory interface {
 	archiveOpenRegularPath(string) (*os.File, error)
 	archivePath() string
 	archiveReadDirectory() ([]os.DirEntry, error)
+	// archiveReadDirectoryBounded reads at most maxEntries entries, failing with
+	// ErrTooManyDirectChildren instead of materialising an unbounded entry slice when more
+	// exist. Used by the direct-child commitment computation (checksum.go) to bound memory
+	// use against an archive directory with an adversarially large child count.
+	archiveReadDirectoryBounded(maxEntries int) ([]os.DirEntry, error)
 }
 
 type rootedLockBinding struct {
@@ -519,6 +559,26 @@ func (s *RootedSource) ReadDirectory() ([]os.DirEntry, error) {
 	return entries, nil
 }
 
+// ReadDirectoryBounded reads at most maxEntries entries from source through a fresh descriptor.
+// It fails with ErrTooManyDirectChildren instead of returning a larger slice when more entries
+// exist, bounding memory use against an archive directory with an adversarially large count.
+func (s *RootedSource) ReadDirectoryBounded(maxEntries int) ([]os.DirEntry, error) {
+	s.runHook(s.path)
+
+	if err := s.verifyCurrent(); err != nil {
+		return nil, err
+	}
+
+	dir, err := openArchiveDirectoryAt(s.dir, ".", s.path)
+	if err != nil {
+		return nil, err
+	}
+
+	defer func() { _ = dir.Close() }()
+
+	return readDirEntriesBounded(dir, s.path, maxEntries)
+}
+
 // OpenRegularFile opens one regular child file without following a final symlink or reparse
 // point. Ordinary hard links remain supported because they are regular files; host link count
 // does not imply archive/tar hard-link semantics.
@@ -597,6 +657,10 @@ func (s *RootedSource) archiveReadDirectory() ([]os.DirEntry, error) {
 	return s.ReadDirectory()
 }
 
+func (s *RootedSource) archiveReadDirectoryBounded(maxEntries int) ([]os.DirEntry, error) {
+	return s.ReadDirectoryBounded(maxEntries)
+}
+
 // Close releases the descriptor retained by directory.
 func (d *PinnedDirectory) Close() error {
 	return d.dir.Close()
@@ -621,6 +685,18 @@ func (d *PinnedDirectory) ReadDirectory(count int) ([]os.DirEntry, error) {
 	}
 
 	return entries, nil
+}
+
+// ReadDirectoryBounded reads at most maxEntries entries from the pinned directory, failing
+// with ErrTooManyDirectChildren instead of returning a larger slice when more entries exist.
+func (d *PinnedDirectory) ReadDirectoryBounded(maxEntries int) ([]os.DirEntry, error) {
+	d.runHook(d.path)
+
+	if err := d.verifyCurrentBinding(); err != nil {
+		return nil, err
+	}
+
+	return readDirEntriesBounded(d.dir, d.path, maxEntries)
 }
 
 // OpenDirectory opens one real child directory relative to the pinned descriptor.
@@ -773,6 +849,10 @@ func (d *PinnedDirectory) archiveReadDirectory() ([]os.DirEntry, error) {
 	return d.ReadDirectory(-1)
 }
 
+func (d *PinnedDirectory) archiveReadDirectoryBounded(maxEntries int) ([]os.DirEntry, error) {
+	return d.ReadDirectoryBounded(maxEntries)
+}
+
 func (d *PinnedDirectory) runHook(path string) {
 	if d.hook != nil {
 		d.hook(path)
@@ -881,6 +961,36 @@ func (d *PinnedDirectory) verifyCurrentBinding() error {
 func (s *RootedSource) runHook(path string) {
 	if s.hook != nil {
 		s.hook(path)
+	}
+}
+
+// readDirEntriesBounded reads dir in fixed-size batches, accumulating at most maxEntries
+// entries. It fails closed with ErrTooManyDirectChildren as soon as the bound is exceeded,
+// so an adversarial directory with far more entries never causes an unbounded allocation.
+func readDirEntriesBounded(dir *os.File, path string, maxEntries int) ([]os.DirEntry, error) {
+	const readDirBatchSize = 256
+
+	entries := make([]os.DirEntry, 0, min(maxEntries+1, readDirBatchSize))
+
+	for {
+		batch, err := dir.ReadDir(readDirBatchSize)
+		entries = append(entries, batch...)
+
+		if len(entries) > maxEntries {
+			return nil, fmt.Errorf("%s: more than %d direct children: %w", path, maxEntries, ErrTooManyDirectChildren)
+		}
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return entries, nil
+			}
+
+			return nil, fmt.Errorf("read directory %s: %w", path, err)
+		}
+
+		if len(batch) < readDirBatchSize {
+			return entries, nil
+		}
 	}
 }
 

@@ -487,6 +487,8 @@ func TestPreflight_FilesystemDataPasses(t *testing.T) {
 		tarData:    make([]byte, 1024),
 	})
 
+	finalizeArchiveChildrenChecksums(t, root)
+
 	up := &stubUploader{}
 	vol := &stubVolumes{}
 	dyn := newFakeDynamic(readyRootSnapshot())
@@ -536,6 +538,8 @@ func TestRun_UnsafeFilesystemPAXFailsBeforeClusterMutation(t *testing.T) {
 		name:       "pvc-1",
 		tarData:    tarBuf.Bytes(),
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
@@ -594,6 +598,8 @@ func TestRun_UnsupportedFilesystemEntriesFailBeforeClusterMutation(t *testing.T)
 		name:       "pvc-1",
 		tarData:    tarBuf.Bytes(),
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
@@ -733,6 +739,229 @@ func TestRun_CorruptSkippedBlockPayload_NoMutation(t *testing.T) {
 
 	if acts := dyn.Actions(); len(acts) != 0 {
 		t.Errorf("dynamic-client actions = %d, want 0 (no cluster reads or writes before preflight): %v", len(acts), acts)
+	}
+}
+
+// assertNoClusterMutations fails t if Run produced any manifest upload, DataImport ensure,
+// volume upload, or dynamic-client action — the exact zero-cluster-write guarantee AC-2
+// requires for every rejected hybrid tree.
+func assertNoClusterMutations(t *testing.T, up *stubUploader, vol *stubVolumes, dyn *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 {
+		t.Errorf("DataImport ensures = %v, want none", vol.ensure)
+	}
+
+	if len(vol.upload) != 0 {
+		t.Errorf("volume uploads = %v, want none", vol.upload)
+	}
+
+	if acts := dyn.Actions(); len(acts) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(acts), acts)
+	}
+}
+
+// TestRun_RejectsHybridTree_NoMutation proves Run — the real production upload/import entry
+// point — enters the archive integrity preflight (verifyArchiveIntegrity, which recomputes
+// every selected node's ChildrenChecksum) and rejects every hybrid-tree shape AC-2 lists
+// (added, removed, replaced, and duplicate children) with zero cluster writes, for both a
+// single-level (root + one child) and a multi-level (root + domain aggregator + leaf) tree.
+func TestRun_RejectsHybridTree_NoMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		// build materializes the hybrid tree and returns its root dir.
+		build func(t *testing.T) string
+		// wantErr, when non-nil, is the exact sentinel Run's error must wrap.
+		wantErr error
+		// wantErrContains, used when wantErr is nil, matches a substring of Run's error: the
+		// duplicate-identity case is rejected by BuildPlan's own topology validation (a plain,
+		// unwrapped error) before verifyArchiveIntegrity's ChildrenChecksum check ever runs.
+		wantErrContains string
+	}{
+		{
+			name: "single-level: added child not in the commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1"), archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root's commitment is authenticated over {pvc-1} only, here.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// pvc-2 is added AFTER root's commitment was written: an unauthenticated addition.
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-2"), archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-2", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: removed child still referenced by the commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				pvc1 := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, pvc1, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				pvc2 := childDir(root, "VolumeSnapshot", "pvc-2")
+				writeArchiveNode(t, pvc2, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-2", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root commits to {pvc-1, pvc-2}.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				if err := os.RemoveAll(pvc2); err != nil {
+					t.Fatalf("remove pvc-2: %v", err)
+				}
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: replaced child identity without re-finalizing the parent",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root's commitment authenticates the pvc-1 identity/digest at this path.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// The same path is now a different, internally self-consistent leaf (own
+				// NodeChecksum/ChildrenChecksum both valid), but root's stale commitment still
+				// names the old identity/digest — a classic hybrid-tree substitution.
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-bytes-entirely"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: duplicate direct child identity",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				dup := archiveNode{apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src"}
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1-a"), dup)
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1-b"), dup)
+
+				// Root can never legitimately finalize over two same-identity children (their
+				// shared identity makes ComputeNodeChildrenChecksum itself fail), so borrow an
+				// unrelated, valid commitment: any stored value is equally unable to
+				// authenticate this on-disk duplicate.
+				other := t.TempDir()
+				writeArchiveNode(t, other, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "solo-root"})
+				borrowed, err := archive.ComputeNodeChildrenChecksum(other)
+				if err != nil {
+					t.Fatalf("compute unrelated children checksum: %v", err)
+				}
+
+				rootChecksum, err := archive.ComputeNodeChecksum(root)
+				if err != nil {
+					t.Fatalf("compute root checksum: %v", err)
+				}
+
+				if err := archive.WriteSnapshotYAML(root, archive.SnapshotYAML{
+					APIVersion: snapshotAPIVersion, Kind: snapshotKind, Name: "root", Namespace: "src",
+					Checksum: rootChecksum, ChildrenChecksum: &borrowed,
+				}); err != nil {
+					t.Fatalf("rewrite root snapshot.yaml: %v", err)
+				}
+
+				return root
+			},
+			wantErrContains: "references child",
+		},
+		{
+			name: "multi-level: leaf swap invalidates the domain aggregator's commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", kind: "DemoVirtualMachineSnapshot",
+					name: "vm-1", namespace: "src",
+				})
+				leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// domain's commitment authenticates {pvc-1}; root's authenticates {vm-1}.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// The leaf is swapped without re-finalizing its parent (the domain
+				// aggregator): domain's stored commitment now diverges from the actual
+				// on-disk leaf, even though root's own commitment (over {vm-1}) still holds.
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-bytes-entirely"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := tt.build(t)
+
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.Mapper = testDomainMapper()
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run error = nil, want a rejected hybrid tree")
+			}
+
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("Run error = %v, want %v", err, tt.wantErr)
+				}
+			case tt.wantErrContains != "":
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("Run error = %q, want substring %q", err, tt.wantErrContains)
+				}
+			}
+
+			assertNoClusterMutations(t, up, vol, dyn)
+		})
 	}
 }
 
@@ -1244,6 +1473,8 @@ func buildDomainDataLeafArchive(t *testing.T) string {
 		},
 	})
 
+	finalizeArchiveChildrenChecksums(t, root)
+
 	return root
 }
 
@@ -1343,6 +1574,8 @@ func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
 		kind:       "DemoVirtualMachineSnapshot",
 		name:       "vm-1",
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	up := &stubUploader{}
 	vol := &stubVolumes{}
@@ -1851,6 +2084,8 @@ func buildThreeLevelArchive(t *testing.T) string {
 		blockData:  []byte("rawbytes"),
 	})
 
+	finalizeArchiveChildrenChecksums(t, root)
+
 	return root
 }
 
@@ -2035,6 +2270,8 @@ func TestRun_SameKindNameAcrossAPIVersions(t *testing.T) {
 		kind:       domainKind,
 		name:       domainName,
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	newMapper := func() meta.RESTMapper {
 		mapper := meta.NewDefaultRESTMapper(nil)
@@ -2224,6 +2461,8 @@ func buildMultiLeafArchive(t *testing.T, n int) (string, []string) {
 			blockData:  []byte("rawbytes"),
 		})
 	}
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	return root, names
 }
@@ -2569,6 +2808,8 @@ func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
 			Name:       "disk-a",
 		},
 	})
+
+	finalizeArchiveChildrenChecksums(t, root)
 
 	return root
 }

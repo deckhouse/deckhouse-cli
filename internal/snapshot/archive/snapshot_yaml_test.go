@@ -19,6 +19,7 @@ package archive_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -178,7 +179,8 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			write: func(t *testing.T, nodeDir string) {
 				t.Helper()
 
-				data := []byte("formatVersion: 2\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: future\n")
+				data := fmt.Appendf(nil, "formatVersion: %d\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: future\n",
+					archive.SnapshotFormatVersionCurrent+1)
 				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
 					t.Fatalf("write future snapshot.yaml: %v", err)
 				}
@@ -190,7 +192,12 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			write: func(t *testing.T, nodeDir string) {
 				t.Helper()
 
-				data := []byte("apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n")
+				data := fmt.Appendf(nil,
+					"apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n"+
+						"childrenChecksum: {algorithm: %s, hex: %q, short: %q}\n",
+					archive.EmptyChildrenChecksum().Algorithm,
+					archive.EmptyChildrenChecksum().Hex,
+					archive.EmptyChildrenChecksum().Short)
 				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
 					t.Fatalf("write legacy snapshot.yaml: %v", err)
 				}
@@ -204,7 +211,12 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			write: func(t *testing.T, nodeDir string) {
 				t.Helper()
 
-				data := []byte("{name: legacy, kind: Snapshot, formatVersion: 0, apiVersion: snapshot.example.io/v1}\n")
+				data := fmt.Appendf(nil,
+					"{name: legacy, kind: Snapshot, formatVersion: 0, apiVersion: snapshot.example.io/v1, "+
+						"childrenChecksum: {algorithm: %s, hex: %q, short: %q}}\n",
+					archive.EmptyChildrenChecksum().Algorithm,
+					archive.EmptyChildrenChecksum().Hex,
+					archive.EmptyChildrenChecksum().Short)
 				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
 					t.Fatalf("write legacy snapshot.yaml: %v", err)
 				}
@@ -246,6 +258,59 @@ func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
 			if (got.MetadataChecksum != nil) != tt.wantMetadataChecksum {
 				t.Errorf("MetadataChecksum presence = %t, want %t",
 					got.MetadataChecksum != nil, tt.wantMetadataChecksum)
+			}
+		})
+	}
+}
+
+// TestReadSnapshotYAML_ChildrenChecksumMissingIsAlwaysFailClosed proves AC-3's compatibility
+// policy: an archive missing its authenticated direct-child commitment is rejected by default,
+// AND that AllowUnauthenticatedLegacy — the existing, narrower opt-in for a pre-formatVersion
+// archive envelope — does not silently resurrect acceptance of a missing commitment. There is
+// deliberately no opt-in for a missing childrenChecksum: the whole point of the commitment is
+// to make a hybrid tree detectable, so an "unauthenticated child set" mode would defeat AC-1/
+// AC-2 for exactly the archives most likely to need it. This holds for both a current-format
+// envelope (formatVersion present) and a legacy one (formatVersion absent).
+func TestReadSnapshotYAML_ChildrenChecksumMissingIsAlwaysFailClosed(t *testing.T) {
+	tests := []struct {
+		name           string
+		yaml           string
+		wantDefaultErr error
+	}{
+		{
+			name: "current format version, no childrenChecksum",
+			yaml: fmt.Sprintf("formatVersion: %d\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: current\n",
+				archive.SnapshotFormatVersionCurrent),
+			wantDefaultErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "legacy unversioned archive, no childrenChecksum",
+			yaml: "apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n",
+			// The legacy-envelope check runs first and rejects before the commitment check is
+			// even reached; either way the archive is rejected by default (fail-closed).
+			wantDefaultErr: archive.ErrLegacySnapshotFormat,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			if err := os.WriteFile(
+				filepath.Join(nodeDir, archive.SnapshotYAMLName), []byte(tt.yaml), 0o600,
+			); err != nil {
+				t.Fatalf("write snapshot.yaml: %v", err)
+			}
+
+			if _, err := archive.ReadSnapshotYAML(nodeDir); !errors.Is(err, tt.wantDefaultErr) {
+				t.Errorf("ReadSnapshotYAML (default options) error = %v, want %v", err, tt.wantDefaultErr)
+			}
+
+			_, err := archive.ReadSnapshotYAMLWithOptions(nodeDir, archive.SnapshotYAMLReadOptions{
+				AllowUnauthenticatedLegacy: true,
+			})
+			if !errors.Is(err, archive.ErrInvalidSnapshotYAML) {
+				t.Errorf("ReadSnapshotYAMLWithOptions(AllowUnauthenticatedLegacy) error = %v, want ErrInvalidSnapshotYAML"+
+					" (a missing commitment must never be waived, unlike the legacy envelope format itself)", err)
 			}
 		})
 	}
@@ -450,6 +515,15 @@ func validChecksum() archive.NodeChecksum {
 	}
 }
 
+// validChildrenChecksum returns a pointer to the canonical empty-child-set commitment, for
+// tests that only need a structurally valid ChildrenChecksum (every snapshot.yaml requires one,
+// even legacy/AllowUnauthenticatedLegacy metadata; see validateChildrenChecksumPresent).
+func validChildrenChecksum() *archive.NodeChecksum {
+	checksum := archive.EmptyChildrenChecksum()
+
+	return &checksum
+}
+
 // validVolume returns a complete data VolumeInfo whose volumeMode is mode.
 func validVolume(mode string) archive.VolumeInfo {
 	return archive.VolumeInfo{
@@ -467,7 +541,13 @@ func TestValidateSnapshotYAML(t *testing.T) {
 	t.Parallel()
 
 	base := func() archive.SnapshotYAML {
-		return archive.SnapshotYAML{APIVersion: "g/v1", Kind: "Snapshot", Name: "root", Checksum: validChecksum()}
+		return archive.SnapshotYAML{
+			APIVersion:       "g/v1",
+			Kind:             "Snapshot",
+			Name:             "root",
+			Checksum:         validChecksum(),
+			ChildrenChecksum: validChildrenChecksum(),
+		}
 	}
 
 	tests := []struct {

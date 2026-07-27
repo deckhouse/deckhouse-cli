@@ -19,6 +19,7 @@ package archive
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -699,6 +700,7 @@ func makeLegacyNodeDir(t *testing.T) string {
 		t.Fatalf("ComputeNodeChecksum: %v", err)
 	}
 
+	childrenChecksum := EmptyChildrenChecksum()
 	data := fmt.Sprintf(`apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 name: legacy
@@ -706,7 +708,12 @@ checksum:
   algorithm: %s
   hex: %s
   short: %s
-`, checksum.Algorithm, checksum.Hex, checksum.Short)
+childrenChecksum:
+  algorithm: %s
+  hex: %s
+  short: %s
+`, checksum.Algorithm, checksum.Hex, checksum.Short,
+		childrenChecksum.Algorithm, childrenChecksum.Hex, childrenChecksum.Short)
 	if err := os.WriteFile(filepath.Join(nodeDir, SnapshotYAMLName), []byte(data), 0o600); err != nil {
 		t.Fatalf("write legacy snapshot.yaml: %v", err)
 	}
@@ -1640,5 +1647,299 @@ func TestValidateNodeMetadata_InvalidBlockPayload(t *testing.T) {
 
 	if err := ValidateNodeMetadata(dir); !errors.Is(err, ErrInvalidBlockPayload) {
 		t.Errorf("expected ErrInvalidBlockPayload, got: %v", err)
+	}
+}
+
+// validChildChecksum returns a syntactically valid NodeChecksum seeded from content, for use
+// as a ChildCommitment's NodeChecksum/ChildrenChecksum in unit tests that never touch disk.
+func validChildChecksum(content string) NodeChecksum {
+	hex := fmt.Sprintf("%064x", sha256.Sum256([]byte(content)))
+
+	return NodeChecksum{Algorithm: ChecksumAlgorithmSHA256, Hex: hex, Short: ShortChecksum(hex)}
+}
+
+// TestComputeChildrenChecksum_DeterministicAndOrderIndependent proves ComputeChildrenChecksum
+// canonicalizes its input: the same child set in any input order must hash identically, and
+// changing any single committed field (digest or identity) must change the result (AC-1).
+func TestComputeChildrenChecksum_DeterministicAndOrderIndependent(t *testing.T) {
+	a := ChildCommitment{
+		APIVersion: "v1", Kind: "Snapshot", Name: "a", Namespace: "ns",
+		NodeChecksum: validChildChecksum("a-node"), ChildrenChecksum: validChildChecksum("a-children"),
+	}
+	b := ChildCommitment{
+		APIVersion: "v1", Kind: "Snapshot", Name: "b", Namespace: "ns",
+		NodeChecksum: validChildChecksum("b-node"), ChildrenChecksum: validChildChecksum("b-children"),
+	}
+
+	forward, err := ComputeChildrenChecksum([]ChildCommitment{a, b})
+	if err != nil {
+		t.Fatalf("ComputeChildrenChecksum(a,b): %v", err)
+	}
+
+	reversed, err := ComputeChildrenChecksum([]ChildCommitment{b, a})
+	if err != nil {
+		t.Fatalf("ComputeChildrenChecksum(b,a): %v", err)
+	}
+
+	if forward.Hex != reversed.Hex {
+		t.Errorf("checksum depends on input order: %q vs %q", forward.Hex, reversed.Hex)
+	}
+
+	tamperedDigest := a
+	tamperedDigest.NodeChecksum = validChildChecksum("a-node-tampered")
+
+	changed, err := ComputeChildrenChecksum([]ChildCommitment{tamperedDigest, b})
+	if err != nil {
+		t.Fatalf("ComputeChildrenChecksum(tampered,b): %v", err)
+	}
+
+	if changed.Hex == forward.Hex {
+		t.Error("checksum did not change when a committed child digest changed")
+	}
+
+	empty, err := ComputeChildrenChecksum(nil)
+	if err != nil {
+		t.Fatalf("ComputeChildrenChecksum(nil): %v", err)
+	}
+
+	if empty.Hex != EmptyChildrenChecksum().Hex {
+		t.Errorf("ComputeChildrenChecksum(nil) = %q, want EmptyChildrenChecksum %q", empty.Hex, EmptyChildrenChecksum().Hex)
+	}
+
+	if forward.Hex == empty.Hex {
+		t.Error("non-empty child set must not collide with the empty commitment")
+	}
+}
+
+// TestComputeChildrenChecksum_RejectsDuplicateIdentity proves two commitments sharing the full
+// (apiVersion, kind, namespace, name, uid) identity tuple are rejected — a hybrid tree cannot
+// smuggle two conflicting records claiming to be the same child (AC-1 canonicalization).
+func TestComputeChildrenChecksum_RejectsDuplicateIdentity(t *testing.T) {
+	dup := ChildCommitment{
+		APIVersion: "v1", Kind: "Snapshot", Name: "dup", Namespace: "ns",
+		NodeChecksum: validChildChecksum("first"), ChildrenChecksum: EmptyChildrenChecksum(),
+	}
+	other := dup
+	other.NodeChecksum = validChildChecksum("second")
+
+	if _, err := ComputeChildrenChecksum([]ChildCommitment{dup, other}); !errors.Is(err, ErrInvalidSnapshotYAML) {
+		t.Errorf("ComputeChildrenChecksum with duplicate identity: got %v, want ErrInvalidSnapshotYAML", err)
+	}
+}
+
+// TestComputeChildrenChecksum_RejectsIncompleteIdentity proves a commitment missing any of
+// apiVersion/kind/name is rejected rather than silently hashed with an ambiguous identity.
+func TestComputeChildrenChecksum_RejectsIncompleteIdentity(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(c *ChildCommitment)
+		wantErr error
+	}{
+		{name: "missing apiVersion", mutate: func(c *ChildCommitment) { c.APIVersion = "" }, wantErr: ErrInvalidSnapshotYAML},
+		{name: "missing kind", mutate: func(c *ChildCommitment) { c.Kind = "" }, wantErr: ErrInvalidSnapshotYAML},
+		{name: "missing name", mutate: func(c *ChildCommitment) { c.Name = "" }, wantErr: ErrInvalidSnapshotYAML},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ChildCommitment{
+				APIVersion: "v1", Kind: "Snapshot", Name: "child", Namespace: "ns",
+				NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+			}
+			tt.mutate(&c)
+
+			if _, err := ComputeChildrenChecksum([]ChildCommitment{c}); !errors.Is(err, tt.wantErr) {
+				t.Errorf("got %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestComputeChildrenChecksum_RejectsMalformedChecksum proves a commitment whose NodeChecksum
+// or ChildrenChecksum fails validateChecksum (wrong algorithm, wrong hex length, inconsistent
+// short form) is rejected rather than silently hashed into the parent's commitment.
+func TestComputeChildrenChecksum_RejectsMalformedChecksum(t *testing.T) {
+	base := func() ChildCommitment {
+		return ChildCommitment{
+			APIVersion: "v1", Kind: "Snapshot", Name: "child", Namespace: "ns",
+			NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(c *ChildCommitment)
+	}{
+		{name: "bad node checksum algorithm", mutate: func(c *ChildCommitment) { c.NodeChecksum.Algorithm = "md5" }},
+		{name: "bad node checksum hex length", mutate: func(c *ChildCommitment) { c.NodeChecksum.Hex = "abc" }},
+		{name: "bad children checksum algorithm", mutate: func(c *ChildCommitment) { c.ChildrenChecksum.Algorithm = "md5" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(&c)
+
+			if _, err := ComputeChildrenChecksum([]ChildCommitment{c}); !errors.Is(err, ErrInvalidSnapshotYAML) {
+				t.Errorf("got %v, want ErrInvalidSnapshotYAML", err)
+			}
+		})
+	}
+}
+
+// finalizeNodeForChildrenChecksumTest writes a minimal, fully-finalized node directory (own
+// NodeChecksum and ChildrenChecksum both authenticated) under parent/snapshots/<name>, mirroring
+// the bottom-up finalize contract every production writer follows.
+func finalizeNodeForChildrenChecksumTest(t *testing.T, parentSnapshotsDir, name string) string {
+	t.Helper()
+
+	dir := filepath.Join(parentSnapshotsDir, name)
+	if err := os.MkdirAll(filepath.Join(dir, ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+
+	checksum, err := ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("compute node checksum for %s: %v", dir, err)
+	}
+
+	childrenChecksum := EmptyChildrenChecksum()
+
+	if err := WriteSnapshotYAML(dir, SnapshotYAML{
+		APIVersion: "v1", Kind: "Snapshot", Name: name,
+		Checksum: checksum, ChildrenChecksum: &childrenChecksum,
+	}); err != nil {
+		t.Fatalf("write snapshot.yaml for %s: %v", dir, err)
+	}
+
+	return dir
+}
+
+// TestComputeNodeChildrenChecksum_RejectsDirectChildCountBeyondBound exercises the production
+// scan/commitment path (ComputeNodeChildrenChecksum, the function volume.finalizeNodeContext
+// and archive verification both call) with more direct children than maxDirectChildren, proving
+// it fails deterministically without reading every child's metadata (the bound is enforced by
+// the bounded directory read itself, before any per-child snapshot.yaml is opened) — the
+// explicit resource bound required by AC-1.
+func TestComputeNodeChildrenChecksum_RejectsDirectChildCountBeyondBound(t *testing.T) {
+	nodeDir := t.TempDir()
+	snapshotsDir := filepath.Join(nodeDir, SnapshotsDirName)
+
+	if err := os.MkdirAll(snapshotsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", snapshotsDir, err)
+	}
+
+	// One over the bound: enough to prove the bound is enforced, without materializing a
+	// second child's worth of extra directories unnecessarily.
+	for i := range maxDirectChildren + 1 {
+		if err := os.Mkdir(filepath.Join(snapshotsDir, fmt.Sprintf("snapshot_child-%05d", i)), 0o755); err != nil {
+			t.Fatalf("mkdir child %d: %v", i, err)
+		}
+	}
+
+	if _, err := ComputeNodeChildrenChecksum(nodeDir); !errors.Is(err, ErrTooManyDirectChildren) {
+		t.Fatalf("ComputeNodeChildrenChecksum with %d children: got %v, want ErrTooManyDirectChildren",
+			maxDirectChildren+1, err)
+	}
+}
+
+// TestComputeNodeChildrenChecksum_RejectsMetadataBudgetBeyondBound exercises the production
+// scan/commitment path with a single direct child whose snapshot.yaml exceeds
+// maxChildrenMetadataBytes, proving the aggregate metadata budget is enforced independently of
+// the direct-child count bound (AC-1's second explicit resource bound).
+func TestComputeNodeChildrenChecksum_RejectsMetadataBudgetBeyondBound(t *testing.T) {
+	nodeDir := t.TempDir()
+	snapshotsDir := filepath.Join(nodeDir, SnapshotsDirName)
+	childDir := filepath.Join(snapshotsDir, "snapshot_bloated-child")
+
+	if err := os.MkdirAll(filepath.Join(childDir, ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", childDir, err)
+	}
+
+	checksum, err := ComputeNodeChecksum(childDir)
+	if err != nil {
+		t.Fatalf("compute node checksum for %s: %v", childDir, err)
+	}
+
+	childrenChecksum := EmptyChildrenChecksum()
+	// A namespace field padded well beyond maxChildrenMetadataBytes: the aggregate metadata
+	// budget is charged against the raw snapshot.yaml file size, so a single oversized child
+	// is enough to exceed it regardless of maxDirectChildren.
+	oversizedNamespace := strings.Repeat("x", int(maxChildrenMetadataBytes)+1)
+
+	if err := WriteSnapshotYAML(childDir, SnapshotYAML{
+		APIVersion: "v1", Kind: "Snapshot", Name: "bloated-child", Namespace: oversizedNamespace,
+		Checksum: checksum, ChildrenChecksum: &childrenChecksum,
+	}); err != nil {
+		t.Fatalf("write snapshot.yaml for %s: %v", childDir, err)
+	}
+
+	if _, err := ComputeNodeChildrenChecksum(nodeDir); !errors.Is(err, ErrChildrenMetadataBudgetExceeded) {
+		t.Fatalf("ComputeNodeChildrenChecksum with oversized child metadata: got %v, want ErrChildrenMetadataBudgetExceeded", err)
+	}
+}
+
+// TestComputeNodeChildrenChecksum_ReflectsActualDirectChildrenOnDisk proves the production
+// commitment path (ComputeNodeChildrenChecksum) changes when a direct child is added, removed,
+// or replaced by a different identity at the same path — the exact "hybrid tree" mutations
+// AC-2 requires be detectable, exercised here at the commitment layer itself.
+func TestComputeNodeChildrenChecksum_ReflectsActualDirectChildrenOnDisk(t *testing.T) {
+	nodeDir := t.TempDir()
+	snapshotsDir := filepath.Join(nodeDir, SnapshotsDirName)
+
+	if err := os.MkdirAll(snapshotsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", snapshotsDir, err)
+	}
+
+	empty, err := ComputeNodeChildrenChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChildrenChecksum (no children): %v", err)
+	}
+
+	if empty.Hex != EmptyChildrenChecksum().Hex {
+		t.Errorf("no-children commitment = %q, want the canonical empty commitment %q", empty.Hex, EmptyChildrenChecksum().Hex)
+	}
+
+	finalizeNodeForChildrenChecksumTest(t, snapshotsDir, "child-a")
+
+	withA, err := ComputeNodeChildrenChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChildrenChecksum (added child-a): %v", err)
+	}
+
+	if withA.Hex == empty.Hex {
+		t.Error("adding a direct child did not change the commitment")
+	}
+
+	finalizeNodeForChildrenChecksumTest(t, snapshotsDir, "child-b")
+
+	withAB, err := ComputeNodeChildrenChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChildrenChecksum (added child-b): %v", err)
+	}
+
+	if withAB.Hex == withA.Hex {
+		t.Error("adding a second direct child did not change the commitment")
+	}
+
+	if err := os.RemoveAll(filepath.Join(snapshotsDir, "child-a")); err != nil {
+		t.Fatalf("remove child-a: %v", err)
+	}
+
+	afterRemoval, err := ComputeNodeChildrenChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChildrenChecksum (removed child-a): %v", err)
+	}
+
+	if afterRemoval.Hex == withAB.Hex {
+		t.Error("removing a direct child did not change the commitment")
+	}
+
+	if afterRemoval.Hex == empty.Hex {
+		t.Error("commitment with child-b still present must not equal the empty commitment")
+	}
+
+	if afterRemoval.Hex == withA.Hex {
+		t.Error("commitment over {child-b} must not equal the earlier, unrelated commitment over {child-a}")
 	}
 }

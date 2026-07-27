@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -35,11 +36,33 @@ const (
 	authChunkSize       = 1024 * 1024
 	authIndexRecordSize = sha256.Size
 	maxAuthIndexRecords = 8 * 1024 * 1024
+
+	// maxDirectChildren bounds the number of direct children a single node's ChildrenChecksum
+	// may commit to. It bounds both the memory retained while computing/verifying the
+	// commitment and the work an adversarial archive can force onto a single node.
+	maxDirectChildren = 10_000
+	// maxChildrenMetadataBytes bounds the aggregate bytes read from direct children's
+	// snapshot.yaml files while computing one node's ChildrenChecksum, independent of
+	// maxDirectChildren (many small files or a few large ones can both exhaust memory).
+	maxChildrenMetadataBytes int64 = 8 << 20 // 8 MiB
 )
 
 // ErrChecksumMismatch is returned when the recomputed checksum differs from
 // the value recorded in snapshot.yaml.
 var ErrChecksumMismatch = errors.New("checksum mismatch")
+
+// ErrChildrenChecksumMismatch is returned when a node's authenticated direct-child commitment
+// does not match its physical direct children (a "hybrid tree": a child was added, removed,
+// replaced, duplicated, or its digest no longer matches).
+var ErrChildrenChecksumMismatch = errors.New("children checksum mismatch")
+
+// ErrTooManyDirectChildren is returned when a node's snapshots/ directory carries more than
+// maxDirectChildren entries.
+var ErrTooManyDirectChildren = errors.New("direct child count exceeds bound")
+
+// ErrChildrenMetadataBudgetExceeded is returned when the aggregate size of direct children's
+// snapshot.yaml files exceeds maxChildrenMetadataBytes while computing a ChildrenChecksum.
+var ErrChildrenMetadataBudgetExceeded = errors.New("aggregate direct-child metadata exceeds budget")
 
 // ErrSnapshotYAMLMissing is returned when snapshot.yaml does not exist in a node directory.
 var ErrSnapshotYAMLMissing = errors.New("snapshot.yaml not found")
@@ -71,6 +94,22 @@ type VerifiedFile struct {
 	archivePath string
 	digest      [sha256.Size]byte
 	info        os.FileInfo
+}
+
+// ChildCommitment is the canonical record committed by a parent's ChildrenChecksum for one
+// direct child: the child's identity plus its own recursively-authenticated digests. Chaining
+// NodeChecksum (the child's content) and ChildrenChecksum (the child's own direct children)
+// makes a single ChildrenChecksum comparison at a node cover only that node's direct children;
+// full-tree authentication requires verifying every node's own commitment (see
+// snapimport.verifyCommitmentTree / archive.VerifyNodeWithOptions applied recursively).
+type ChildCommitment struct {
+	APIVersion       string
+	Kind             string
+	Name             string
+	Namespace        string
+	UID              string
+	NodeChecksum     NodeChecksum
+	ChildrenChecksum NodeChecksum
 }
 
 // AuthenticatedReadStats reports chunk authentication performed while serving Read and ReadAt.
@@ -250,12 +289,40 @@ func (a *VerifiedArchive) VerifyNode(ctx context.Context, nodeDir string) (*Veri
 		return nil, fmt.Errorf("%s: %w", nodeDir, err)
 	}
 
+	if err := verifyNodeChildrenChecksum(source, metadata, a.snapshotReadOptions); err != nil {
+		return nil, fmt.Errorf("%s: %w", nodeDir, err)
+	}
+
 	return &VerifiedNode{
 		checksum:       checksum,
 		snapshotDigest: snapshotDigest,
 		snapshotInfo:   snapshotInfoBefore,
 		files:          files,
 	}, nil
+}
+
+// VerifyNodeChildrenChecksum verifies one node's authenticated direct-child commitment through
+// the archive's pinned root, without opening any child payload bytes. Callers use it as a fast
+// preflight (e.g. against a selected-subtree import's ancestor chain) before the fuller
+// VerifyNode pass runs on the nodes actually being mutated.
+func (a *VerifiedArchive) VerifyNodeChildrenChecksum(ctx context.Context, nodeDir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	source, closeNode, err := a.openNode(nodeDir)
+	if err != nil {
+		return err
+	}
+
+	defer closeNode()
+
+	metadata, err := readSnapshotYAML(source, a.snapshotReadOptions)
+	if err != nil {
+		return err
+	}
+
+	return verifyNodeChildrenChecksum(source, metadata, a.snapshotReadOptions)
 }
 
 // Checksum returns the recomputed node checksum.
@@ -900,6 +967,295 @@ func copyContext(ctx context.Context, writer io.Writer, reader io.Reader) error 
 	}
 }
 
+// EmptyChildrenChecksum is the canonical ChildrenChecksum committed by a node with no direct
+// children (a leaf, or an aggregator whose snapshots/ directory is absent or empty).
+func EmptyChildrenChecksum() NodeChecksum {
+	checksum, err := ComputeChildrenChecksum(nil)
+	if err != nil {
+		// Hashing zero, already-valid records cannot fail ComputeChildrenChecksum's validation.
+		panic(fmt.Sprintf("compute empty children checksum: %v", err))
+	}
+
+	return checksum
+}
+
+// ComputeChildrenChecksum computes the canonical authenticated digest committing to an exact
+// set of direct-child identities and digests. It is deterministic regardless of input order:
+// commitments are canonicalized by sorting on the full
+// (apiVersion, kind, namespace, name, uid) identity tuple before hashing. It rejects more than
+// maxDirectChildren commitments, any commitment with an incomplete identity or malformed
+// checksum, and duplicate identities (ErrInvalidSnapshotYAML).
+func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error) {
+	if len(commitments) > maxDirectChildren {
+		return NodeChecksum{}, fmt.Errorf("%d direct children exceeds bound %d: %w",
+			len(commitments), maxDirectChildren, ErrTooManyDirectChildren)
+	}
+
+	canonical := make([]ChildCommitment, len(commitments))
+	copy(canonical, commitments)
+
+	for i := range canonical {
+		record := canonical[i]
+		if record.APIVersion == "" || record.Kind == "" || record.Name == "" {
+			return NodeChecksum{}, fmt.Errorf(
+				"child identity apiVersion/kind/name must be complete (got %q/%q/%q): %w",
+				record.APIVersion, record.Kind, record.Name, ErrInvalidSnapshotYAML)
+		}
+
+		if err := validateChecksum(record.NodeChecksum); err != nil {
+			return NodeChecksum{}, fmt.Errorf("child %s/%s node checksum: %w", record.Kind, record.Name, err)
+		}
+
+		if err := validateChecksum(record.ChildrenChecksum); err != nil {
+			return NodeChecksum{}, fmt.Errorf("child %s/%s children checksum: %w", record.Kind, record.Name, err)
+		}
+	}
+
+	sort.Slice(canonical, func(i, j int) bool {
+		return childIdentityKey(canonical[i]) < childIdentityKey(canonical[j])
+	})
+
+	for i := 1; i < len(canonical); i++ {
+		if childIdentityKey(canonical[i]) == childIdentityKey(canonical[i-1]) {
+			return NodeChecksum{}, fmt.Errorf("duplicate direct child identity %s: %w",
+				childIdentityKey(canonical[i]), ErrInvalidSnapshotYAML)
+		}
+	}
+
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("d8-snapshot-children-checksum-v1\x00"))
+	writeLengthPrefixed(hash, fmt.Sprintf("%d", len(canonical)))
+
+	for _, record := range canonical {
+		writeLengthPrefixed(hash, record.APIVersion)
+		writeLengthPrefixed(hash, record.Kind)
+		writeLengthPrefixed(hash, record.Namespace)
+		writeLengthPrefixed(hash, record.Name)
+		writeLengthPrefixed(hash, record.UID)
+		writeLengthPrefixed(hash, record.NodeChecksum.Hex)
+		writeLengthPrefixed(hash, record.ChildrenChecksum.Hex)
+	}
+
+	hexString := fmt.Sprintf("%x", hash.Sum(nil))
+
+	return NodeChecksum{
+		Algorithm: ChecksumAlgorithmSHA256,
+		Hex:       hexString,
+		Short:     ShortChecksum(hexString),
+	}, nil
+}
+
+// childIdentityKey renders a ChildCommitment's identity as a delimiter-separated, order- and
+// collision-safe sort/comparison key. \x1f (unit separator) cannot appear in the identity
+// fields it joins, so no combination of field boundaries can collide with another.
+func childIdentityKey(c ChildCommitment) string {
+	return c.APIVersion + "\x1f" + c.Kind + "\x1f" + c.Namespace + "\x1f" + c.Name + "\x1f" + c.UID
+}
+
+func writeLengthPrefixed(hash io.Writer, field string) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+	_, _ = hash.Write(length[:])
+	_, _ = hash.Write([]byte(field))
+}
+
+// ComputeNodeChildrenChecksum computes nodeDir's commitment from its physical direct children.
+func ComputeNodeChildrenChecksum(nodeDir string) (NodeChecksum, error) {
+	source, err := OpenRootedSource(nodeDir)
+	if err != nil {
+		return NodeChecksum{}, err
+	}
+
+	defer func() { _ = source.Close() }()
+
+	return computeNodeChildrenChecksum(source, SnapshotYAMLReadOptions{})
+}
+
+// ComputeNodeChildrenChecksumRooted computes a commitment through an already pinned source.
+func ComputeNodeChildrenChecksumRooted(source *RootedSource) (NodeChecksum, error) {
+	return computeNodeChildrenChecksum(source, SnapshotYAMLReadOptions{})
+}
+
+// ComputeNodeChildrenChecksum hashes one node's direct children through the locked rooted view.
+func (d *RootedDestination) ComputeNodeChildrenChecksum(nodeDir string) (NodeChecksum, error) {
+	directory, err := d.openDirectory(nodeDir, false, false)
+	if err != nil {
+		return NodeChecksum{}, err
+	}
+	defer directory.close()
+
+	return computeNodeChildrenChecksum(directory.source, SnapshotYAMLReadOptions{})
+}
+
+// computeNodeChildrenChecksum enumerates source's snapshots/ directory (its direct children),
+// bounded to maxDirectChildren entries and maxChildrenMetadataBytes of aggregate snapshot.yaml
+// content, and folds each child's identity and digests into a ComputeChildrenChecksum call.
+// A missing snapshots/ directory (a leaf) commits to EmptyChildrenChecksum.
+func computeNodeChildrenChecksum(source archiveDirectory, options SnapshotYAMLReadOptions) (NodeChecksum, error) {
+	snapshots, err := source.archiveOpenDirectory(SnapshotsDirName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return EmptyChildrenChecksum(), nil
+		}
+
+		return NodeChecksum{}, fmt.Errorf("open child snapshots in %s: %w", source.archivePath(), err)
+	}
+
+	defer func() { _ = snapshots.archiveClose() }()
+
+	entries, err := snapshots.archiveReadDirectoryBounded(maxDirectChildren)
+	if err != nil {
+		return NodeChecksum{}, fmt.Errorf("read child snapshots in %s: %w", source.archivePath(), err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	metadataBudget := maxChildrenMetadataBytes
+	children := make([]ChildCommitment, 0, len(entries))
+
+	for _, entry := range entries {
+		childPath := filepath.Join(snapshots.archivePath(), entry.Name())
+
+		if !entry.IsDir() {
+			if entry.Type()&os.ModeSymlink != 0 {
+				return NodeChecksum{}, fmt.Errorf("child entry %s is a symlink: %w",
+					childPath, ErrNonRegularArchiveArtifact)
+			}
+
+			continue
+		}
+
+		child, err := snapshots.archiveOpenDirectory(entry.Name())
+		if err != nil {
+			return NodeChecksum{}, fmt.Errorf("open child %s: %w", childPath, err)
+		}
+
+		metadata, readErr := readChildSnapshotYAMLBounded(child, options, &metadataBudget)
+
+		closeErr := child.archiveClose()
+		if errors.Is(readErr, os.ErrNotExist) && closeErr == nil {
+			// A snapshot.yaml-less collision/resume directory is not a finalized child.
+			continue
+		}
+
+		if readErr != nil {
+			return NodeChecksum{}, errors.Join(fmt.Errorf("read child %s: %w", childPath, readErr), closeErr)
+		}
+
+		if closeErr != nil {
+			return NodeChecksum{}, fmt.Errorf("close child %s: %w", childPath, closeErr)
+		}
+
+		if metadata.ChildrenChecksum == nil {
+			return NodeChecksum{}, fmt.Errorf(
+				"child %s has no authenticated children commitment: %w", childPath, ErrInvalidSnapshotYAML)
+		}
+
+		children = append(children, ChildCommitment{
+			APIVersion:       metadata.APIVersion,
+			Kind:             metadata.Kind,
+			Name:             metadata.Name,
+			Namespace:        metadata.Namespace,
+			UID:              metadata.UID,
+			NodeChecksum:     metadata.Checksum,
+			ChildrenChecksum: *metadata.ChildrenChecksum,
+		})
+	}
+
+	return ComputeChildrenChecksum(children)
+}
+
+// readChildSnapshotYAMLBounded reads and unmarshals one direct child's snapshot.yaml, charging
+// its size against the shared remainingBudget so the aggregate metadata read while enumerating
+// all of a node's direct children stays within maxChildrenMetadataBytes regardless of how many
+// children there are or how large any single snapshot.yaml is.
+func readChildSnapshotYAMLBounded(
+	child archiveDirectory,
+	options SnapshotYAMLReadOptions,
+	remainingBudget *int64,
+) (SnapshotYAML, error) {
+	file, err := child.archiveOpenRegularFile(SnapshotYAMLName)
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml: %w", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("inspect snapshot.yaml in %s: %w", child.archivePath(), err)
+	}
+
+	if info.Size() > *remainingBudget {
+		return SnapshotYAML{}, fmt.Errorf(
+			"snapshot.yaml in %s would exceed the %d-byte aggregate direct-child metadata budget: %w",
+			child.archivePath(), maxChildrenMetadataBytes, ErrChildrenMetadataBudgetExceeded)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, info.Size()+1))
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("read snapshot.yaml in %s: %w", child.archivePath(), err)
+	}
+
+	if int64(len(data)) > info.Size() {
+		return SnapshotYAML{}, fmt.Errorf("snapshot.yaml in %s changed while being read: %w",
+			child.archivePath(), ErrVerifiedArchiveChanged)
+	}
+
+	*remainingBudget -= int64(len(data))
+
+	sy, err := UnmarshalSnapshotYAML(data, options)
+	if err != nil {
+		return SnapshotYAML{}, fmt.Errorf("unmarshal snapshot.yaml in %s: %w", child.archivePath(), err)
+	}
+
+	return sy, nil
+}
+
+// VerifyNodeChildrenChecksumRooted verifies one pinned node's authenticated direct-child
+// commitment without reading any child payload bytes.
+func VerifyNodeChildrenChecksumRooted(source *RootedSource) error {
+	return VerifyNodeChildrenChecksumRootedWithOptions(source, SnapshotYAMLReadOptions{})
+}
+
+// VerifyNodeChildrenChecksumRootedWithOptions verifies one pinned node under an explicit
+// envelope compatibility policy; the childrenChecksum commitment itself remains mandatory.
+func VerifyNodeChildrenChecksumRootedWithOptions(source *RootedSource, options SnapshotYAMLReadOptions) error {
+	metadata, err := readSnapshotYAML(source, options)
+	if err != nil {
+		return err
+	}
+
+	return verifyNodeChildrenChecksum(source, metadata, options)
+}
+
+// verifyNodeChildrenChecksum recomputes source's direct-child commitment and compares it with
+// metadata.ChildrenChecksum. Legacy-format (version 0) metadata is exempt: it predates the
+// commitment entirely and is already unauthenticated end-to-end under
+// options.AllowUnauthenticatedLegacy (validateSnapshotEnvelope requires the field be present,
+// but a legacy node's own commitment cannot be trusted any more than the rest of its envelope).
+func verifyNodeChildrenChecksum(source archiveDirectory, metadata SnapshotYAML, options SnapshotYAMLReadOptions) error {
+	if metadata.FormatVersion == SnapshotFormatVersionLegacy {
+		return nil
+	}
+
+	computed, err := computeNodeChildrenChecksum(source, options)
+	if err != nil {
+		return err
+	}
+
+	stored := "<missing>"
+	if metadata.ChildrenChecksum != nil {
+		stored = metadata.ChildrenChecksum.Hex
+	}
+
+	if metadata.ChildrenChecksum == nil || computed.Hex != metadata.ChildrenChecksum.Hex {
+		return fmt.Errorf("stored %q computed %q: %w", stored, computed.Hex, ErrChildrenChecksumMismatch)
+	}
+
+	return nil
+}
+
 func sameVerifiedInfo(expected, actual os.FileInfo) bool {
 	return os.SameFile(expected, actual) &&
 		expected.Mode() == actual.Mode() &&
@@ -1046,6 +1402,10 @@ func VerifyNodeWithOptions(nodeDir string, options SnapshotYAMLReadOptions) erro
 	if got.Hex != sy.Checksum.Hex {
 		return fmt.Errorf("node %s: stored %q computed %q: %w",
 			nodeDir, sy.Checksum.Hex, got.Hex, ErrChecksumMismatch)
+	}
+
+	if err := verifyNodeChildrenChecksum(source, sy, options); err != nil {
+		return fmt.Errorf("node %s: %w", nodeDir, err)
 	}
 
 	return nil
