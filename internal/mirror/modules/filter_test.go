@@ -189,6 +189,89 @@ func TestFilter_BareVersionConstraint(t *testing.T) {
 	}
 }
 
+// TestFilter_BareIncludeHasNoVersionConstraint covers "--include-module <name>"
+// with no "@version" part. Membership and version selection are separate
+// concerns: the name alone selects the module for mirroring, while the absent
+// version part means no version is pinned, so the release channels decide what
+// gets pulled and the registry tag list is never consulted.
+func TestFilter_BareIncludeHasNoVersionConstraint(t *testing.T) {
+	const moduleName = "csi-huawei"
+
+	filter, err := NewFilter([]string{moduleName}, FilterTypeWhitelist)
+	require.NoError(t, err)
+	filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+
+	require.True(t, filter.Match(&Module{Name: moduleName}),
+		"the name alone must select the module for mirroring")
+
+	_, hasConstraint := filter.GetConstraint(moduleName)
+	assert.False(t, hasConstraint,
+		"a bare include pins no version, so it must report no constraint")
+
+	assert.True(t, filter.ShouldMirrorReleaseChannels(moduleName),
+		"release channels are the only version source for a bare include")
+
+	mod := &Module{
+		Name:     moduleName,
+		Releases: []string{"v0.1.1", "v0.2.9", "v0.3.11", "v0.3.13"},
+	}
+	assert.Empty(t, filter.VersionsToMirror(mod),
+		"a bare include must not add version tags from the registry tag list")
+}
+
+// TestFilter_BareIncludeMergedWithExplicitConstraint covers a name declared
+// several times with and without a version part. A bare entry pins nothing, so
+// merging it must neither drop an explicitly pinned version nor widen the
+// selection back to the whole registry tag list.
+func TestFilter_BareIncludeMergedWithExplicitConstraint(t *testing.T) {
+	releases := []string{"v0.1.1", "v0.2.9", "v1.2.3", "v1.2.4", "v1.3.0"}
+
+	tests := []struct {
+		name           string
+		expressions    []string
+		wantConstraint bool     // GetConstraint reports a pinned constraint
+		wantVersions   []string // tags VersionsToMirror resolves to
+	}{
+		{
+			name:           "bare first, pinned second",
+			expressions:    []string{"module1", "module1@=v1.2.3"},
+			wantConstraint: true,
+			wantVersions:   []string{"v1.2.3"},
+		},
+		{
+			name:           "pinned first, bare second",
+			expressions:    []string{"module1@=v1.2.3", "module1"},
+			wantConstraint: true,
+			wantVersions:   []string{"v1.2.3"},
+		},
+		{
+			name:           "two bare entries stay channels-only",
+			expressions:    []string{"module1", "module1"},
+			wantConstraint: false,
+			wantVersions:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter(tt.expressions, FilterTypeWhitelist)
+			require.NoError(t, err)
+			filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+
+			constraint, hasConstraint := filter.GetConstraint("module1")
+			require.Equal(t, tt.wantConstraint, hasConstraint)
+
+			if tt.wantConstraint {
+				assert.True(t, constraint.IsExact(),
+					"merging a bare entry must keep the pinned tag exact")
+			}
+
+			assert.ElementsMatch(t, tt.wantVersions,
+				filter.VersionsToMirror(&Module{Name: "module1", Releases: releases}))
+		})
+	}
+}
+
 func TestFilter_Match(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelDebug)
 	type args struct {

@@ -175,6 +175,8 @@ Examples (available platform versions: v1.63.x, v1.64.x, v1.65.x, v1.66.x, v1.67
 		nil,
 		`Whitelist specific modules for downloading. Use one flag per each module. Disables blacklisting by --exclude-module."
 
+Without a version part (module-name), only the versions the release channels currently point at are pulled - the same set as a default pull with no filters.
+
 Semver constraints (caret, tilde, range) keep only the highest patch in each (major, minor) series, mirroring how platform releases are discovered.
 Versions explicitly named with an inclusive boundary operator (>= or <=) are always preserved — that boundary is part of the user's request and must round-trip even when a newer patch exists in the same minor.
 Use the exact-tag form (=) when you need a specific older patch unconditionally.
@@ -185,6 +187,8 @@ Shell note: >= and <= contain the redirection metacharacters > and <, so an unqu
 
 Example:
 Available versions for <module-name>: v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1
+
+module-name → no version part: pull only the versions the release channels currently point at (same as a default pull).
 
 module-name@1.3.0 → bare version, expands to >=1.3.0 <2.0.0 (same major line): keep latest patch per minor — includes v1.3.3 (1.3.x) and v1.4.1 (1.4.x). Versions currently pinned by release channels are pulled in addition.
 
