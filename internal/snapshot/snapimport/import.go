@@ -212,8 +212,10 @@ func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedA
 		cfg.testHooks.afterPlan()
 	}
 
+	completePlan := plan
+
 	if cfg.SelectedNodeKind != "" {
-		plan, err = filterPlanToSubtree(plan, cfg.SelectedNodeKind, cfg.SelectedNodeName)
+		plan, err = filterPlanToSubtree(completePlan, cfg.SelectedNodeKind, cfg.SelectedNodeName)
 		if err != nil {
 			return fmt.Errorf("filter archive to selected node %s/%s: %w", cfg.SelectedNodeKind, cfg.SelectedNodeName, err)
 		}
@@ -251,6 +253,12 @@ func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedA
 					"it carries no own volume data and is materialised only as part of its parent tree; "+
 					"import the full archive (omit --node) or select its ancestor Snapshot",
 				root.Kind, root.Name)
+		}
+	}
+
+	if cfg.SelectedNodeKind != "" {
+		if err := verifySelectedNodeExternalAncestors(ctx, view, completePlan, root); err != nil {
+			return err
 		}
 	}
 
@@ -333,6 +341,44 @@ func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedA
 	}
 
 	return waitRootReady(ctx, cfg, root)
+}
+
+// verifySelectedNodeExternalAncestors authenticates every physical parent excluded by --node
+// before any Kubernetes request. It uses the same pinned archive and rooted lock as the full
+// import preflight and reads only bounded child metadata, never child payload bytes.
+func verifySelectedNodeExternalAncestors(
+	ctx context.Context,
+	view *archive.VerifiedArchive,
+	fullPlan []PlannedNode,
+	selected PlannedNode,
+) error {
+	topology, err := indexPlanTopology(fullPlan)
+	if err != nil {
+		return fmt.Errorf("index selected-node ancestor topology: %w", err)
+	}
+
+	currentKey := nodeKey(selected)
+
+	for {
+		parentIndex, ok := topology.parents[currentKey]
+		if !ok {
+			return nil
+		}
+
+		parent := fullPlan[parentIndex]
+		if err := view.VerifyNodeChildrenChecksum(ctx, parent.Dir); err != nil {
+			return fmt.Errorf(
+				"selected node %s/%s external ancestor %s/%s: %w",
+				selected.Kind,
+				selected.Name,
+				parent.Kind,
+				parent.Name,
+				err,
+			)
+		}
+
+		currentKey = nodeKey(parent)
+	}
 }
 
 func wrapArchiveViewCloseError(err error) error {

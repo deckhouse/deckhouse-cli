@@ -1510,6 +1510,278 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 	assertNoIdentityMarkers(t, outputDir)
 }
 
+func TestPipeline_PublicationTransactionRecoversBottomUpAfterParentCrash(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("P"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           buildFakeClient(t),
+		OpenExport: func(
+			_ context.Context,
+			namespace string,
+			_ aggapi.NodeRef,
+			_ string,
+		) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	transactionPath := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		".d8-snapshot-publication-v1.json",
+	)
+	crashErr := errors.New("injected parent publication crash")
+	ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		if path == outputDir {
+			if _, err := os.Stat(transactionPath); err == nil {
+				return crashErr
+			}
+		}
+
+		return next()
+	})
+
+	err := runPipeline(ctx, cfg)
+	require.ErrorIs(t, err, crashErr)
+	require.FileExists(t, transactionPath)
+	transactionData, err := os.ReadFile(transactionPath)
+	require.NoError(t, err)
+
+	childDir := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		archive.NodeDirName(childKind, diskSnapName),
+	)
+	assertNodeComplete(t, childDir)
+
+	var openExportCalls atomic.Int64
+	cfg.OpenExport = func(
+		_ context.Context,
+		_ string,
+		_ aggapi.NodeRef,
+		_ string,
+	) (*exporter.Export, error) {
+		openExportCalls.Add(1)
+		t.Error("OpenExport must not run while replaying durable publication")
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	receiptPath := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		".d8-snapshot-publication-receipt-v1.json",
+	)
+	cleanupErr := errors.New("injected transaction cleanup crash")
+	cleanupCtx := archive.WithDirectorySyncHook(
+		context.Background(),
+		func(path string, next func() error) error {
+			if path == filepath.Join(outputDir, archive.SnapshotsDirName) {
+				_, transactionErr := os.Stat(transactionPath)
+				_, receiptErr := os.Stat(receiptPath)
+				if errors.Is(transactionErr, os.ErrNotExist) && receiptErr == nil {
+					return cleanupErr
+				}
+			}
+
+			return next()
+		},
+	)
+	require.ErrorIs(t, runPipeline(cleanupCtx, cfg), cleanupErr)
+	require.NoFileExists(t, transactionPath)
+	require.FileExists(t, receiptPath)
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	assertNodeComplete(t, outputDir)
+	require.NoFileExists(t, transactionPath)
+
+	// Cleanup replay is convergent: after receipt publication and active-record
+	// removal, an additional run is a no-op success.
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	// A transaction that reappears after its authenticated cleaned receipt is
+	// fail-closed rather than authorizing a second publication.
+	require.NoError(t, os.WriteFile(transactionPath, transactionData, 0o600))
+	err = runPipeline(context.Background(), cfg)
+	require.ErrorContains(t, err, "replayed after durable cleanup")
+	require.Zero(t, openExportCalls.Load())
+
+	require.NoError(t, os.WriteFile(transactionPath, []byte("{"), 0o600))
+	err = runPipeline(context.Background(), cfg)
+	require.ErrorContains(t, err, "decode publication transaction")
+	require.Zero(t, openExportCalls.Load())
+
+	var foreignTransaction map[string]interface{}
+	require.NoError(t, json.Unmarshal(transactionData, &foreignTransaction))
+	foreignTransaction["archiveRoot"] = outputDir + "-foreign"
+	foreignData, err := json.Marshal(foreignTransaction)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(transactionPath, foreignData, 0o600))
+	err = runPipeline(context.Background(), cfg)
+	require.ErrorContains(t, err, "does not match this archive and source tree")
+	require.Zero(t, openExportCalls.Load())
+
+	require.NoError(t, os.Remove(transactionPath))
+	require.NoError(t, os.WriteFile(transactionPath+".tmp", []byte("partial"), 0o600))
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	require.Zero(t, openExportCalls.Load())
+}
+
+func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("T"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	aggDir := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, "agg-snap"),
+	)
+	leafDir := filepath.Join(
+		aggDir,
+		archive.SnapshotsDirName,
+		archive.NodeDirName("VolumeSnapshot", "pvc-agg"),
+	)
+	transactionPath := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		".d8-snapshot-publication-v1.json",
+	)
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eAggRootSnap,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           buildOrphanLeafFakeClient(t),
+		OpenExport: func(
+			_ context.Context,
+			namespace string,
+			_ aggapi.NodeRef,
+			_ string,
+		) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-tree", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	runWithCrash := func(nodeDir string, crashErr error) error {
+		t.Helper()
+
+		ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+			if path == nodeDir {
+				if _, err := os.Stat(transactionPath); err == nil {
+					return crashErr
+				}
+			}
+
+			return next()
+		})
+
+		return runPipeline(ctx, cfg)
+	}
+
+	firstCrash := errors.New("injected aggregator publication crash")
+	require.ErrorIs(t, runWithCrash(aggDir, firstCrash), firstCrash)
+	require.FileExists(t, transactionPath)
+	assertNodeComplete(t, leafDir)
+	require.NoFileExists(t, filepath.Join(outputDir, archive.SnapshotYAMLName))
+
+	var openExportCalls atomic.Int64
+	cfg.OpenExport = func(
+		_ context.Context,
+		_ string,
+		_ aggapi.NodeRef,
+		_ string,
+	) (*exporter.Export, error) {
+		openExportCalls.Add(1)
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	secondCrash := errors.New("injected root publication crash")
+	require.ErrorIs(t, runWithCrash(outputDir, secondCrash), secondCrash)
+	require.FileExists(t, transactionPath)
+	require.Zero(t, openExportCalls.Load())
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	assertNodeComplete(t, aggDir)
+	assertNodeComplete(t, outputDir)
+	require.NoFileExists(t, transactionPath)
+	require.Zero(t, openExportCalls.Load())
+}
+
+func TestPipeline_StaleParentWithoutPublicationTransactionIsRejected(t *testing.T) {
+	rawBlock := bytes.Repeat([]byte("S"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	outputDir := t.TempDir()
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eAggRootSnap,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           buildOrphanLeafFakeClient(t),
+		OpenExport: func(
+			_ context.Context,
+			namespace string,
+			_ aggapi.NodeRef,
+			_ string,
+		) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-stale", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+		},
+	}
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	leafDir := filepath.Join(
+		outputDir,
+		archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, "agg-snap"),
+		archive.SnapshotsDirName,
+		archive.NodeDirName("VolumeSnapshot", "pvc-agg"),
+	)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(leafDir, archive.ManifestsDirName, "republished.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: republished\n"),
+		0o600,
+	))
+
+	metadata, err := archive.ReadSnapshotYAML(leafDir)
+	require.NoError(t, err)
+	metadata.Checksum, err = archive.ComputeNodeChecksum(leafDir)
+	require.NoError(t, err)
+	require.NoError(t, archive.WriteSnapshotYAML(leafDir, metadata))
+
+	var openExportCalls atomic.Int64
+	cfg.OpenExport = func(
+		_ context.Context,
+		_ string,
+		_ aggapi.NodeRef,
+		_ string,
+	) (*exporter.Export, error) {
+		openExportCalls.Add(1)
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	err = runPipeline(context.Background(), cfg)
+	require.ErrorIs(t, err, archive.ErrChildrenChecksumMismatch)
+	require.Zero(t, openExportCalls.Load())
+}
+
 func TestPipeline_ProductionTargetMismatchNeverCleansUpCollision(t *testing.T) {
 	t.Parallel()
 

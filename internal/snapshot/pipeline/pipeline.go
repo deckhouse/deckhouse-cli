@@ -46,8 +46,9 @@ type nodeTask struct {
 	// done is the resume scan's single consumed decision: a complete,
 	// identity-verified node is skipped. observed is a non-authoritative label of
 	// what the scan saw on disk, carried only for the "resume_state" log line.
-	done     bool
-	observed archive.ObservedState
+	done          bool
+	staleChildren bool
+	observed      archive.ObservedState
 }
 
 // streamKey identifies a pre-created progress stream.
@@ -183,14 +184,52 @@ func run(
 		return fmt.Errorf("build snapshot tree: %w", err)
 	}
 
+	sourceTreeDigest, err := publicationTreeDigest(root)
+	if err != nil {
+		return fmt.Errorf("identify publication source tree: %w", err)
+	}
+
 	processRoot, startDir, err := resolveSubtreeRootRooted(root, cfg, destination)
 	if err != nil {
 		return err
 	}
 
-	tasks, err := collectNodeTasksRootedContext(ctx, destination, processRoot, startDir)
+	transaction, err := loadPublicationTransaction(destination, sourceTreeDigest)
+	if err != nil {
+		return fmt.Errorf("load publication transaction: %w", err)
+	}
+
+	receipt, err := loadPublicationReceipt(destination, sourceTreeDigest)
+	if err != nil {
+		return fmt.Errorf("load publication receipt: %w", err)
+	}
+
+	if transaction != nil && receipt != nil &&
+		receipt.TransactionChecksum == transaction.Checksum && receipt.Cleaned {
+		return fmt.Errorf("publication transaction %s was replayed after durable cleanup: %w",
+			transaction.Checksum, errPublicationTransactionInvalid)
+	}
+
+	if transaction == nil && receipt != nil && !receipt.Cleaned {
+		receipt.Cleaned = true
+		if err := writePublicationReceipt(context.WithoutCancel(ctx), destination, receipt); err != nil {
+			return fmt.Errorf("recover publication cleanup receipt: %w", err)
+		}
+	}
+
+	tasks, err := collectNodeTasksRootedContextWithTransaction(
+		ctx,
+		destination,
+		processRoot,
+		startDir,
+		transaction,
+	)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
+	}
+
+	if err := validateProvisionalStaleParents(tasks); err != nil {
+		return err
 	}
 
 	// Redirect any sibling nodes that resolve to the SAME on-disk directory in
@@ -273,7 +312,7 @@ func run(
 	// re-finalized only if one of its direct children was freshly (re)published this run,
 	// since that is the only way its previously-committed ChildrenChecksum could now be stale.
 	failed := make(map[*source.Node]bool, len(tasks))
-	republished := make(map[*source.Node]bool, len(tasks))
+	publish := make(map[*source.Node]bool, len(tasks))
 	// Publication writes only local, already-downloaded content and must not be aborted by a
 	// cancellation that arrived after every node's transfer already finished successfully:
 	// the caller's success/failure result must depend only on whether nodes actually failed
@@ -288,7 +327,7 @@ func run(
 
 		for _, child := range task.node.Children {
 			blockedByChild = blockedByChild || failed[child]
-			needsPublication = needsPublication || republished[child]
+			needsPublication = needsPublication || publish[child]
 		}
 
 		if taskErrs[task.node] != nil || blockedByChild {
@@ -297,22 +336,104 @@ func run(
 			continue
 		}
 
-		if !needsPublication {
-			continue
+		if needsPublication {
+			publish[task.node] = true
+		}
+	}
+
+	if transaction == nil && len(publish) > 0 {
+		transaction, err = buildPublicationTransaction(destination, sourceTreeDigest, tasks, publish)
+		if err != nil {
+			nodeErrs = append(nodeErrs, fmt.Errorf("prepare publication transaction: %w", err))
+		} else if err := writePublicationTransaction(publicationCtx, destination, transaction); err != nil {
+			nodeErrs = append(nodeErrs, fmt.Errorf("durably publish publication transaction: %w", err))
+			transaction = nil
+		}
+	}
+
+	if transaction != nil && receipt != nil &&
+		receipt.TransactionChecksum == transaction.Checksum && !receipt.Cleaned {
+		if err := completePublicationTransaction(publicationCtx, destination, transaction); err != nil {
+			nodeErrs = append(nodeErrs, fmt.Errorf("recover publication transaction cleanup: %w", err))
 		}
 
-		if err := volume.FinalizeNodeRootedContext(publicationCtx, destination, task.nodeDir, task.node); err != nil {
-			nodeErrs = append(nodeErrs, fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err))
-			failed[task.node] = true
+		transaction = nil
+	}
 
-			continue
+	if transaction != nil {
+		transactionNodes := make(map[string]publicationEntry, len(transaction.Entries))
+		for _, entry := range transaction.Entries {
+			transactionNodes[entry.Path] = entry
 		}
 
-		republished[task.node] = true
+		publicationFailed := false
 
-		cfg.Log.Info("node complete",
-			slog.String("kind", task.node.Kind),
-			slog.String("name", task.node.DisplayLabel()))
+		for i := len(tasks) - 1; i >= 0; i-- {
+			task := tasks[i]
+			relative, relErr := filepath.Rel(destination.Path(), task.nodeDir)
+
+			entry, required := transactionNodes[relative]
+			if relErr != nil || !required {
+				continue
+			}
+
+			if verifyErr := verifyPublicationEntry(destination, entry); verifyErr == nil {
+				continue
+			}
+
+			checksum, checksumErr := destination.ComputeNodeChecksum(task.nodeDir)
+			if checksumErr != nil || checksum.Hex != entry.NodeChecksum.Hex ||
+				entry.Identity != publicationIdentityForNode(task.node) {
+				publicationFailed = true
+
+				nodeErrs = append(nodeErrs, fmt.Errorf(
+					"publication transaction no longer matches %s: %w",
+					task.node.DisplayLabel(),
+					errors.Join(checksumErr, errPublicationTransactionInvalid),
+				))
+
+				break
+			}
+
+			childrenChecksum, childrenErr := destination.ComputeNodeChildrenChecksum(task.nodeDir)
+			if childrenErr != nil || childrenChecksum.Hex != entry.ChildrenChecksum.Hex {
+				publicationFailed = true
+
+				nodeErrs = append(nodeErrs, fmt.Errorf(
+					"publication child set no longer matches %s: %w",
+					task.node.DisplayLabel(),
+					errors.Join(childrenErr, archive.ErrChildrenChecksumMismatch),
+				))
+
+				break
+			}
+
+			if err := volume.FinalizeNodeRootedContext(publicationCtx, destination, task.nodeDir, task.node); err != nil {
+				publicationFailed = true
+
+				nodeErrs = append(nodeErrs, fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err))
+
+				break
+			}
+
+			if err := verifyPublicationEntry(destination, entry); err != nil {
+				publicationFailed = true
+
+				nodeErrs = append(nodeErrs, fmt.Errorf("verify finalized %s: %w", task.node.DisplayLabel(), err))
+
+				break
+			}
+
+			cfg.Log.Info("node complete",
+				slog.String("kind", task.node.Kind),
+				slog.String("name", task.node.DisplayLabel()))
+		}
+
+		if !publicationFailed {
+			if err := completePublicationTransaction(publicationCtx, destination, transaction); err != nil {
+				nodeErrs = append(nodeErrs, fmt.Errorf("complete publication transaction: %w", err))
+			}
+		}
 	}
 
 	// Defensive sweep: guarantee every pre-created stream is terminally settled
@@ -599,19 +720,56 @@ func collectNodeTasksRootedContext(
 	root *source.Node,
 	outputDir string,
 ) ([]nodeTask, error) {
+	return collectNodeTasksRootedContextWithTransaction(ctx, destination, root, outputDir, nil)
+}
+
+func collectNodeTasksRootedContextWithTransaction(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	root *source.Node,
+	outputDir string,
+	transaction *publicationTransaction,
+) ([]nodeTask, error) {
+	rootIdentity := nodeIdentity(root)
 	rootPlan, err := archive.ScanAbsoluteRootedContext(
 		ctx,
 		destination,
 		outputDir,
-		nodeIdentity(root),
+		rootIdentity,
 	)
+	rootStaleChildren := false
+
+	if errors.Is(err, archive.ErrChildrenChecksumMismatch) {
+		if transaction != nil {
+			if authErr := authorizePublicationMismatch(destination, transaction, outputDir, rootIdentity); authErr != nil {
+				return nil, errors.Join(err, authErr)
+			}
+		}
+
+		rootPlan = archive.NodeResumePlan{
+			TargetDir: outputDir,
+			Done:      true,
+			Observed:  archive.ObservedDone,
+		}
+		rootStaleChildren = true
+		err = nil
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("scan root directory %s: %w", outputDir, err)
 	}
 
 	var tasks []nodeTask
 
-	if err := collectDFS(ctx, destination, root, rootPlan, &tasks); err != nil {
+	if err := collectDFSWithTransaction(
+		ctx,
+		destination,
+		root,
+		rootPlan,
+		&tasks,
+		transaction,
+		rootStaleChildren,
+	); err != nil {
 		return nil, err
 	}
 
@@ -627,11 +785,24 @@ func collectDFS(
 	plan archive.NodeResumePlan,
 	tasks *[]nodeTask,
 ) error {
+	return collectDFSWithTransaction(ctx, destination, node, plan, tasks, nil, false)
+}
+
+func collectDFSWithTransaction(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	node *source.Node,
+	plan archive.NodeResumePlan,
+	tasks *[]nodeTask,
+	transaction *publicationTransaction,
+	staleChildren bool,
+) error {
 	*tasks = append(*tasks, nodeTask{
-		node:     node,
-		nodeDir:  plan.TargetDir,
-		done:     plan.Done,
-		observed: plan.Observed,
+		node:          node,
+		nodeDir:       plan.TargetDir,
+		done:          plan.Done,
+		staleChildren: staleChildren,
+		observed:      plan.Observed,
 	})
 
 	if len(node.Children) == 0 {
@@ -642,18 +813,81 @@ func collectDFS(
 	snapshotsDir := filepath.Join(plan.TargetDir, archive.SnapshotsDirName)
 
 	for _, child := range node.Children {
+		childIdentity := nodeIdentity(child)
+		childStaleChildren := false
+
 		childPlan, err := archive.ScanNodeRootedContext(
 			ctx,
 			destination,
 			snapshotsDir,
-			nodeIdentity(child),
+			childIdentity,
 		)
+		if errors.Is(err, archive.ErrChildrenChecksumMismatch) {
+			childDir := filepath.Join(snapshotsDir, archive.NodeDirName(child.Kind, child.DirBaseName()))
+			if transaction != nil {
+				if authErr := authorizePublicationMismatch(
+					destination,
+					transaction,
+					childDir,
+					childIdentity,
+				); authErr != nil {
+					return errors.Join(err, authErr)
+				}
+			}
+
+			childPlan = archive.NodeResumePlan{
+				TargetDir: childDir,
+				Done:      true,
+				Observed:  archive.ObservedDone,
+			}
+			childStaleChildren = true
+			err = nil
+		}
+
 		if err != nil {
 			return fmt.Errorf("scan child %s/%s: %w", child.Kind, child.Name, err)
 		}
 
-		if err := collectDFS(ctx, destination, child, childPlan, tasks); err != nil {
+		if err := collectDFSWithTransaction(
+			ctx,
+			destination,
+			child,
+			childPlan,
+			tasks,
+			transaction,
+			childStaleChildren,
+		); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+func validateProvisionalStaleParents(tasks []nodeTask) error {
+	byNode := make(map[*source.Node]nodeTask, len(tasks))
+	for _, task := range tasks {
+		byNode[task.node] = task
+	}
+
+	for _, task := range tasks {
+		if !task.staleChildren {
+			continue
+		}
+
+		recoverable := false
+
+		for _, child := range task.node.Children {
+			childTask, ok := byNode[child]
+			recoverable = recoverable || ok && (!childTask.done || childTask.staleChildren)
+		}
+
+		if !recoverable {
+			return fmt.Errorf(
+				"node %s has a stale direct-child commitment without a recorded publication transaction: %w",
+				task.node.DisplayLabel(),
+				archive.ErrChildrenChecksumMismatch,
+			)
 		}
 	}
 

@@ -1943,3 +1943,76 @@ func TestComputeNodeChildrenChecksum_ReflectsActualDirectChildrenOnDisk(t *testi
 		t.Error("commitment over {child-b} must not equal the earlier, unrelated commitment over {child-a}")
 	}
 }
+
+func TestVerifyNodeChildrenChecksumMismatchParity(t *testing.T) {
+	root := t.TempDir()
+	snapshotsDir := filepath.Join(root, SnapshotsDirName)
+	childDir := finalizeNodeForChildrenChecksumTest(t, snapshotsDir, "child")
+
+	if err := os.MkdirAll(filepath.Join(root, ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir root manifests: %v", err)
+	}
+
+	rootChecksum, err := ComputeNodeChecksum(root)
+	if err != nil {
+		t.Fatalf("compute root checksum: %v", err)
+	}
+
+	childrenChecksum, err := ComputeNodeChildrenChecksum(root)
+	if err != nil {
+		t.Fatalf("compute root children checksum: %v", err)
+	}
+
+	if err := WriteSnapshotYAML(root, SnapshotYAML{
+		APIVersion:       "v1",
+		Kind:             "Snapshot",
+		Name:             "root",
+		Checksum:         rootChecksum,
+		ChildrenChecksum: &childrenChecksum,
+	}); err != nil {
+		t.Fatalf("write root snapshot.yaml: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(childDir, ManifestsDirName, "changed.yaml"), []byte("changed"), 0o600); err != nil {
+		t.Fatalf("change child manifest: %v", err)
+	}
+
+	childChecksum, err := ComputeNodeChecksum(childDir)
+	if err != nil {
+		t.Fatalf("recompute child checksum: %v", err)
+	}
+
+	childMetadata, err := ReadSnapshotYAML(childDir)
+	if err != nil {
+		t.Fatalf("read child snapshot.yaml: %v", err)
+	}
+	childMetadata.Checksum = childChecksum
+
+	if err := WriteSnapshotYAML(childDir, childMetadata); err != nil {
+		t.Fatalf("republish self-consistent child: %v", err)
+	}
+
+	if err := VerifyNode(root); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Fatalf("VerifyNode error = %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	view, err := OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+	defer func() { _ = view.Close() }()
+
+	if _, err := view.VerifyNode(context.Background(), root); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Fatalf("VerifiedArchive.VerifyNode error = %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	destination, err := OpenRootedDestination(root, nil)
+	if err != nil {
+		t.Fatalf("open rooted destination: %v", err)
+	}
+	defer func() { _ = destination.Close() }()
+
+	if err := destination.VerifyNode(root); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Fatalf("RootedDestination.VerifyNode error = %v, want ErrChildrenChecksumMismatch", err)
+	}
+}

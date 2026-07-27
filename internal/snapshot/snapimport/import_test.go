@@ -781,6 +781,8 @@ func TestRun_RejectsHybridTree_NoMutation(t *testing.T) {
 		// duplicate-identity case is rejected by BuildPlan's own topology validation (a plain,
 		// unwrapped error) before verifyArchiveIntegrity's ChildrenChecksum check ever runs.
 		wantErrContains string
+		selectedKind    string
+		selectedName    string
 	}{
 		{
 			name: "single-level: added child not in the commitment",
@@ -931,6 +933,67 @@ func TestRun_RejectsHybridTree_NoMutation(t *testing.T) {
 			},
 			wantErr: archive.ErrChildrenChecksumMismatch,
 		},
+		{
+			name: "selected leaf: immediate external parent rejects republished child",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src",
+				})
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				finalizeArchiveChildrenChecksums(t, root)
+
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-self-consistent-bytes"),
+				})
+
+				return root
+			},
+			wantErr:      archive.ErrChildrenChecksumMismatch,
+			selectedKind: "VolumeSnapshot",
+			selectedName: "pvc-1",
+		},
+		{
+			name: "selected leaf: higher external ancestor rejects republished parent",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src",
+				})
+				domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+					kind:       "DemoVirtualMachineSnapshot", name: "vm-1", namespace: "src",
+				})
+				leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				finalizeArchiveChildrenChecksums(t, root)
+
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+					kind:       "DemoVirtualMachineSnapshot", name: "vm-1", namespace: "src",
+					manifests: []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "changed"}}},
+				})
+				finalizeArchiveChildrenChecksums(t, domain)
+
+				return root
+			},
+			wantErr:      archive.ErrChildrenChecksumMismatch,
+			selectedKind: "VolumeSnapshot",
+			selectedName: "pvc-1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -943,6 +1006,8 @@ func TestRun_RejectsHybridTree_NoMutation(t *testing.T) {
 
 			cfg := baseConfig(root, up, vol, dyn)
 			cfg.Mapper = testDomainMapper()
+			cfg.SelectedNodeKind = tt.selectedKind
+			cfg.SelectedNodeName = tt.selectedName
 
 			err := Run(context.Background(), cfg)
 			if err == nil {

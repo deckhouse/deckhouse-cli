@@ -1234,6 +1234,10 @@ func (d *RootedDestination) VerifyNodeWithOptions(
 			nodeDir, snapshot.Checksum.Hex, checksum.Hex, ErrChecksumMismatch)
 	}
 
+	if err := verifyNodeChildrenChecksum(directory.source, snapshot, options); err != nil {
+		return fmt.Errorf("node %s: %w", nodeDir, err)
+	}
+
 	return nil
 }
 

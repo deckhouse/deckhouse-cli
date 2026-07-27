@@ -201,6 +201,10 @@ func scanNodeContext(
 		})
 	}
 
+	if errors.Is(verifyErr, ErrChildrenChecksumMismatch) {
+		return NodeResumePlan{}, verifyErr
+	}
+
 	if errors.Is(verifyErr, ErrLegacySnapshotFormat) {
 		return NodeResumePlan{}, fmt.Errorf(
 			"refuse to resume node directory %s with unauthenticated legacy metadata: %w",
@@ -531,6 +535,10 @@ func scanAbsoluteContext(
 			return NodeResumePlan{}, fmt.Errorf("%w: %s contains %s/%s, expected %s/%s",
 				ErrIdentityMismatch, nodeDir, sy.Kind, sy.Name, id.Kind, id.Name)
 		})
+	}
+
+	if errors.Is(verifyErr, ErrChildrenChecksumMismatch) {
+		return NodeResumePlan{}, verifyErr
 	}
 
 	if errors.Is(verifyErr, ErrLegacySnapshotFormat) {
