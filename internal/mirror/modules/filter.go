@@ -70,6 +70,7 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 		// only what the release channels point at", the same behaviour as a
 		// default all-modules pull. An explicit @version is parsed as usual.
 		var constraint VersionConstraint
+
 		if hasVersion {
 			var err error
 
