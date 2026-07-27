@@ -15,6 +15,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/images"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/oss"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/requirements"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/templates"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/settings"
 )
@@ -135,6 +136,11 @@ func buildLinters(ctx context.Context, root *settings.Root, path string, collect
 		Path:     path,
 	}, collector)
 
+	requirementsLinter := requirements.NewLinter(requirements.Config{
+		Settings:   root.Requirements,
+		Definition: def,
+	}, collector)
+
 	return []linter{
 		layoutLinter,
 		templatesLinter,
@@ -142,5 +148,6 @@ func buildLinters(ctx context.Context, root *settings.Root, path string, collect
 		imagesLinter,
 		iconLinter,
 		ossLinter,
+		requirementsLinter,
 	}, nil
 }
