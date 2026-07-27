@@ -167,6 +167,45 @@ func TestNewCommand_Defaults(t *testing.T) {
 	}
 }
 
+func TestNewCommand_ExplainsPVCSafetyAndWaitSemantics(t *testing.T) {
+	cmd := NewCommand(slog.Default())
+
+	for _, text := range []string{
+		"same-named claim is already Bound",
+		"refuses to reuse it",
+		"never deletes or replaces the claim",
+		"selected node, live Pod consumer, active provisioning event",
+		"provisioning failure is returned with its cause",
+		"PVC UID",
+		"bound PersistentVolume identity",
+	} {
+		if !strings.Contains(cmd.Long, text) {
+			t.Errorf("long help does not contain PVC safety text %q", text)
+		}
+	}
+
+	waitFlag := cmd.Flags().Lookup(flagWait)
+	if waitFlag == nil {
+		t.Fatal("--wait flag is missing")
+	}
+
+	for _, text := range []string{"manifest PVCs", "dormant WaitForFirstConsumer", "provisioning signal"} {
+		if !strings.Contains(waitFlag.Usage, text) {
+			t.Errorf("--wait usage does not contain %q: %q", text, waitFlag.Usage)
+		}
+	}
+
+	for _, forbiddenFlag := range []string{
+		"replace-existing-pvc",
+		"reuse-existing-pvc",
+		"delete-existing-pvc",
+	} {
+		if flag := cmd.Flags().Lookup(forbiddenFlag); flag != nil {
+			t.Errorf("unsafe bypass flag --%s is exposed", forbiddenFlag)
+		}
+	}
+}
+
 func TestBoundedControlPlaneConfig(t *testing.T) {
 	original := &rest.Config{
 		Host:    "https://cluster.example.test",

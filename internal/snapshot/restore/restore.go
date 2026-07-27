@@ -58,9 +58,12 @@ import (
 )
 
 const (
-	snapshotKind = "Snapshot"
-	pvcKind      = "PersistentVolumeClaim"
-	pvcResource  = "persistentvolumeclaims"
+	snapshotKind  = "Snapshot"
+	pvcKind       = "PersistentVolumeClaim"
+	pvcResource   = "persistentvolumeclaims"
+	pvResource    = "persistentvolumes"
+	podResource   = "pods"
+	eventResource = "events"
 
 	// fieldManager is the SSA field manager name used for all restore applies.
 	fieldManager = "d8-snapshot-restore"
@@ -92,6 +95,16 @@ const (
 	// defaultStorageClassAnnotation marks the cluster's default StorageClass,
 	// used to resolve a PVC whose spec.storageClassName is empty.
 	defaultStorageClassAnnotation = "storageclass.kubernetes.io/is-default-class"
+	selectedNodeAnnotation        = "volume.kubernetes.io/selected-node"
+
+	eventReasonProvisioning         = "Provisioning"
+	eventReasonExternalProvisioning = "ExternalProvisioning"
+	eventReasonProvisioningFailed   = "ProvisioningFailed"
+	eventReasonFailedBinding        = "FailedBinding"
+
+	waitScanPageLimit  int64 = 100
+	waitScanMaxPages   int   = 100
+	waitScanMaxObjects int   = 10_000
 
 	missingChildProofPageLimit int64 = 100
 	missingChildProofMaxPages  int   = 100
@@ -208,15 +221,41 @@ type Config struct {
 	silenceApplyLog bool
 }
 
-// pvcRef identifies a restored PVC to wait on.
+// pvcRef identifies the exact post-apply PVC and restore source to revalidate.
 type pvcRef struct {
 	namespace string
 	name      string
+	uid       types.UID
 	// storageClassName is the PVC's spec.storageClassName as applied (may be
 	// empty; an empty value resolves to the cluster's default StorageClass,
 	// not to Immediate binding, when the effective volumeBindingMode is
 	// resolved in waitPVCsBound).
-	storageClassName string
+	storageClassName    string
+	hasStorageClassName bool
+	desiredSource       pvcSourceIdentity
+	boundPV             *boundPVIdentity
+}
+
+type pvcSourceIdentity struct {
+	dataSourceRef *pvcDataSourceIdentity
+	dataSource    *pvcDataSourceIdentity
+}
+
+type pvcDataSourceIdentity struct {
+	apiGroup  string
+	kind      string
+	name      string
+	namespace string
+}
+
+type boundPVIdentity struct {
+	name string
+	uid  types.UID
+}
+
+type applyResult struct {
+	namespace string
+	object    *unstructured.Unstructured
 }
 
 // Run executes an in-namespace restore: anchor selection to the positional Snapshot,
@@ -382,6 +421,10 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		slog.String("snapshot", cfg.Snapshot),
 		slog.Int("objects", stage.objectCount))
 
+	if err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
+		return err
+	}
+
 	// Implicit dry-run preflight: validate every object without mutating the cluster.
 	// Any admission failure here aborts before any real apply.
 	dryRunCfg := cfg
@@ -404,6 +447,12 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		return nil
 	}
 
+	// Close the admission window before the first real Patch. A target that was
+	// absent or Pending before dry-run may have become Bound while validation ran.
+	if err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
+		return fmt.Errorf("post-dry-run PVC preflight: %w", err)
+	}
+
 	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
 	pvcs, applied, err := applyStaged(ctx, cfg, stage)
 	if err != nil {
@@ -415,11 +464,11 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		)
 	}
 
-	if !cfg.Wait {
-		return nil
+	if cfg.Wait {
+		return waitPVCsBound(ctx, cfg, pvcs)
 	}
 
-	return waitPVCsBound(ctx, cfg, pvcs)
+	return revalidatePVCsAfterApply(ctx, cfg, pvcs)
 }
 
 // applyDefaults fills zero-valued optional fields with their defaults.
@@ -1359,6 +1408,60 @@ func isLeafReady(obj *unstructured.Unstructured, ref leafRef) bool {
 	return isConditionTrue(obj)
 }
 
+// preflightExistingBoundPVCs rejects stale successful state before any Patch.
+func preflightExistingBoundPVCs(ctx context.Context, cfg Config, stage *manifestStage) error {
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
+
+	return stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
+		if obj.GetAPIVersion() != "v1" || obj.GetKind() != pvcKind {
+			return nil
+		}
+
+		namespace := obj.GetNamespace()
+
+		pvc, err := controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("getting restore target PVC %s/%s", namespace, obj.GetName()),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return cfg.Dynamic.Resource(gvr).Namespace(namespace).Get(
+					requestCtx,
+					obj.GetName(),
+					metav1.GetOptions{},
+				)
+			},
+		)
+		if kubeerrors.IsNotFound(err) {
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("preflight restore target PVC %s/%s: %w", namespace, obj.GetName(), err)
+		}
+
+		phase, _, err := unstructured.NestedString(pvc.Object, "status", "phase")
+		if err != nil {
+			return fmt.Errorf(
+				"preflight restore target PVC %s/%s: read status.phase: %w",
+				namespace,
+				obj.GetName(),
+				err,
+			)
+		}
+
+		if phase == pvcPhaseBound {
+			return fmt.Errorf(
+				"restore target PVC %s/%s already exists in phase %q; refusing to reuse it because it may contain stale data from an earlier operation; preserve its data and remove or rename the claim before retrying",
+				namespace,
+				obj.GetName(),
+				phase,
+			)
+		}
+
+		return nil
+	})
+}
+
 func applyStaged(
 	ctx context.Context,
 	cfg Config,
@@ -1368,7 +1471,25 @@ func applyStaged(
 	applied := 0
 
 	err := stage.forEach(ctx, func(obj *unstructured.Unstructured) error {
-		namespace, err := applyObject(ctx, cfg, obj)
+		isPVC := obj.GetAPIVersion() == "v1" && obj.GetKind() == pvcKind
+
+		var desiredSource pvcSourceIdentity
+
+		if isPVC {
+			var sourceErr error
+
+			desiredSource, sourceErr = pvcSourceIdentityFromObject(obj)
+			if sourceErr != nil {
+				return fmt.Errorf(
+					"read desired restore source for PVC %s/%s: %w",
+					obj.GetNamespace(),
+					obj.GetName(),
+					sourceErr,
+				)
+			}
+		}
+
+		result, err := applyObject(ctx, cfg, obj)
 		if err != nil {
 			return fmt.Errorf(
 				"apply %s/%s %q: %w",
@@ -1379,13 +1500,24 @@ func applyStaged(
 			)
 		}
 
-		if obj.GetKind() == pvcKind {
-			storageClassName, _, _ := unstructured.NestedString(obj.Object, "spec", "storageClassName")
-			pvcs = append(pvcs, pvcRef{
-				namespace:        namespace,
-				name:             obj.GetName(),
-				storageClassName: storageClassName,
-			})
+		if isPVC {
+			if err := validateAppliedPVCSource(result, desiredSource, obj.GetName(), cfg.DryRun); err != nil {
+				return err
+			}
+
+			if !cfg.DryRun {
+				ref, refErr := pvcRefFromApplied(ctx, cfg, result, desiredSource, obj.GetName())
+				if refErr != nil {
+					return fmt.Errorf(
+						"record post-apply identity for PVC %s/%s: %w",
+						result.namespace,
+						obj.GetName(),
+						refErr,
+					)
+				}
+
+				pvcs = append(pvcs, ref)
+			}
 		}
 
 		applied++
@@ -1399,11 +1531,206 @@ func applyStaged(
 	return pvcs, applied, nil
 }
 
+func validateAppliedPVCSource(
+	result applyResult,
+	desired pvcSourceIdentity,
+	expectedName string,
+	dryRun bool,
+) error {
+	if result.object == nil {
+		return fmt.Errorf("API server returned no object for PVC %s/%s", result.namespace, expectedName)
+	}
+
+	if result.object.GetName() != expectedName {
+		return fmt.Errorf(
+			"API server returned PVC name %q for requested PVC %s/%s",
+			result.object.GetName(),
+			result.namespace,
+			expectedName,
+		)
+	}
+
+	observed, err := pvcSourceIdentityFromObject(result.object)
+	if err != nil {
+		return fmt.Errorf(
+			"read API server response restore source for PVC %s/%s: %w",
+			result.namespace,
+			expectedName,
+			err,
+		)
+	}
+
+	if desired.matchesObserved(observed) {
+		return nil
+	}
+
+	phase := "real apply"
+	if dryRun {
+		phase = "dry-run apply"
+	}
+
+	return fmt.Errorf(
+		"%s response for PVC %s/%s changed desired dataSource/dataSourceRef identity",
+		phase,
+		result.namespace,
+		expectedName,
+	)
+}
+
+func pvcRefFromApplied(
+	ctx context.Context,
+	cfg Config,
+	result applyResult,
+	desiredSource pvcSourceIdentity,
+	expectedName string,
+) (pvcRef, error) {
+	if result.object == nil {
+		return pvcRef{}, fmt.Errorf("API server returned no object")
+	}
+
+	uid := result.object.GetUID()
+	if uid == "" {
+		return pvcRef{}, fmt.Errorf("API server returned an empty metadata.uid")
+	}
+
+	storageClassName, hasStorageClassName, err := unstructured.NestedString(
+		result.object.Object,
+		"spec",
+		"storageClassName",
+	)
+	if err != nil {
+		return pvcRef{}, fmt.Errorf("read applied spec.storageClassName: %w", err)
+	}
+
+	ref := pvcRef{
+		namespace:           result.namespace,
+		name:                expectedName,
+		uid:                 uid,
+		storageClassName:    storageClassName,
+		hasStorageClassName: hasStorageClassName,
+		desiredSource:       desiredSource,
+	}
+
+	phase, _, err := unstructured.NestedString(result.object.Object, "status", "phase")
+	if err != nil {
+		return pvcRef{}, fmt.Errorf("read applied status.phase: %w", err)
+	}
+
+	if phase == pvcPhaseBound {
+		boundPV, pvErr := getBoundPVIdentity(ctx, cfg, result.object, ref)
+		if pvErr != nil {
+			return pvcRef{}, pvErr
+		}
+
+		ref.boundPV = &boundPV
+	}
+
+	return ref, nil
+}
+
+func pvcSourceIdentityFromObject(obj *unstructured.Unstructured) (pvcSourceIdentity, error) {
+	dataSourceRef, err := pvcDataSourceIdentityFromObject(obj, "dataSourceRef")
+	if err != nil {
+		return pvcSourceIdentity{}, fmt.Errorf("read spec.dataSourceRef: %w", err)
+	}
+
+	dataSource, err := pvcDataSourceIdentityFromObject(obj, "dataSource")
+	if err != nil {
+		return pvcSourceIdentity{}, fmt.Errorf("read spec.dataSource: %w", err)
+	}
+
+	identity := pvcSourceIdentity{
+		dataSourceRef: dataSourceRef,
+		dataSource:    dataSource,
+	}
+
+	if dataSourceRef != nil && dataSource != nil && *dataSourceRef != *dataSource {
+		return pvcSourceIdentity{}, fmt.Errorf("spec.dataSourceRef and spec.dataSource identify different volume sources")
+	}
+
+	return identity, nil
+}
+
+func pvcDataSourceIdentityFromObject(
+	obj *unstructured.Unstructured,
+	field string,
+) (*pvcDataSourceIdentity, error) {
+	value, found, err := unstructured.NestedMap(obj.Object, "spec", field)
+	if err != nil {
+		return nil, err
+	}
+
+	if !found {
+		return nil, nil
+	}
+
+	identity := &pvcDataSourceIdentity{}
+
+	for fieldName, destination := range map[string]*string{
+		"apiGroup":  &identity.apiGroup,
+		"kind":      &identity.kind,
+		"name":      &identity.name,
+		"namespace": &identity.namespace,
+	} {
+		fieldValue, _, fieldErr := unstructured.NestedString(value, fieldName)
+		if fieldErr != nil {
+			return nil, fmt.Errorf("%s.%s: %w", field, fieldName, fieldErr)
+		}
+
+		*destination = fieldValue
+	}
+
+	if identity.kind == "" || identity.name == "" {
+		return nil, fmt.Errorf("%s is malformed: kind and name are required", field)
+	}
+
+	return identity, nil
+}
+
+func (desired pvcSourceIdentity) matchesObserved(observed pvcSourceIdentity) bool {
+	expected, hasExpected := desired.canonical()
+	if !hasExpected {
+		return observed.dataSourceRef == nil && observed.dataSource == nil
+	}
+
+	if desired.dataSourceRef != nil &&
+		(observed.dataSourceRef == nil || *observed.dataSourceRef != *desired.dataSourceRef) {
+		return false
+	}
+
+	if desired.dataSource != nil &&
+		(observed.dataSource == nil || *observed.dataSource != *desired.dataSource) {
+		return false
+	}
+
+	if observed.dataSourceRef != nil && *observed.dataSourceRef != expected {
+		return false
+	}
+
+	if observed.dataSource != nil && *observed.dataSource != expected {
+		return false
+	}
+
+	return true
+}
+
+func (desired pvcSourceIdentity) canonical() (pvcDataSourceIdentity, bool) {
+	if desired.dataSourceRef != nil {
+		return *desired.dataSourceRef, true
+	}
+
+	if desired.dataSource != nil {
+		return *desired.dataSource, true
+	}
+
+	return pvcDataSourceIdentity{}, false
+}
+
 // applyObject applies a single object to the cluster using Server-Side Apply (SSA).
 // SSA merges only the fields d8 sets; fields owned by other managers (controllers,
 // webhooks) are not touched. Namespaced objects without a namespace inherit the target
-// namespace. It returns the effective namespace the object was applied into.
-func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured) (string, error) {
+// namespace. It returns the effective namespace and API-server response.
+func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured) (applyResult, error) {
 	phase := "applying"
 	if cfg.DryRun {
 		phase = "dry-run applying"
@@ -1415,7 +1742,7 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
 	)
 	if err != nil {
-		return "", err
+		return applyResult{}, err
 	}
 
 	var (
@@ -1442,7 +1769,7 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 
 	jsonBytes, err := json.Marshal(obj.Object)
 	if err != nil {
-		return "", fmt.Errorf("marshal object for apply: %w", err)
+		return applyResult{}, fmt.Errorf("marshal object for apply: %w", err)
 	}
 
 	force := true
@@ -1456,7 +1783,7 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		patchOpts.DryRun = []string{metav1.DryRunAll}
 	}
 
-	_, patchErr := controlPlaneRequest(
+	applied, patchErr := controlPlaneRequest(
 		ctx,
 		cfg.controlPlaneTimeout(),
 		fmt.Sprintf("%s %s/%s %q", phase, obj.GetAPIVersion(), obj.GetKind(), obj.GetName()),
@@ -1468,11 +1795,11 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
 		// surface an actionable error instead of a raw API rejection.
 		if kubeerrors.IsInvalid(patchErr) {
-			return "", fmt.Errorf("already exists with immutable fields differing from the snapshot; "+
+			return applyResult{}, fmt.Errorf("already exists with immutable fields differing from the snapshot; "+
 				"delete it and re-run restore: %w", patchErr)
 		}
 
-		return "", fmt.Errorf("apply: %w", patchErr)
+		return applyResult{}, fmt.Errorf("apply: %w", patchErr)
 	}
 
 	if !cfg.silenceApplyLog {
@@ -1489,7 +1816,7 @@ func applyObject(ctx context.Context, cfg Config, obj *unstructured.Unstructured
 		}
 	}
 
-	return ns, nil
+	return applyResult{namespace: ns, object: applied}, nil
 }
 
 // waitPVCsBound blocks until every restored PVC reports status.phase == Bound or the
@@ -1511,6 +1838,9 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		return nil
 	}
 
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
+	scGVR := schema.GroupVersionResource{Group: storageClassGroup, Version: "v1", Resource: storageClassResource}
+
 	newWaitContext := context.WithTimeout
 	if cfg.newWaitContext != nil {
 		newWaitContext = cfg.newWaitContext
@@ -1519,12 +1849,10 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	waitCtx, cancel := newWaitContext(ctx, cfg.Timeout)
 	defer cancel()
 
-	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
-	scGVR := schema.GroupVersionResource{Group: storageClassGroup, Version: "v1", Resource: storageClassResource}
-
 	cfg.Log.Info("waiting for restored PVCs to bind", slog.Int("count", len(pvcs)))
 
 	bindingModes := make(map[string]string)
+	activeRefs := make([]pvcRef, 0, len(pvcs))
 
 	var (
 		boundCount   int
@@ -1538,15 +1866,28 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		}
 
 		if mode == volumeBindingModeWFC {
-			if err := checkWFFCPVCOnce(waitCtx, cfg, gvr, ref); err != nil {
+			active, bound, err := inspectWFFCPVC(waitCtx, cfg, gvr, ref)
+			if err != nil {
 				return err
 			}
 
-			skippedCount++
+			if bound {
+				boundCount++
 
-			continue
+				continue
+			}
+
+			if !active {
+				skippedCount++
+
+				continue
+			}
 		}
 
+		activeRefs = append(activeRefs, ref)
+	}
+
+	for _, ref := range activeRefs {
 		if err := waitOnePVCBound(waitCtx, cfg, gvr, ref); err != nil {
 			return err
 		}
@@ -1654,14 +1995,17 @@ func findDefaultStorageClass(ctx context.Context, cfg Config, scGVR schema.Group
 	return nil, nil
 }
 
-// checkWFFCPVCOnce checks a WaitForFirstConsumer PVC's state exactly once, never
-// polling it: a non-terminating Pending PVC with no consumer yet is expected under this
-// binding mode and must not consume the shared --wait deadline. An already-Bound PVC
-// (e.g. a consumer already existed) is still reported as bound.
-func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) error {
-	phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
+// inspectWFFCPVC returns dormant Pending claims without starting the shared wait
+// deadline. Selected, consumed, or actively provisioning claims must be polled.
+func inspectWFFCPVC(
+	ctx context.Context,
+	cfg Config,
+	gvr schema.GroupVersionResource,
+	ref pvcRef,
+) (bool, bool, error) {
+	pvc, phase, err := getPVCWaitState(ctx, cfg, gvr, ref)
 	if err != nil {
-		return err
+		return false, false, err
 	}
 
 	if phase == pvcPhaseBound {
@@ -1670,7 +2014,33 @@ func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionRe
 			slog.String("name", ref.name),
 			slog.String("phase", phase))
 
-		return nil
+		return false, true, nil
+	}
+
+	selected := pvc.GetAnnotations()[selectedNodeAnnotation] != ""
+
+	consumed, err := hasLivePVCConsumer(ctx, cfg, ref)
+	if err != nil {
+		return false, false, err
+	}
+
+	eventState, err := currentPVCProvisioningEvent(ctx, cfg, ref)
+	if err != nil {
+		return false, false, err
+	}
+
+	if eventState.terminal {
+		return false, false, fmt.Errorf(
+			"restored PVC %s/%s has terminal provisioning event %q: %s",
+			ref.namespace,
+			ref.name,
+			eventState.reason,
+			eventState.message,
+		)
+	}
+
+	if selected || consumed || eventState.active {
+		return true, false, nil
 	}
 
 	cfg.Log.Info("PVC is WaitForFirstConsumer and Pending with no consumer yet; not waiting for Bound",
@@ -1678,7 +2048,7 @@ func checkWFFCPVCOnce(ctx context.Context, cfg Config, gvr schema.GroupVersionRe
 		slog.String("name", ref.name),
 		slog.String("phase", phase))
 
-	return nil
+	return false, false, nil
 }
 
 // waitOnePVCBound polls a single non-terminating Pending PVC until it is Bound or the
@@ -1709,6 +2079,17 @@ func waitOnePVCBound(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 }
 
 func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) (string, error) {
+	_, phase, err := getPVCWaitState(ctx, cfg, gvr, ref)
+
+	return phase, err
+}
+
+func getPVCWaitState(
+	ctx context.Context,
+	cfg Config,
+	gvr schema.GroupVersionResource,
+	ref pvcRef,
+) (*unstructured.Unstructured, string, error) {
 	pvc, err := controlPlaneRequest(
 		ctx,
 		cfg.controlPlaneTimeout(),
@@ -1718,7 +2099,7 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 		},
 	)
 	if kubeerrors.IsNotFound(err) {
-		return "", fmt.Errorf("restored PVC %s/%s was not found after apply: %w", ref.namespace, ref.name, err)
+		return nil, "", fmt.Errorf("restored PVC %s/%s was not found after apply: %w", ref.namespace, ref.name, err)
 	}
 
 	if err != nil {
@@ -1726,12 +2107,12 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 			err = errors.Join(err, ctxErr)
 		}
 
-		return "", fmt.Errorf("get restored PVC %s/%s: %w", ref.namespace, ref.name, err)
+		return nil, "", fmt.Errorf("get restored PVC %s/%s: %w", ref.namespace, ref.name, err)
 	}
 
 	phase, found, err := unstructured.NestedString(pvc.Object, "status", "phase")
 	if err != nil {
-		return "", fmt.Errorf("read status.phase of restored PVC %s/%s: %w", ref.namespace, ref.name, err)
+		return nil, "", fmt.Errorf("read status.phase of restored PVC %s/%s: %w", ref.namespace, ref.name, err)
 	}
 
 	observedPhase := phase
@@ -1740,7 +2121,7 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 	}
 
 	if deletionTimestamp := pvc.GetDeletionTimestamp(); deletionTimestamp != nil {
-		return "", fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"restored PVC %s/%s is terminating with deletionTimestamp %s; observed phase %q",
 			ref.namespace,
 			ref.name,
@@ -1749,16 +2130,435 @@ func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionRes
 		)
 	}
 
-	switch phase {
-	case pvcPhaseBound, pvcPhasePending:
-		return phase, nil
-	case pvcPhaseLost:
-		return "", fmt.Errorf("restored PVC %s/%s is in terminal phase %q", ref.namespace, ref.name, phase)
-	case "":
-		return "", fmt.Errorf("restored PVC %s/%s has missing status.phase", ref.namespace, ref.name)
-	default:
-		return "", fmt.Errorf("restored PVC %s/%s has unrecognized phase %q", ref.namespace, ref.name, phase)
+	if err := validateCurrentPVCIdentity(pvc, ref, observedPhase); err != nil {
+		return nil, "", err
 	}
+
+	switch phase {
+	case pvcPhaseBound:
+		if err := validateBoundPV(ctx, cfg, pvc, ref); err != nil {
+			return nil, "", err
+		}
+
+		return pvc, phase, nil
+	case pvcPhasePending:
+		return pvc, phase, nil
+	case pvcPhaseLost:
+		return nil, "", fmt.Errorf("restored PVC %s/%s is in terminal phase %q", ref.namespace, ref.name, phase)
+	case "":
+		return nil, "", fmt.Errorf("restored PVC %s/%s has missing status.phase", ref.namespace, ref.name)
+	default:
+		return nil, "", fmt.Errorf("restored PVC %s/%s has unrecognized phase %q", ref.namespace, ref.name, phase)
+	}
+}
+
+func revalidatePVCsAfterApply(ctx context.Context, cfg Config, pvcs []pvcRef) error {
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvcResource}
+
+	for _, ref := range pvcs {
+		pvc, err := controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("revalidating restored PVC %s/%s", ref.namespace, ref.name),
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return cfg.Dynamic.Resource(gvr).Namespace(ref.namespace).Get(
+					requestCtx,
+					ref.name,
+					metav1.GetOptions{},
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("revalidate PVC %s/%s after apply: %w", ref.namespace, ref.name, err)
+		}
+
+		phase, _, phaseErr := unstructured.NestedString(pvc.Object, "status", "phase")
+		if phaseErr != nil {
+			return fmt.Errorf("read status.phase while revalidating PVC %s/%s: %w", ref.namespace, ref.name, phaseErr)
+		}
+
+		observedPhase := phase
+		if observedPhase == "" {
+			observedPhase = "<missing>"
+		}
+
+		if err := validateCurrentPVCIdentity(pvc, ref, observedPhase); err != nil {
+			return fmt.Errorf("revalidate PVC after apply: %w", err)
+		}
+
+		if phase == pvcPhaseBound {
+			if err := validateBoundPV(ctx, cfg, pvc, ref); err != nil {
+				return fmt.Errorf("revalidate PVC after apply: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateCurrentPVCIdentity(
+	pvc *unstructured.Unstructured,
+	ref pvcRef,
+	observedPhase string,
+) error {
+	if pvc.GetUID() != ref.uid {
+		return fmt.Errorf(
+			"restored PVC %s/%s changed UID after apply (expected %q, observed %q); observed phase %q",
+			ref.namespace,
+			ref.name,
+			ref.uid,
+			pvc.GetUID(),
+			observedPhase,
+		)
+	}
+
+	observedSource, err := pvcSourceIdentityFromObject(pvc)
+	if err != nil {
+		return fmt.Errorf(
+			"read current restore source of PVC %s/%s; observed phase %q: %w",
+			ref.namespace,
+			ref.name,
+			observedPhase,
+			err,
+		)
+	}
+
+	if !ref.desiredSource.matchesObserved(observedSource) {
+		return fmt.Errorf(
+			"restored PVC %s/%s dataSource/dataSourceRef identity changed after apply; observed phase %q",
+			ref.namespace,
+			ref.name,
+			observedPhase,
+		)
+	}
+
+	observedStorageClassName, hasObservedStorageClassName, err := unstructured.NestedString(
+		pvc.Object,
+		"spec",
+		"storageClassName",
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"read current storageClassName of restored PVC %s/%s; observed phase %q: %w",
+			ref.namespace,
+			ref.name,
+			observedPhase,
+			err,
+		)
+	}
+
+	if hasObservedStorageClassName != ref.hasStorageClassName ||
+		observedStorageClassName != ref.storageClassName {
+		return fmt.Errorf(
+			"restored PVC %s/%s storageClassName changed after apply; observed phase %q",
+			ref.namespace,
+			ref.name,
+			observedPhase,
+		)
+	}
+
+	return nil
+}
+
+func validateBoundPV(
+	ctx context.Context,
+	cfg Config,
+	pvc *unstructured.Unstructured,
+	ref pvcRef,
+) error {
+	current, err := getBoundPVIdentity(ctx, cfg, pvc, ref)
+	if err != nil {
+		return err
+	}
+
+	if ref.boundPV != nil && current != *ref.boundPV {
+		return fmt.Errorf(
+			"restored PVC %s/%s bound PersistentVolume identity changed after apply (expected %s UID %q, observed %s UID %q)",
+			ref.namespace,
+			ref.name,
+			ref.boundPV.name,
+			ref.boundPV.uid,
+			current.name,
+			current.uid,
+		)
+	}
+
+	return nil
+}
+
+func getBoundPVIdentity(
+	ctx context.Context,
+	cfg Config,
+	pvc *unstructured.Unstructured,
+	ref pvcRef,
+) (boundPVIdentity, error) {
+	volumeName, _, err := unstructured.NestedString(pvc.Object, "spec", "volumeName")
+	if err != nil {
+		return boundPVIdentity{}, fmt.Errorf(
+			"read spec.volumeName of Bound PVC %s/%s: %w",
+			ref.namespace,
+			ref.name,
+			err,
+		)
+	}
+
+	if volumeName == "" {
+		return boundPVIdentity{}, fmt.Errorf(
+			"restored PVC %s/%s is Bound but has no spec.volumeName",
+			ref.namespace,
+			ref.name,
+		)
+	}
+
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: pvResource}
+
+	pv, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("getting bound PersistentVolume %s for PVC %s/%s", volumeName, ref.namespace, ref.name),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return cfg.Dynamic.Resource(gvr).Get(requestCtx, volumeName, metav1.GetOptions{})
+		},
+	)
+	if err != nil {
+		return boundPVIdentity{}, fmt.Errorf(
+			"get bound PersistentVolume %s for restored PVC %s/%s: %w",
+			volumeName,
+			ref.namespace,
+			ref.name,
+			err,
+		)
+	}
+
+	if pv.GetUID() == "" {
+		return boundPVIdentity{}, fmt.Errorf("bound PersistentVolume %s has empty metadata.uid", volumeName)
+	}
+
+	claimNamespace, _, namespaceErr := unstructured.NestedString(pv.Object, "spec", "claimRef", "namespace")
+	claimName, _, nameErr := unstructured.NestedString(pv.Object, "spec", "claimRef", "name")
+
+	claimUID, _, uidErr := unstructured.NestedString(pv.Object, "spec", "claimRef", "uid")
+	if err := errors.Join(namespaceErr, nameErr, uidErr); err != nil {
+		return boundPVIdentity{}, fmt.Errorf("read claimRef of bound PersistentVolume %s: %w", volumeName, err)
+	}
+
+	if claimNamespace != ref.namespace || claimName != ref.name || types.UID(claimUID) != ref.uid {
+		return boundPVIdentity{}, fmt.Errorf(
+			"bound PersistentVolume %s claimRef does not identify restored PVC %s/%s UID %q (observed %s/%s UID %q)",
+			volumeName,
+			ref.namespace,
+			ref.name,
+			ref.uid,
+			claimNamespace,
+			claimName,
+			claimUID,
+		)
+	}
+
+	return boundPVIdentity{name: volumeName, uid: pv.GetUID()}, nil
+}
+
+type pvcProvisioningEvent struct {
+	active   bool
+	terminal bool
+	reason   string
+	message  string
+	stamp    time.Time
+}
+
+func currentPVCProvisioningEvent(
+	ctx context.Context,
+	cfg Config,
+	ref pvcRef,
+) (pvcProvisioningEvent, error) {
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: eventResource}
+	selector := fields.AndSelectors(
+		fields.OneTermEqualSelector("involvedObject.kind", pvcKind),
+		fields.OneTermEqualSelector("involvedObject.namespace", ref.namespace),
+		fields.OneTermEqualSelector("involvedObject.name", ref.name),
+		fields.OneTermEqualSelector("involvedObject.uid", string(ref.uid)),
+	).String()
+
+	var latest pvcProvisioningEvent
+
+	err := scanResourcePages(ctx, cfg, gvr, ref.namespace, selector, func(obj *unstructured.Unstructured) error {
+		reason, _, _ := unstructured.NestedString(obj.Object, "reason")
+
+		candidate := pvcProvisioningEvent{reason: reason, stamp: eventTimestamp(obj)}
+
+		switch reason {
+		case eventReasonProvisioning, eventReasonExternalProvisioning:
+			candidate.active = true
+		case eventReasonProvisioningFailed, eventReasonFailedBinding:
+			candidate.terminal = true
+		default:
+			return nil
+		}
+
+		candidate.message, _, _ = unstructured.NestedString(obj.Object, "message")
+		if latest.reason == "" || !candidate.stamp.Before(latest.stamp) {
+			latest = candidate
+		}
+
+		return nil
+	})
+	if err != nil {
+		return pvcProvisioningEvent{}, fmt.Errorf(
+			"inspect provisioning events for restored PVC %s/%s: %w",
+			ref.namespace,
+			ref.name,
+			err,
+		)
+	}
+
+	return latest, nil
+}
+
+func eventTimestamp(event *unstructured.Unstructured) time.Time {
+	for _, path := range [][]string{
+		{"eventTime"},
+		{"series", "lastObservedTime"},
+		{"lastTimestamp"},
+		{"firstTimestamp"},
+	} {
+		value, _, _ := unstructured.NestedString(event.Object, path...)
+		if value == "" {
+			continue
+		}
+
+		stamp, err := time.Parse(time.RFC3339Nano, value)
+		if err == nil {
+			return stamp
+		}
+	}
+
+	return event.GetCreationTimestamp().Time
+}
+
+func hasLivePVCConsumer(ctx context.Context, cfg Config, ref pvcRef) (bool, error) {
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: podResource}
+	consumed := false
+
+	err := scanResourcePages(ctx, cfg, gvr, ref.namespace, "", func(obj *unstructured.Unstructured) error {
+		if podConsumesPVC(obj, ref.name) {
+			consumed = true
+		}
+
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf(
+			"inspect live Pod consumers of restored PVC %s/%s: %w",
+			ref.namespace,
+			ref.name,
+			err,
+		)
+	}
+
+	return consumed, nil
+}
+
+func podConsumesPVC(pod *unstructured.Unstructured, claimName string) bool {
+	if pod.GetDeletionTimestamp() != nil {
+		return false
+	}
+
+	phase, _, _ := unstructured.NestedString(pod.Object, "status", "phase")
+	if phase == "Succeeded" || phase == "Failed" {
+		return false
+	}
+
+	volumes, _, _ := unstructured.NestedSlice(pod.Object, "spec", "volumes")
+	for _, rawVolume := range volumes {
+		volume, ok := rawVolume.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		referencedClaim, _, _ := unstructured.NestedString(volume, "persistentVolumeClaim", "claimName")
+		if referencedClaim == claimName {
+			return true
+		}
+
+		volumeName, _, _ := unstructured.NestedString(volume, "name")
+		if _, found, _ := unstructured.NestedMap(volume, "ephemeral"); found &&
+			pod.GetName()+"-"+volumeName == claimName {
+			return true
+		}
+	}
+
+	return false
+}
+
+func scanResourcePages(
+	ctx context.Context,
+	cfg Config,
+	gvr schema.GroupVersionResource,
+	namespace string,
+	fieldSelector string,
+	visit func(*unstructured.Unstructured) error,
+) error {
+	continueToken := ""
+	seenTokens := make(map[string]struct{})
+	objects := 0
+
+	for pageNumber := 0; pageNumber < waitScanMaxPages; pageNumber++ {
+		options := metav1.ListOptions{
+			FieldSelector: fieldSelector,
+			Limit:         waitScanPageLimit,
+			Continue:      continueToken,
+		}
+
+		var resource dynamic.ResourceInterface = cfg.Dynamic.Resource(gvr)
+		if namespace != "" {
+			resource = cfg.Dynamic.Resource(gvr).Namespace(namespace)
+		}
+
+		page, err := controlPlaneRequest(
+			ctx,
+			cfg.controlPlaneTimeout(),
+			fmt.Sprintf("listing %s in namespace %q", gvr.Resource, namespace),
+			func(requestCtx context.Context) (*unstructured.UnstructuredList, error) {
+				return resource.List(requestCtx, options)
+			},
+		)
+		if err != nil {
+			return err
+		}
+
+		if page == nil {
+			return fmt.Errorf("list %s returned no page", gvr.Resource)
+		}
+
+		for i := range page.Items {
+			objects++
+			if objects > waitScanMaxObjects {
+				return fmt.Errorf(
+					"list %s exceeds object budget of %d",
+					gvr.Resource,
+					waitScanMaxObjects,
+				)
+			}
+
+			if err := visit(&page.Items[i]); err != nil {
+				return err
+			}
+		}
+
+		next := page.GetContinue()
+		if next == "" {
+			return nil
+		}
+
+		if _, seen := seenTokens[next]; seen {
+			return fmt.Errorf("list %s repeated continue token %q", gvr.Resource, next)
+		}
+
+		seenTokens[next] = struct{}{}
+		continueToken = next
+	}
+
+	return fmt.Errorf("list %s exceeds page budget of %d", gvr.Resource, waitScanMaxPages)
 }
 
 func waitContextError(ctx context.Context, phase string) error {

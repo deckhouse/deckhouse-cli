@@ -108,13 +108,18 @@ selects the root Snapshot node alone.
 preflight a restore before committing. The --wait loop is skipped in dry-run mode because
 no objects are actually created.
 
+Before any dry-run or real apply, restore reads every target PersistentVolumeClaim. If a
+same-named claim is already Bound, restore refuses to reuse it because that status may
+describe stale data from an earlier operation. Restore never deletes or replaces the claim.
+
 --wait only tracks PersistentVolumeClaims that appear in the restored manifest set. Disk-backed
 PVCs for domain objects are recreated asynchronously by the domain controller (not part of this
 output), so they are not awaited; the command may return before such volumes finish provisioning.
-A PVC on a WaitForFirstConsumer StorageClass is checked once and never polled: it is expected to
-stay Pending until a Pod schedules against it, so --wait does not block or spend its timeout
-budget on it; PVCs on an Immediate (or unspecified, since Immediate is Kubernetes' own default)
-StorageClass are still awaited until Bound or --timeout as before.`,
+A Pending PVC on a WaitForFirstConsumer StorageClass completes immediately only while it has no
+selected node, live Pod consumer, active provisioning event, or terminal provisioning failure.
+Once selected, consumed, or provisioning, it is polled until Bound or --timeout; an observed
+provisioning failure is returned with its cause. Success revalidates the post-apply PVC UID,
+restore source, and bound PersistentVolume identity.`,
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
 
@@ -154,7 +159,7 @@ StorageClass are still awaited until Bound or --timeout as before.`,
 	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR before applying; aborts on non-zero exit, unchanged, or empty content")
-	cmd.Flags().Bool(flagWait, false, "wait for restored PersistentVolumeClaims to become Bound (only PVCs in the manifest set; domain disk-backed PVCs created asynchronously are not awaited; a WaitForFirstConsumer-class PVC left Pending with no consumer is not waited on)")
+	cmd.Flags().Bool(flagWait, false, "wait for manifest PVCs to become Bound; a dormant WaitForFirstConsumer PVC with no selected node, live consumer, or provisioning signal completes without polling")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
 
 	return cmd

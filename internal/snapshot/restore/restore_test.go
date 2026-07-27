@@ -278,6 +278,10 @@ func addSSAReactor(dyn *dynamicfake.FakeDynamicClient) {
 		existing, err := tracker.Get(gvr, ns, name, metav1.GetOptions{})
 		if kubeerrors.IsNotFound(err) {
 			// Object absent: create from patch body (SSA create semantics).
+			if patch.GetUID() == "" {
+				patch.SetUID(types.UID("uid-" + name))
+			}
+
 			if createErr := tracker.Create(gvr, patch, ns); createErr != nil {
 				return true, nil, createErr
 			}
@@ -339,26 +343,42 @@ func jsonMergeInto(dst, src map[string]interface{}) {
 // Patch(ApplyPatchType, …) works for new objects the same way as on a real cluster.
 func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	gvrToListKind := map[schema.GroupVersionResource]string{
-		snapshotGVR:   "SnapshotList",
-		pvcGVR:        "PersistentVolumeClaimList",
-		cmGVR:         "ConfigMapList",
-		pvGVR:         "PersistentVolumeList",
-		vsGVR:         "VolumeSnapshotList",
-		domainDiskGVR: "DemoVirtualDiskSnapshotList",
-		scGVR:         "StorageClassList",
+		snapshotGVR:                         "SnapshotList",
+		pvcGVR:                              "PersistentVolumeClaimList",
+		cmGVR:                               "ConfigMapList",
+		pvGVR:                               "PersistentVolumeList",
+		{Version: "v1", Resource: "pods"}:   "PodList",
+		{Version: "v1", Resource: "events"}: "EventList",
+		vsGVR:                               "VolumeSnapshotList",
+		domainDiskGVR:                       "DemoVirtualDiskSnapshotList",
+		scGVR:                               "StorageClassList",
 	}
 
-	for _, obj := range objs {
+	seededObjects := make([]runtime.Object, 0, len(objs))
+
+	for _, original := range objs {
+		obj := original.DeepCopyObject()
 		gvk := obj.GetObjectKind().GroupVersionKind()
 		if gvk.Empty() {
+			seededObjects = append(seededObjects, obj)
+
 			continue
+		}
+
+		if accessor, ok := obj.(metav1.Object); ok && accessor.GetUID() == "" {
+			accessor.SetUID(types.UID("uid-" + accessor.GetName()))
 		}
 
 		gvr, _ := meta.UnsafeGuessKindToResource(gvk)
 		gvrToListKind[gvr] = gvk.Kind + "List"
+		seededObjects = append(seededObjects, obj)
 	}
 
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		gvrToListKind,
+		seededObjects...,
+	)
 
 	addSSAReactor(dyn)
 
@@ -372,11 +392,19 @@ type dynamicListInterceptor func(
 	string,
 	metav1.ListOptions,
 ) (*unstructured.UnstructuredList, bool, error)
+type dynamicPatchTransformer func(
+	schema.GroupVersionResource,
+	string,
+	string,
+	metav1.PatchOptions,
+	*unstructured.Unstructured,
+) (*unstructured.Unstructured, error)
 
 type interceptingDynamicClient struct {
 	dynamic.Interface
-	intercept     dynamicRequestInterceptor
-	interceptList dynamicListInterceptor
+	intercept      dynamicRequestInterceptor
+	interceptList  dynamicListInterceptor
+	transformPatch dynamicPatchTransformer
 }
 
 func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
@@ -387,14 +415,16 @@ func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dy
 		gvr:                            gvr,
 		intercept:                      c.intercept,
 		interceptList:                  c.interceptList,
+		transformPatch:                 c.transformPatch,
 	}
 }
 
 type interceptingNamespaceableResource struct {
 	dynamic.NamespaceableResourceInterface
-	gvr           schema.GroupVersionResource
-	intercept     dynamicRequestInterceptor
-	interceptList dynamicListInterceptor
+	gvr            schema.GroupVersionResource
+	intercept      dynamicRequestInterceptor
+	interceptList  dynamicListInterceptor
+	transformPatch dynamicPatchTransformer
 }
 
 func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.ResourceInterface {
@@ -404,6 +434,7 @@ func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.
 		namespace:         namespace,
 		intercept:         r.intercept,
 		interceptList:     r.interceptList,
+		transformPatch:    r.transformPatch,
 	}
 }
 
@@ -456,15 +487,21 @@ func (r *interceptingNamespaceableResource) Patch(
 		}
 	}
 
-	return r.NamespaceableResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
+	result, err := r.NamespaceableResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
+	if err != nil || r.transformPatch == nil {
+		return result, err
+	}
+
+	return r.transformPatch(r.gvr, "", name, opts, result)
 }
 
 type interceptingResource struct {
 	dynamic.ResourceInterface
-	gvr           schema.GroupVersionResource
-	namespace     string
-	intercept     dynamicRequestInterceptor
-	interceptList dynamicListInterceptor
+	gvr            schema.GroupVersionResource
+	namespace      string
+	intercept      dynamicRequestInterceptor
+	interceptList  dynamicListInterceptor
+	transformPatch dynamicPatchTransformer
 }
 
 func (r *interceptingResource) Get(
@@ -516,7 +553,12 @@ func (r *interceptingResource) Patch(
 		}
 	}
 
-	return r.ResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
+	result, err := r.ResourceInterface.Patch(ctx, name, patchType, data, opts, subresources...)
+	if err != nil || r.transformPatch == nil {
+		return result, err
+	}
+
+	return r.transformPatch(r.gvr, r.namespace, name, opts, result)
 }
 
 func discardLogger() *slog.Logger {
@@ -733,12 +775,87 @@ func restoredPVCObject(name, phase, storageClassName string, terminating bool) *
 	obj := pvcManifestSC(name, phase, storageClassName)
 	metadata, _ := obj["metadata"].(map[string]interface{})
 	metadata["namespace"] = testNS
+	metadata["uid"] = "uid-" + name
+
+	if phase == pvcPhaseBound {
+		spec, _ := obj["spec"].(map[string]interface{})
+		spec["volumeName"] = "pv-" + name
+	}
 
 	if terminating {
 		metadata["deletionTimestamp"] = "2026-07-23T12:00:00Z"
 	}
 
 	return &unstructured.Unstructured{Object: obj}
+}
+
+func boundPVObject(pvcName string) *unstructured.Unstructured {
+	return boundPVObjectWithUID(pvcName, "uid-pv-"+pvcName)
+}
+
+func boundPVObjectWithUID(pvcName, uid string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolume",
+		"metadata": map[string]interface{}{
+			"name": "pv-" + pvcName,
+			"uid":  uid,
+		},
+		"spec": map[string]interface{}{
+			"claimRef": map[string]interface{}{
+				"namespace": testNS,
+				"name":      pvcName,
+				"uid":       "uid-" + pvcName,
+			},
+		},
+	}}
+}
+
+func podConsumerObject(name, claimName string, terminal bool) *unstructured.Unstructured {
+	phase := "Running"
+	if terminal {
+		phase = "Succeeded"
+	}
+
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      name,
+		},
+		"spec": map[string]interface{}{
+			"volumes": []interface{}{
+				map[string]interface{}{
+					"name": "data",
+					"persistentVolumeClaim": map[string]interface{}{
+						"claimName": claimName,
+					},
+				},
+			},
+		},
+		"status": map[string]interface{}{"phase": phase},
+	}}
+}
+
+func pvcEventObject(name, pvcName, reason, message, timestamp string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Event",
+		"metadata": map[string]interface{}{
+			"namespace": testNS,
+			"name":      name,
+		},
+		"involvedObject": map[string]interface{}{
+			"kind":      pvcKind,
+			"namespace": testNS,
+			"name":      pvcName,
+			"uid":       "uid-" + pvcName,
+		},
+		"reason":        reason,
+		"message":       message,
+		"lastTimestamp": timestamp,
+	}}
 }
 
 // storageClassObj returns a StorageClass object for the volumeBindingMode wait tests.
@@ -2257,24 +2374,275 @@ func TestRun_UpdatePreservesLiveMetadata(t *testing.T) {
 	}
 }
 
-// TestRun_WaitBound succeeds when the restored PVC reports Bound.
-// The PVC is pre-seeded with Bound status to simulate CSI binding, since
-// applyObject strips status from the SSA patch (status is a separate subresource).
-func TestRun_WaitBound(t *testing.T) {
-	// Pre-seed the PVC as already Bound; applyObject strips status from the SSA patch
-	// so the existing Bound status is preserved by strategic-merge semantics.
-	existing := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "v1",
-		"kind":       "PersistentVolumeClaim",
-		"metadata": map[string]interface{}{
-			"namespace": testNS,
-			"name":      "pvc-1",
+func TestRun_PreflightExistingBoundPVCNoMutation(t *testing.T) {
+	sources := []struct {
+		name   string
+		mutate func(*unstructured.Unstructured)
+	}{
+		{name: "matching"},
+		{
+			name: "different",
+			mutate: func(pvc *unstructured.Unstructured) {
+				ref, _, _ := unstructured.NestedMap(pvc.Object, "spec", "dataSourceRef")
+				ref["name"] = "older-snapshot"
+				_ = unstructured.SetNestedMap(pvc.Object, ref, "spec", "dataSourceRef")
+			},
 		},
-		"status": map[string]interface{}{"phase": "Bound"},
-	}}
+		{
+			name: "missing",
+			mutate: func(pvc *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(pvc.Object, "spec", "dataSourceRef")
+			},
+		},
+		{
+			name: "malformed",
+			mutate: func(pvc *unstructured.Unstructured) {
+				_ = unstructured.SetNestedField(pvc.Object, "not-an-object", "spec", "dataSourceRef")
+			},
+		},
+	}
 
+	for _, source := range sources {
+		for _, wait := range []bool{false, true} {
+			for _, dryRun := range []bool{false, true} {
+				name := fmt.Sprintf("%s/wait=%t/dry-run=%t", source.name, wait, dryRun)
+				t.Run(name, func(t *testing.T) {
+					existing := restoredPVCObject("pvc-stale", pvcPhaseBound, "", false)
+					if source.mutate != nil {
+						source.mutate(existing)
+					}
+
+					src := &stubSource{body: mustArray(
+						t,
+						pvcManifest("pvc-stale", ""),
+						configMapManifest("must-not-apply"),
+					)}
+					dyn := newFakeDynamic(
+						readySnapshot(),
+						readyVolumeSnapshot("vs-1"),
+						existing,
+						boundPVObject("pvc-stale"),
+					)
+					cfg := baseConfig(src, dyn)
+					cfg.Wait = wait
+					cfg.DryRun = dryRun
+
+					err := Run(context.Background(), cfg)
+					if err == nil {
+						t.Fatal("Run unexpectedly reused a pre-existing Bound PVC")
+					}
+
+					for _, want := range []string{
+						"default/pvc-stale",
+						`phase "Bound"`,
+						"refusing to reuse it",
+						"stale data",
+					} {
+						if !contains(err.Error(), want) {
+							t.Errorf("Run error = %q, want %q", err, want)
+						}
+					}
+
+					pvcGets := 0
+					for _, action := range dyn.Actions() {
+						if action.GetVerb() == "get" && action.GetResource() == pvcGVR {
+							pvcGets++
+						}
+
+						switch action.GetVerb() {
+						case "create", "delete", "delete-collection", "patch", "update":
+							t.Errorf("mutation %s %s occurred after Bound refusal", action.GetVerb(), action.GetResource().Resource)
+						}
+					}
+
+					if pvcGets != 1 {
+						t.Errorf("PVC GET count = %d, want exactly 1 preflight read", pvcGets)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRun_AbsentPVCStillRestores(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
+			src := &stubSource{body: mustArray(t, pvcManifest("pvc-new", ""))}
+			dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"))
+			cfg := baseConfig(src, dyn)
+			cfg.DryRun = dryRun
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run with absent PVC: %v", err)
+			}
+
+			patches := 0
+			for _, action := range dyn.Actions() {
+				if action.GetVerb() == "patch" && action.GetResource() == pvcGVR {
+					patches++
+				}
+			}
+
+			wantPatches := 2
+			if dryRun {
+				wantPatches = 1
+			}
+
+			if patches != wantPatches {
+				t.Errorf("PVC Patch count = %d, want %d", patches, wantPatches)
+			}
+		})
+	}
+}
+
+func TestRun_RevalidatesPVCUIDAndRestoreSource(t *testing.T) {
+	tests := []struct {
+		name      string
+		wait      bool
+		mutate    func(*unstructured.Unstructured)
+		wantError string
+	}{
+		{
+			name: "no-wait UID replacement",
+			mutate: func(pvc *unstructured.Unstructured) {
+				pvc.SetUID("uid-recreated")
+			},
+			wantError: "changed UID after apply",
+		},
+		{
+			name: "wait source replacement",
+			wait: true,
+			mutate: func(pvc *unstructured.Unstructured) {
+				ref, _, _ := unstructured.NestedMap(pvc.Object, "spec", "dataSourceRef")
+				ref["name"] = "other-snapshot"
+				_ = unstructured.SetNestedMap(pvc.Object, ref, "spec", "dataSourceRef")
+			},
+			wantError: "dataSource/dataSourceRef identity changed after apply",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pvc := restoredPVCObject("pvc-race", pvcPhasePending, "immediate-sc", false)
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-race", "", "immediate-sc"))}
+			dyn := newFakeDynamic(
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				storageClassObj("immediate-sc", volumeBindingModeImmediate, false),
+				pvc,
+			)
+			pvcGets := 0
+			dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+				pvcGets++
+				if pvcGets <= 2 {
+					return false, nil, nil
+				}
+
+				replacement := pvc.DeepCopy()
+				tc.mutate(replacement)
+
+				return true, replacement, nil
+			})
+
+			cfg := baseConfig(src, dyn)
+			cfg.Wait = tc.wait
+			cfg.Timeout = time.Second
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run accepted a replaced PVC")
+			}
+
+			for _, want := range []string{"default/pvc-race", tc.wantError} {
+				if !contains(err.Error(), want) {
+					t.Errorf("Run error = %q, want %q", err, want)
+				}
+			}
+
+			if pvcGets != 3 {
+				t.Errorf("PVC GET count = %d, want two preflights and one revalidation", pvcGets)
+			}
+		})
+	}
+}
+
+func TestRun_RevalidatesBoundPVIdentityAgainstABA(t *testing.T) {
+	pvc := restoredPVCObject("pvc-aba", pvcPhasePending, "immediate-sc", false)
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-aba", "", "immediate-sc"))}
+	base := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		storageClassObj("immediate-sc", volumeBindingModeImmediate, false),
+		pvc,
+		boundPVObjectWithUID("pvc-aba", "uid-pv-original"),
+	)
+
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		transformPatch: func(
+			gvr schema.GroupVersionResource,
+			namespace string,
+			_ string,
+			opts metav1.PatchOptions,
+			result *unstructured.Unstructured,
+		) (*unstructured.Unstructured, error) {
+			if gvr != pvcGVR || len(opts.DryRun) != 0 {
+				return result, nil
+			}
+
+			bound := restoredPVCObject("pvc-aba", pvcPhaseBound, "immediate-sc", false)
+			if err := base.Tracker().Update(pvcGVR, bound, namespace); err != nil {
+				return nil, err
+			}
+
+			return bound, nil
+		},
+	}
+	pvGets := 0
+	base.PrependReactor("get", "persistentvolumes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvGets++
+		if pvGets == 1 {
+			return true, boundPVObjectWithUID("pvc-aba", "uid-pv-original"), nil
+		}
+
+		return true, boundPVObjectWithUID("pvc-aba", "uid-pv-replacement"), nil
+	})
+
+	err := Run(context.Background(), baseConfig(src, dyn))
+	if err == nil {
+		t.Fatal("Run accepted a same-name PersistentVolume ABA replacement")
+	}
+
+	for _, want := range []string{
+		"default/pvc-aba",
+		"PersistentVolume identity changed after apply",
+		`expected pv-pvc-aba UID "uid-pv-original"`,
+		`observed pv-pvc-aba UID "uid-pv-replacement"`,
+	} {
+		if !contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want %q", err, want)
+		}
+	}
+
+	if pvGets != 2 {
+		t.Errorf("PersistentVolume GET count = %d, want record plus revalidation", pvGets)
+	}
+}
+
+// TestRun_WaitBound succeeds only for a PVC created by this invocation.
+func TestRun_WaitBound(t *testing.T) {
 	src := &stubSource{body: mustArray(t, pvcManifest("pvc-1", ""))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), existing)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), boundPVObject("pvc-1"))
+	pvcGets := 0
+
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets++
+		if pvcGets <= 2 {
+			return false, nil, nil
+		}
+
+		return true, restoredPVCObject("pvc-1", pvcPhaseBound, "", false), nil
+	})
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -2282,6 +2650,10 @@ func TestRun_WaitBound(t *testing.T) {
 
 	if err := Run(context.Background(), cfg); err != nil {
 		t.Fatalf("Run with --wait: %v", err)
+	}
+
+	if pvcGets != 3 {
+		t.Fatalf("PVC GET count = %d, want two preflights plus wait revalidation", pvcGets)
 	}
 }
 
@@ -2332,10 +2704,22 @@ func TestRun_Wait_WFFCHealthyStates(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sc := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
-			pvc := restoredPVCObject("pvc-1", tc.phase, "wffc-sc", false)
-			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", tc.phase, "wffc-sc"))}
-			dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc)
+			pvc := restoredPVCObject("pvc-1", pvcPhasePending, "wffc-sc", false)
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", pvcPhasePending, "wffc-sc"))}
+			dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc, boundPVObject("pvc-1"))
 			capture := &logCapture{}
+
+			if tc.phase == pvcPhaseBound {
+				pvcGets := 0
+				dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+					pvcGets++
+					if pvcGets <= 2 {
+						return false, nil, nil
+					}
+
+					return true, restoredPVCObject("pvc-1", pvcPhaseBound, "wffc-sc", false), nil
+				})
+			}
 
 			cfg := baseConfig(src, dyn)
 			cfg.Log = slog.New(capture)
@@ -2354,13 +2738,187 @@ func TestRun_Wait_WFFCHealthyStates(t *testing.T) {
 	}
 }
 
+func TestRun_Wait_WFFCSelectedOrConsumedPollsToBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*unstructured.Unstructured, *[]runtime.Object)
+	}{
+		{
+			name: "selected node",
+			prepare: func(pvc *unstructured.Unstructured, _ *[]runtime.Object) {
+				pvc.SetAnnotations(map[string]string{selectedNodeAnnotation: "node-a"})
+			},
+		},
+		{
+			name: "live Pod consumer",
+			prepare: func(_ *unstructured.Unstructured, objects *[]runtime.Object) {
+				*objects = append(*objects, podConsumerObject("consumer", "pvc-active", false))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pvc := restoredPVCObject("pvc-active", pvcPhasePending, "wffc-sc", false)
+			objects := []runtime.Object{
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+				pvc,
+				boundPVObject("pvc-active"),
+			}
+			tc.prepare(pvc, &objects)
+
+			dyn := newFakeDynamic(objects...)
+			pvcGets := 0
+			dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+				pvcGets++
+				if pvcGets <= 3 {
+					return false, nil, nil
+				}
+
+				return true, restoredPVCObject("pvc-active", pvcPhaseBound, "wffc-sc", false), nil
+			})
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-active", "", "wffc-sc"))}
+			cfg := baseConfig(src, dyn)
+			cfg.Wait = true
+			cfg.Timeout = time.Second
+
+			if err := Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run with active WFFC PVC: %v", err)
+			}
+
+			if pvcGets != 4 {
+				t.Errorf("PVC GET count = %d, want two preflights, inspection, and Bound poll", pvcGets)
+			}
+		})
+	}
+}
+
+func TestRun_Wait_WFFCProvisioningSignals(t *testing.T) {
+	tests := []struct {
+		name        string
+		reason      string
+		message     string
+		wantTimeout bool
+		wantError   []string
+	}{
+		{
+			name:        "active provisioning polls until timeout",
+			reason:      eventReasonProvisioning,
+			message:     "External provisioner is provisioning volume for claim default/pvc-event",
+			wantTimeout: true,
+			wantError:   []string{"default/pvc-event", "restore wait timeout", "Bound"},
+		},
+		{
+			name:      "terminal CSI failure preserves cause",
+			reason:    eventReasonProvisioningFailed,
+			message:   "failed to provision volume with StorageClass \"wffc-sc\": rpc error: code = InvalidArgument",
+			wantError: []string{"default/pvc-event", eventReasonProvisioningFailed, "rpc error: code = InvalidArgument"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pvc := restoredPVCObject("pvc-event", pvcPhasePending, "wffc-sc", false)
+			event := pvcEventObject(
+				"event-1",
+				"pvc-event",
+				tc.reason,
+				tc.message,
+				"2026-07-27T12:00:00Z",
+			)
+			src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-event", "", "wffc-sc"))}
+			dyn := newFakeDynamic(
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+				pvc,
+				event,
+			)
+			cfg := baseConfig(src, dyn)
+			cfg.Wait = true
+			cfg.Timeout = time.Millisecond
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run reported false success for an active or failed WFFC PVC")
+			}
+
+			for _, want := range tc.wantError {
+				if !contains(err.Error(), want) {
+					t.Errorf("Run error = %q, want %q", err, want)
+				}
+			}
+
+			if tc.wantTimeout && !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Run error = %v, want context.DeadlineExceeded", err)
+			}
+
+			eventLists := 0
+			podLists := 0
+			for _, action := range dyn.Actions() {
+				if action.GetVerb() != "list" {
+					continue
+				}
+
+				switch action.GetResource().Resource {
+				case eventResource:
+					eventLists++
+				case podResource:
+					podLists++
+				}
+			}
+
+			if eventLists != 1 || podLists != 1 {
+				t.Errorf("WFFC scan counts: events=%d pods=%d, want 1 each", eventLists, podLists)
+			}
+		})
+	}
+}
+
+func TestRun_Wait_WFFCActiveCancellationPreservesCause(t *testing.T) {
+	pvc := restoredPVCObject("pvc-cancel", pvcPhasePending, "wffc-sc", false)
+	pvc.SetAnnotations(map[string]string{selectedNodeAnnotation: "node-a"})
+	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-cancel", "", "wffc-sc"))}
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		storageClassObj("wffc-sc", volumeBindingModeWFC, false),
+		pvc,
+	)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("operator canceled active WFFC wait")
+	pvcGets := 0
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+		pvcGets++
+		if pvcGets == 4 {
+			cancel(cause)
+		}
+
+		return false, nil, nil
+	})
+	cfg := baseConfig(src, dyn)
+	cfg.Wait = true
+	cfg.Timeout = time.Hour
+
+	err := Run(ctx, cfg)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+		t.Fatalf("Run error = %v, want context cancellation and cause", err)
+	}
+
+	if pvcGets != 4 {
+		t.Errorf("PVC GET count = %d, want cancellation after first active poll", pvcGets)
+	}
+}
+
 // TestRun_Wait_ImmediateStillWaits verifies a Pending PVC on an explicit Immediate
 // StorageClass is polled until it becomes Bound.
 func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
 	sc := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
 	pvc := restoredPVCObject("pvc-1", pvcPhasePending, "immediate-sc", false)
 	src := &stubSource{body: mustArray(t, pvcManifestSC("pvc-1", "Pending", "immediate-sc"))}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc)
+	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, pvc, boundPVObject("pvc-1"))
 
 	var pvcGets int
 
@@ -2372,7 +2930,7 @@ func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
 
 		pvcGets++
 		phase := pvcPhasePending
-		if pvcGets == 2 {
+		if pvcGets == 3 {
 			phase = pvcPhaseBound
 		}
 
@@ -2387,8 +2945,8 @@ func TestRun_Wait_ImmediateStillWaits(t *testing.T) {
 		t.Fatalf("Run with a Pending-then-Bound Immediate PVC: %v", err)
 	}
 
-	if pvcGets != 2 {
-		t.Errorf("PVC GET count = %d, want 2", pvcGets)
+	if pvcGets != 3 {
+		t.Errorf("PVC GET count = %d, want 3", pvcGets)
 	}
 }
 
@@ -2455,16 +3013,48 @@ func TestRun_Wait_InvalidPVCStatesFailClosed(t *testing.T) {
 			objects := []runtime.Object{readySnapshot(), readyVolumeSnapshot("vs-1"), sc}
 
 			if !tc.notFound {
-				objects = append(objects, restoredPVCObject("pvc-terminal", tc.phase, "wait-sc", tc.terminating))
+				initialPhase := tc.phase
+				initialTerminating := tc.terminating
+				if tc.phase == pvcPhaseBound {
+					initialPhase = pvcPhasePending
+					initialTerminating = false
+				}
+
+				objects = append(
+					objects,
+					restoredPVCObject("pvc-terminal", initialPhase, "wait-sc", initialTerminating),
+					boundPVObject("pvc-terminal"),
+				)
 			}
 
 			dyn := newFakeDynamic(objects...)
 			if tc.notFound {
+				pvcGets := 0
 				dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+					pvcGets++
+					if pvcGets <= 2 {
+						return false, nil, nil
+					}
+
 					return true, nil, kubeerrors.NewNotFound(
 						schema.GroupResource{Resource: pvcGVR.Resource},
 						"pvc-terminal",
 					)
+				})
+			} else if tc.phase == pvcPhaseBound {
+				pvcGets := 0
+				dyn.PrependReactor("get", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
+					pvcGets++
+					if pvcGets <= 2 {
+						return false, nil, nil
+					}
+
+					return true, restoredPVCObject(
+						"pvc-terminal",
+						pvcPhaseBound,
+						"wait-sc",
+						tc.terminating,
+					), nil
 				})
 			}
 
@@ -2493,14 +3083,14 @@ func TestRun_Wait_InvalidPVCStatesFailClosed(t *testing.T) {
 	}
 }
 
-// TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited seeds one WFFC-Pending PVC
-// ahead of one already-Bound Immediate PVC. The WFFC PVC must be checked once without
+// TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited seeds two Pending PVCs.
+// The WFFC PVC must be checked once without
 // polling, leaving the shared remaining budget available for the Immediate PVC.
 func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 	wffcSC := storageClassObj("wffc-sc", volumeBindingModeWFC, false)
 	immediateSC := storageClassObj("immediate-sc", volumeBindingModeImmediate, false)
 	pendingWFFC := restoredPVCObject("pvc-wffc", pvcPhasePending, "wffc-sc", false)
-	boundImmediate := restoredPVCObject("pvc-immediate", pvcPhaseBound, "immediate-sc", false)
+	pendingImmediate := restoredPVCObject("pvc-immediate", pvcPhasePending, "immediate-sc", false)
 
 	src := &stubSource{body: mustArray(t,
 		pvcManifestSC("pvc-wffc", "Pending", "wffc-sc"),
@@ -2512,8 +3102,23 @@ func TestRun_Wait_MixedWFFCAndImmediate_OnlyImmediateAwaited(t *testing.T) {
 		wffcSC,
 		immediateSC,
 		pendingWFFC,
-		boundImmediate,
+		pendingImmediate,
+		boundPVObject("pvc-immediate"),
 	)
+	immediateGets := 0
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getAction, ok := action.(clienttesting.GetAction)
+		if !ok || getAction.GetName() != "pvc-immediate" {
+			return false, nil, nil
+		}
+
+		immediateGets++
+		if immediateGets <= 2 {
+			return false, nil, nil
+		}
+
+		return true, restoredPVCObject("pvc-immediate", pvcPhaseBound, "immediate-sc", false), nil
+	})
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -2551,23 +3156,34 @@ func TestRun_Wait_EmptyStorageClassName_ResolvesDefault(t *testing.T) {
 func TestRun_Wait_BindingModeCachedPerStorageClass(t *testing.T) {
 	sc := storageClassObj("shared-sc", volumeBindingModeImmediate, false)
 
-	bound := func(name string) *unstructured.Unstructured {
-		return &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "v1",
-			"kind":       "PersistentVolumeClaim",
-			"metadata": map[string]interface{}{
-				"namespace": testNS,
-				"name":      name,
-			},
-			"status": map[string]interface{}{"phase": "Bound"},
-		}}
-	}
-
 	src := &stubSource{body: mustArray(t,
 		pvcManifestSC("pvc-a", "", "shared-sc"),
 		pvcManifestSC("pvc-b", "", "shared-sc"),
 	)}
-	dyn := newFakeDynamic(readySnapshot(), readyVolumeSnapshot("vs-1"), sc, bound("pvc-a"), bound("pvc-b"))
+	dyn := newFakeDynamic(
+		readySnapshot(),
+		readyVolumeSnapshot("vs-1"),
+		sc,
+		restoredPVCObject("pvc-a", pvcPhasePending, "shared-sc", false),
+		restoredPVCObject("pvc-b", pvcPhasePending, "shared-sc", false),
+		boundPVObject("pvc-a"),
+		boundPVObject("pvc-b"),
+	)
+	pvcGets := make(map[string]int)
+	dyn.PrependReactor("get", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getAction, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		name := getAction.GetName()
+		pvcGets[name]++
+		if pvcGets[name] <= 2 {
+			return false, nil, nil
+		}
+
+		return true, restoredPVCObject(name, pvcPhaseBound, "shared-sc", false), nil
+	})
 
 	cfg := baseConfig(src, dyn)
 	cfg.Wait = true
@@ -2642,12 +3258,20 @@ func TestRun_WaitBlockedAPICallsHonorControlPlaneTimeout(t *testing.T) {
 			returned := make(chan struct{})
 			var enterOnce sync.Once
 			var returnOnce sync.Once
+			pvcGetCalls := 0
 
 			dyn := &interceptingDynamicClient{
 				Interface: baseDynamic,
 				intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, _ string) error {
 					if verb != tc.blockVerb || gvr != tc.blockGVR {
 						return nil
+					}
+
+					if gvr == pvcGVR {
+						pvcGetCalls++
+						if pvcGetCalls <= 2 {
+							return nil
+						}
 					}
 
 					enterOnce.Do(func() {
@@ -2761,6 +3385,7 @@ func TestRun_WaitRequestErrorsPreserveConcurrentContextCause(t *testing.T) {
 					releaseOnce sync.Once
 					returnOnce  sync.Once
 					requests    int
+					pvcGetCalls int
 				)
 
 				requestErr := kubeerrors.NewForbidden(
@@ -2779,6 +3404,13 @@ func TestRun_WaitRequestErrorsPreserveConcurrentContextCause(t *testing.T) {
 					) error {
 						if verb != request.blockVerb || gvr != request.blockGVR {
 							return nil
+						}
+
+						if gvr == pvcGVR {
+							pvcGetCalls++
+							if pvcGetCalls <= 2 {
+								return nil
+							}
 						}
 
 						requests++
@@ -2989,8 +3621,8 @@ func TestRun_WaitParentCancellationPreservesCause(t *testing.T) {
 func TestRun_WaitMultiplePVCsShareOneDeadline(t *testing.T) {
 	firstSC := storageClassObj("first-sc", volumeBindingModeImmediate, false)
 	secondSC := storageClassObj("second-sc", volumeBindingModeImmediate, false)
-	firstPVC := restoredPVCObject("pvc-first", pvcPhaseBound, "first-sc", false)
-	secondPVC := restoredPVCObject("pvc-second", pvcPhaseBound, "second-sc", false)
+	firstPVC := restoredPVCObject("pvc-first", pvcPhasePending, "first-sc", false)
+	secondPVC := restoredPVCObject("pvc-second", pvcPhasePending, "second-sc", false)
 	baseDynamic := newFakeDynamic(
 		readySnapshot(),
 		readyVolumeSnapshot("vs-1"),
@@ -2998,18 +3630,48 @@ func TestRun_WaitMultiplePVCsShareOneDeadline(t *testing.T) {
 		secondSC,
 		firstPVC,
 		secondPVC,
+		boundPVObject("pvc-first"),
+		boundPVObject("pvc-second"),
 	)
+	basePVCGets := make(map[string]int)
+	baseDynamic.PrependReactor("get", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		getAction, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		name := getAction.GetName()
+		basePVCGets[name]++
+		if basePVCGets[name] <= 2 {
+			return false, nil, nil
+		}
+
+		className := "first-sc"
+		if name == "pvc-second" {
+			className = "second-sc"
+		}
+
+		return true, restoredPVCObject(name, pvcPhaseBound, className, false), nil
+	})
 
 	var (
 		deadlineMu sync.Mutex
 		deadlines  []time.Time
+		pvcGets    = make(map[string]int)
 	)
 
 	dyn := &interceptingDynamicClient{
 		Interface: baseDynamic,
-		intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, _ string) error {
+		intercept: func(ctx context.Context, verb string, gvr schema.GroupVersionResource, _, name string) error {
 			if verb != "get" || (gvr != scGVR && gvr != pvcGVR) {
 				return nil
+			}
+
+			if gvr == pvcGVR {
+				pvcGets[name]++
+				if pvcGets[name] <= 2 {
+					return nil
+				}
 			}
 
 			deadline, ok := ctx.Deadline()
@@ -3440,13 +4102,13 @@ func TestApplyObject_DryRunOptions(t *testing.T) {
 
 	obj := &unstructured.Unstructured{Object: configMapManifest("cm-1")}
 
-	ns, err := applyObject(context.Background(), cfg, obj)
+	result, err := applyObject(context.Background(), cfg, obj)
 	if err != nil {
 		t.Fatalf("applyObject: %v", err)
 	}
 
-	if ns != testNS {
-		t.Errorf("namespace: got %q, want %q", ns, testNS)
+	if result.namespace != testNS {
+		t.Errorf("namespace: got %q, want %q", result.namespace, testNS)
 	}
 
 	if len(mock.gotOpts) != 1 {
