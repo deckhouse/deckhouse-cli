@@ -1369,20 +1369,31 @@ func uploadFSTarFromScan(
 			ModTime: hdr.ModTime,
 		}
 
-		newBody := tarEntryBodyFactoryFromSource(source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
-		if err := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
-			newBody, progress, activate); err != nil {
+		// A fresh (non-resumed) upload lets the stream's own terminal proof stand in for
+		// the separate verification pass below; a resumed upload always needs that pass,
+		// since its live stream may never open a decoder at all (see tarEntryStream.close).
+		freshUpload := offset == 0
+
+		stream := newTarEntryStream(source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize)
+
+		uploadErr := putFile(ctx, client, baseURL, relPath, metadata.RawSize, offset, attrs,
+			stream.body, progress, activate)
+
+		folded, closeErr := stream.close(freshUpload && uploadErr == nil)
+		if err := errors.Join(uploadErr, closeErr); err != nil {
 			return errors.Join(
 				fmt.Errorf("upload %s: %w", relPath, err),
 				closeFSTarSequence(sequence),
 			)
 		}
 
-		if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
-			return errors.Join(
-				fmt.Errorf("verify plaintext size for %s: %w", relPath, err),
-				closeFSTarSequence(sequence),
-			)
+		if !folded {
+			if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
+				return errors.Join(
+					fmt.Errorf("verify plaintext size for %s: %w", relPath, err),
+					closeFSTarSequence(sequence),
+				)
+			}
 		}
 	}
 
@@ -2152,48 +2163,178 @@ func (b *fsUploadBody) Close() error {
 	return b.closeErr
 }
 
-// tarEntryBodyFactoryFromSource deliberately preserves the source's authenticated chunk cache
-// across adjacent entries and body reopens. Raw bytes are traversed once per requested range;
-// compressed bytes are traversed once per request plus any decoded-prefix replay for reposition.
-func tarEntryBodyFactoryFromSource(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) fileBodyFactory {
-	return func(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
-		if err := validateBlockOffset(offset, rawSize); err != nil {
-			return nil, fmt.Errorf("validate body offset: %w", err)
-		}
+// tarEntryStream serves putFile's successive PUT chunks for one filesystem tar entry
+// from a single forward-decoding stream. Its body method opens the entry's decoder at
+// most once per contiguous run and reopens it only when a requested offset does not
+// match the decoder's current position — the entry's first chunk, and again after
+// every server-directed reposition (a 409 with X-Expected-Offset) — never for an
+// ordinary sequential chunk. Reusing one decoder this way keeps decode work and the
+// source's authenticated-read work linear in the entry's compressed size instead of
+// quadratic in its number of 32 MiB PUT chunks.
+//
+// tarEntryStream is driven from a single goroutine only (putFile's own upload loop for
+// one entry) and does not synchronize its fields.
+type tarEntryStream struct {
+	source       io.ReaderAt
+	tarPath, ext string
+	payloadStart int64
+	storedSize   int64
+	rawSize      int64
 
-		if size < 0 || size > rawSize-offset {
-			return nil, fmt.Errorf("body size %d at offset %d exceeds raw size %d", size, offset, rawSize)
-		}
+	decoder io.ReadCloser // nil whenever no decode stream is currently open
+	pos     int64         // decoder's next unread raw byte offset; valid only while decoder != nil
+}
 
-		if payloadStart > math.MaxInt64-offset {
-			return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", payloadStart, offset)
-		}
+// newTarEntryStream prepares to serve one PUT upload attempt's request bodies for a
+// filesystem tar entry. ext selects the decode codec via compress.NewReader; "" serves
+// the entry's stored bytes verbatim, with no decoder ever opened.
+func newTarEntryStream(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) *tarEntryStream {
+	return &tarEntryStream{
+		source:       source,
+		tarPath:      tarPath,
+		ext:          ext,
+		payloadStart: payloadStart,
+		storedSize:   storedSize,
+		rawSize:      rawSize,
+		pos:          -1,
+	}
+}
 
-		if ext == "" {
-			section := io.NewSectionReader(source, payloadStart+offset, size)
+// body implements fileBodyFactory: putFile calls it to obtain the request body for
+// each PUT chunk in turn.
+func (s *tarEntryStream) body(ctx context.Context, offset, size int64) (io.ReadCloser, error) {
+	if err := validateBlockOffset(offset, s.rawSize); err != nil {
+		return nil, fmt.Errorf("validate body offset: %w", err)
+	}
 
-			return &fsUploadBody{reader: section}, nil
-		}
+	if size < 0 || size > s.rawSize-offset {
+		return nil, fmt.Errorf("body size %d at offset %d exceeds raw size %d", size, offset, s.rawSize)
+	}
 
-		stored := io.NewSectionReader(source, payloadStart, storedSize)
+	if s.payloadStart > math.MaxInt64-offset {
+		return nil, fmt.Errorf("tar payload offset %d plus raw offset %d overflows int64", s.payloadStart, offset)
+	}
 
-		decoder, err := compress.NewReader(ext, stored)
-		if err != nil {
-			return nil, fmt.Errorf("open decompressor for %s: %w", tarPath, err)
-		}
+	if s.ext == "" {
+		section := io.NewSectionReader(s.source, s.payloadStart+offset, size)
 
-		discarded, err := discardDecoded(ctx, decoder, offset)
-		if err != nil {
-			return nil, errors.Join(
-				fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, offset, err),
-				closeTarEntryDecoder(decoder),
-			)
-		}
+		return &fsUploadBody{reader: section}, nil
+	}
 
-		return &fsUploadBody{
-			reader:  io.LimitReader(decoder, size),
-			closers: []io.Closer{decoder},
-		}, nil
+	if err := s.reopen(ctx, offset); err != nil {
+		return nil, err
+	}
+
+	limited := io.LimitReader(s.decoder, size)
+
+	return &fsUploadBody{reader: &tarEntryPositionReader{r: limited, pos: &s.pos}}, nil
+}
+
+// reopen makes the stream's decoder ready to serve offset next. It is a no-op when the
+// decoder is already open and positioned exactly there — the common case for every
+// chunk after the first — and otherwise (re)opens the decoder from the entry's start
+// and discards forward to offset, exactly once.
+func (s *tarEntryStream) reopen(ctx context.Context, offset int64) error {
+	if s.decoder != nil && s.pos == offset {
+		return nil
+	}
+
+	if err := s.closeDecoder(); err != nil {
+		return err
+	}
+
+	stored := io.NewSectionReader(s.source, s.payloadStart, s.storedSize)
+
+	decoder, err := compress.NewReader(s.ext, stored)
+	if err != nil {
+		return fmt.Errorf("open decompressor for %s: %w", s.tarPath, err)
+	}
+
+	discarded, err := discardDecoded(ctx, decoder, offset)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("discard decoded prefix (got %d of %d bytes): %w", discarded, offset, err),
+			closeTarEntryDecoder(decoder),
+		)
+	}
+
+	s.decoder = decoder
+	s.pos = offset
+
+	return nil
+}
+
+// close releases the stream's decoder, if any, and reports whether it also produced a
+// terminal decoded-size proof for the entry's declared raw size. attemptFold requests
+// that proof, but close only delivers it when the decoder is still open and has
+// already been read all the way to rawSize — which holds precisely when this PUT
+// attempt started at offset 0 and completed without error, so the same decoder that
+// streamed every chunk covered the entry's whole compressed payload start to finish.
+// Any other case (a resumed attempt, or an entry short enough that its decoder never
+// had to open) reports folded=false, and the caller must run a full
+// verifyTarEntryRawSizeFromSource pass itself.
+func (s *tarEntryStream) close(attemptFold bool) (bool, error) {
+	if !attemptFold || s.decoder == nil || s.pos != s.rawSize {
+		return false, s.closeDecoder()
+	}
+
+	var probe [1]byte
+
+	n, readErr := s.decoder.Read(probe[:])
+	probeErr := classifyTerminalProbe(n, readErr, s.rawSize)
+	closeErr := s.closeDecoder()
+
+	if err := errors.Join(probeErr, closeErr); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// closeDecoder closes the stream's decoder, if one is open, and resets the stream to
+// its unopened state. It is idempotent.
+func (s *tarEntryStream) closeDecoder() error {
+	if s.decoder == nil {
+		return nil
+	}
+
+	decoder := s.decoder
+	s.decoder = nil
+	s.pos = -1
+
+	return closeTarEntryDecoder(decoder)
+}
+
+// tarEntryPositionReader advances *pos by exactly the bytes it actually delivers, so
+// tarEntryStream only ever trusts its decoder's position for bytes proven consumed —
+// never bytes merely requested — before deciding whether a later chunk can continue
+// without reopening the decoder.
+type tarEntryPositionReader struct {
+	r   io.Reader
+	pos *int64
+}
+
+func (r *tarEntryPositionReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	*r.pos += int64(n)
+
+	return n, err
+}
+
+// classifyTerminalProbe interprets a 1-byte read taken exactly at a compressed entry's
+// declared raw size: a byte still available means the archive's decoded payload is
+// larger than declared; io.EOF confirms an exact boundary; any other error is the
+// codec rejecting the stream (e.g. a corrupt trailing checksum) at end of input.
+func classifyTerminalProbe(n int, readErr error, rawSize int64) error {
+	switch {
+	case n > 0:
+		return fmt.Errorf("decoded stream exceeds declared PAX raw size %d", rawSize)
+	case errors.Is(readErr, io.EOF):
+		return nil
+	case readErr != nil:
+		return fmt.Errorf("probe decoded stream end: %w", readErr)
+	default:
+		return nil
 	}
 }
 
@@ -2224,23 +2365,10 @@ func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, ta
 	var probe [1]byte
 
 	n, readErr := decoder.Read(probe[:])
-
-	switch {
-	case n > 0:
-		readErr = fmt.Errorf("decoded stream exceeds declared PAX raw size %d", rawSize)
-	case errors.Is(readErr, io.EOF):
-		readErr = nil
-	case readErr != nil:
-		readErr = fmt.Errorf("probe decoded stream end: %w", readErr)
-	}
-
+	probeErr := classifyTerminalProbe(n, readErr, rawSize)
 	closeErr := closeTarEntryDecoder(decoder)
 
-	if readErr != nil || closeErr != nil {
-		return errors.Join(readErr, closeErr)
-	}
-
-	return nil
+	return errors.Join(probeErr, closeErr)
 }
 
 func closeTarEntryDecoder(decoder io.Closer) error {

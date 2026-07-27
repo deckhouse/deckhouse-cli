@@ -5673,3 +5673,332 @@ func TestSendVolumeData_FSWaitsForExactBodyCompletion(t *testing.T) {
 		})
 	}
 }
+
+// countingFSTarSource wraps a real tar file and counts every byte ReadAt actually
+// returns, so a test can measure how many times the underlying archive gets re-read
+// without pulling in the full authenticated-read/hashing machinery. It satisfies
+// fsTarSource directly and is not safe for concurrent use — importFSFromTarSource
+// drives one entry's upload from a single goroutine.
+type countingFSTarSource struct {
+	file  *os.File
+	bytes int64
+}
+
+func (s *countingFSTarSource) ReadAt(p []byte, off int64) (int, error) {
+	n, err := s.file.ReadAt(p, off)
+	s.bytes += int64(n)
+
+	return n, err
+}
+
+func (s *countingFSTarSource) Stat() (os.FileInfo, error) {
+	return s.file.Stat()
+}
+
+// TestImportFSFromTarSource_LargeCompressedEntryDecodeWorkIsLinear is the
+// discriminating regression test for this task's core bug: uploading one large
+// compressed filesystem tar entry across many PUT chunks, with no conflicts, must
+// re-read (and re-decode) the underlying archive roughly once — not once per chunk.
+// Before the fix, tarEntryBodyFactoryFromSource reopened a fresh decoder positioned at
+// byte zero on every chunk and discarded forward to the current offset, so the
+// archive's stored bytes were re-read and re-decoded on every one of the entry's PUT
+// chunks: total work grew with roughly chunkCount*(chunkCount+1)/2 stored-size
+// traversals, not chunkCount. This test drives a single compressed entry across eight
+// PUT chunks with no conflicts (the ordinary, non-resuming path the bug affected) and
+// asserts the underlying archive file's total bytes read stays within a small constant
+// multiple of the entry's stored size — a bound the pre-fix quadratic behavior blows
+// through by roughly chunkCount/2 (an 8-chunk run would need 36 traversals, not the
+// handful this test allows for the fixed linear-scaling stream plus preflight
+// overhead).
+func TestImportFSFromTarSource_LargeCompressedEntryDecodeWorkIsLinear(t *testing.T) {
+	const chunkCount = 8
+
+	payloadSize := int64(chunkCount-1)*blockPutPayloadLimit + 12345
+	pattern := []byte("linear-not-quadratic-decode-work-regression-test-fixture. ")
+	content := bytes.Repeat(pattern, int(payloadSize)/len(pattern)+2)
+	content = content[:payloadSize]
+
+	ext, stored := encodeEntry(t, "zstd", content)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryMetadata(t, tw, "large.bin"+ext, "large.bin", "zstd", payloadSize, stored, 0o640, 5, 6, time.Unix(100, 0).UTC())
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	file, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open data.tar: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("close data.tar: %v", err)
+		}
+	})
+
+	source := &countingFSTarSource{file: file}
+
+	putCount := 0
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodHead {
+			return fileHTTPResponse(http.StatusNotFound, nil), nil
+		}
+
+		if req.Method != http.MethodPut {
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+
+		putCount++
+
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read request body: %w", err)
+		}
+
+		offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse X-Offset: %w", err)
+		}
+
+		requestEnd := offset + int64(len(body))
+		if requestEnd > payloadSize || !bytes.Equal(body, content[offset:requestEnd]) {
+			return nil, fmt.Errorf("body at offset %d is not the exact raw suffix", offset)
+		}
+
+		if requestEnd == payloadSize {
+			return fileHTTPResponse(http.StatusCreated, http.Header{
+				"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
+			}), nil
+		}
+
+		return fileHTTPResponse(http.StatusNoContent, http.Header{
+			"X-Next-Offset": []string{strconv.FormatInt(requestEnd, 10)},
+		}), nil
+	})
+
+	if err := importFSFromTarSource(
+		context.Background(),
+		doer,
+		"https://import.example",
+		tarPath,
+		source,
+		discardLogger(),
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("import filesystem tar: %v", err)
+	}
+
+	if putCount != chunkCount {
+		t.Fatalf("PUT count = %d, want %d", putCount, chunkCount)
+	}
+
+	storedSize := int64(len(stored))
+
+	// The pre-fix factory reopened from byte zero and re-decoded on every chunk, so its
+	// total archive-read bytes grew roughly as chunkCount*(chunkCount+1)/2 = 36 stored-size
+	// traversals for this 8-chunk run. The fixed stream opens its decoder once and only
+	// ever continues forward, so total bytes read should stay within a handful of
+	// stored-size traversals regardless of chunk count: a few fixed preflight passes
+	// over headers (which do not touch entry bodies) plus the one upload pass and its
+	// folded terminal probe. Six traversals is comfortably above that fixed overhead and
+	// comfortably below the quadratic figure.
+	const maxTraversals = 6
+
+	maxBytes := maxTraversals * storedSize
+	if got := source.bytes; got > maxBytes {
+		t.Errorf("archive bytes read = %d (%.1f stored-size traversals of %d bytes), want at most %d (%d traversals): "+
+			"decode/authenticated-read work must scale with entry size, not with entry size x chunk count",
+			got, float64(got)/float64(storedSize), storedSize, maxBytes, maxTraversals)
+	}
+}
+
+// buildMismatchedRawSizeFSTar writes a single-entry filesystem tar whose PAX raw-size
+// metadata does not match what its stored payload actually decodes to: declaredRawSize
+// below len(content) simulates an archive whose payload is larger than declared
+// (over-size); above it simulates a payload smaller than declared (under-size).
+func buildMismatchedRawSizeFSTar(t *testing.T, codec string, content []byte, declaredRawSize int64) string {
+	t.Helper()
+
+	ext, stored := encodeEntry(t, codec, content)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryMetadata(t, tw, "file.bin"+ext, "file.bin", codec, declaredRawSize, stored, 0o600, 1, 2, time.Unix(100, 0).UTC())
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	return tarPath
+}
+
+// buildCorruptChecksumFSTar writes a single-entry filesystem tar whose stored payload
+// decodes cleanly through its declared PAX raw size but fails the codec's own trailing
+// checksum on the read immediately after — content XORed against itself stands in for
+// an independently corrupted archive with the same declared length.
+func buildCorruptChecksumFSTar(t *testing.T, codec string, content []byte) string {
+	t.Helper()
+
+	emitted := append([]byte(nil), content...)
+	for i := range emitted {
+		emitted[i] ^= 0x01
+	}
+
+	ext, corrupted := encodeEntryWithMismatchedChecksum(t, codec, content, emitted)
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryMetadata(t, tw, "file.bin"+ext, "file.bin", codec, int64(len(emitted)), corrupted, 0o600, 1, 2, time.Unix(100, 0).UTC())
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	tarPath := filepath.Join(t.TempDir(), "data.tar")
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	return tarPath
+}
+
+// TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads is the coverage-gap
+// regression test for fs.go's live-upload terminal proof (the verify call following a
+// non-done putFile, and the folded probe that can stand in for it on a fresh upload):
+// before this test, no case exercised that proof's error path at all. It drives a
+// live (never-"done") upload of a single compressed entry that is over-size,
+// under-size, or checksum-corrupt relative to its declared PAX raw size, once starting
+// fresh at offset 0 (where tarEntryStream.close may fold the proof into the live
+// stream) and once resuming from a HEAD-reported partial offset (where folding is
+// deliberately never attempted, so a full separate verifyTarEntryRawSizeFromSource
+// pass must catch it instead). Every case must still reject the entry, though not
+// always through the same mechanism: over-size is only ever visible once the declared
+// byte count has been fully delivered, so it cleanly demonstrates the fold-vs-separate-
+// pass distinction; under-size and checksum corruption can also surface earlier, as a
+// hard read error during the live transfer itself, which is an equally valid rejection.
+func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T) {
+	content := bytes.Repeat([]byte("expected-server-bytes-"), 256)
+
+	tests := []struct {
+		name         string
+		resumeOffset int64 // 0 means a fresh, non-resumed upload
+		build        func(t *testing.T) string
+		wantErrSub   string
+	}{
+		{
+			name: "fresh over-size",
+			build: func(t *testing.T) string {
+				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
+			},
+			wantErrSub: "exceeds declared",
+		},
+		{
+			name: "fresh under-size",
+			build: func(t *testing.T) string {
+				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))+100)
+			},
+		},
+		{
+			name: "fresh corrupt",
+			build: func(t *testing.T) string {
+				return buildCorruptChecksumFSTar(t, "zstd", content)
+			},
+		},
+		{
+			name:         "resumed over-size",
+			resumeOffset: int64(len(content)) / 2,
+			build: func(t *testing.T) string {
+				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))-100)
+			},
+			wantErrSub: "exceeds declared",
+		},
+		{
+			name:         "resumed under-size",
+			resumeOffset: int64(len(content)) / 2,
+			build: func(t *testing.T) string {
+				return buildMismatchedRawSizeFSTar(t, "zstd", content, int64(len(content))+100)
+			},
+		},
+		{
+			name:         "resumed corrupt",
+			resumeOffset: int64(len(content)) / 2,
+			build: func(t *testing.T) string {
+				return buildCorruptChecksumFSTar(t, "zstd", content)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tarPath := tc.build(t)
+
+			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+				switch req.Method {
+				case http.MethodHead:
+					if tc.resumeOffset == 0 {
+						return fileHTTPResponse(http.StatusNotFound, nil), nil
+					}
+
+					return fileHTTPResponse(http.StatusOK, http.Header{
+						"X-Next-Offset": []string{strconv.FormatInt(tc.resumeOffset, 10)},
+					}), nil
+				case http.MethodPut:
+					body, err := io.ReadAll(req.Body)
+					if err != nil {
+						return nil, fmt.Errorf("read request body: %w", err)
+					}
+
+					offset, err := strconv.ParseInt(req.Header.Get("X-Offset"), 10, 64)
+					if err != nil {
+						return nil, fmt.Errorf("parse X-Offset: %w", err)
+					}
+
+					totalDeclared, err := strconv.ParseInt(req.Header.Get("X-Content-Length"), 10, 64)
+					if err != nil {
+						return nil, fmt.Errorf("parse X-Content-Length: %w", err)
+					}
+
+					next := offset + int64(len(body))
+					if next == totalDeclared {
+						return fileHTTPResponse(http.StatusCreated, http.Header{
+							"X-Next-Offset": []string{strconv.FormatInt(next, 10)},
+						}), nil
+					}
+
+					return fileHTTPResponse(http.StatusNoContent, http.Header{
+						"X-Next-Offset": []string{strconv.FormatInt(next, 10)},
+					}), nil
+				default:
+					return nil, fmt.Errorf("unexpected method %s", req.Method)
+				}
+			})
+
+			err := importFSFromTar(context.Background(), doer, "https://import.example", tarPath, discardLogger(), nil, nil, nil)
+			if err == nil {
+				t.Fatal("importFSFromTar succeeded, want a rejected bad payload")
+			}
+
+			if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("importFSFromTar error = %v, want containing %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}
