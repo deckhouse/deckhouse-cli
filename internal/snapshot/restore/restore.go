@@ -2071,18 +2071,51 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 		activeRefs = append(activeRefs, waitRef{pvc: ref, recheckProvisioning: recheckProvisioning})
 	}
 
-	for _, activeRef := range activeRefs {
-		if err := waitOnePVCBound(
-			waitCtx,
-			cfg,
-			gvr,
-			activeRef.pvc,
-			activeRef.recheckProvisioning,
-		); err != nil {
-			return err
+	for len(activeRefs) > 0 {
+		unresolvedRefs := make([]waitRef, 0, len(activeRefs))
+		unresolvedPhases := make([]string, 0, len(activeRefs))
+
+		for _, activeRef := range activeRefs {
+			bound, phase, err := observePVCBound(
+				waitCtx,
+				cfg,
+				gvr,
+				activeRef.pvc,
+				activeRef.recheckProvisioning,
+			)
+			if err != nil {
+				return err
+			}
+
+			if bound {
+				boundCount++
+
+				continue
+			}
+
+			unresolvedRefs = append(unresolvedRefs, activeRef)
+			unresolvedPhases = append(unresolvedPhases, phase)
 		}
 
-		boundCount++
+		if len(unresolvedRefs) == 0 {
+			break
+		}
+
+		activeRefs = unresolvedRefs
+
+		if !sleepCtx(waitCtx, cfg.PollInterval) {
+			firstRef := unresolvedRefs[0].pvc
+
+			return waitContextError(
+				waitCtx,
+				fmt.Sprintf(
+					"waiting for PVC %s/%s to become Bound; observed phase %q",
+					firstRef.namespace,
+					firstRef.name,
+					unresolvedPhases[0],
+				),
+			)
+		}
 	}
 
 	cfg.Log.Info("finished waiting for restored PVCs",
@@ -2241,55 +2274,50 @@ func inspectWFFCPVC(
 	return false, false, nil
 }
 
-// waitOnePVCBound polls a single non-terminating Pending PVC until it is Bound or the
-// shared wait context expires. Active WFFC claims also recheck bounded Event history on
-// every poll so a provisioning failure is not hidden behind the eventual wait deadline.
-func waitOnePVCBound(
+// observePVCBound performs one bounded observation in a shared wait round. Active WFFC
+// claims also recheck bounded Event history before the scheduler advances to the next
+// claim, so manifest order cannot starve later terminal failures.
+func observePVCBound(
 	ctx context.Context,
 	cfg Config,
 	gvr schema.GroupVersionResource,
 	ref pvcRef,
 	recheckProvisioning bool,
-) error {
-	for {
-		phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
-		if err != nil {
-			return err
-		}
-
-		if phase == pvcPhaseBound {
-			cfg.Log.Info("PVC bound",
-				slog.String("namespace", ref.namespace),
-				slog.String("name", ref.name),
-				slog.String("phase", phase))
-
-			return nil
-		}
-
-		if recheckProvisioning {
-			eventState, eventErr := currentPVCProvisioningEvent(ctx, cfg, ref)
-			if eventErr != nil {
-				return eventErr
-			}
-
-			if eventState.terminal {
-				return fmt.Errorf(
-					"restored PVC %s/%s has terminal provisioning event %q: %s",
-					ref.namespace,
-					ref.name,
-					eventState.reason,
-					eventState.message,
-				)
-			}
-		}
-
-		if !sleepCtx(ctx, cfg.PollInterval) {
-			return waitContextError(
-				ctx,
-				fmt.Sprintf("waiting for PVC %s/%s to become Bound; observed phase %q", ref.namespace, ref.name, phase),
-			)
-		}
+) (bool, string, error) {
+	phase, err := getPVCWaitPhase(ctx, cfg, gvr, ref)
+	if err != nil {
+		return false, "", err
 	}
+
+	if phase == pvcPhaseBound {
+		cfg.Log.Info("PVC bound",
+			slog.String("namespace", ref.namespace),
+			slog.String("name", ref.name),
+			slog.String("phase", phase))
+
+		return true, phase, nil
+	}
+
+	if !recheckProvisioning {
+		return false, phase, nil
+	}
+
+	eventState, err := currentPVCProvisioningEvent(ctx, cfg, ref)
+	if err != nil {
+		return false, "", err
+	}
+
+	if eventState.terminal {
+		return false, "", fmt.Errorf(
+			"restored PVC %s/%s has terminal provisioning event %q: %s",
+			ref.namespace,
+			ref.name,
+			eventState.reason,
+			eventState.message,
+		)
+	}
+
+	return false, phase, nil
 }
 
 func getPVCWaitPhase(ctx context.Context, cfg Config, gvr schema.GroupVersionResource, ref pvcRef) (string, error) {
