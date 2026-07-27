@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -53,6 +54,7 @@ const (
 	categoryImageNotFound   = "Image not found in registry"
 	categoryRepoNotFound    = "Repository not found in registry"
 	categoryEmptyConstraint = "Version constraint is missing after '@'"
+	categoryPathConstraint  = "Version constraint is a path, not a version"
 )
 
 // Diagnose analyzes an error and returns a *diagnostic.HelpfulError
@@ -371,9 +373,8 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 //
 // flagName names the flag in the suggestion text (e.g. "include-module").
 // rawValues are the exact strings cobra stored for that flag. The first one
-// ending with '@' is the entry the parser rejected; it is reported to the user
-// and its absence keeps the hint away from flags whose values have no
-// "name@constraint" shape.
+// ending with '@' is the entry the parser rejected and is quoted back to the
+// user; without it the caller falls through to its own error.
 func DiagnoseConstraintParseError(err error, flagName string, rawValues ...string) *diagnostic.HelpfulError {
 	if !errors.Is(err, modules.ErrEmptyConstraint) {
 		return nil
@@ -412,7 +413,62 @@ func DiagnoseConstraintParseError(err error, flagName string, rawValues ...strin
 	}
 }
 
+// DiagnosePlatformConstraintParseError explains a --include-platform value that
+// turned out to be a filesystem path.
+//
+// The flag takes a bare constraint with no "name@" prefix, so an unquoted value
+// leaves nothing behind:
+//
+//	--include-platform >=1.64 ./bundle
+//
+// bash redirects ">=1.64" into a file named "=1.64" and the flag swallows the
+// bundle path that followed it, so the constraint parser is handed a directory.
+//
+// Returns nil for a value that is not path-shaped, so a plain typo in the
+// constraint keeps the parser's own message.
+func DiagnosePlatformConstraintParseError(err error, rawValue string) *diagnostic.HelpfulError {
+	if err == nil || !looksLikePath(rawValue) {
+		return nil
+	}
+
+	return &diagnostic.HelpfulError{
+		Category:    categoryPathConstraint,
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause: fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --include-platform swallowed the bundle path %q", strings.TrimSpace(rawValue)),
+				Solutions: []string{
+					`Quote the constraint: --include-platform ">=1.64"`,
+					`Example: d8 mirror pull --license='****' --include-platform ">=1.64 <=1.68" ./bundle`,
+				},
+			},
+		},
+	}
+}
+
 // --- detection functions ---
+
+// looksLikePath reports whether a value is shaped like a filesystem path rather
+// than a version constraint. A tilde constraint (~1.65.0) is not a home-relative
+// path, so only "~/" counts.
+func looksLikePath(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+
+	if filepath.IsAbs(v) {
+		return true
+	}
+
+	for _, prefix := range []string{"./", "../", `.\`, `..\`, "~/"} {
+		if strings.HasPrefix(v, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
 
 func isEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)

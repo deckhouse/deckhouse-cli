@@ -195,3 +195,47 @@ func TestDiagnoseConstraintParseError_FlagNameAppearsInSolution(t *testing.T) {
 		assert.NotContains(t, solutions, "--include-module", "no solution may hardcode a different flag")
 	}
 }
+
+// --- DiagnosePlatformConstraintParseError tests ---
+
+func TestDiagnosePlatformConstraintParseError_NilError(t *testing.T) {
+	assert.Nil(t, DiagnosePlatformConstraintParseError(nil, "./bundle"))
+}
+
+func TestDiagnosePlatformConstraintParseError_ConstraintTypoIsNotDiagnosed(t *testing.T) {
+	// A malformed but path-less value is the user's own typo.
+	for _, value := range []string{"1.64.", "^^1.0", ">=1.64 <=x"} {
+		_, err := modules.ParseVersionConstraint(value)
+		require.Error(t, err, "value %q should not parse", value)
+		assert.Nil(t, DiagnosePlatformConstraintParseError(err, value), "value %q is not a path", value)
+	}
+}
+
+func TestLooksLikePath(t *testing.T) {
+	for _, v := range []string{"./bundle", "../bundle", "/tmp/bundle", "~/bundle", `.\bundle`, `..\bundle`, " ./bundle "} {
+		assert.True(t, looksLikePath(v), "%q is a path", v)
+	}
+
+	// Constraint operators only. The tilde constraint is the trap: ~1.65.0 is
+	// semver shorthand, not a home-relative path.
+	for _, v := range []string{"~1.65.0", "^1.65.0", ">=1.64 <=1.68", "=v1.65.3", "1.65.0", "", "  "} {
+		assert.False(t, looksLikePath(v), "%q is a constraint", v)
+	}
+}
+
+func TestDiagnosePlatformConstraintParseError_BundlePathSwallowed(t *testing.T) {
+	// shell-redirect scenario:
+	//   --include-platform >=1.64 ./bundle  (no quotes)
+	// Shell redirects ">=1.64" into a file, so the flag takes the bundle path.
+	for _, path := range []string{"./bundle", "../bundle", "/tmp/bundle", "~/bundle"} {
+		_, err := modules.ParseVersionConstraint(path)
+		require.Error(t, err)
+
+		diag := DiagnosePlatformConstraintParseError(err, path)
+		require.NotNil(t, diag, "path-shaped value %q should be diagnosed", path)
+		assert.Equal(t, categoryPathConstraint, diag.Category)
+		assert.True(t, errors.Is(diag, err), "original error must be accessible via errors.Is")
+		assert.Contains(t, diag.Suggestions[0].Cause, path, "cause should quote the value that landed in the flag")
+		assert.Contains(t, allSolutions(diag), "--include-platform")
+	}
+}

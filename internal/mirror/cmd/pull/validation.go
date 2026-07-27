@@ -165,7 +165,7 @@ func parseAndValidateVersionFlags() error {
 	if pullflags.PlatformConstraintString != "" {
 		pullflags.PlatformConstraint, err = modules.ParseVersionConstraint(pullflags.PlatformConstraintString)
 		if err != nil {
-			if diag := errdetect.DiagnoseConstraintParseError(err, "include-platform", pullflags.PlatformConstraintString); diag != nil {
+			if diag := errdetect.DiagnosePlatformConstraintParseError(err, pullflags.PlatformConstraintString); diag != nil {
 				return diag
 			}
 
