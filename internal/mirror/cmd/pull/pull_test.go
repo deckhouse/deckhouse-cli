@@ -37,7 +37,9 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
+	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 )
@@ -1143,6 +1145,116 @@ func TestPullerCreateModuleFilter(t *testing.T) {
 	filter, err = puller.createModuleFilter()
 	assert.NoError(t, err)
 	assert.NotNil(t, filter)
+}
+
+// TestPullerFilterQuotingDiagnostic covers the user-visible half of the quoting
+// hint: an entry the shell cut down to a bare "name@" must reach the top level
+// as a *diagnostic.HelpfulError naming the flag that was typed, not as the raw
+// "Prepare module filter" error.
+func TestPullerFilterQuotingDiagnostic(t *testing.T) {
+	originalModulesWhitelist := pullflags.ModulesWhitelist
+	originalModulesBlacklist := pullflags.ModulesBlacklist
+	originalPackagesWhitelist := pullflags.PackagesWhitelist
+	originalPackagesBlacklist := pullflags.PackagesBlacklist
+
+	defer func() {
+		pullflags.ModulesWhitelist = originalModulesWhitelist
+		pullflags.ModulesBlacklist = originalModulesBlacklist
+		pullflags.PackagesWhitelist = originalPackagesWhitelist
+		pullflags.PackagesBlacklist = originalPackagesBlacklist
+	}()
+
+	puller := &Puller{}
+
+	for _, tt := range []struct {
+		name     string
+		setup    func()
+		call     func() (*modules.Filter, error)
+		wantFlag string
+	}{
+		{
+			name:     "include-module",
+			setup:    func() { pullflags.ModulesWhitelist = []string{"console@"} },
+			call:     puller.createModuleFilter,
+			wantFlag: "--include-module",
+		},
+		{
+			name:     "exclude-module",
+			setup:    func() { pullflags.ModulesBlacklist = []string{"console@"} },
+			call:     puller.createModuleFilter,
+			wantFlag: "--exclude-module",
+		},
+		{
+			name:     "include-package",
+			setup:    func() { pullflags.PackagesWhitelist = []string{"console@"} },
+			call:     puller.createPackageFilter,
+			wantFlag: "--include-package",
+		},
+		{
+			name:     "exclude-package",
+			setup:    func() { pullflags.PackagesBlacklist = []string{"console@"} },
+			call:     puller.createPackageFilter,
+			wantFlag: "--exclude-package",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pullflags.ModulesWhitelist, pullflags.ModulesBlacklist = nil, nil
+			pullflags.PackagesWhitelist, pullflags.PackagesBlacklist = nil, nil
+
+			tt.setup()
+
+			_, err := tt.call()
+			require.Error(t, err)
+
+			var helpErr *diagnostic.HelpfulError
+			require.ErrorAs(t, err, &helpErr, "the hint must survive to the top level")
+			assert.Contains(t, helpErr.Format(), tt.wantFlag, "the hint must name the flag that was typed")
+			assert.Contains(t, helpErr.Format(), `"console@"`, "the hint must name the entry that was rejected")
+		})
+	}
+}
+
+// TestPullerFilterKeepsPlainParseErrors guards the other direction: a constraint
+// the user mistyped is not a quoting problem and keeps the parser's own message.
+func TestPullerFilterKeepsPlainParseErrors(t *testing.T) {
+	original := pullflags.ModulesWhitelist
+	defer func() { pullflags.ModulesWhitelist = original }()
+
+	pullflags.ModulesWhitelist = []string{"console@^^1.0"}
+
+	puller := &Puller{}
+
+	_, err := puller.createModuleFilter()
+	require.Error(t, err)
+
+	var helpErr *diagnostic.HelpfulError
+	assert.False(t, errors.As(err, &helpErr), "a malformed constraint is not a quoting hint")
+	assert.Contains(t, err.Error(), "Prepare module filter")
+}
+
+// TestParseAndValidateVersionFlagsPlatformQuoting covers the --include-platform
+// shape of the same mistake: the shell eats the constraint and the flag is left
+// holding the bundle path that followed it.
+func TestParseAndValidateVersionFlagsPlatformQuoting(t *testing.T) {
+	original := pullflags.PlatformConstraintString
+	defer func() { pullflags.PlatformConstraintString = original }()
+
+	pullflags.PlatformConstraintString = "./bundle"
+
+	err := parseAndValidateVersionFlags()
+	require.Error(t, err)
+
+	var helpErr *diagnostic.HelpfulError
+	require.ErrorAs(t, err, &helpErr)
+	assert.Contains(t, helpErr.Format(), "--include-platform")
+	assert.Contains(t, helpErr.Format(), "./bundle")
+
+	// A mistyped constraint stays a plain parse error.
+	pullflags.PlatformConstraintString = "1.64."
+
+	err = parseAndValidateVersionFlags()
+	require.Error(t, err)
+	assert.False(t, errors.As(err, &helpErr), "a malformed constraint is not a quoting hint")
 }
 
 func TestPullerComputeGOSTDigests(t *testing.T) {
