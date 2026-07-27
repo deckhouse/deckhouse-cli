@@ -396,6 +396,191 @@ func TestEnsureDataExport_RecreatesWhenExpired(t *testing.T) {
 	assert.Equal(t, fresh.ResourceVersion, again.ResourceVersion)
 }
 
+func TestEnsureDataExport_ExpiredReclaimABAReplacementPreserved(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace  = "test-ns"
+		leafName   = "expired-reclaim-aba"
+		expiredRun = "run-expired-a"
+		liveRun    = "run-live-b"
+		ttl        = "1h"
+	)
+
+	const (
+		expiredUID types.UID = "uid-expired-a"
+		liveUID    types.UID = "uid-live-b"
+	)
+
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+	targetRef := volumeSnapshotTargetRef(leafName)
+
+	expired := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            deName,
+			Namespace:       namespace,
+			UID:             expiredUID,
+			ResourceVersion: "11",
+			Annotations:     targetAnnotations(expiredRun),
+		},
+		Spec: deapi.DataexportSpec{
+			TTL:       ttl,
+			TargetRef: targetRef,
+		},
+		Status: deapi.DataExportStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionFalse,
+					Reason: "Expired",
+				},
+			},
+		},
+	}
+
+	replacement := &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deName,
+			Namespace: namespace,
+			UID:       liveUID,
+			Annotations: map[string]string{
+				runOwnerAnnotationKey:  liveRun,
+				targetUIDAnnotationKey: string(testTargetUID),
+				"test.deckhouse.io/id": "replacement-b",
+			},
+		},
+		Spec: deapi.DataexportSpec{
+			TTL:       "4h",
+			Publish:   true,
+			TargetRef: targetRef,
+		},
+		Status: deapi.DataExportStatus{
+			URL:        "https://live-b.example.test/export",
+			CA:         "live-b-ca",
+			PublicURL:  "https://public-live-b.example.test/export",
+			VolumeMode: "Block",
+			Conditions: []metav1.Condition{
+				{
+					Type:   "Ready",
+					Status: metav1.ConditionTrue,
+					Reason: "PodReady",
+				},
+			},
+		},
+	}
+
+	var (
+		deleteCalls        int
+		createCalls        int
+		deletedObjectUID   types.UID
+		deletePrecondition types.UID
+		seededReplacement  *deapi.DataExport
+	)
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(expired).
+		WithStatusSubresource(expired).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.DeleteOption,
+			) error {
+				deleteCalls++
+				deletedObjectUID = obj.GetUID()
+
+				if err := cl.Delete(ctx, obj); err != nil {
+					return fmt.Errorf("remove expired UID A before replacement: %w", err)
+				}
+
+				live := replacement.DeepCopy()
+				if err := cl.Create(ctx, live); err != nil {
+					return fmt.Errorf("create live replacement UID B: %w", err)
+				}
+
+				if err := cl.Status().Update(ctx, live); err != nil {
+					return fmt.Errorf("persist live replacement UID B status: %w", err)
+				}
+
+				seededReplacement = new(deapi.DataExport)
+				key := client.ObjectKey{Namespace: namespace, Name: deName}
+				if err := cl.Get(ctx, key, seededReplacement); err != nil {
+					return fmt.Errorf("capture seeded live replacement UID B: %w", err)
+				}
+
+				deleteOptions := client.DeleteOptions{}
+				deleteOptions.ApplyOptions(opts)
+				if deleteOptions.Preconditions != nil && deleteOptions.Preconditions.UID != nil {
+					deletePrecondition = *deleteOptions.Preconditions.UID
+				}
+
+				if deletePrecondition == expiredUID {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+						deName,
+						errors.New("UID precondition does not match live replacement"),
+					)
+				}
+
+				return cl.Delete(ctx, obj, opts...)
+			},
+			Create: func(
+				ctx context.Context,
+				cl client.WithWatch,
+				obj client.Object,
+				opts ...client.CreateOption,
+			) error {
+				createCalls++
+
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	var acquisition *exporter.DataExportAcquisition
+
+	got, err := ensureDataExport(
+		context.Background(),
+		c,
+		namespace,
+		aggapi.VolumeSnapshotGroup,
+		aggapi.VolumeSnapshotResource,
+		aggapi.VolumeSnapshotKind,
+		leafName,
+		ttl,
+		exporter.WithRunOwner("run-reclaimer", slog.Default()),
+		exporter.WithAcquisition(&acquisition),
+	)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err), "UID-precondition conflict must be propagated: %v", err)
+	assert.Nil(t, got)
+	assert.Nil(t, acquisition, "the replacement must never be acquired")
+	assert.Equal(t, 1, deleteCalls, "the failed reclaim must not retry deletion")
+	assert.Equal(t, 0, createCalls, "the failed reclaim must not create after the conflict")
+	assert.Equal(t, expiredUID, deletedObjectUID, "the reclaim must delete the exact initially observed UID A")
+	assert.Equal(t, expiredUID, deletePrecondition, "the reclaim delete must carry the observed UID-A precondition")
+	require.NotNil(t, seededReplacement)
+
+	preserved := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: deName}, preserved))
+
+	assert.Equal(t, liveUID, preserved.UID)
+	assert.NotEmpty(t, preserved.ResourceVersion)
+	assert.Equal(t, seededReplacement.ResourceVersion, preserved.ResourceVersion)
+	assert.Equal(t, replacement.Annotations, preserved.Annotations)
+	assert.Equal(t, liveRun, preserved.Annotations[runOwnerAnnotationKey])
+	assert.Equal(t, string(testTargetUID), preserved.Annotations[targetUIDAnnotationKey])
+	assert.Equal(t, replacement.Spec, preserved.Spec)
+	assert.Equal(t, replacement.Status, preserved.Status)
+	assert.Equal(t, replacement.Status.URL, preserved.Status.URL)
+
+	seededJSON, marshalErr := json.Marshal(seededReplacement)
+	require.NoError(t, marshalErr)
+
+	preservedJSON, marshalErr := json.Marshal(preserved)
+	require.NoError(t, marshalErr)
+	assert.Equal(t, seededJSON, preservedJSON, "live replacement UID B must remain byte-for-byte unchanged")
+}
+
 // makeReadyDE returns a DataExport pre-populated with the Ready condition and a URL
 // so that WaitReady exits on its first iteration without sleeping.
 func makeReadyDE(namespace, leafName, baseURL, volumeMode string) *deapi.DataExport {

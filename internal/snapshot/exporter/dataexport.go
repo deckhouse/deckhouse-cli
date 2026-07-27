@@ -481,7 +481,9 @@ func EnsureDataExport(
 			// regression — the caller's per-node retry on the next resume attempt
 			// (pipeline.Run is best-effort per node) converges once the delete has
 			// actually propagated.
-			if delErr := c.Delete(ctx, existing); delErr != nil && !kubeerrors.IsNotFound(delErr) {
+			observedUID := existing.UID
+			if delErr := c.Delete(ctx, existing, client.Preconditions{UID: &observedUID}); delErr != nil &&
+				!kubeerrors.IsNotFound(delErr) {
 				return nil, fmt.Errorf("delete expired DataExport %q: %w", deName, delErr)
 			}
 		}
