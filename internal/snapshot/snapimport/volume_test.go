@@ -2232,6 +2232,14 @@ func TestZstdBlockAndFilesystemResume_Logical400GiB(t *testing.T) {
 				if !decoder.closed {
 					t.Error("decoder was not closed")
 				}
+
+				t.Logf(
+					"wire_bytes=%d decoded_prefix=%d locator_calls=%d decoder_closed=%t",
+					doer.wireBytes,
+					doer.prefixDecoded,
+					locatorCalls,
+					decoder.closed,
+				)
 			})
 
 			t.Run("filesystem", func(t *testing.T) {
@@ -2322,6 +2330,14 @@ func TestZstdBlockAndFilesystemResume_Logical400GiB(t *testing.T) {
 				if !decoder.closed {
 					t.Error("decoder was not closed")
 				}
+
+				t.Logf(
+					"wire_bytes=%d decoded_prefix=%d locator_calls=%d decoder_closed=%t",
+					doer.wireBytes,
+					doer.prefixDecoded,
+					locatorCalls,
+					decoder.closed,
+				)
 			})
 		})
 	}
@@ -3885,6 +3901,13 @@ func TestPutBlockFromSource_ZstdFullSkipUsesMetadataWithoutDecoder(t *testing.T)
 	if !slices.Equal(doer.methods, []string{http.MethodHead}) {
 		t.Errorf("HTTP methods = %v, want HEAD only for a full skip", doer.methods)
 	}
+
+	t.Logf(
+		"largest_source_read=%d decoder_opened=%t methods=%v",
+		source.maxRead,
+		source.decodeRead,
+		doer.methods,
+	)
 }
 
 func TestVerifyCompressedBlockSize_ZstdAuthenticatedMutateUseRestore(t *testing.T) {

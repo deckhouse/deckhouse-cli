@@ -146,6 +146,7 @@ type clusterVolumeImporter struct {
 	wait              time.Duration
 	requestTimeout    time.Duration
 	newRequestContext requestContextFactory
+	fsDecodeDeps      fsDecodeDependencies
 	log               *slog.Logger
 }
 
@@ -172,6 +173,7 @@ func NewClusterVolumeImporter(
 		wait:              wait,
 		requestTimeout:    DefaultControlRequestTimeout,
 		newRequestContext: context.WithTimeout,
+		fsDecodeDeps:      defaultFSDecodeDependencies(),
 		log:               log,
 	}
 }
@@ -592,9 +594,13 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 		// complete until the LAST entry in the tar has been processed.
 		var err error
 		if handle == nil {
-			err = importFSFromTar(ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress, activate)
+			err = importFSFromTarWithDependencies(
+				ctx, httpClient, url, leaf.TarFile, c.log, setTotal, onProgress, activate, c.fsDecodeDeps,
+			)
 		} else {
-			err = importFSFromTarSource(ctx, httpClient, url, leaf.TarFile, handle, c.log, setTotal, onProgress, activate)
+			err = importFSFromTarSourceWithDependencies(
+				ctx, httpClient, url, leaf.TarFile, handle, c.log, setTotal, onProgress, activate, c.fsDecodeDeps,
+			)
 		}
 
 		if err != nil {

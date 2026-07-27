@@ -103,6 +103,31 @@ type fsTarSource interface {
 	Stat() (os.FileInfo, error)
 }
 
+type fsDecodeDependencies struct {
+	locateZstdRawOffset func(context.Context, io.ReadSeeker, int64) (compress.ZstdRawOffset, error)
+	newReader           func(string, io.Reader) (io.ReadCloser, error)
+}
+
+func defaultFSDecodeDependencies() fsDecodeDependencies {
+	return fsDecodeDependencies{
+		locateZstdRawOffset: compress.LocateZstdRawOffset,
+		newReader:           compress.NewReader,
+	}
+}
+
+func (d fsDecodeDependencies) withDefaults() fsDecodeDependencies {
+	defaults := defaultFSDecodeDependencies()
+	if d.locateZstdRawOffset == nil {
+		d.locateZstdRawOffset = defaults.locateZstdRawOffset
+	}
+
+	if d.newReader == nil {
+		d.newReader = defaults.newReader
+	}
+
+	return d
+}
+
 type fileUploadProgress struct {
 	onProgress func(int)
 	credited   int64
@@ -322,7 +347,7 @@ func setFileHeaders(req *http.Request, totalSize, offset int64, attrs fileAttrs)
 // the upload should be skipped entirely; size is that final file's exact on-disk
 // (decompressed) byte count, read from the HEAD response's Content-Length, and is only
 // meaningful when done is true — it lets a caller validate the completed size and credit
-// progress after the entry's terminal codec proof. offset is the number of bytes already
+// progress after the entry's checksum-bound geometry proof. offset is the number of bytes already
 // written to the server's temp file when done is false; 0 if no partial upload exists.
 func headFileOffset(ctx context.Context, client httpDoer, fileURL string, totalSize int64) (int64, bool, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
@@ -1026,8 +1051,8 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // non-regular entry are rejected by default because the importer cannot reproduce them. The
 // explicit lossy mode skips them and emits a bounded post-upload summary.
 // onProgress, when non-nil, is called with the decompressed byte count after each file is
-// successfully uploaded or after an already-fully-uploaded entry passes its terminal codec
-// proof without activating a transfer.
+// successfully uploaded or after an already-fully-uploaded entry passes its raw-size and
+// codec-geometry checks without activating a transfer.
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
 // called with a running sum of exact PAX raw sizes as entries are walked.
@@ -1040,18 +1065,53 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // progress stream — activate only distinguishes "at least one file was genuinely
 // transferred" from "nothing was transferred".
 func importFSFromTar(ctx context.Context, client httpDoer, baseURL, tarPath string, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
+	return importFSFromTarWithDependencies(
+		ctx, client, baseURL, tarPath, log, setTotal, onProgress, activate, defaultFSDecodeDependencies(),
+	)
+}
+
+func importFSFromTarWithDependencies(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, tarPath string,
+	log *slog.Logger,
+	setTotal func(int64),
+	onProgress func(int),
+	activate func(),
+	deps fsDecodeDependencies,
+) error {
 	file, err := os.Open(tarPath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", tarPath, err)
 	}
 
-	uploadErr := importFSFromTarSource(ctx, client, baseURL, tarPath, file, log, setTotal, onProgress, activate)
+	uploadErr := importFSFromTarSourceWithDependencies(
+		ctx, client, baseURL, tarPath, file, log, setTotal, onProgress, activate, deps,
+	)
 	closeErr := file.Close()
 
 	return errors.Join(uploadErr, closeTarFileError(tarPath, closeErr))
 }
 
-func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPath string, source fsTarSource, log *slog.Logger, setTotal func(int64), onProgress func(int), activate func()) error {
+func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPath string, source fsTarSource, log *slog.Logger, onProgress func(int), activate func()) error {
+	return importFSFromTarSourceWithDependencies(
+		ctx, client, baseURL, tarPath, source, log, nil, onProgress, activate, defaultFSDecodeDependencies(),
+	)
+}
+
+func importFSFromTarSourceWithDependencies(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, tarPath string,
+	source fsTarSource,
+	log *slog.Logger,
+	setTotal func(int64),
+	onProgress func(int),
+	activate func(),
+	deps fsDecodeDependencies,
+) error {
+	deps = deps.withDefaults()
+
 	scan, err := scanFSTarSource(ctx, source, tarPath)
 	if err != nil {
 		return fmt.Errorf("filesystem tar metadata preflight: %w", err)
@@ -1063,7 +1123,9 @@ func importFSFromTarSource(ctx context.Context, client httpDoer, baseURL, tarPat
 		return errors.Join(fmt.Errorf("filesystem tar identity preflight: %w", err), cleanupErr)
 	}
 
-	uploadErr := uploadFSTarFromScan(ctx, client, baseURL, tarPath, source, log, setTotal, onProgress, activate, &scan)
+	uploadErr := uploadFSTarFromScanWithDependencies(
+		ctx, client, baseURL, tarPath, source, log, setTotal, onProgress, activate, &scan, deps,
+	)
 	cleanupErr := scan.Close()
 
 	return errors.Join(uploadErr, cleanupErr)
@@ -1185,6 +1247,24 @@ func uploadFSTarFromScan(
 	onProgress func(int),
 	activate func(),
 	scan *fsTarScan,
+) error {
+	return uploadFSTarFromScanWithDependencies(
+		ctx, client, baseURL, tarPath, source, log, setTotal, onProgress, activate, scan,
+		defaultFSDecodeDependencies(),
+	)
+}
+
+func uploadFSTarFromScanWithDependencies(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, tarPath string,
+	source fsTarSource,
+	log *slog.Logger,
+	setTotal func(int64),
+	onProgress func(int),
+	activate func(),
+	scan *fsTarScan,
+	deps fsDecodeDependencies,
 ) error {
 	if scan.StructuralDirectoryCount > 0 {
 		log.Warn("filesystem import creates structural parent directories implicitly; directory mode, uid, gid, and mtime cannot be restored",
@@ -1347,7 +1427,9 @@ func uploadFSTarFromScan(
 				)
 			}
 
-			if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize); err != nil {
+			if err := verifyTarEntryRawSizeFromSource(
+				ctx, source, tarPath, ext, payloadStart, hdr.Size, metadata.RawSize, deps,
+			); err != nil {
 				return errors.Join(
 					fmt.Errorf("verify completed payload for %s: %w", relPath, err),
 					closeFSTarSequence(sequence),
@@ -1368,9 +1450,9 @@ func uploadFSTarFromScan(
 			ModTime: hdr.ModTime,
 		}
 
-		if err := uploadFSTarEntry(
+		if err := uploadFSTarEntryWithDependencies(
 			ctx, client, baseURL, relPath, tarPath, source, ext,
-			payloadStart, hdr.Size, metadata.RawSize, offset, attrs, progress, activate,
+			payloadStart, hdr.Size, metadata.RawSize, offset, attrs, progress, activate, deps,
 		); err != nil {
 			return errors.Join(err, closeFSTarSequence(sequence))
 		}
@@ -1424,7 +1506,28 @@ func uploadFSTarEntry(
 	progress *fileUploadProgress,
 	activate func(),
 ) error {
-	stream := newTarEntryStream(source, tarPath, ext, payloadStart, storedSize, rawSize)
+	return uploadFSTarEntryWithDependencies(
+		ctx, client, baseURL, relPath, tarPath, source, ext,
+		payloadStart, storedSize, rawSize, offset, attrs, progress, activate,
+		defaultFSDecodeDependencies(),
+	)
+}
+
+func uploadFSTarEntryWithDependencies(
+	ctx context.Context,
+	client httpDoer,
+	baseURL, relPath, tarPath string,
+	source io.ReaderAt,
+	ext string,
+	payloadStart, storedSize, rawSize, offset int64,
+	attrs fileAttrs,
+	progress *fileUploadProgress,
+	activate func(),
+	deps fsDecodeDependencies,
+) error {
+	stream := newTarEntryStreamWithDependencies(
+		source, tarPath, ext, payloadStart, storedSize, rawSize, deps,
+	)
 
 	defer func() {
 		_ = stream.closeDecoder()
@@ -1445,7 +1548,9 @@ func uploadFSTarEntry(
 		return nil
 	}
 
-	if err := verifyTarEntryRawSizeFromSource(ctx, source, tarPath, ext, payloadStart, storedSize, rawSize); err != nil {
+	if err := verifyTarEntryRawSizeFromSource(
+		ctx, source, tarPath, ext, payloadStart, storedSize, rawSize, deps,
+	); err != nil {
 		return fmt.Errorf("verify plaintext size for %s: %w", relPath, err)
 	}
 
@@ -2213,6 +2318,19 @@ type tarEntryStream struct {
 // filesystem tar entry. ext selects the decode codec via compress.NewReader; "" serves
 // the entry's stored bytes verbatim, with no decoder ever opened.
 func newTarEntryStream(source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) *tarEntryStream {
+	return newTarEntryStreamWithDependencies(
+		source, tarPath, ext, payloadStart, storedSize, rawSize, defaultFSDecodeDependencies(),
+	)
+}
+
+func newTarEntryStreamWithDependencies(
+	source io.ReaderAt,
+	tarPath, ext string,
+	payloadStart, storedSize, rawSize int64,
+	deps fsDecodeDependencies,
+) *tarEntryStream {
+	deps = deps.withDefaults()
+
 	return &tarEntryStream{
 		source:              source,
 		tarPath:             tarPath,
@@ -2221,8 +2339,8 @@ func newTarEntryStream(source io.ReaderAt, tarPath, ext string, payloadStart, st
 		storedSize:          storedSize,
 		rawSize:             rawSize,
 		pos:                 -1,
-		locateZstdRawOffset: compress.LocateZstdRawOffset,
-		newReader:           compress.NewReader,
+		locateZstdRawOffset: deps.locateZstdRawOffset,
+		newReader:           deps.newReader,
 	}
 }
 
@@ -2452,7 +2570,13 @@ func classifyTerminalProbe(n int, readErr error, rawSize int64) error {
 	}
 }
 
-func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, tarPath, ext string, payloadStart, storedSize, rawSize int64) error {
+func verifyTarEntryRawSizeFromSource(
+	ctx context.Context,
+	source io.ReaderAt,
+	tarPath, ext string,
+	payloadStart, storedSize, rawSize int64,
+	deps fsDecodeDependencies,
+) error {
 	if ext == "" {
 		if storedSize != rawSize {
 			return fmt.Errorf("stored size %d differs from declared raw size %d", storedSize, rawSize)
@@ -2463,7 +2587,29 @@ func verifyTarEntryRawSizeFromSource(ctx context.Context, source io.ReaderAt, ta
 
 	stored := io.NewSectionReader(source, payloadStart, storedSize)
 
-	decoder, err := compress.NewReader(ext, stored)
+	if ext == ".zst" {
+		// A validated DataImport identity binds the server's accepted raw prefix to this
+		// archive payload, whose outer SHA-256 is rechecked before finalisation. Walking
+		// every frame and mandatory Frame_Content_Size therefore proves only structural
+		// geometry and the aggregate raw size here; it deliberately does not claim
+		// semantic zstd checksum authentication or re-decode checksum-bound accepted bytes.
+		location, err := deps.locateZstdRawOffset(ctx, stored, rawSize)
+		if err != nil {
+			return fmt.Errorf("validate zstd geometry for %s: %w", tarPath, err)
+		}
+
+		if location.DecodedSize != rawSize {
+			return fmt.Errorf(
+				"zstd decoded size %d differs from declared raw size %d",
+				location.DecodedSize,
+				rawSize,
+			)
+		}
+
+		return nil
+	}
+
+	decoder, err := deps.newReader(ext, stored)
 	if err != nil {
 		return fmt.Errorf("open decompressor for %s: %w", tarPath, err)
 	}

@@ -2575,7 +2575,6 @@ func TestImportFSFromTar_SecondPassDetectsIdentityOrderAndCountDrift(t *testing.
 				discardLogger(),
 				nil,
 				nil,
-				nil,
 			)
 			if !errors.Is(err, archive.ErrInvalidFSMetadata) {
 				t.Fatalf("importFSFromTarSource error = %v, want ErrInvalidFSMetadata", err)
@@ -3169,7 +3168,19 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutTransfer(t *testing.T) 
 	}
 }
 
-func TestSendVolumeData_FSCompressedDoneEntryRequiresTerminalCodecProof(t *testing.T) {
+type countingReadSeeker struct {
+	io.ReadSeeker
+	bytes int64
+}
+
+func (r *countingReadSeeker) Read(p []byte) (int, error) {
+	n, err := r.ReadSeeker.Read(p)
+	r.bytes += int64(n)
+
+	return n, err
+}
+
+func TestSendVolumeData_FSCompressedDoneEntryUsesChecksumBoundZstdResume(t *testing.T) {
 	expected := bytes.Repeat([]byte("expected-server-bytes-"), 256)
 	emitted := append([]byte(nil), expected...)
 	for i := range emitted {
@@ -3222,13 +3233,15 @@ func TestSendVolumeData_FSCompressedDoneEntryRequiresTerminalCodecProof(t *testi
 				t.Fatalf("close tar writer: %v", err)
 			}
 
-			tarPath := filepath.Join(t.TempDir(), "data.tar")
-			if err := os.WriteFile(tarPath, tarBuffer.Bytes(), 0o600); err != nil {
-				t.Fatalf("write data.tar: %v", err)
-			}
+			tarPath, handle := openVerifiedFSTarHandle(
+				t,
+				context.Background(),
+				tarBuffer.Bytes(),
+			)
 
 			var methods []string
 
+			finished := 0
 			doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
 				methods = append(methods, req.Method)
 
@@ -3238,18 +3251,43 @@ func TestSendVolumeData_FSCompressedDoneEntryRequiresTerminalCodecProof(t *testi
 				case http.MethodPut:
 					return nil, errors.New("PUT issued after completed HEAD response")
 				case http.MethodPost:
-					return nil, errors.New("finished POST issued after terminal codec failure")
+					finished++
+
+					return fileHTTPResponse(http.StatusNoContent, nil), nil
 				default:
 					return nil, fmt.Errorf("unexpected method %s", req.Method)
 				}
 			})
 
+			var (
+				locatorCalls       int
+				decoderCalls       int
+				geometrySourceRead int64
+			)
+
+			deps := fsDecodeDependencies{
+				locateZstdRawOffset: func(ctx context.Context, source io.ReadSeeker, rawOffset int64) (compress.ZstdRawOffset, error) {
+					locatorCalls++
+
+					counted := &countingReadSeeker{ReadSeeker: source}
+					location, locateErr := compress.LocateZstdRawOffset(ctx, counted, rawOffset)
+					geometrySourceRead += counted.bytes
+
+					return location, locateErr
+				},
+				newReader: func(ext string, source io.Reader) (io.ReadCloser, error) {
+					decoderCalls++
+
+					return compress.NewReader(ext, source)
+				},
+			}
+
 			progressed := 0
 			activated := 0
-			importer := &clusterVolumeImporter{log: discardLogger()}
+			importer := &clusterVolumeImporter{log: discardLogger(), fsDecodeDeps: deps}
 			leaf := PlannedNode{FilesystemData: true, TarFile: tarPath}
 
-			err = importer.sendVolumeData(
+			err = importer.sendVolumeDataFromSource(
 				context.Background(),
 				doer,
 				"https://import.example",
@@ -3257,25 +3295,189 @@ func TestSendVolumeData_FSCompressedDoneEntryRequiresTerminalCodecProof(t *testi
 				leaf,
 				"target",
 				"data-import",
+				handle,
 				nil,
 				func(n int) { progressed += n },
 				func() { activated++ },
 			)
-			if err == nil || !strings.Contains(err.Error(), "verify completed payload") {
-				t.Fatalf("sendVolumeData error = %v, want terminal completed-payload proof failure", err)
+
+			if codecName == "zstd" {
+				if err != nil {
+					t.Fatalf("sendVolumeData: %v", err)
+				}
+				if !slices.Equal(methods, []string{http.MethodHead, http.MethodPost}) {
+					t.Errorf("HTTP methods = %v, want HEAD then finished POST", methods)
+				}
+				if locatorCalls != 1 {
+					t.Errorf("zstd geometry locator calls = %d, want 1", locatorCalls)
+				}
+				if decoderCalls != 0 {
+					t.Errorf("decoder calls = %d, want 0 for a checksum-bound completed zstd entry", decoderCalls)
+				}
+				if geometrySourceRead <= 0 || geometrySourceRead >= int64(len(corrupted)) {
+					t.Errorf("zstd geometry source reads = %d, want metadata-only work between 0 and stored size %d",
+						geometrySourceRead, len(corrupted))
+				}
+				if progressed != len(emitted) {
+					t.Errorf("progress = %d, want completed raw size %d", progressed, len(emitted))
+				}
+				if finished != 1 {
+					t.Errorf("finished POST count = %d, want 1", finished)
+				}
+
+				t.Logf(
+					"codec=%s geometry_source_read=%d decoder_calls=%d methods=%v finished=%d",
+					codecName,
+					geometrySourceRead,
+					decoderCalls,
+					methods,
+					finished,
+				)
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "verify completed payload") {
+					t.Fatalf("sendVolumeData error = %v, want terminal completed-payload proof failure", err)
+				}
+				if !slices.Equal(methods, []string{http.MethodHead}) {
+					t.Errorf("HTTP methods = %v, want HEAD only", methods)
+				}
+				if locatorCalls != 0 {
+					t.Errorf("zstd geometry locator calls = %d, want 0 for %s", locatorCalls, codecName)
+				}
+				if decoderCalls != 1 {
+					t.Errorf("decoder calls = %d, want 1 terminal-proof fallback for %s", decoderCalls, codecName)
+				}
+				if progressed != 0 {
+					t.Errorf("progress = %d, want 0 before completed payload proof succeeds", progressed)
+				}
+				if finished != 0 {
+					t.Errorf("finished POST count = %d, want 0 after terminal codec failure", finished)
+				}
 			}
 
-			if !slices.Equal(methods, []string{http.MethodHead}) {
-				t.Errorf("HTTP methods = %v, want HEAD only", methods)
-			}
-			if progressed != 0 {
-				t.Errorf("progress = %d, want 0 before completed payload proof succeeds", progressed)
-			}
 			if activated != 0 {
 				t.Errorf("activation count = %d, want 0 without a PUT", activated)
 			}
 		})
 	}
+}
+
+func TestSendVolumeData_FSZstdFullOffsetUsesEmptyPUTWithoutDecoder(t *testing.T) {
+	content := bytes.Repeat([]byte("pending-full-offset-"), 512)
+	tarFixture := writeSingleEntryFSTar(t, "zstd", content)
+	tarData, err := os.ReadFile(tarFixture)
+	if err != nil {
+		t.Fatalf("read filesystem tar fixture: %v", err)
+	}
+
+	tarPath, handle := openVerifiedFSTarHandle(t, context.Background(), tarData)
+
+	var (
+		methods      []string
+		finished     int
+		emptyPUTs    int
+		locatorCalls int
+		decoderCalls int
+		sourceRead   int64
+	)
+
+	doer := fileHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		methods = append(methods, req.Method)
+
+		switch req.Method {
+		case http.MethodHead:
+			return fileHTTPResponse(http.StatusOK, http.Header{
+				"X-Next-Offset": []string{strconv.Itoa(len(content))},
+			}), nil
+		case http.MethodPut:
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, fmt.Errorf("read empty finalising PUT: %w", err)
+			}
+			if req.ContentLength != 0 || len(body) != 0 {
+				return nil, fmt.Errorf("finalising PUT carried Content-Length %d and %d body bytes",
+					req.ContentLength, len(body))
+			}
+
+			emptyPUTs++
+
+			return fileHTTPResponse(http.StatusCreated, nil), nil
+		case http.MethodPost:
+			finished++
+
+			return fileHTTPResponse(http.StatusNoContent, nil), nil
+		default:
+			return nil, fmt.Errorf("unexpected method %s", req.Method)
+		}
+	})
+
+	deps := fsDecodeDependencies{
+		locateZstdRawOffset: func(ctx context.Context, source io.ReadSeeker, rawOffset int64) (compress.ZstdRawOffset, error) {
+			locatorCalls++
+
+			counted := &countingReadSeeker{ReadSeeker: source}
+			location, err := compress.LocateZstdRawOffset(ctx, counted, rawOffset)
+			sourceRead += counted.bytes
+
+			return location, err
+		},
+		newReader: func(ext string, source io.Reader) (io.ReadCloser, error) {
+			decoderCalls++
+
+			return compress.NewReader(ext, source)
+		},
+	}
+
+	progressed := 0
+	activated := 0
+	importer := &clusterVolumeImporter{log: discardLogger(), fsDecodeDeps: deps}
+	leaf := PlannedNode{FilesystemData: true, TarFile: tarPath}
+
+	err = importer.sendVolumeDataFromSource(
+		context.Background(),
+		doer,
+		"https://import.example",
+		volumeModeFilesystem,
+		leaf,
+		"target",
+		"data-import",
+		handle,
+		nil,
+		func(n int) { progressed += n },
+		func() { activated++ },
+	)
+	if err != nil {
+		t.Fatalf("sendVolumeData: %v", err)
+	}
+	if !slices.Equal(methods, []string{http.MethodHead, http.MethodPut, http.MethodPost}) {
+		t.Errorf("HTTP methods = %v, want HEAD, empty PUT, then finished POST", methods)
+	}
+	if locatorCalls != 1 {
+		t.Errorf("zstd geometry locator calls = %d, want 1", locatorCalls)
+	}
+	if decoderCalls != 0 {
+		t.Errorf("decoder calls = %d, want 0 at full offset", decoderCalls)
+	}
+	if sourceRead <= 0 {
+		t.Errorf("zstd geometry source reads = %d, want positive metadata work", sourceRead)
+	}
+	if emptyPUTs != 1 || finished != 1 {
+		t.Errorf("empty PUTs=%d finished POSTs=%d, want one each", emptyPUTs, finished)
+	}
+	if progressed != len(content) {
+		t.Errorf("progress = %d, want validated durable offset %d", progressed, len(content))
+	}
+	if activated != 1 {
+		t.Errorf("activation count = %d, want 1 for the protocol finalising PUT", activated)
+	}
+
+	t.Logf(
+		"source_read=%d decoder_calls=%d methods=%v empty_puts=%d finished=%d",
+		sourceRead,
+		decoderCalls,
+		methods,
+		emptyPUTs,
+		finished,
+	)
 }
 
 func TestSendVolumeData_FSValidDoneEntriesPreserveProgressWithoutPUT(t *testing.T) {
@@ -3416,8 +3618,8 @@ func TestSendVolumeData_FSRawEntryRetainsStoredIdentityCheck(t *testing.T) {
 	}
 }
 
-func TestSendVolumeData_FSCompressedDoneProofHonorsCancellation(t *testing.T) {
-	content := bytes.Repeat([]byte("cancel-terminal-proof-"), 4096)
+func TestSendVolumeData_FSCompressedDoneGeometryHonorsCancellation(t *testing.T) {
+	content := bytes.Repeat([]byte("cancel-done-geometry-"), 4096)
 	tarPath := writeSingleEntryFSTar(t, "zstd", content)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -3465,7 +3667,7 @@ func TestSendVolumeData_FSCompressedDoneProofHonorsCancellation(t *testing.T) {
 		t.Errorf("HTTP methods = %v, want HEAD only", methods)
 	}
 	if progressed != 0 {
-		t.Errorf("progress = %d, want 0 before terminal proof succeeds", progressed)
+		t.Errorf("progress = %d, want 0 before completed-entry geometry succeeds", progressed)
 	}
 }
 
@@ -4751,7 +4953,6 @@ func TestImportFSFromTarSource_ConflictReplayWorkIsBounded(t *testing.T) {
 				discardLogger(),
 				nil,
 				nil,
-				nil,
 			)
 			if tc.wantErr == "" {
 				if err != nil {
@@ -4886,7 +5087,6 @@ func TestImportFSFromTarSource_HighCardinalityAuthenticationWorkIsBounded(t *tes
 				tarPath,
 				handle,
 				discardLogger(),
-				nil,
 				func(n int) { progressed += n },
 				func() { activated++ },
 			)
@@ -4918,9 +5118,34 @@ func TestImportFSFromTarSource_HighCardinalityAuthenticationWorkIsBounded(t *tes
 	}
 }
 
-func TestImportFSFromTarSource_DoneProofRejectsHardlinkMutateUseRestore(t *testing.T) {
+func TestImportFSFromTarSource_DoneGeometryDefersHardlinkMutationToFinalVerify(t *testing.T) {
 	content := randomPayload(t, 2*1024*1024+4096)
-	tarData := buildSingleEntryFSTar(t, "zstd", content)
+	split := len(content) / 2
+	ext, firstFrame := encodeEntry(t, "zstd", content[:split])
+	_, secondFrame := encodeEntry(t, "zstd", content[split:])
+	stored := append(firstFrame, secondFrame...)
+
+	var tarBuffer bytes.Buffer
+
+	tarWriter := tar.NewWriter(&tarBuffer)
+	addTarEntryMetadata(
+		t,
+		tarWriter,
+		"file.bin"+ext,
+		"file.bin",
+		"zstd",
+		int64(len(content)),
+		stored,
+		0o600,
+		1,
+		2,
+		time.Unix(100, 0).UTC(),
+	)
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	tarData := tarBuffer.Bytes()
 	tarPath, handle := openVerifiedFSTarHandle(t, context.Background(), tarData)
 
 	hardlinkPath := filepath.Join(t.TempDir(), "data-tar-hardlink")
@@ -4938,15 +5163,22 @@ func TestImportFSFromTarSource_DoneProofRejectsHardlinkMutateUseRestore(t *testi
 		}
 	})
 
-	const mutationOffset = 1024*1024 + 17
-	if mutationOffset >= len(tarData) {
-		t.Fatalf("mutation offset %d exceeds tar size %d", mutationOffset, len(tarData))
+	zstdMagic := []byte{0x28, 0xb5, 0x2f, 0xfd}
+	firstMagic := bytes.Index(tarData, zstdMagic)
+	if firstMagic < 0 {
+		t.Fatal("first zstd frame header is absent from filesystem tar")
 	}
 
+	secondMagicRelative := bytes.Index(tarData[firstMagic+len(zstdMagic):], zstdMagic)
+	if secondMagicRelative < 0 {
+		t.Fatal("second zstd frame header is absent from filesystem tar")
+	}
+
+	mutationOffset := firstMagic + len(zstdMagic) + secondMagicRelative
 	source := &mutateRestoreFSTarSource{
 		source:         handle,
 		writer:         writer,
-		mutationOffset: mutationOffset,
+		mutationOffset: int64(mutationOffset),
 		original:       tarData[mutationOffset],
 	}
 
@@ -4975,25 +5207,23 @@ func TestImportFSFromTarSource_DoneProofRejectsHardlinkMutateUseRestore(t *testi
 		tarPath,
 		source,
 		discardLogger(),
-		nil,
 		func(n int) { progressed += n },
 		nil,
 	)
-	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
-		t.Fatalf("import filesystem tar error = %v, want ErrVerifiedArchiveChanged", err)
-	}
-
 	if !source.exercised {
-		t.Fatal("done-entry proof did not reach the hardlink mutation")
+		t.Fatal("done-entry geometry did not reach the hardlink mutation")
+	}
+	if err != nil {
+		t.Fatalf("import filesystem tar: %v", err)
 	}
 	if !slices.Equal(methods, []string{http.MethodHead}) {
 		t.Errorf("HTTP methods = %v, want HEAD only", methods)
 	}
-	if progressed != 0 {
-		t.Errorf("progress = %d, want 0 before authenticated proof succeeds", progressed)
+	if progressed != len(content) {
+		t.Errorf("progress = %d, want completed raw size %d", progressed, len(content))
 	}
 	if err := handle.Verify(context.Background()); !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
-		t.Fatalf("verified handle error after restored mutation = %v, want sticky ErrVerifiedArchiveChanged", err)
+		t.Fatalf("verified handle error after restored mutation = %v, want ErrVerifiedArchiveChanged", err)
 	}
 }
 
@@ -5033,7 +5263,6 @@ func TestImportFSFromTarSource_HighCardinalityCancellationIsStickyAndBounded(t *
 		tarPath,
 		handle,
 		discardLogger(),
-		nil,
 		nil,
 		nil,
 	)
@@ -5806,7 +6035,6 @@ func TestImportFSFromTarSource_LargeCompressedEntryDecodeWorkIsLinear(t *testing
 				discardLogger(),
 				nil,
 				nil,
-				nil,
 			); err != nil {
 				t.Fatalf("import filesystem tar: %v", err)
 			}
@@ -5899,20 +6127,11 @@ func buildCorruptChecksumFSTar(t *testing.T, codec string, content []byte) strin
 	return tarPath
 }
 
-// TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads is the coverage-gap
-// regression test for fs.go's live-upload terminal proof (the verify call following a
-// non-done putFile, and the folded probe that can stand in for it on a fresh upload):
-// before this test, no case exercised that proof's error path at all. It drives a
-// live (never-"done") upload of a single compressed entry that is over-size,
-// under-size, or checksum-corrupt relative to its declared PAX raw size, once starting
-// fresh at offset 0 (where tarEntryStream.close may fold the proof into the live
-// stream) and once resuming from a HEAD-reported partial offset (where folding is
-// deliberately never attempted, so a full separate verifyTarEntryRawSizeFromSource
-// pass must catch it instead). Every case must still reject the entry, though not
-// always through the same mechanism: over-size is only ever visible once the declared
-// byte count has been fully delivered, so it cleanly demonstrates the fold-vs-separate-
-// pass distinction; under-size and checksum corruption can also surface earlier, as a
-// hard read error during the live transfer itself, which is an equally valid rejection.
+// TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads covers fs.go's
+// live-upload boundary: frame geometry rejects raw-size mismatches before PUT, while
+// the decoder serving the current frame/suffix rejects truncation or checksum errors
+// before the volume is finalised. A resumed zstd upload intentionally does not
+// re-decode checksum-bound fully accepted frames.
 func TestImportFSFromTar_LiveUploadTerminalProofRejectsBadPayloads(t *testing.T) {
 	content := bytes.Repeat([]byte("expected-server-bytes-"), 256)
 
