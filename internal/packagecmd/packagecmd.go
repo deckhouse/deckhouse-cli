@@ -15,7 +15,7 @@ import (
 // entry point (cmd/package/main.go) and the "version" subcommand, whose value is
 // injected by the plugin's own ldflags. d8 reports its version itself.
 //
-// Vendored from d8-package-plugin v0.0.25 (4458426). Keep this in sync when
+// Vendored from d8-package-plugin v0.0.27 (97da2a0). Keep this in sync when
 // re-syncing internal/, pkg/ and templates/ from upstream.
 func NewCommand() *cobra.Command {
 	return pkgcmd.NewCmdRoot()
