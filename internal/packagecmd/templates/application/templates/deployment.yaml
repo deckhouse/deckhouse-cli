@@ -6,7 +6,7 @@ memory: 70Mi
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Application.Instance.Name }}-server
+  name: d8a-{{ .Application.Instance.Name }}-server
 spec:
   revisionHistoryLimit: 2
   replicas: {{ .Application.Settings.replicas | default 1 }}
@@ -26,7 +26,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: {{ .Application.Instance.Name }}-registrysecret
+        - name: d8a-{{ .Application.Instance.Name }}-registrysecret
       containers:
         - name: server
           image: {{ index .Application.Package.Images "echo" }}

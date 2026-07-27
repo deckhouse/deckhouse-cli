@@ -1,7 +1,7 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ .Application.Instance.Name }}-server
+  name: d8a-{{ .Application.Instance.Name }}-server
 spec:
   minAvailable: 1
   selector:

@@ -2,12 +2,12 @@
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
-  name: {{ .Application.Instance.Name }}-server
+  name: d8a-{{ .Application.Instance.Name }}-server
 spec:
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ .Application.Instance.Name }}-server
+    name: d8a-{{ .Application.Instance.Name }}-server
   updatePolicy:
     updateMode: Initial
   resourcePolicy:
