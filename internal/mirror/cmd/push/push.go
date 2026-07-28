@@ -201,6 +201,8 @@ func (p *Pusher) Execute() error {
 
 	p.logger.Infof("d8 version: %s", version.Version)
 
+	p.warnNonDefaultModulesPath()
+
 	if RegistryUsername != "" {
 		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}
@@ -222,6 +224,22 @@ func (p *Pusher) Execute() error {
 	}
 
 	return nil
+}
+
+// warnNonDefaultModulesPath opens the log with the moved-modules-path warning,
+// so a non-standard layout is visible before anything is uploaded. The summary
+// repeats it, in its multi-line form, at the end of the run.
+//
+// Which components the bundle carries is unknown this early, so the warning
+// covers every non-default path.
+func (p *Pusher) warnNonDefaultModulesPath() {
+	target := path.Join(p.pushParams.RegistryHost, p.pushParams.RegistryPath)
+
+	report := mirror.BuildModulesPathReport(target, p.pushParams.ModulesPathSuffix)
+
+	if warning := report.Warning(); warning != "" {
+		p.logger.WarnLn(warning)
+	}
 }
 
 // executeNewPush runs the push using the push service.
