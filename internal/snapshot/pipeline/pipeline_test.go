@@ -61,7 +61,9 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/localscan"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
@@ -1559,6 +1561,53 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 	assertNoIdentityMarkers(t, outputDir)
 }
 
+// publicationTransactionPath is where the download pipeline keeps its active
+// publication transaction record, and publicationReceiptPath its receipt: both
+// live directly in the archive root, beside the root node's snapshot.yaml.
+//
+// Neither may live under archive.SnapshotsDirName. That directory carries child
+// node directories and nothing else — snapimport.childNodeNames opens every entry
+// it finds there as a directory, so one regular file there aborts upload planning
+// (see TestPipeline_PublicationStateKeepsUploadAndLocalScanWorking). Both helpers
+// mirror pipeline.publicationStatePath, which the internal
+// publication_transaction_test.go exercises directly.
+func publicationTransactionPath(outputDir string) string {
+	return filepath.Join(outputDir, ".d8-snapshot-publication-v1.json")
+}
+
+func publicationReceiptPath(outputDir string) string {
+	return filepath.Join(outputDir, ".d8-snapshot-publication-receipt-v1.json")
+}
+
+// crashOnEnvelopeDurability returns a directory-sync hook that fails nodeDir's
+// durability confirmation in the window where that node's own snapshot.yaml has
+// just become visible while a publication transaction record is already durable —
+// the "crashed while publishing this node's envelope" fixture state.
+//
+// The snapshot.yaml precondition is load-bearing, not decoration. The transaction
+// record lives directly in the archive root, so publishing the record confirms
+// that same directory; keying on the directory and the record's existence alone
+// would fire on the record's OWN commit instead, which happens before any
+// envelope exists and would leave the fixture never reaching envelope
+// publication at all.
+func crashOnEnvelopeDurability(nodeDir, transactionPath string, crashErr error) archive.DirectorySyncHook {
+	return func(path string, next func() error) error {
+		if filepath.Clean(path) != filepath.Clean(nodeDir) {
+			return next()
+		}
+
+		if _, err := os.Stat(transactionPath); err != nil {
+			return next()
+		}
+
+		if _, err := os.Stat(filepath.Join(nodeDir, archive.SnapshotYAMLName)); err != nil {
+			return next()
+		}
+
+		return crashErr
+	}
+}
+
 func TestPipeline_PublicationTransactionRecoversBottomUpAfterParentCrash(t *testing.T) {
 	rawBlock := bytes.Repeat([]byte("P"), 600)
 
@@ -1583,21 +1632,12 @@ func TestPipeline_PublicationTransactionRecoversBottomUpAfterParentCrash(t *test
 		},
 	}
 
-	transactionPath := filepath.Join(
-		outputDir,
-		archive.SnapshotsDirName,
-		".d8-snapshot-publication-v1.json",
-	)
+	transactionPath := publicationTransactionPath(outputDir)
 	crashErr := errors.New("injected parent publication crash")
-	ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
-		if path == outputDir {
-			if _, err := os.Stat(transactionPath); err == nil {
-				return crashErr
-			}
-		}
-
-		return next()
-	})
+	ctx := archive.WithDirectorySyncHook(
+		context.Background(),
+		crashOnEnvelopeDurability(outputDir, transactionPath, crashErr),
+	)
 
 	err := runPipeline(ctx, cfg)
 	require.ErrorIs(t, err, crashErr)
@@ -1625,16 +1665,15 @@ func TestPipeline_PublicationTransactionRecoversBottomUpAfterParentCrash(t *test
 		return nil, errors.New("unexpected OpenExport call")
 	}
 
-	receiptPath := filepath.Join(
-		outputDir,
-		archive.SnapshotsDirName,
-		".d8-snapshot-publication-receipt-v1.json",
-	)
+	receiptPath := publicationReceiptPath(outputDir)
 	cleanupErr := errors.New("injected transaction cleanup crash")
+	// The cleanup window is confirmed in the archive root now that both records
+	// live there: it is the confirmation of the cleaned receipt, taken once the
+	// active transaction has already been removed.
 	cleanupCtx := archive.WithDirectorySyncHook(
 		context.Background(),
 		func(path string, next func() error) error {
-			if path == filepath.Join(outputDir, archive.SnapshotsDirName) {
+			if filepath.Clean(path) == filepath.Clean(outputDir) {
 				_, transactionErr := os.Stat(transactionPath)
 				_, receiptErr := os.Stat(receiptPath)
 				if errors.Is(transactionErr, os.ErrNotExist) && receiptErr == nil {
@@ -1702,11 +1741,7 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 		archive.SnapshotsDirName,
 		archive.NodeDirName("VolumeSnapshot", "pvc-agg"),
 	)
-	transactionPath := filepath.Join(
-		outputDir,
-		archive.SnapshotsDirName,
-		".d8-snapshot-publication-v1.json",
-	)
+	transactionPath := publicationTransactionPath(outputDir)
 	cfg := pipeline.Config{
 		Namespace:            e2eNS,
 		RootSnapshot:         e2eAggRootSnap,
@@ -1734,15 +1769,10 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 				recoveryReads[nodeDir] += payloadBytes
 			},
 		)
-		ctx := archive.WithDirectorySyncHook(countingCtx, func(path string, next func() error) error {
-			if path == nodeDir {
-				if _, err := os.Stat(transactionPath); err == nil {
-					return crashErr
-				}
-			}
-
-			return next()
-		})
+		ctx := archive.WithDirectorySyncHook(
+			countingCtx,
+			crashOnEnvelopeDurability(nodeDir, transactionPath, crashErr),
+		)
 
 		return runPipeline(ctx, cfg)
 	}
@@ -1876,8 +1906,8 @@ func TestPipeline_StaleParentWithIncompleteSiblingIsRejectedAtRunStart(t *testin
 	reseedResumeMarkerFromSnapshotYAML(t, childBDir)
 	require.NoError(t, os.Remove(filepath.Join(childBDir, archive.SnapshotYAMLName)))
 
-	transactionPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-v1.json")
-	receiptPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-receipt-v1.json")
+	transactionPath := publicationTransactionPath(outputDir)
+	receiptPath := publicationReceiptPath(outputDir)
 	require.NoFileExists(t, transactionPath)
 	receiptBefore, err := os.ReadFile(receiptPath)
 	require.NoError(t, err)
@@ -1915,6 +1945,238 @@ func TestPipeline_StaleParentWithIncompleteSiblingIsRejectedAtRunStart(t *testin
 		require.NoError(t, readErr)
 		require.Equal(t, before, after, "snapshot envelope changed at %s", nodeDir)
 	}
+}
+
+// assertChildDirectoriesOnly fails if any archive.SnapshotsDirName directory in
+// the tree rooted at root holds an entry that is not a directory.
+//
+// That is not a stylistic preference: every consumer of a downloaded archive
+// treats snapshots/ as "child node directories and nothing else".
+// snapimport.childNodeNames lists the directory and opens EVERY entry it returns
+// as a directory, so one regular file there fails upload planning outright with
+// archive.ErrNonRegularArchiveArtifact. localscan.scanDir and
+// archive.computeNodeChildrenChecksum read the same directory under the same
+// convention and happen to skip non-directories, so they tolerate a stray entry
+// rather than sanction one. Download machinery sidecars therefore belong beside
+// snapshot.yaml in the node directory root, never inside snapshots/.
+func assertChildDirectoriesOnly(t *testing.T, root string) {
+	t.Helper()
+
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if !entry.IsDir() || entry.Name() != archive.SnapshotsDirName {
+			return nil
+		}
+
+		children, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+
+		for _, child := range children {
+			if !child.IsDir() {
+				t.Errorf("%s must hold child node directories only, found non-directory %q",
+					path, child.Name())
+			}
+		}
+
+		return nil
+	}))
+}
+
+// uploadLayoutPVCData extends pvcData with the captured-volume metadata that
+// snapshot.yaml's strict envelope validation demands of a data node
+// (storageClassName, a positive size, and a volumeMode agreeing with the on-disk
+// payload). A real state-snapshotter status.data always carries them; the plain
+// pvcData fixture omits them, which is enough for checksum-only assertions but
+// not for archive.ValidateNodeMetadata, the pass localscan.ScanVerified and the
+// upload preflight both run.
+func uploadLayoutPVCData(pvcName, pvcUID, vscName, volumeMode string) map[string]interface{} {
+	data := pvcData(e2eNS, pvcName, pvcUID, vscName)
+	data["volumeMode"] = volumeMode
+	data["storageClassName"] = "csi-upload-layout-sc"
+	data["size"] = "1Gi"
+
+	return data
+}
+
+// buildUploadLayoutFakeClient mirrors the three-level e2e tree (core Snapshot root
+// -> domain aggregator -> one block and one filesystem data leaf) with fully
+// populated status.data on both leaves.
+func buildUploadLayoutFakeClient(t *testing.T) client.Client {
+	t.Helper()
+
+	root := snapObj{
+		apiVersion: storageAPIVersion, kind: "Snapshot",
+		namespace: e2eNS, name: e2eRootSnap, uid: "uid-upload-root",
+		sourceRef: namespaceSourceRefMap(e2eNS, "uid-upload-ns"),
+		children:  []map[string]interface{}{childRefMap(e2eVMAPIVersion, e2eVMKind, e2eVMSnap)},
+	}.build()
+
+	vmSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eVMKind,
+		namespace: e2eNS, name: e2eVMSnap, uid: "uid-upload-vm",
+		children: []map[string]interface{}{
+			childRefMap(e2eVMAPIVersion, e2eDiskKind, e2eBlockDisk),
+			childRefMap(e2eVMAPIVersion, e2eDiskKind, e2eFSDisk),
+		},
+	}.build()
+
+	blockSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: e2eBlockDisk, uid: "uid-upload-block",
+		data: uploadLayoutPVCData("pvc-block-source", "uid-block", e2eBlockVSC, archive.VolumeModeBlock),
+	}.build()
+
+	fsSnap := snapObj{
+		apiVersion: e2eVMAPIVersion, kind: e2eDiskKind,
+		namespace: e2eNS, name: e2eFSDisk, uid: "uid-upload-fs",
+		data: uploadLayoutPVCData("pvc-fs-source", "uid-fs", e2eFSVSC, archive.VolumeModeFilesystem),
+	}.build()
+
+	return fake.NewClientBuilder().
+		WithScheme(buildScheme(t)).
+		WithObjects(root, vmSnap, blockSnap, fsSnap).
+		Build()
+}
+
+// TestPipeline_PublicationStateKeepsUploadAndLocalScanWorking is the regression
+// test for the publication records' on-disk location. A completed download leaves
+// its publication receipt behind permanently, so wherever that record lands is
+// part of the archive layout every downstream consumer must tolerate.
+//
+// Placing it inside archive.SnapshotsDirName broke two independent consumers of
+// EVERY archive the pipeline produced: snapimport.BuildPlan (d8 snapshot upload's
+// planner) opened the record as a child node directory and failed the whole plan,
+// and localscan (d8 snapshot local/describe) walks the same directory under the
+// same assumption. This test drives the real production pipeline over a
+// three-level tree, then exercises both consumers plus the selected-node upload
+// preflight against the resulting directory.
+func TestPipeline_PublicationStateKeepsUploadAndLocalScanWorking(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("U"), e2eBlockSize)
+	fsFiles := []fsE2EFile{
+		{rel: "alpha.txt", content: []byte("upload-alpha")},
+		{rel: "subdir/beta.txt", content: []byte("upload-beta")},
+	}
+
+	blockSrv := makeE2EBlockServer(t, rawBlock)
+	fsSrv := makeE2EFSServer(t, fsFiles)
+
+	outputDir := t.TempDir()
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eRootSnap,
+		OutputDir:            outputDir,
+		Workers:              2,
+		PerVolumeConcurrency: 2,
+		KubeClient:           buildUploadLayoutFakeClient(t),
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			switch leafRef.Name {
+			case e2eBlockDisk:
+				return exporter.NewExport(namespace, "de-upload-block", "Block", blockSrv.URL,
+					exporter.NewFetcher(blockSrv.Client())), nil
+			case e2eFSDisk:
+				return exporter.NewExport(namespace, "de-upload-fs", "Filesystem", fsSrv.URL,
+					exporter.NewFetcher(fsSrv.Client())), nil
+			default:
+				return nil, fmt.Errorf("upload-layout: unknown leaf %q", leafRef.Name)
+			}
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	vmDir := filepath.Join(outputDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eVMKind, e2eVMSnap))
+	blockDir := filepath.Join(vmDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, e2eBlockDisk))
+	fsDir := filepath.Join(vmDir, archive.SnapshotsDirName,
+		archive.NodeDirName(e2eDiskKind, e2eFSDisk))
+
+	for _, nodeDir := range []string{outputDir, vmDir, blockDir, fsDir} {
+		assertNodeComplete(t, nodeDir)
+	}
+
+	// The receipt survives a completed run and lives beside the root envelope,
+	// exactly like the identity sidecar convention, never inside snapshots/.
+	require.FileExists(t, publicationReceiptPath(outputDir))
+	require.NoFileExists(t, publicationTransactionPath(outputDir))
+	require.NoFileExists(t, filepath.Join(outputDir, archive.SnapshotsDirName,
+		filepath.Base(publicationReceiptPath(outputDir))))
+	assertChildDirectoriesOnly(t, outputDir)
+
+	wantPlan := []string{
+		e2eDiskKind + "/" + e2eBlockDisk,
+		e2eDiskKind + "/" + e2eFSDisk,
+		e2eVMKind + "/" + e2eVMSnap,
+		"Snapshot/" + e2eRootSnap,
+	}
+
+	planLabels := func(t *testing.T, rootDir string) []string {
+		t.Helper()
+
+		plan, err := snapimport.BuildPlan(rootDir)
+		require.NoError(t, err, "upload plan must build from %s", rootDir)
+
+		labels := make([]string, 0, len(plan))
+		for _, node := range plan {
+			labels = append(labels, node.Kind+"/"+node.Name)
+			require.NotEmpty(t, node.NodeChecksum, "planned node %s carries no checksum", node.Name)
+		}
+
+		return labels
+	}
+
+	// Full-tree upload semantics: post-order, leaves first, archive root last.
+	require.Equal(t, wantPlan, planLabels(t, outputDir))
+
+	// Selected-node upload semantics: every subtree root must plan standalone, and
+	// the ancestors --node excludes must still authenticate through the pinned
+	// archive (snapimport.verifySelectedNodeExternalAncestors' contract).
+	require.Equal(t, wantPlan[:3], planLabels(t, vmDir))
+	require.Equal(t, wantPlan[:1], planLabels(t, blockDir))
+
+	view, err := archive.OpenVerifiedArchive(outputDir)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, view.Close()) })
+
+	for _, ancestorDir := range []string{vmDir, outputDir} {
+		require.NoError(t, view.VerifyNodeChildrenChecksum(context.Background(), ancestorDir),
+			"excluded ancestor %s must authenticate", ancestorDir)
+	}
+
+	verified, err := view.VerifyNode(context.Background(), blockDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, verified.Checksum().Hex)
+
+	// d8 snapshot local / describe walk the same snapshots/ directories.
+	assertLocalScan := func(t *testing.T, scan func(string) (*localscan.Node, error), name string) {
+		t.Helper()
+
+		root, err := scan(outputDir)
+		require.NoError(t, err, "%s must succeed on a downloaded archive", name)
+		require.Equal(t, e2eRootSnap, root.Name)
+		require.Len(t, root.Children, 1)
+		require.Equal(t, e2eVMSnap, root.Children[0].Name)
+		require.Len(t, root.Children[0].Children, 2)
+		require.Equal(t, 2, root.VolumeCount())
+	}
+
+	assertLocalScan(t, localscan.Scan, "localscan.Scan")
+	assertLocalScan(t, localscan.ScanVerified, "localscan.ScanVerified")
+
+	// A resume run over the completed tree republishes nothing and must leave both
+	// consumers working against the same directory.
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	assertChildDirectoriesOnly(t, outputDir)
+	require.Equal(t, wantPlan, planLabels(t, outputDir))
+	assertLocalScan(t, localscan.ScanVerified, "localscan.ScanVerified after resume")
 }
 
 // TestPipeline_PayloadChecksumReadsAreBounded bounds the payload bytes the
@@ -1974,20 +2236,15 @@ func TestPipeline_PayloadChecksumReadsAreBounded(t *testing.T) {
 		t.Logf("completed rerun payload bytes %s=%d", nodeDir, completedReads[nodeDir])
 	}
 
-	transactionPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-v1.json")
+	transactionPath := publicationTransactionPath(outputDir)
 	reseedResumeMarkerFromSnapshotYAML(t, outputDir)
 	require.NoError(t, os.Remove(filepath.Join(outputDir, archive.SnapshotYAMLName)))
 
 	crashErr := errors.New("injected root publication crash")
-	crashCtx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
-		if path == outputDir {
-			if _, err := os.Stat(transactionPath); err == nil {
-				return crashErr
-			}
-		}
-
-		return next()
-	})
+	crashCtx := archive.WithDirectorySyncHook(
+		context.Background(),
+		crashOnEnvelopeDurability(outputDir, transactionPath, crashErr),
+	)
 	require.ErrorIs(t, runPipeline(crashCtx, cfg), crashErr)
 	require.FileExists(t, transactionPath)
 
@@ -3088,6 +3345,19 @@ func TestPipeline_SnapshotYAMLRecoversDurabilityBeforeDone(t *testing.T) {
 			ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
 				if filepath.Clean(path) != filepath.Clean(nodeDir) {
 					return next()
+				}
+
+				// The publication transaction/receipt records live directly in the
+				// archive root, so publishing one confirms the archive root itself.
+				// In the Root case that is the very directory this fixture counts
+				// confirmations for, yet it is a different operation: it happens
+				// while the root envelope does not exist, so it must not consume a
+				// call number. Child cases are unaffected — no record is ever
+				// published into a child node directory.
+				if filepath.Clean(path) == filepath.Clean(outputDir) {
+					if _, err := os.Stat(filepath.Join(outputDir, archive.SnapshotYAMLName)); err != nil {
+						return next()
+					}
 				}
 
 				call := syncCalls.Add(1)

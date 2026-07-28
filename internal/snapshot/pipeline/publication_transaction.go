@@ -291,21 +291,40 @@ func writePublicationTransaction(
 			maxPublicationStateBytes, errPublicationTransactionInvalid)
 	}
 
-	path := publicationStatePath(destination, publicationTransactionName)
-	if err := destination.EnsureDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("prepare publication state directory: %w", err)
-	}
-
+	// The record's containing directory is the archive root itself, which
+	// destination already opened and identity-verified, so no directory has to be
+	// created or confirmed before the record can be published into it.
 	return archive.WriteFileAtomicRooted(
 		ctx,
 		destination,
-		path,
+		publicationStatePath(destination, publicationTransactionName),
 		bytes.NewReader(data),
 	)
 }
 
+// publicationStatePath locates one publication state record (the active
+// transaction or its receipt) directly inside the archive root — the same
+// directory that holds the root node's snapshot.yaml, manifests/ and snapshots/.
+// It is the single choke point every read, write and cleanup of those records
+// routes through.
+//
+// The record MUST NOT live under archive.SnapshotsDirName. "snapshots/" is a
+// load-bearing convention across the whole codebase meaning "contains child node
+// directories and nothing else". snapimport.childNodeNames opens EVERY entry it
+// finds there as a directory, so a single regular file aborts upload planning for
+// the whole archive with archive.ErrNonRegularArchiveArtifact; localscan.scanDir
+// and archive.computeNodeChildrenChecksum enumerate the same directory under the
+// same convention and survive a stray entry today only because they skip
+// non-directories, which is tolerance, not permission. A dot-prefixed,
+// versioned, machinery-only name beside snapshot.yaml is the convention
+// archive.NodeIdentityMarkerName already follows, and the node-directory root is
+// a namespace no user- or server-provided name can reach under any codec: block
+// payloads are data.bin[.<ext>], filesystem payloads live inside data.tar as tar
+// members, and multi-volume payloads live under data/ (inv. #10a). The record is
+// also outside every set archive.ComputeNodeChecksum covers, so its presence
+// never perturbs a node checksum.
 func publicationStatePath(destination *archive.RootedDestination, name string) string {
-	return filepath.Join(destination.Path(), archive.SnapshotsDirName, name)
+	return filepath.Join(destination.Path(), name)
 }
 
 func snapshotDigest(data []byte) string {

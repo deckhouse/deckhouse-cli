@@ -88,10 +88,10 @@ func TestPublicationTransactionRejectsMalformedForeignAndPartialState(t *testing
 	}{
 		{
 			name: "malformed",
-			prepare: func(t *testing.T, _ *archive.RootedDestination, root, _ string) {
+			prepare: func(t *testing.T, destination *archive.RootedDestination, _, _ string) {
 				t.Helper()
 				if err := os.WriteFile(
-					filepath.Join(root, archive.SnapshotsDirName, publicationTransactionName),
+					publicationStatePath(destination, publicationTransactionName),
 					[]byte("{"),
 					0o600,
 				); err != nil {
@@ -102,7 +102,7 @@ func TestPublicationTransactionRejectsMalformedForeignAndPartialState(t *testing
 		},
 		{
 			name: "foreign archive root",
-			prepare: func(t *testing.T, _ *archive.RootedDestination, root, treeDigest string) {
+			prepare: func(t *testing.T, destination *archive.RootedDestination, root, treeDigest string) {
 				t.Helper()
 				transaction := publicationTransaction{
 					Version:          publicationStateVersion,
@@ -123,7 +123,7 @@ func TestPublicationTransactionRejectsMalformedForeignAndPartialState(t *testing
 					t.Fatalf("marshal foreign transaction: %v", err)
 				}
 				if err := os.WriteFile(
-					filepath.Join(root, archive.SnapshotsDirName, publicationTransactionName),
+					publicationStatePath(destination, publicationTransactionName),
 					data,
 					0o600,
 				); err != nil {
@@ -134,10 +134,10 @@ func TestPublicationTransactionRejectsMalformedForeignAndPartialState(t *testing
 		},
 		{
 			name: "partially durable temporary file",
-			prepare: func(t *testing.T, _ *archive.RootedDestination, root, _ string) {
+			prepare: func(t *testing.T, destination *archive.RootedDestination, _, _ string) {
 				t.Helper()
 				if err := os.WriteFile(
-					filepath.Join(root, archive.SnapshotsDirName, publicationTransactionName+".tmp"),
+					publicationStatePath(destination, publicationTransactionName)+".tmp",
 					[]byte("partial"),
 					0o600,
 				); err != nil {
