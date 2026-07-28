@@ -241,6 +241,12 @@ func NewPuller(cmd *cobra.Command) *Puller {
 func (p *Puller) Execute(ctx context.Context) error {
 	configureSummaryColor()
 
+	// Where modules are read from; honors --modules-path-suffix. Shared by the
+	// start-of-log warning and the summary, so both report the same path.
+	modulesPath := mirror.BuildModulesPathReport(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+
+	p.warnNonDefaultModulesPath(modulesPath)
+
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
 	}
@@ -260,8 +266,7 @@ func (p *Puller) Execute(ctx context.Context) error {
 	_, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
 	summary.Edition = string(edition)
 
-	// Modules path for the summary warning; honors --modules-path-suffix.
-	summary.ModulesPath = mirror.BuildModulesPathReport(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+	summary.ModulesPath = modulesPath
 
 	// pullErr is nil for success and for a graceful Ctrl+C (which still renders a
 	// partial summary); non-nil for a hard failure (which also renders, then
@@ -305,6 +310,27 @@ func (p *Puller) Execute(ctx context.Context) error {
 	p.renderSummary(summary)
 
 	return p.finalCleanup()
+}
+
+// warnNonDefaultModulesPath opens the log with the moved-modules-path warning,
+// so a non-standard layout is visible before anything is downloaded. The
+// summary repeats it, in its multi-line form, at the end of the run.
+//
+// Silent when the pull carries no modules: the path is then irrelevant.
+func (p *Puller) warnNonDefaultModulesPath(m mirror.ModulesPathReport) {
+	if !modulesWillBePulled() {
+		return
+	}
+
+	if warning := m.Warning(); warning != "" {
+		p.logger.WarnLn(warning)
+	}
+}
+
+// modulesWillBePulled reports whether the pull includes modules: --no-modules
+// drops them, but --only-extra-images keeps their extra images in play.
+func modulesWillBePulled() bool {
+	return !pullflags.NoModules || pullflags.OnlyExtraImages
 }
 
 // renderSummary prints the end-of-pull summary block. PullService.Pull always

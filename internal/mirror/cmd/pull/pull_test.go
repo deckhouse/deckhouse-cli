@@ -1349,6 +1349,35 @@ func TestClassifyPullOutcome(t *testing.T) {
 	})
 }
 
+func TestModulesWillBePulled(t *testing.T) {
+	savedNoModules, savedOnlyExtraImages := pullflags.NoModules, pullflags.OnlyExtraImages
+	defer func() {
+		pullflags.NoModules = savedNoModules
+		pullflags.OnlyExtraImages = savedOnlyExtraImages
+	}()
+
+	tests := []struct {
+		name            string
+		noModules       bool
+		onlyExtraImages bool
+		want            bool
+	}{
+		{name: "modules by default", want: true},
+		{name: "no-modules drops them", noModules: true, want: false},
+		{name: "only-extra-images keeps them", noModules: true, onlyExtraImages: true, want: true},
+		{name: "only-extra-images alone", onlyExtraImages: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pullflags.NoModules = tt.noModules
+			pullflags.OnlyExtraImages = tt.onlyExtraImages
+
+			assert.Equal(t, tt.want, modulesWillBePulled())
+		})
+	}
+}
+
 // Benchmark tests
 func BenchmarkNewPuller(b *testing.B) {
 	cmd := &cobra.Command{}
