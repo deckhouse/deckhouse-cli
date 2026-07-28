@@ -51,6 +51,44 @@ func TestBuildModulesPathReport(t *testing.T) {
 	}
 }
 
+func TestModulesPathReportWarning(t *testing.T) {
+	const root = "registry.example.com/deckhouse/ee"
+
+	tests := []struct {
+		name   string
+		suffix string
+		want   string
+	}{
+		{name: "flag default", suffix: "/modules", want: ""},
+		{name: "empty is default", suffix: "", want: ""},
+		{name: "bare modules is default", suffix: "modules", want: ""},
+		{
+			name:   "root suffix",
+			suffix: "/",
+			want: "Modules use a non-default path (--modules-path-suffix): " +
+				root + " (default: " + root + "/modules)",
+		},
+		{
+			name:   "custom single segment",
+			suffix: "mymods",
+			want: "Modules use a non-default path (--modules-path-suffix): " +
+				root + "/mymods (default: " + root + "/modules)",
+		},
+		{
+			name:   "custom multi segment",
+			suffix: "my/mods",
+			want: "Modules use a non-default path (--modules-path-suffix): " +
+				root + "/my/mods (default: " + root + "/modules)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, BuildModulesPathReport(root, tt.suffix).Warning())
+		})
+	}
+}
+
 func TestBuildModulesPathReport_TrimsRootSlash(t *testing.T) {
 	report := BuildModulesPathReport("registry.example.com/deckhouse/ee/", "/")
 

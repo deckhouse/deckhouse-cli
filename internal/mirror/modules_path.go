@@ -17,6 +17,7 @@ limitations under the License.
 package mirror
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -59,4 +60,21 @@ func BuildModulesPathReport(root, modulesPathSuffix string) ModulesPathReport {
 		Path:        path.Join(root, modulesPath),
 		DefaultPath: path.Join(root, internal.ModulesSegment),
 	}
+}
+
+// Warning is the single-line form of the moved-modules-path warning, for the
+// start of the pull/push log: it names the path modules go through and the
+// standard path they would go through by default. Empty for a standard path.
+//
+// The same warning closes the run as a multi-line block in the summary (see
+// summaryui.WriteModulesPathWarning), where the module count is known.
+func (m ModulesPathReport) Warning() string {
+	if !m.Moved {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"Modules use a non-default path (--modules-path-suffix): %s (default: %s)",
+		m.Path, m.DefaultPath,
+	)
 }
