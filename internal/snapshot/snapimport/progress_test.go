@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deckhouse/deckhouse-cli/internal/progress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 )
 
 // recordingSink wraps a Sink and captures the name of every NewStream call so tests can

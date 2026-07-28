@@ -38,12 +38,12 @@ import (
 	"k8s.io/client-go/rest"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
-	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )

@@ -31,10 +31,10 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/deckhouse/deckhouse-cli/internal/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
