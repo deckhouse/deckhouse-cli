@@ -591,6 +591,16 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			expectError:              true,
 			errorMsg:                 "since-version",
 		},
+		{
+			// The example must be copy-pasteable: quotes go around the whole
+			// value, the same form the flag help teaches.
+			name:                     "bare --include-module: example quotes the whole value",
+			proxyRegistry:            true,
+			platformConstraintString: "^1.64.0",
+			modulesWhitelist:         []string{"console"},
+			expectError:              true,
+			errorMsg:                 `(e.g. "console@^1.0.0")`,
+		},
 	}
 
 	for _, tt := range tests {

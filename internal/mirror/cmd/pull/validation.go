@@ -241,7 +241,7 @@ func validateProxyRegistryFlag() error {
 		// Bail out loudly so the user picks a real anchor.
 		for _, entry := range pullflags.ModulesWhitelist {
 			if !strings.Contains(entry, "@") {
-				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q@^1.0.0); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry))
+				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry)+"@^1.0.0")
 			}
 		}
 	}
