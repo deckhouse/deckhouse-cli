@@ -64,6 +64,7 @@ var (
 	snapshotGVR   = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
 	pvcGVR        = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
 	cmGVR         = schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+	serviceGVR    = schema.GroupVersionResource{Version: "v1", Resource: "services"}
 	pvGVR         = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}
 	vsGVR         = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 	domainDiskGVR = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
@@ -232,6 +233,13 @@ func testMapper() meta.RESTMapper {
 	return m
 }
 
+func testMapperWithService() meta.RESTMapper {
+	mapper := testMapper().(*meta.DefaultRESTMapper)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Service"}, meta.RESTScopeNamespace)
+
+	return mapper
+}
+
 func clusterScopeTestMapper() meta.RESTMapper {
 	groupVersions := []schema.GroupVersion{
 		{Group: "", Version: "v1"},
@@ -362,6 +370,7 @@ func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		snapshotGVR:                         "SnapshotList",
 		pvcGVR:                              "PersistentVolumeClaimList",
 		cmGVR:                               "ConfigMapList",
+		serviceGVR:                          "ServiceList",
 		pvGVR:                               "PersistentVolumeList",
 		{Version: "v1", Resource: "pods"}:   "PodList",
 		{Version: "v1", Resource: "events"}: "EventList",
@@ -415,11 +424,20 @@ type dynamicPatchTransformer func(
 	metav1.PatchOptions,
 	*unstructured.Unstructured,
 ) (*unstructured.Unstructured, error)
+type dynamicPatchInterceptor func(
+	context.Context,
+	schema.GroupVersionResource,
+	string,
+	string,
+	[]byte,
+	metav1.PatchOptions,
+) (*unstructured.Unstructured, bool, error)
 
 type interceptingDynamicClient struct {
 	dynamic.Interface
 	intercept      dynamicRequestInterceptor
 	interceptList  dynamicListInterceptor
+	interceptPatch dynamicPatchInterceptor
 	transformPatch dynamicPatchTransformer
 }
 
@@ -431,6 +449,7 @@ func (c *interceptingDynamicClient) Resource(gvr schema.GroupVersionResource) dy
 		gvr:                            gvr,
 		intercept:                      c.intercept,
 		interceptList:                  c.interceptList,
+		interceptPatch:                 c.interceptPatch,
 		transformPatch:                 c.transformPatch,
 	}
 }
@@ -440,6 +459,7 @@ type interceptingNamespaceableResource struct {
 	gvr            schema.GroupVersionResource
 	intercept      dynamicRequestInterceptor
 	interceptList  dynamicListInterceptor
+	interceptPatch dynamicPatchInterceptor
 	transformPatch dynamicPatchTransformer
 }
 
@@ -450,6 +470,7 @@ func (r *interceptingNamespaceableResource) Namespace(namespace string) dynamic.
 		namespace:         namespace,
 		intercept:         r.intercept,
 		interceptList:     r.interceptList,
+		interceptPatch:    r.interceptPatch,
 		transformPatch:    r.transformPatch,
 	}
 }
@@ -497,6 +518,13 @@ func (r *interceptingNamespaceableResource) Patch(
 	opts metav1.PatchOptions,
 	subresources ...string,
 ) (*unstructured.Unstructured, error) {
+	if r.interceptPatch != nil {
+		result, handled, err := r.interceptPatch(ctx, r.gvr, "", name, data, opts)
+		if handled {
+			return result, err
+		}
+	}
+
 	if r.intercept != nil {
 		if err := r.intercept(ctx, "patch", r.gvr, "", name); err != nil {
 			return nil, err
@@ -517,6 +545,7 @@ type interceptingResource struct {
 	namespace      string
 	intercept      dynamicRequestInterceptor
 	interceptList  dynamicListInterceptor
+	interceptPatch dynamicPatchInterceptor
 	transformPatch dynamicPatchTransformer
 }
 
@@ -563,6 +592,13 @@ func (r *interceptingResource) Patch(
 	opts metav1.PatchOptions,
 	subresources ...string,
 ) (*unstructured.Unstructured, error) {
+	if r.interceptPatch != nil {
+		result, handled, err := r.interceptPatch(ctx, r.gvr, r.namespace, name, data, opts)
+		if handled {
+			return result, err
+		}
+	}
+
 	if r.intercept != nil {
 		if err := r.intercept(ctx, "patch", r.gvr, r.namespace, name); err != nil {
 			return nil, err
@@ -750,6 +786,29 @@ func configMapManifest(name string) map[string]interface{} {
 		"kind":       "ConfigMap",
 		"metadata":   map[string]interface{}{"name": name},
 		"data":       map[string]interface{}{"k": "v"},
+	}
+}
+
+func serviceManifest(name string, includePort bool) map[string]interface{} {
+	spec := map[string]interface{}{
+		"selector": map[string]interface{}{"app": "demo"},
+	}
+	if includePort {
+		spec["ports"] = []interface{}{
+			map[string]interface{}{
+				"name":       "http",
+				"port":       int64(80),
+				"protocol":   "TCP",
+				"targetPort": int64(8080),
+			},
+		}
+	}
+
+	return map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec":       spec,
 	}
 }
 
@@ -5253,6 +5312,130 @@ func TestRun_ImmutableUpdateActionable(t *testing.T) {
 	}
 }
 
+func TestRun_ClassifiesApplyErrorsTruthfully(t *testing.T) {
+	requiredErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"required",
+		field.ErrorList{field.Required(field.NewPath("data"), "")},
+	)
+	webhookErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"webhook",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "rejected by webhook")},
+	)
+	immutableAbsentErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"immutable-absent",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "field is immutable")},
+	)
+	immutableExistingErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"immutable-existing",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "field is immutable")},
+	)
+	conflictErr := kubeerrors.NewConflict(cmGVR.GroupResource(), "conflict", errors.New("resource version changed"))
+	alreadyExistsErr := kubeerrors.NewAlreadyExists(cmGVR.GroupResource(), "already-exists")
+
+	tests := []struct {
+		name       string
+		objectName string
+		apiErr     error
+		existing   bool
+		wantText   []string
+		rejectText []string
+	}{
+		{
+			name:       "required field on absent object",
+			objectName: "required",
+			apiErr:     requiredErr,
+			wantText:   []string{"rejected the restore object as invalid", "Required value"},
+			rejectText: []string{"already exists", "immutable field that differs"},
+		},
+		{
+			name:       "webhook Invalid on absent object",
+			objectName: "webhook",
+			apiErr:     webhookErr,
+			wantText:   []string{"rejected the restore object as invalid", "rejected by webhook"},
+			rejectText: []string{"already exists", "immutable field that differs"},
+		},
+		{
+			name:       "immutable Invalid on absent object",
+			objectName: "immutable-absent",
+			apiErr:     immutableAbsentErr,
+			wantText:   []string{"rejected the restore object as invalid", "field is immutable"},
+			rejectText: []string{"already exists and the API server", "delete it"},
+		},
+		{
+			name:       "immutable Invalid on existing object",
+			objectName: "immutable-existing",
+			apiErr:     immutableExistingErr,
+			existing:   true,
+			wantText:   []string{"already exists", "immutable field", "delete it"},
+		},
+		{
+			name:       "Conflict",
+			objectName: "conflict",
+			apiErr:     conflictErr,
+			wantText:   []string{"apply conflict", "resource version changed"},
+			rejectText: []string{"immutable field"},
+		},
+		{
+			name:       "AlreadyExists",
+			objectName: "already-exists",
+			apiErr:     alreadyExistsErr,
+			wantText:   []string{"already exists"},
+			rejectText: []string{"immutable field"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := []runtime.Object{readySnapshot()}
+			if tc.existing {
+				existing := &unstructured.Unstructured{Object: configMapManifest(tc.objectName)}
+				existing.SetNamespace(testNS)
+				existing.SetResourceVersion("1")
+				objects = append(objects, existing)
+			}
+
+			dyn := newFakeDynamic(objects...)
+			dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				patchAction, ok := action.(clienttesting.PatchAction)
+				if !ok || patchAction.GetPatchType() != types.ApplyPatchType {
+					return false, nil, nil
+				}
+
+				return true, nil, tc.apiErr
+			})
+
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest(tc.objectName))},
+				dyn,
+			)
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			if !errors.Is(err, tc.apiErr) {
+				t.Errorf("Run error = %v, want original API cause", err)
+			}
+
+			for _, want := range tc.wantText {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Run error = %q, want text %q", err, want)
+				}
+			}
+
+			for _, rejected := range tc.rejectText {
+				if strings.Contains(err.Error(), rejected) {
+					t.Errorf("Run error = %q, reject misleading text %q", err, rejected)
+				}
+			}
+		})
+	}
+}
+
 // patchCaptureDynamic is a minimal dynamic.Interface stub that captures PatchOptions
 // for verifying that applyObject passes the correct options to ri.Patch.
 // All methods except Resource, Namespace, and Patch panic if called.
@@ -5524,6 +5707,754 @@ func TestRun_Preflight_DryRunFailureAborts(t *testing.T) {
 	_, getErr := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
 	if !kubeerrors.IsNotFound(getErr) {
 		t.Errorf("expected NotFound after dry-run failure, got %v", getErr)
+	}
+}
+
+func TestRun_AutomaticEditTriggerMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiErr     error
+		existing   bool
+		wantEditor int
+		wantError  bool
+	}{
+		{
+			name: "schema Invalid",
+			apiErr: kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"original",
+				field.ErrorList{field.Required(field.NewPath("data"), "")},
+			),
+			wantEditor: 1,
+		},
+		{
+			name: "webhook Invalid",
+			apiErr: kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"original",
+				field.ErrorList{field.Forbidden(field.NewPath("data"), "rejected by webhook")},
+			),
+			wantEditor: 1,
+		},
+		{
+			name: "immutable Invalid for existing object",
+			apiErr: kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"original",
+				field.ErrorList{field.Forbidden(field.NewPath("data"), "field is immutable")},
+			),
+			existing:   true,
+			wantEditor: 1,
+		},
+		{
+			name:       "Conflict",
+			apiErr:     kubeerrors.NewConflict(cmGVR.GroupResource(), "original", errors.New("changed")),
+			wantError:  true,
+			wantEditor: 0,
+		},
+		{
+			name:       "AlreadyExists",
+			apiErr:     kubeerrors.NewAlreadyExists(cmGVR.GroupResource(), "original"),
+			wantError:  true,
+			wantEditor: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := []runtime.Object{readySnapshot()}
+			if tc.existing {
+				existing := &unstructured.Unstructured{Object: configMapManifest("original")}
+				existing.SetNamespace(testNS)
+				existing.SetResourceVersion("1")
+				objects = append(objects, existing)
+			}
+
+			base := newFakeDynamic(objects...)
+			patchOrder := make([]string, 0, 3)
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					name string,
+					_ []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != cmGVR {
+						return nil, false, nil
+					}
+
+					phase := "real"
+					if len(opts.DryRun) != 0 {
+						phase = "dry-run"
+					}
+
+					patchOrder = append(patchOrder, phase+":"+name)
+					if name == "original" {
+						return nil, true, tc.apiErr
+					}
+
+					return nil, false, nil
+				},
+			}
+
+			editorCalls := 0
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("original"))},
+				dyn,
+			)
+			cfg.AutoEdit = true
+			cfg.editManifests = func(
+				_ context.Context,
+				_ []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+
+				return []unstructured.Unstructured{{Object: configMapManifest("repaired")}}, nil
+			}
+
+			err := Run(context.Background(), cfg)
+			if tc.wantError {
+				if !errors.Is(err, tc.apiErr) {
+					t.Fatalf("Run error = %v, want original API error", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if editorCalls != tc.wantEditor {
+				t.Errorf("editor calls = %d, want %d", editorCalls, tc.wantEditor)
+			}
+
+			if tc.wantEditor == 0 {
+				if len(patchOrder) != 1 || patchOrder[0] != "dry-run:original" {
+					t.Errorf("Patch order = %v, want one rejected dry-run", patchOrder)
+				}
+
+				return
+			}
+
+			wantOrder := []string{"dry-run:original", "dry-run:repaired", "real:repaired"}
+			if !slices.Equal(patchOrder, wantOrder) {
+				t.Errorf("Patch order = %v, want %v", patchOrder, wantOrder)
+			}
+		})
+	}
+}
+
+func TestRun_AutomaticEditExplicitModesAndRetryBound(t *testing.T) {
+	invalidErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"invalid",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "rejected by webhook")},
+	)
+	tests := []struct {
+		name        string
+		autoEdit    bool
+		edit        bool
+		dryRun      bool
+		wantEditor  int
+		wantPatches int
+	}{
+		{
+			name:        "automatic disabled",
+			wantPatches: 1,
+		},
+		{
+			name:        "explicit edit suppresses automatic retry",
+			autoEdit:    true,
+			edit:        true,
+			wantEditor:  1,
+			wantPatches: 1,
+		},
+		{
+			name:        "explicit dry-run suppresses automatic edit",
+			autoEdit:    true,
+			dryRun:      true,
+			wantPatches: 1,
+		},
+		{
+			name:        "repeated Invalid opens once",
+			autoEdit:    true,
+			wantEditor:  1,
+			wantPatches: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := newFakeDynamic(readySnapshot())
+			patches := 0
+			dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				patchAction, ok := action.(clienttesting.PatchAction)
+				if !ok || patchAction.GetPatchType() != types.ApplyPatchType {
+					return false, nil, nil
+				}
+
+				patches++
+
+				return true, nil, invalidErr
+			})
+
+			editorCalls := 0
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("invalid"))},
+				dyn,
+			)
+			cfg.AutoEdit = tc.autoEdit
+			cfg.Edit = tc.edit
+			cfg.DryRun = tc.dryRun
+			cfg.editManifests = func(
+				_ context.Context,
+				_ []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+
+				return []unstructured.Unstructured{{Object: configMapManifest("edited")}}, nil
+			}
+
+			err := Run(context.Background(), cfg)
+			if !errors.Is(err, invalidErr) {
+				t.Fatalf("Run error = %v, want repeated Invalid cause", err)
+			}
+
+			if editorCalls != tc.wantEditor {
+				t.Errorf("editor calls = %d, want %d", editorCalls, tc.wantEditor)
+			}
+
+			if patches != tc.wantPatches {
+				t.Errorf("Patch calls = %d, want %d", patches, tc.wantPatches)
+			}
+		})
+	}
+}
+
+func TestRun_AutomaticEditAbortPreservesInvalidCause(t *testing.T) {
+	invalidErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"invalid",
+		field.ErrorList{field.Required(field.NewPath("data"), "")},
+	)
+	cancelCause := errors.New("operator canceled editor")
+	tests := []struct {
+		name    string
+		editErr error
+	}{
+		{name: "unchanged", editErr: errors.New("edit aborted: content is unchanged")},
+		{name: "empty", editErr: errors.New("edit aborted: content is empty")},
+		{name: "editor failure", editErr: errors.New("editor exited with error")},
+		{name: "invalid YAML", editErr: errors.New("decode edited manifests")},
+		{name: "cancellation", editErr: cancelCause},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeDynamic(readySnapshot())
+			realPatches := 0
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					_ string,
+					_ []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != cmGVR {
+						return nil, false, nil
+					}
+
+					if len(opts.DryRun) == 0 {
+						realPatches++
+					}
+
+					return nil, true, invalidErr
+				},
+			}
+
+			editorCalls := 0
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("invalid"))},
+				dyn,
+			)
+			cfg.AutoEdit = true
+			cfg.editManifests = func(
+				_ context.Context,
+				_ []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+
+				return nil, tc.editErr
+			}
+
+			err := Run(context.Background(), cfg)
+			if !errors.Is(err, invalidErr) {
+				t.Errorf("Run error = %v, want original Invalid cause", err)
+			}
+
+			if !errors.Is(err, tc.editErr) {
+				t.Errorf("Run error = %v, want edit failure", err)
+			}
+
+			if !strings.Contains(err.Error(), "automatic edit aborted") {
+				t.Errorf("Run error = %q, want automatic-edit-aborted text", err)
+			}
+
+			if editorCalls != 1 {
+				t.Errorf("editor calls = %d, want 1", editorCalls)
+			}
+
+			if realPatches != 0 {
+				t.Errorf("real Patch calls = %d, want 0", realPatches)
+			}
+		})
+	}
+}
+
+func TestRun_AutomaticEditRejectsLocalAndBoundConflicts(t *testing.T) {
+	tests := []struct {
+		name     string
+		source   *stubSource
+		objects  []runtime.Object
+		wantText string
+	}{
+		{
+			name: "conflicting duplicate manifests",
+			source: &stubSource{body: mustArray(
+				t,
+				configMapManifest("duplicate"),
+				map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]interface{}{"name": "duplicate"},
+					"data":       map[string]interface{}{"k": "different"},
+				},
+			)},
+			objects:  []runtime.Object{readySnapshot()},
+			wantText: "conflicting duplicate restore object",
+		},
+		{
+			name:   "existing Bound PVC",
+			source: &stubSource{body: mustArray(t, pvcManifest("bound", ""))},
+			objects: []runtime.Object{
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				restoredPVCObject("bound", pvcPhaseBound, "", false),
+				boundPVObject("bound"),
+			},
+			wantText: "refusing to reuse it",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dyn := newFakeDynamic(tc.objects...)
+			editorCalls := 0
+			cfg := baseConfig(tc.source, dyn)
+			cfg.AutoEdit = true
+			cfg.editManifests = func(
+				_ context.Context,
+				objs []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+
+				return objs, nil
+			}
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("Run error = %q, want text %q", err, tc.wantText)
+			}
+
+			if editorCalls != 0 {
+				t.Errorf("editor calls = %d, want 0", editorCalls)
+			}
+
+			assertNoPatchActions(t, dyn)
+		})
+	}
+}
+
+func TestRun_AutomaticEditNeverStartsAfterRealApply(t *testing.T) {
+	invalidErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"second",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "late admission race")},
+	)
+	base := newFakeDynamic(readySnapshot())
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		interceptPatch: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			_ string,
+			name string,
+			_ []byte,
+			opts metav1.PatchOptions,
+		) (*unstructured.Unstructured, bool, error) {
+			if gvr == cmGVR && len(opts.DryRun) == 0 && name == "second" {
+				return nil, true, invalidErr
+			}
+
+			return nil, false, nil
+		},
+	}
+
+	editorCalls := 0
+	cfg := baseConfig(
+		&stubSource{body: mustArray(
+			t,
+			configMapManifest("first"),
+			configMapManifest("second"),
+		)},
+		dyn,
+	)
+	cfg.AutoEdit = true
+	cfg.editManifests = func(
+		_ context.Context,
+		objs []unstructured.Unstructured,
+	) ([]unstructured.Unstructured, error) {
+		editorCalls++
+
+		return objs, nil
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, invalidErr) {
+		t.Fatalf("Run error = %v, want late Invalid cause", err)
+	}
+
+	for _, want := range []string{
+		"restore apply stopped after 1 of 2 objects completed",
+		"cluster may be partially applied",
+		"outcome is unknown",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want text %q", err, want)
+		}
+	}
+
+	if editorCalls != 0 {
+		t.Errorf("editor calls = %d, want 0 after real apply began", editorCalls)
+	}
+}
+
+func TestRun_StateSnapshotterServicePayloadCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		includePort bool
+		autoEdit    bool
+		dryRun      bool
+		wantEditor  int
+		wantError   bool
+		wantOrder   []string
+	}{
+		{
+			name:       "missing ports follows automatic repair path",
+			autoEdit:   true,
+			wantEditor: 1,
+			wantOrder:  []string{"dry-run:missing", "dry-run:ports", "real:ports"},
+		},
+		{
+			name:        "preserved port passes without editor",
+			includePort: true,
+			autoEdit:    true,
+			wantOrder:   []string{"dry-run:ports", "real:ports"},
+		},
+		{
+			name:      "explicit dry-run never opens automatic editor",
+			autoEdit:  true,
+			dryRun:    true,
+			wantError: true,
+			wantOrder: []string{"dry-run:missing"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeDynamic(readySnapshot())
+			invalidErr := kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "Service"},
+				"demo",
+				field.ErrorList{field.Required(field.NewPath("spec", "ports"), "")},
+			)
+			order := make([]string, 0, 3)
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					_ string,
+					data []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != serviceGVR {
+						return nil, false, nil
+					}
+
+					var obj unstructured.Unstructured
+					if err := json.Unmarshal(data, &obj.Object); err != nil {
+						return nil, true, err
+					}
+
+					_, hasPorts, err := unstructured.NestedSlice(obj.Object, "spec", "ports")
+					if err != nil {
+						return nil, true, err
+					}
+
+					phase := "real"
+					if len(opts.DryRun) != 0 {
+						phase = "dry-run"
+						if !slices.Equal(opts.DryRun, []string{metav1.DryRunAll}) {
+							t.Errorf("DryRun options = %v, want [%s]", opts.DryRun, metav1.DryRunAll)
+						}
+					}
+
+					payload := "missing"
+					if hasPorts {
+						payload = "ports"
+					}
+					order = append(order, phase+":"+payload)
+
+					if !hasPorts {
+						return nil, true, invalidErr
+					}
+
+					return nil, false, nil
+				},
+				transformPatch: func(
+					gvr schema.GroupVersionResource,
+					namespace string,
+					name string,
+					opts metav1.PatchOptions,
+					result *unstructured.Unstructured,
+				) (*unstructured.Unstructured, error) {
+					if gvr != serviceGVR || len(opts.DryRun) == 0 {
+						return result, nil
+					}
+
+					if err := base.Tracker().Delete(gvr, namespace, name); err != nil {
+						return nil, err
+					}
+
+					return result, nil
+				},
+			}
+
+			editorCalls := 0
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, serviceManifest("demo", tc.includePort))},
+				dyn,
+			)
+			cfg.Mapper = testMapperWithService()
+			cfg.AutoEdit = tc.autoEdit
+			cfg.DryRun = tc.dryRun
+			cfg.editManifests = func(
+				_ context.Context,
+				_ []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+
+				return []unstructured.Unstructured{{Object: serviceManifest("demo", true)}}, nil
+			}
+
+			err := Run(context.Background(), cfg)
+			if tc.wantError {
+				if !errors.Is(err, invalidErr) {
+					t.Fatalf("Run error = %v, want missing-ports Invalid", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if editorCalls != tc.wantEditor {
+				t.Errorf("editor calls = %d, want %d", editorCalls, tc.wantEditor)
+			}
+
+			if !slices.Equal(order, tc.wantOrder) {
+				t.Errorf("apply order = %v, want %v", order, tc.wantOrder)
+			}
+
+			_, getErr := base.Tracker().Get(serviceGVR, testNS, "demo", metav1.GetOptions{})
+			if tc.dryRun {
+				if !kubeerrors.IsNotFound(getErr) {
+					t.Errorf("explicit dry-run persisted Service: %v", getErr)
+				}
+			} else if getErr != nil {
+				t.Errorf("real restore did not persist Service: %v", getErr)
+			}
+		})
+	}
+}
+
+func TestRun_AutomaticEditRestagesAllPreflightChecks(t *testing.T) {
+	foreign := configMapManifest("foreign")
+	foreignMetadata, _ := foreign["metadata"].(map[string]interface{})
+	foreignMetadata["namespace"] = "other"
+	duplicateA := configMapManifest("duplicate")
+	duplicateB := configMapManifest("duplicate")
+	duplicateB["data"] = map[string]interface{}{"k": "different"}
+	clusterScoped := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolume",
+		"metadata":   map[string]interface{}{"name": "pv-edited"},
+	}
+	large := configMapManifest("large")
+	large["data"] = map[string]interface{}{"payload": strings.Repeat("x", 2048)}
+
+	tests := []struct {
+		name          string
+		edited        []unstructured.Unstructured
+		objects       []runtime.Object
+		mapper        meta.RESTMapper
+		maxStageBytes int64
+		cancel        bool
+		wantCause     error
+		wantText      string
+		skipOriginal  bool
+	}{
+		{
+			name:     "cross namespace",
+			edited:   []unstructured.Unstructured{{Object: foreign}},
+			objects:  []runtime.Object{readySnapshot()},
+			wantText: `required namespace is "default"`,
+		},
+		{
+			name: "cluster scoped",
+			edited: []unstructured.Unstructured{
+				{Object: clusterScoped},
+			},
+			objects:  []runtime.Object{readySnapshot()},
+			mapper:   clusterScopeTestMapper(),
+			wantText: "does not support cluster-scoped object",
+		},
+		{
+			name: "conflicting duplicate",
+			edited: []unstructured.Unstructured{
+				{Object: duplicateA},
+				{Object: duplicateB},
+			},
+			objects:  []runtime.Object{readySnapshot()},
+			wantText: "conflicting duplicate restore object",
+		},
+		{
+			name: "missing volume leaf",
+			edited: []unstructured.Unstructured{
+				{Object: pvcManifest("missing-leaf", "")},
+			},
+			objects:  []runtime.Object{readySnapshot()},
+			wantText: "volume-snapshot leaf",
+		},
+		{
+			name: "existing Bound PVC",
+			edited: []unstructured.Unstructured{
+				{Object: pvcManifest("bound-edited", "")},
+			},
+			objects: []runtime.Object{
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				restoredPVCObject("bound-edited", pvcPhaseBound, "", false),
+				boundPVObject("bound-edited"),
+			},
+			wantText:     "refusing to reuse it",
+			skipOriginal: true,
+		},
+		{
+			name: "edited byte budget",
+			edited: []unstructured.Unstructured{
+				{Object: large},
+			},
+			objects:       []runtime.Object{readySnapshot()},
+			maxStageBytes: 512,
+			wantText:      "temporary-disk byte budget",
+		},
+		{
+			name:      "cancellation",
+			edited:    []unstructured.Unstructured{{Object: configMapManifest("canceled")}},
+			objects:   []runtime.Object{readySnapshot()},
+			cancel:    true,
+			wantCause: context.Canceled,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			invalidErr := kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"original",
+				field.ErrorList{field.Forbidden(field.NewPath("data"), "repair required")},
+			)
+			dyn := newFakeDynamic(tc.objects...)
+			patches := 0
+			dyn.PrependReactor("patch", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				patchAction, ok := action.(clienttesting.PatchAction)
+				if !ok || patchAction.GetPatchType() != types.ApplyPatchType {
+					return false, nil, nil
+				}
+
+				patches++
+
+				return true, nil, invalidErr
+			})
+
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+
+			editorCalls := 0
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("original"))},
+				dyn,
+			)
+			cfg.AutoEdit = true
+			cfg.maxStagedManifestBytes = tc.maxStageBytes
+			if tc.mapper != nil {
+				cfg.Mapper = tc.mapper
+			}
+			cfg.editManifests = func(
+				_ context.Context,
+				_ []unstructured.Unstructured,
+			) ([]unstructured.Unstructured, error) {
+				editorCalls++
+				if tc.cancel {
+					cancel(errors.New("operator canceled during automatic edit"))
+				}
+
+				return tc.edited, nil
+			}
+
+			err := Run(ctx, cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded")
+			}
+
+			if !tc.skipOriginal && !errors.Is(err, invalidErr) {
+				t.Errorf("Run error = %v, want original Invalid cause", err)
+			}
+
+			if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+				t.Errorf("Run error = %v, want cause %v", err, tc.wantCause)
+			}
+
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Errorf("Run error = %q, want text %q", err, tc.wantText)
+			}
+
+			if editorCalls != 1 {
+				t.Errorf("editor calls = %d, want 1", editorCalls)
+			}
+
+			if patches != 1 {
+				t.Errorf("Patch calls = %d, want only the initial rejected dry-run", patches)
+			}
+		})
 	}
 }
 

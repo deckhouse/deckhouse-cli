@@ -165,6 +165,130 @@ func TestNewCommand_Defaults(t *testing.T) {
 	if timeout != 10*time.Minute {
 		t.Fatalf("default --%s: got %s, want 10m", flagTimeout, timeout)
 	}
+
+	noAutoEdit, err := cmd.Flags().GetBool(flagNoAutoEdit)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNoAutoEdit, err)
+	}
+
+	if noAutoEdit {
+		t.Fatalf("default --%s: got true, want false", flagNoAutoEdit)
+	}
+}
+
+func TestNewCommand_ExplainsAutomaticEditPolicy(t *testing.T) {
+	cmd := NewCommand(slog.Default())
+
+	for _, text := range []string{
+		"one editor session",
+		"Kubernetes Invalid (HTTP 422)",
+		"schema",
+		"webhook",
+		"immutable-field",
+		"Both stdin and stdout must be terminals",
+		"--no-auto-edit",
+		"Conflict (HTTP 409)",
+		"AlreadyExists",
+		"existing Bound PVC never trigger",
+		"does not imply that the object already exists",
+		"retries",
+		"repeated Invalid is returned without reopening",
+		"Explicit --edit",
+		"Explicit\n--dry-run never opens the automatic editor",
+		"non-interactive use",
+		"$KUBE_EDITOR, then $EDITOR",
+		"falling back to vi",
+		"unchanged file, or empty file",
+	} {
+		if !strings.Contains(cmd.Long, text) {
+			t.Errorf("long help does not contain automatic-edit policy %q", text)
+		}
+	}
+
+	noAutoEditFlag := cmd.Flags().Lookup(flagNoAutoEdit)
+	if noAutoEditFlag == nil {
+		t.Fatal("--no-auto-edit flag is missing")
+	}
+
+	for _, text := range []string{"one automatic editor session", "Invalid (HTTP 422)"} {
+		if !strings.Contains(noAutoEditFlag.Usage, text) {
+			t.Errorf("--no-auto-edit usage does not contain %q: %q", text, noAutoEditFlag.Usage)
+		}
+	}
+}
+
+func TestAutomaticEditEnabledRequiresBothTerminals(t *testing.T) {
+	stdin, err := os.Create(filepath.Join(t.TempDir(), "stdin"))
+	if err != nil {
+		t.Fatalf("open stdin fixture: %v", err)
+	}
+	defer func() {
+		if closeErr := stdin.Close(); closeErr != nil {
+			t.Errorf("close stdin fixture: %v", closeErr)
+		}
+	}()
+
+	stdout, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+	if err != nil {
+		t.Fatalf("open stdout fixture: %v", err)
+	}
+	defer func() {
+		if closeErr := stdout.Close(); closeErr != nil {
+			t.Errorf("close stdout fixture: %v", closeErr)
+		}
+	}()
+
+	tests := []struct {
+		name        string
+		disabled    bool
+		stdinTTY    bool
+		stdoutTTY   bool
+		wantEnabled bool
+	}{
+		{
+			name:        "both terminals",
+			stdinTTY:    true,
+			stdoutTTY:   true,
+			wantEnabled: true,
+		},
+		{
+			name:      "stdin is not a terminal",
+			stdoutTTY: true,
+		},
+		{
+			name:     "stdout is not a terminal",
+			stdinTTY: true,
+		},
+		{
+			name:      "opt out",
+			disabled:  true,
+			stdinTTY:  true,
+			stdoutTTY: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := automaticEditEnabled(
+				tc.disabled,
+				stdin,
+				stdout,
+				func(fd int) bool {
+					switch fd {
+					case int(stdin.Fd()):
+						return tc.stdinTTY
+					case int(stdout.Fd()):
+						return tc.stdoutTTY
+					default:
+						return false
+					}
+				},
+			)
+			if got != tc.wantEnabled {
+				t.Errorf("automaticEditEnabled() = %t, want %t", got, tc.wantEnabled)
+			}
+		})
+	}
 }
 
 func TestNewCommand_ExplainsPVCSafetyAndWaitSemantics(t *testing.T) {

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -52,6 +53,7 @@ const (
 	flagObject         = "object"
 	flagDryRun         = "dry-run"
 	flagEdit           = "edit"
+	flagNoAutoEdit     = "no-auto-edit"
 	flagWait           = "wait"
 	flagTimeout        = "timeout"
 )
@@ -108,6 +110,21 @@ selects the root Snapshot node alone.
 preflight a restore before committing. The --wait loop is skipped in dry-run mode because
 no objects are actually created.
 
+Without --edit or --dry-run, an interactive restore automatically opens one editor session
+when the pre-mutation DryRunAll pass returns Kubernetes Invalid (HTTP 422), including schema,
+webhook, and immutable-field Invalid responses. Both stdin and stdout must be terminals.
+Use --no-auto-edit to opt out. Conflict (HTTP 409), AlreadyExists, conflicting duplicate
+manifests, and an existing Bound PVC never trigger automatic editing. A generic Invalid
+response does not imply that the object already exists or that an immutable field differs.
+After an automatic edit, restore restages and validates the complete manifest set and retries
+the full DryRunAll pass once; a repeated Invalid is returned without reopening the editor.
+Explicit --edit opens before preflight and suppresses later automatic editing. Explicit
+--dry-run never opens the automatic editor. In non-interactive use, Invalid is returned
+with the original API response preserved as its cause and without invoking an editor.
+Editor selection is $KUBE_EDITOR, then $EDITOR,
+falling back to vi; a blank selected command, failed editor, unchanged file, or empty file
+aborts instead of applying.
+
 Before any dry-run or real apply, restore reads every target PersistentVolumeClaim. If a
 same-named claim is already Bound, restore refuses to reuse it because that status may
 describe stale data from an earlier operation. Restore never deletes or replaces the claim.
@@ -158,7 +175,8 @@ restore source, and bound PersistentVolume identity.`,
 	cmd.Flags().String(flagScope, string(aggapi.RestoreScopeSubtree), "restore scope: 'subtree' (default) compiles the addressed node and its whole subtree; 'node' compiles only the addressed node itself")
 	cmd.Flags().String(flagObject, "", "restrict a --scope node restore to a single captured object; format '<Kind>/<name>' (requires --scope node)")
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
-	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR before applying; aborts on non-zero exit, unchanged, or empty content")
+	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR (falling back to vi) before applying; aborts on non-zero exit, unchanged, or empty content")
+	cmd.Flags().Bool(flagNoAutoEdit, false, "disable the one automatic editor session for interactive Kubernetes Invalid (HTTP 422) preflight responses")
 	cmd.Flags().Bool(flagWait, false, "wait for manifest PVCs to become Bound; a dormant WaitForFirstConsumer PVC with no selected node, live consumer, or provisioning signal completes without polling")
 	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
 
@@ -245,6 +263,11 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading --%s flag: %w", flagEdit, err)
 	}
 
+	noAutoEdit, err := cmd.Flags().GetBool(flagNoAutoEdit)
+	if err != nil {
+		return fmt.Errorf("reading --%s flag: %w", flagNoAutoEdit, err)
+	}
+
 	wait, err := cmd.Flags().GetBool(flagWait)
 	if err != nil {
 		return fmt.Errorf("reading --%s flag: %w", flagWait, err)
@@ -287,6 +310,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		FilterKind:             filterKind,
 		FilterName:             filterName,
 		Edit:                   edit,
+		AutoEdit:               automaticEditEnabled(noAutoEdit, os.Stdin, os.Stdout, term.IsTerminal),
 		DryRun:                 dryRun,
 		Wait:                   wait,
 		Timeout:                timeout,
@@ -312,6 +336,19 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 	)
 
 	return nil
+}
+
+func automaticEditEnabled(
+	disabled bool,
+	stdin *os.File,
+	stdout *os.File,
+	isTerminal func(int) bool,
+) bool {
+	return !disabled &&
+		stdin != nil &&
+		stdout != nil &&
+		isTerminal(int(stdin.Fd())) &&
+		isTerminal(int(stdout.Fd()))
 }
 
 func newCommandRESTConfig(cmd *cobra.Command, load transport.RESTConfigLoader) (*rest.Config, error) {

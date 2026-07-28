@@ -18,6 +18,7 @@ package restore
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,6 +37,13 @@ import (
 //   - the saved content is byte-for-byte identical to what was written, or
 //   - the saved content is empty or whitespace-only.
 func editManifests(objs []unstructured.Unstructured) ([]unstructured.Unstructured, error) {
+	return editManifestsContext(context.Background(), objs)
+}
+
+func editManifestsContext(
+	ctx context.Context,
+	objs []unstructured.Unstructured,
+) ([]unstructured.Unstructured, error) {
 	yamlData, err := marshalMultiDocYAML(objs)
 	if err != nil {
 		return nil, fmt.Errorf("serialize manifests for editing: %w", err)
@@ -60,7 +68,7 @@ func editManifests(objs []unstructured.Unstructured) ([]unstructured.Unstructure
 		return nil, fmt.Errorf("close temp file before editing: %w", err)
 	}
 
-	if err = runEditor(tmpPath); err != nil {
+	if err = runEditor(ctx, tmpPath); err != nil {
 		return nil, err
 	}
 
@@ -160,10 +168,10 @@ func splitYAMLDocs(data []byte) [][]byte {
 }
 
 // runEditor opens path in the user's preferred editor and blocks until the
-// editor exits. Returns an error if the editor exits non-zero.
+// editor exits. Returns an error if the editor exits non-zero or ctx is canceled.
 // Editor selection: $KUBE_EDITOR → $EDITOR → "vi".
 // Simple field-splitting is used to support editors with flags (e.g. "code --wait").
-func runEditor(path string) error {
+func runEditor(ctx context.Context, path string) error {
 	editor := resolveEditor()
 	fields := strings.Fields(editor)
 
@@ -175,12 +183,20 @@ func runEditor(path string) error {
 	cmdArgs = append(cmdArgs, fields[1:]...)
 	cmdArgs = append(cmdArgs, path)
 
-	cmd := exec.Command(fields[0], cmdArgs...)
+	if err := context.Cause(ctx); err != nil {
+		return fmt.Errorf("editor canceled before startup: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, fields[0], cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return fmt.Errorf("editor canceled: %w", cause)
+		}
+
 		return fmt.Errorf("editor exited with error: %w", err)
 	}
 

@@ -184,6 +184,11 @@ type Config struct {
 	// passes. A non-zero editor exit, unchanged content, or empty content aborts
 	// the restore without applying anything.
 	Edit bool
+	// AutoEdit opens the resolved manifests once when the pre-mutation DryRunAll
+	// pass returns Kubernetes Invalid. Command callers enable it only when both
+	// stdin and stdout are interactive terminals and --no-auto-edit is absent.
+	// Edit and DryRun always suppress this automatic session.
+	AutoEdit bool
 
 	// DryRun, when true, passes DryRunAll to every SSA apply so the API server
 	// validates and admits objects without persisting them. The --wait loop is
@@ -213,6 +218,7 @@ type Config struct {
 	maxStagedManifestBytes   int64
 	maxStagedManifestObjects int
 	manifestStageOps         manifestStageOperations
+	editManifests            func(context.Context, []unstructured.Unstructured) ([]unstructured.Unstructured, error)
 
 	// newWaitContext is a test seam for controlling the shared wait boundary.
 	newWaitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -265,6 +271,23 @@ type boundPVIdentity struct {
 type applyResult struct {
 	namespace string
 	object    *unstructured.Unstructured
+}
+
+type automaticEditAbortedError struct {
+	invalidErr error
+	editErr    error
+}
+
+func (e *automaticEditAbortedError) Error() string {
+	return fmt.Sprintf(
+		"automatic edit aborted after Kubernetes Invalid response: %v; original response: %v",
+		e.editErr,
+		e.invalidErr,
+	)
+}
+
+func (e *automaticEditAbortedError) Unwrap() []error {
+	return []error{e.invalidErr, e.editErr}
 }
 
 // Run executes an in-namespace restore: anchor selection to the positional Snapshot,
@@ -393,33 +416,9 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	}
 
 	if cfg.Edit {
-		if stage.bytesWritten > maxEditableManifestBytes {
-			return fmt.Errorf(
-				"restore edit requires loading %d staged bytes, exceeding the bounded edit limit of %d bytes; retry without --edit or select a smaller subtree",
-				stage.bytesWritten,
-				maxEditableManifestBytes,
-			)
-		}
-
-		objs, loadErr := stage.objects(ctx)
-		if loadErr != nil {
-			return fmt.Errorf("load staged manifests for editing: %w", loadErr)
-		}
-
-		objs, err = editManifests(objs)
-		if err != nil {
-			return fmt.Errorf("restore edit: %w", err)
-		}
-
-		editedStage, stageErr := newManifestStage(cfg)
-		if stageErr != nil {
-			return fmt.Errorf("create edited restore manifest staging: %w", stageErr)
-		}
-
-		stages.add(editedStage)
-
-		if stageErr = editedStage.add(ctx, cfg, objs); stageErr != nil {
-			return fmt.Errorf("preflight edited restore manifests: %w", stageErr)
+		editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages)
+		if editErr != nil {
+			return fmt.Errorf("restore edit: %w", editErr)
 		}
 
 		stage = editedStage
@@ -430,20 +429,48 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		slog.String("snapshot", cfg.Snapshot),
 		slog.Int("objects", stage.objectCount))
 
-	if _, err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
-		return err
-	}
+	automaticEditAttempted := false
 
-	// Implicit dry-run preflight: validate every object without mutating the cluster.
-	// Any admission failure here aborts before any real apply.
-	dryRunCfg := cfg
-	dryRunCfg.DryRun = true
-	// Silence per-object log for the implicit pass; keep it when the user requested
-	// --dry-run because this is then the only apply pass the user sees output from.
-	dryRunCfg.silenceApplyLog = !cfg.DryRun
+	for {
+		if _, err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
+			return err
+		}
 
-	if _, _, err := applyStaged(ctx, dryRunCfg, stage, nil); err != nil {
-		return fmt.Errorf("dry-run preflight: %w", err)
+		// Every candidate manifest set completes a full DryRunAll pass before the
+		// first real mutation. An automatic edit restages the complete set and
+		// returns here rather than continuing from the rejected object.
+		dryRunCfg := cfg
+		dryRunCfg.DryRun = true
+		dryRunCfg.silenceApplyLog = !cfg.DryRun
+
+		if _, _, dryRunErr := applyStaged(ctx, dryRunCfg, stage, nil); dryRunErr != nil {
+			preflightErr := fmt.Errorf("dry-run preflight: %w", dryRunErr)
+
+			autoEditEligible := cfg.AutoEdit &&
+				!cfg.Edit &&
+				!cfg.DryRun &&
+				!automaticEditAttempted &&
+				kubeerrors.IsInvalid(dryRunErr)
+			if !autoEditEligible {
+				return preflightErr
+			}
+
+			automaticEditAttempted = true
+
+			editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages)
+			if editErr != nil {
+				return &automaticEditAbortedError{
+					invalidErr: preflightErr,
+					editErr:    fmt.Errorf("automatic restore edit: %w", editErr),
+				}
+			}
+
+			stage = editedStage
+
+			continue
+		}
+
+		break
 	}
 
 	cfg.Log.Info("validated restore manifests (dry-run)",
@@ -481,6 +508,48 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	return revalidatePVCsAfterApply(ctx, cfg, pvcs)
 }
 
+func restageEditedManifests(
+	ctx context.Context,
+	cfg Config,
+	stage *manifestStage,
+	stages *manifestStages,
+) (*manifestStage, error) {
+	if stage.bytesWritten > maxEditableManifestBytes {
+		return nil, fmt.Errorf(
+			"requires loading %d staged bytes, exceeding the bounded edit limit of %d bytes; select a smaller subtree",
+			stage.bytesWritten,
+			maxEditableManifestBytes,
+		)
+	}
+
+	objs, err := stage.objects(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load staged manifests for editing: %w", err)
+	}
+
+	objs, err = cfg.editManifests(ctx, objs)
+	if err != nil {
+		return nil, err
+	}
+
+	editedStage, err := newManifestStage(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create edited restore manifest staging: %w", err)
+	}
+
+	stages.add(editedStage)
+
+	if err = editedStage.add(ctx, cfg, objs); err != nil {
+		return nil, fmt.Errorf("preflight edited restore manifests: %w", err)
+	}
+
+	if editedStage.objectCount == 0 {
+		return nil, fmt.Errorf("edited restore manifests are empty")
+	}
+
+	return editedStage, nil
+}
+
 // applyDefaults fills zero-valued optional fields with their defaults.
 func applyDefaults(cfg Config) Config {
 	if cfg.Timeout <= 0 {
@@ -505,6 +574,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
+	}
+
+	if cfg.editManifests == nil {
+		cfg.editManifests = editManifestsContext
 	}
 
 	return cfg
@@ -1953,13 +2026,6 @@ func applyObject(
 	}
 
 	if applyErr != nil {
-		// Immutable fields (e.g. a PVC's spec.dataSourceRef) cause an Invalid error:
-		// surface an actionable error instead of a raw API rejection.
-		if kubeerrors.IsInvalid(applyErr) {
-			return applyResult{}, fmt.Errorf("already exists with immutable fields differing from the snapshot; "+
-				"delete it and re-run restore: %w", applyErr)
-		}
-
 		if pvcGuard != nil && kubeerrors.IsConflict(applyErr) {
 			return applyResult{}, fmt.Errorf(
 				"restore target PVC %s/%s changed after preflight; refusing stale mutation: %w",
@@ -1976,6 +2042,18 @@ func applyObject(
 				obj.GetName(),
 				applyErr,
 			)
+		}
+
+		if kubeerrors.IsInvalid(applyErr) {
+			return applyResult{}, classifyInvalidApplyError(ctx, cfg, ri, ns, obj, applyErr)
+		}
+
+		if kubeerrors.IsConflict(applyErr) {
+			return applyResult{}, fmt.Errorf("Kubernetes API reported an apply conflict: %w", applyErr)
+		}
+
+		if kubeerrors.IsAlreadyExists(applyErr) {
+			return applyResult{}, fmt.Errorf("Kubernetes API reported that the object already exists: %w", applyErr)
 		}
 
 		return applyResult{}, fmt.Errorf("apply: %w", applyErr)
@@ -1996,6 +2074,69 @@ func applyObject(
 	}
 
 	return applyResult{namespace: ns, object: applied}, nil
+}
+
+func classifyInvalidApplyError(
+	ctx context.Context,
+	cfg Config,
+	resource dynamic.ResourceInterface,
+	namespace string,
+	obj *unstructured.Unstructured,
+	invalidErr error,
+) error {
+	if invalidResponseHasImmutableCause(invalidErr) &&
+		applyTargetExists(ctx, cfg, resource, namespace, obj.GetName()) {
+		return fmt.Errorf(
+			"%s/%s %s/%s already exists and the API server rejected an immutable field that differs from the snapshot; delete it and re-run restore: %w",
+			obj.GetAPIVersion(),
+			obj.GetKind(),
+			namespace,
+			obj.GetName(),
+			invalidErr,
+		)
+	}
+
+	return fmt.Errorf("Kubernetes API rejected the restore object as invalid: %w", invalidErr)
+}
+
+func invalidResponseHasImmutableCause(err error) bool {
+	var statusErr kubeerrors.APIStatus
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+
+	status := statusErr.Status()
+	if status.Details == nil {
+		return false
+	}
+
+	for _, cause := range status.Details.Causes {
+		message := strings.ToLower(cause.Message)
+		if strings.Contains(message, "immutable") || strings.Contains(message, "may not be changed") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func applyTargetExists(
+	ctx context.Context,
+	cfg Config,
+	resource dynamic.ResourceInterface,
+	namespace string,
+	name string,
+) bool {
+	_, err := controlPlaneRequest(
+		ctx,
+		cfg.controlPlaneTimeout(),
+		fmt.Sprintf("checking whether invalid restore target %s/%s exists", namespace, name),
+		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+			return resource.Get(requestCtx, name, metav1.GetOptions{})
+		},
+	)
+
+	return err == nil
 }
 
 // waitPVCsBound blocks until every restored PVC reports status.phase == Bound or the

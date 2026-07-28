@@ -18,14 +18,19 @@ package restore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // fakeEditorScript writes a small shell script into dir that, when invoked with a
@@ -476,6 +481,77 @@ func TestEditManifests_WhitespaceEditorEnvReturnsError(t *testing.T) {
 	_, err := editManifests(input)
 	if err == nil {
 		t.Fatal("expected error for whitespace-only EDITOR env, got nil")
+	}
+}
+
+func TestEditManifestsContext_CancellationPreservesCause(t *testing.T) {
+	t.Setenv("EDITOR", "must-not-run")
+	t.Setenv("KUBE_EDITOR", "")
+
+	cancelCause := errors.New("operator canceled automatic editor")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cancelCause)
+
+	input := []unstructured.Unstructured{
+		{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "cm-canceled-editor"},
+		}},
+	}
+
+	_, err := editManifestsContext(ctx, input)
+	if !errors.Is(err, cancelCause) {
+		t.Fatalf("editManifestsContext error = %v, want cancellation cause", err)
+	}
+
+	if !strings.Contains(err.Error(), "canceled before startup") {
+		t.Errorf("editManifestsContext error = %q, want pre-start cancellation text", err)
+	}
+}
+
+func TestRun_AutomaticEditBlankEditorAbortsAndPreservesInvalid(t *testing.T) {
+	t.Setenv("KUBE_EDITOR", " ")
+	t.Setenv("EDITOR", "")
+
+	invalidErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"invalid",
+		field.ErrorList{field.Required(field.NewPath("data"), "")},
+	)
+	base := newFakeDynamic(readySnapshot())
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		interceptPatch: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			_ string,
+			_ string,
+			_ []byte,
+			_ metav1.PatchOptions,
+		) (*unstructured.Unstructured, bool, error) {
+			if gvr == cmGVR {
+				return nil, true, invalidErr
+			}
+
+			return nil, false, nil
+		},
+	}
+	cfg := baseConfig(
+		&stubSource{body: mustArray(t, configMapManifest("invalid"))},
+		dyn,
+	)
+	cfg.AutoEdit = true
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, invalidErr) {
+		t.Errorf("Run error = %v, want original Invalid cause", err)
+	}
+
+	for _, want := range []string{"automatic edit aborted", "resolved editor command", "is empty"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run error = %q, want text %q", err, want)
+		}
 	}
 }
 
