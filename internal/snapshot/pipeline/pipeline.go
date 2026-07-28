@@ -46,9 +46,20 @@ type nodeTask struct {
 	// done is the resume scan's single consumed decision: a complete,
 	// identity-verified node is skipped. observed is a non-authoritative label of
 	// what the scan saw on disk, carried only for the "resume_state" log line.
-	done          bool
-	staleChildren bool
-	observed      archive.ObservedState
+	done     bool
+	observed archive.ObservedState
+}
+
+type payloadChecksumObserverKey struct{}
+
+// PayloadChecksumObserver observes payload bytes traversed by publication
+// checksum passes. It is intended for deterministic integrity-work accounting.
+type PayloadChecksumObserver func(nodeDir string, payloadBytes int64)
+
+// WithPayloadChecksumObserver returns a context that observes complete
+// publication checksum passes without changing archive reads or writes.
+func WithPayloadChecksumObserver(ctx context.Context, observer PayloadChecksumObserver) context.Context {
+	return context.WithValue(ctx, payloadChecksumObserverKey{}, observer)
 }
 
 // streamKey identifies a pre-created progress stream.
@@ -199,6 +210,8 @@ func run(
 		return fmt.Errorf("load publication transaction: %w", err)
 	}
 
+	transactionAtRunStart := transaction != nil
+
 	receipt, err := loadPublicationReceipt(destination, sourceTreeDigest)
 	if err != nil {
 		return fmt.Errorf("load publication receipt: %w", err)
@@ -226,10 +239,6 @@ func run(
 	)
 	if err != nil {
 		return fmt.Errorf("scan output directory: %w", err)
-	}
-
-	if err := validateProvisionalStaleParents(tasks); err != nil {
-		return err
 	}
 
 	// Redirect any sibling nodes that resolve to the SAME on-disk directory in
@@ -342,7 +351,15 @@ func run(
 	}
 
 	if transaction == nil && len(publish) > 0 {
-		transaction, err = buildPublicationTransaction(destination, sourceTreeDigest, tasks, publish)
+		transaction, err = buildPublicationTransaction(
+			destination,
+			sourceTreeDigest,
+			tasks,
+			publish,
+			func(nodeDir string) (archive.NodeChecksum, error) {
+				return computePublicationNodeChecksum(ctx, destination, nodeDir)
+			},
+		)
 		if err != nil {
 			nodeErrs = append(nodeErrs, fmt.Errorf("prepare publication transaction: %w", err))
 		} else if err := writePublicationTransaction(publicationCtx, destination, transaction); err != nil {
@@ -377,19 +394,38 @@ func run(
 				continue
 			}
 
-			if verifyErr := verifyPublicationEntry(destination, entry); verifyErr == nil {
+			if verifyErr := verifyPublicationEntryEnvelope(destination, entry); verifyErr == nil {
 				continue
 			}
 
-			checksum, checksumErr := destination.ComputeNodeChecksum(task.nodeDir)
-			if checksumErr != nil || checksum.Hex != entry.NodeChecksum.Hex ||
-				entry.Identity != publicationIdentityForNode(task.node) {
+			if transactionAtRunStart {
+				checksumErr := verifyPublicationEntryContent(
+					destination,
+					entry,
+					func(nodeDir string) (archive.NodeChecksum, error) {
+						return computePublicationNodeChecksum(ctx, destination, nodeDir)
+					},
+				)
+				if checksumErr != nil {
+					publicationFailed = true
+
+					nodeErrs = append(nodeErrs, fmt.Errorf(
+						"publication transaction no longer matches %s: %w",
+						task.node.DisplayLabel(),
+						errors.Join(checksumErr, errPublicationTransactionInvalid),
+					))
+
+					break
+				}
+			}
+
+			if entry.Identity != publicationIdentityForNode(task.node) {
 				publicationFailed = true
 
 				nodeErrs = append(nodeErrs, fmt.Errorf(
 					"publication transaction no longer matches %s: %w",
 					task.node.DisplayLabel(),
-					errors.Join(checksumErr, errPublicationTransactionInvalid),
+					errPublicationTransactionInvalid,
 				))
 
 				break
@@ -408,7 +444,13 @@ func run(
 				break
 			}
 
-			if err := volume.FinalizeNodeRootedContext(publicationCtx, destination, task.nodeDir, task.node); err != nil {
+			if err := volume.FinalizeNodeRootedContextWithChecksum(
+				publicationCtx,
+				destination,
+				task.nodeDir,
+				task.node,
+				entry.NodeChecksum,
+			); err != nil {
 				publicationFailed = true
 
 				nodeErrs = append(nodeErrs, fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err))
@@ -416,7 +458,7 @@ func run(
 				break
 			}
 
-			if err := verifyPublicationEntry(destination, entry); err != nil {
+			if err := verifyPublicationEntryEnvelope(destination, entry); err != nil {
 				publicationFailed = true
 
 				nodeErrs = append(nodeErrs, fmt.Errorf("verify finalized %s: %w", task.node.DisplayLabel(), err))
@@ -731,19 +773,30 @@ func collectNodeTasksRootedContextWithTransaction(
 	transaction *publicationTransaction,
 ) ([]nodeTask, error) {
 	rootIdentity := nodeIdentity(root)
+
+	// The resume scan's own full-content verification is the ONLY place a node
+	// already sealed by an earlier process is re-authenticated against its
+	// recorded digest, so it must not be short-circuited by an envelope-only
+	// check: an attacker or bit rot that rewrites payload bytes of the same
+	// length after finalization is invisible to identity/child-commitment checks
+	// alone (code-style §6a "existence is not validity").
 	rootPlan, err := archive.ScanAbsoluteRootedContext(
 		ctx,
 		destination,
 		outputDir,
 		rootIdentity,
 	)
-	rootStaleChildren := false
 
 	if errors.Is(err, archive.ErrChildrenChecksumMismatch) {
-		if transaction != nil {
-			if authErr := authorizePublicationMismatch(destination, transaction, outputDir, rootIdentity); authErr != nil {
-				return nil, errors.Join(err, authErr)
-			}
+		if transaction == nil {
+			return nil, fmt.Errorf(
+				"root node has a stale direct-child commitment without a run-start publication transaction: %w",
+				err,
+			)
+		}
+
+		if authErr := authorizePublicationMismatch(destination, transaction, outputDir, rootIdentity); authErr != nil {
+			return nil, errors.Join(err, authErr)
 		}
 
 		rootPlan = archive.NodeResumePlan{
@@ -751,7 +804,6 @@ func collectNodeTasksRootedContextWithTransaction(
 			Done:      true,
 			Observed:  archive.ObservedDone,
 		}
-		rootStaleChildren = true
 		err = nil
 	}
 
@@ -768,7 +820,6 @@ func collectNodeTasksRootedContextWithTransaction(
 		rootPlan,
 		&tasks,
 		transaction,
-		rootStaleChildren,
 	); err != nil {
 		return nil, err
 	}
@@ -785,7 +836,7 @@ func collectDFS(
 	plan archive.NodeResumePlan,
 	tasks *[]nodeTask,
 ) error {
-	return collectDFSWithTransaction(ctx, destination, node, plan, tasks, nil, false)
+	return collectDFSWithTransaction(ctx, destination, node, plan, tasks, nil)
 }
 
 func collectDFSWithTransaction(
@@ -795,14 +846,12 @@ func collectDFSWithTransaction(
 	plan archive.NodeResumePlan,
 	tasks *[]nodeTask,
 	transaction *publicationTransaction,
-	staleChildren bool,
 ) error {
 	*tasks = append(*tasks, nodeTask{
-		node:          node,
-		nodeDir:       plan.TargetDir,
-		done:          plan.Done,
-		staleChildren: staleChildren,
-		observed:      plan.Observed,
+		node:     node,
+		nodeDir:  plan.TargetDir,
+		done:     plan.Done,
+		observed: plan.Observed,
 	})
 
 	if len(node.Children) == 0 {
@@ -814,7 +863,7 @@ func collectDFSWithTransaction(
 
 	for _, child := range node.Children {
 		childIdentity := nodeIdentity(child)
-		childStaleChildren := false
+		childDir := filepath.Join(snapshotsDir, archive.NodeDirName(child.Kind, child.DirBaseName()))
 
 		childPlan, err := archive.ScanNodeRootedContext(
 			ctx,
@@ -822,17 +871,23 @@ func collectDFSWithTransaction(
 			snapshotsDir,
 			childIdentity,
 		)
+
 		if errors.Is(err, archive.ErrChildrenChecksumMismatch) {
-			childDir := filepath.Join(snapshotsDir, archive.NodeDirName(child.Kind, child.DirBaseName()))
-			if transaction != nil {
-				if authErr := authorizePublicationMismatch(
-					destination,
-					transaction,
-					childDir,
-					childIdentity,
-				); authErr != nil {
-					return errors.Join(err, authErr)
-				}
+			if transaction == nil {
+				return fmt.Errorf(
+					"child %s has a stale direct-child commitment without a run-start publication transaction: %w",
+					child.DisplayLabel(),
+					err,
+				)
+			}
+
+			if authErr := authorizePublicationMismatch(
+				destination,
+				transaction,
+				childDir,
+				childIdentity,
+			); authErr != nil {
+				return errors.Join(err, authErr)
 			}
 
 			childPlan = archive.NodeResumePlan{
@@ -840,7 +895,6 @@ func collectDFSWithTransaction(
 				Done:      true,
 				Observed:  archive.ObservedDone,
 			}
-			childStaleChildren = true
 			err = nil
 		}
 
@@ -855,7 +909,6 @@ func collectDFSWithTransaction(
 			childPlan,
 			tasks,
 			transaction,
-			childStaleChildren,
 		); err != nil {
 			return err
 		}
@@ -864,34 +917,65 @@ func collectDFSWithTransaction(
 	return nil
 }
 
-func validateProvisionalStaleParents(tasks []nodeTask) error {
-	byNode := make(map[*source.Node]nodeTask, len(tasks))
-	for _, task := range tasks {
-		byNode[task.node] = task
+// computePublicationNodeChecksum computes one node's complete content checksum
+// for the publication path, reporting the payload bytes it traversed to an
+// optional observer so integrity-work accounting can be asserted from the
+// production Run path rather than from helper call counts.
+func computePublicationNodeChecksum(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+) (archive.NodeChecksum, error) {
+	checksum, err := destination.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		return archive.NodeChecksum{}, err
 	}
 
-	for _, task := range tasks {
-		if !task.staleChildren {
-			continue
-		}
-
-		recoverable := false
-
-		for _, child := range task.node.Children {
-			childTask, ok := byNode[child]
-			recoverable = recoverable || ok && (!childTask.done || childTask.staleChildren)
-		}
-
-		if !recoverable {
-			return fmt.Errorf(
-				"node %s has a stale direct-child commitment without a recorded publication transaction: %w",
-				task.node.DisplayLabel(),
-				archive.ErrChildrenChecksumMismatch,
-			)
-		}
+	observer, _ := ctx.Value(payloadChecksumObserverKey{}).(PayloadChecksumObserver)
+	if observer == nil {
+		return checksum, nil
 	}
 
-	return nil
+	payloadBytes, err := publicationPayloadBytes(destination, nodeDir)
+	if err != nil {
+		return archive.NodeChecksum{}, err
+	}
+
+	observer(nodeDir, payloadBytes)
+
+	return checksum, nil
+}
+
+// publicationPayloadBytes sizes the volume payload a single ComputeNodeChecksum
+// pass over nodeDir traverses. It exists so integrity-work accounting is
+// expressed in bytes rather than helper invocations: an invocation count cannot
+// distinguish one pass over a multi-chunk volume from one pass over an empty
+// aggregator node.
+func publicationPayloadBytes(destination *archive.RootedDestination, nodeDir string) (int64, error) {
+	var payloadBytes int64
+
+	block, found, err := destination.FindBlockData(nodeDir)
+	if err != nil {
+		return 0, fmt.Errorf("inspect block payload for checksum accounting: %w", err)
+	}
+
+	if found {
+		info, statErr := destination.Stat(block.Path)
+		if statErr != nil {
+			return 0, fmt.Errorf("stat block payload for checksum accounting: %w", statErr)
+		}
+
+		payloadBytes += info.Size()
+	}
+
+	info, err := destination.Stat(filepath.Join(nodeDir, archive.FsTarName))
+	if err == nil {
+		payloadBytes += info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("stat filesystem payload for checksum accounting: %w", err)
+	}
+
+	return payloadBytes, nil
 }
 
 // dedupeSiblingTargetDirs detects sibling nodes that resolve to the SAME on-disk

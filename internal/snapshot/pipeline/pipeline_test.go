@@ -98,6 +98,18 @@ type dataExportTargetMapping struct {
 	resource   string
 }
 
+type repeatedByteReaderAt struct {
+	value byte
+}
+
+func (r repeatedByteReaderAt) ReadAt(data []byte, _ int64) (int, error) {
+	for i := range data {
+		data[i] = r.value
+	}
+
+	return len(data), nil
+}
+
 func dataExportAggClient(t *testing.T, mappings ...dataExportTargetMapping) *aggapi.Client {
 	t.Helper()
 
@@ -260,6 +272,42 @@ func reseedResumeMarkerFromSnapshotYAML(t *testing.T, nodeDir string) {
 		Namespace:  sy.Namespace,
 		UID:        sy.UID,
 	})
+}
+
+// reseedResumeMarkerAndDropEnvelopesUpTo rolls nodeDir AND every ancestor node
+// directory up to outputDir (inclusive) back to the pre-publication state a real
+// interrupted run leaves behind: identity marker present, snapshot.yaml absent.
+//
+// Ancestors must be rolled back together with the descendant because publication
+// is strictly bottom-up and a parent's ChildrenChecksum authenticates its direct
+// children's envelopes. A run interrupted before nodeDir's envelope became
+// durable therefore cannot have written any ancestor envelope either, and once a
+// publication transaction has been completed and cleaned no crash can leave a
+// finalized ancestor committing to a descendant envelope that is gone. Dropping
+// only the descendant's envelope would synthesize a hybrid tree — a stale
+// parent commitment with no run-start publication transaction authorizing it —
+// which the pipeline must reject before touching anything (AC-1), not resume
+// into.
+func reseedResumeMarkerAndDropEnvelopesUpTo(t *testing.T, outputDir, nodeDir string) {
+	t.Helper()
+
+	outputDir = filepath.Clean(outputDir)
+	dir := filepath.Clean(nodeDir)
+
+	require.True(t, dir == outputDir || strings.HasPrefix(dir, outputDir+string(filepath.Separator)),
+		"node dir %s must live under output dir %s", dir, outputDir)
+
+	for {
+		reseedResumeMarkerFromSnapshotYAML(t, dir)
+		require.NoError(t, os.Remove(filepath.Join(dir, archive.SnapshotYAMLName)))
+
+		if dir == outputDir {
+			return
+		}
+
+		// A child node dir is always <parent>/snapshots/<kind>_<name>.
+		dir = filepath.Dir(filepath.Dir(dir))
+	}
 }
 
 // assertNoIdentityMarkers walks the whole output tree rooted at root and fails
@@ -1493,9 +1541,10 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 
 	// Simulate a crash after the block volume committed but before snapshot.yaml
 	// was written: re-stamp the identity marker (finalize removed it on the first
-	// run) and delete only snapshot.yaml. The merged data.bin.zst stays in place.
-	reseedResumeMarkerFromSnapshotYAML(t, diskSnapDir)
-	require.NoError(t, os.Remove(filepath.Join(diskSnapDir, archive.SnapshotYAMLName)))
+	// run) and delete snapshot.yaml here and in every ancestor, which bottom-up
+	// publication could not have written yet. The merged data.bin.zst stays in
+	// place.
+	reseedResumeMarkerAndDropEnvelopesUpTo(t, outputDir, diskSnapDir)
 
 	// OpenExport must not run: the merged data is detected and only FinalizeNode
 	// re-runs.
@@ -1675,10 +1724,17 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 		},
 	}
 
+	recoveryReads := make(map[string]int64)
 	runWithCrash := func(nodeDir string, crashErr error) error {
 		t.Helper()
 
-		ctx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		countingCtx := pipeline.WithPayloadChecksumObserver(
+			context.Background(),
+			func(nodeDir string, payloadBytes int64) {
+				recoveryReads[nodeDir] += payloadBytes
+			},
+		)
+		ctx := archive.WithDirectorySyncHook(countingCtx, func(path string, next func() error) error {
 			if path == nodeDir {
 				if _, err := os.Stat(transactionPath); err == nil {
 					return crashErr
@@ -1696,6 +1752,7 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 	require.FileExists(t, transactionPath)
 	assertNodeComplete(t, leafDir)
 	require.NoFileExists(t, filepath.Join(outputDir, archive.SnapshotYAMLName))
+	clear(recoveryReads)
 
 	var openExportCalls atomic.Int64
 	cfg.OpenExport = func(
@@ -1714,11 +1771,23 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 	require.FileExists(t, transactionPath)
 	require.Zero(t, openExportCalls.Load())
 
-	require.NoError(t, runPipeline(context.Background(), cfg))
+	finalRecoveryCtx := pipeline.WithPayloadChecksumObserver(
+		context.Background(),
+		func(nodeDir string, payloadBytes int64) {
+			recoveryReads[nodeDir] += payloadBytes
+		},
+	)
+	require.NoError(t, runPipeline(finalRecoveryCtx, cfg))
 	assertNodeComplete(t, aggDir)
 	assertNodeComplete(t, outputDir)
 	require.NoFileExists(t, transactionPath)
 	require.Zero(t, openExportCalls.Load())
+
+	leafInfo, err := os.Stat(filepath.Join(leafDir, archive.DataBlockName(".zst")))
+	require.NoError(t, err)
+	require.LessOrEqual(t, recoveryReads[leafDir], leafInfo.Size())
+	t.Logf("two-level recovery payload bytes %s=%d (payload=%d)",
+		leafDir, recoveryReads[leafDir], leafInfo.Size())
 }
 
 func TestPipeline_StaleParentWithoutPublicationTransactionIsRejected(t *testing.T) {
@@ -1780,6 +1849,163 @@ func TestPipeline_StaleParentWithoutPublicationTransactionIsRejected(t *testing.
 	err = runPipeline(context.Background(), cfg)
 	require.ErrorIs(t, err, archive.ErrChildrenChecksumMismatch)
 	require.Zero(t, openExportCalls.Load())
+}
+
+func TestPipeline_StaleParentWithIncompleteSiblingIsRejectedAtRunStart(t *testing.T) {
+	const payloadSize = int64(600)
+
+	srv := makeSizedBlockServer(t, payloadSize, 'A')
+	outputDir := t.TempDir()
+	cfg := twoDataChildPipelineConfig(t, outputDir, srv)
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	childADir := twoDataChildDir(outputDir, "disk-a")
+	childBDir := twoDataChildDir(outputDir, "disk-b")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(childADir, archive.ManifestsDirName, "republished.yaml"),
+		[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: republished\n"),
+		0o600,
+	))
+
+	metadata, err := archive.ReadSnapshotYAML(childADir)
+	require.NoError(t, err)
+	metadata.Checksum, err = archive.ComputeNodeChecksum(childADir)
+	require.NoError(t, err)
+	require.NoError(t, archive.WriteSnapshotYAML(childADir, metadata))
+
+	reseedResumeMarkerFromSnapshotYAML(t, childBDir)
+	require.NoError(t, os.Remove(filepath.Join(childBDir, archive.SnapshotYAMLName)))
+
+	transactionPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-v1.json")
+	receiptPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-receipt-v1.json")
+	require.NoFileExists(t, transactionPath)
+	receiptBefore, err := os.ReadFile(receiptPath)
+	require.NoError(t, err)
+
+	envelopesBefore := map[string][]byte{}
+	for _, nodeDir := range []string{outputDir, childADir} {
+		envelope, readErr := os.ReadFile(filepath.Join(nodeDir, archive.SnapshotYAMLName))
+		require.NoError(t, readErr)
+		envelopesBefore[nodeDir] = envelope
+	}
+
+	var openExportCalls atomic.Int64
+	cfg.OpenExport = func(
+		_ context.Context,
+		_ string,
+		_ aggapi.NodeRef,
+		_ string,
+	) (*exporter.Export, error) {
+		openExportCalls.Add(1)
+
+		return nil, errors.New("unexpected payload redownload")
+	}
+
+	err = runPipeline(context.Background(), cfg)
+	require.ErrorIs(t, err, archive.ErrChildrenChecksumMismatch)
+	require.Zero(t, openExportCalls.Load())
+	require.NoFileExists(t, transactionPath)
+	require.NoFileExists(t, filepath.Join(childBDir, archive.SnapshotYAMLName))
+	receiptAfter, readErr := os.ReadFile(receiptPath)
+	require.NoError(t, readErr)
+	require.Equal(t, receiptBefore, receiptAfter)
+
+	for nodeDir, before := range envelopesBefore {
+		after, readErr := os.ReadFile(filepath.Join(nodeDir, archive.SnapshotYAMLName))
+		require.NoError(t, readErr)
+		require.Equal(t, before, after, "snapshot envelope changed at %s", nodeDir)
+	}
+}
+
+// TestPipeline_PayloadChecksumReadsAreBounded bounds the payload bytes the
+// PUBLICATION path hashes, counted through the production Run call path over
+// multi-chunk data-bearing nodes.
+//
+// Scope matters for reading the numbers: the observer sees only publication
+// checksum passes (transaction construction and the recovery content
+// re-verification). A fresh node is hashed exactly once there and that one
+// digest is then carried through the transaction entry into finalization and
+// envelope-only post-publication verification. A completed rerun publishes
+// nothing, hence zero publication-path bytes — but it is NOT a zero-read run:
+// the resume scan still performs its own single full-content verification per
+// already-sealed node, which is the only thing that can catch a same-size
+// payload rewrite after finalization (see
+// TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed). That gate is
+// deliberately not optimized away; eliminating it would trade tamper detection
+// for I/O.
+func TestPipeline_PayloadChecksumReadsAreBounded(t *testing.T) {
+	const payloadSize = int64(volume.DefaultChunkSize) + 1
+
+	srv := makeSizedBlockServer(t, payloadSize, 'B')
+	outputDir := t.TempDir()
+	cfg := twoDataChildPipelineConfig(t, outputDir, srv)
+
+	freshReads := make(map[string]int64)
+	freshCtx := pipeline.WithPayloadChecksumObserver(
+		context.Background(),
+		func(nodeDir string, payloadBytes int64) {
+			freshReads[nodeDir] += payloadBytes
+		},
+	)
+	require.NoError(t, runPipeline(freshCtx, cfg))
+
+	dataNodeDirs := []string{
+		twoDataChildDir(outputDir, "disk-a"),
+		twoDataChildDir(outputDir, "disk-b"),
+	}
+	for _, nodeDir := range dataNodeDirs {
+		info, err := os.Stat(filepath.Join(nodeDir, archive.DataBlockName(".zst")))
+		require.NoError(t, err)
+		require.Equal(t, info.Size(), freshReads[nodeDir], "fresh checksum payload bytes at %s", nodeDir)
+		require.Greater(t, info.Size(), int64(0))
+		t.Logf("fresh payload bytes %s=%d", nodeDir, freshReads[nodeDir])
+	}
+
+	completedReads := make(map[string]int64)
+	completedCtx := pipeline.WithPayloadChecksumObserver(
+		context.Background(),
+		func(nodeDir string, payloadBytes int64) {
+			completedReads[nodeDir] += payloadBytes
+		},
+	)
+	require.NoError(t, runPipeline(completedCtx, cfg))
+	for _, nodeDir := range dataNodeDirs {
+		require.Zero(t, completedReads[nodeDir], "completed rerun payload bytes at %s", nodeDir)
+		t.Logf("completed rerun payload bytes %s=%d", nodeDir, completedReads[nodeDir])
+	}
+
+	transactionPath := filepath.Join(outputDir, archive.SnapshotsDirName, ".d8-snapshot-publication-v1.json")
+	reseedResumeMarkerFromSnapshotYAML(t, outputDir)
+	require.NoError(t, os.Remove(filepath.Join(outputDir, archive.SnapshotYAMLName)))
+
+	crashErr := errors.New("injected root publication crash")
+	crashCtx := archive.WithDirectorySyncHook(context.Background(), func(path string, next func() error) error {
+		if path == outputDir {
+			if _, err := os.Stat(transactionPath); err == nil {
+				return crashErr
+			}
+		}
+
+		return next()
+	})
+	require.ErrorIs(t, runPipeline(crashCtx, cfg), crashErr)
+	require.FileExists(t, transactionPath)
+
+	recoveryReads := make(map[string]int64)
+	recoveryCtx := pipeline.WithPayloadChecksumObserver(
+		context.Background(),
+		func(nodeDir string, payloadBytes int64) {
+			recoveryReads[nodeDir] += payloadBytes
+		},
+	)
+	require.NoError(t, runPipeline(recoveryCtx, cfg))
+	for _, nodeDir := range dataNodeDirs {
+		info, err := os.Stat(filepath.Join(nodeDir, archive.DataBlockName(".zst")))
+		require.NoError(t, err)
+		require.LessOrEqual(t, recoveryReads[nodeDir], info.Size(), "recovery checksum payload bytes at %s", nodeDir)
+		t.Logf("one-level recovery payload bytes %s=%d (payload=%d)",
+			nodeDir, recoveryReads[nodeDir], info.Size())
+	}
 }
 
 func TestPipeline_ProductionTargetMismatchNeverCleansUpCollision(t *testing.T) {
@@ -2404,8 +2630,7 @@ func TestPipeline_FSResumeAfterTarConfirmsDurabilityBeforeCompletion(t *testing.
 			stagedBytes, err := readTarEntry(t, tarPath, "alpha.txt.zst")
 			require.NoError(t, err)
 
-			reseedResumeMarkerFromSnapshotYAML(t, nodeDir)
-			require.NoError(t, os.Remove(snapshotPath))
+			reseedResumeMarkerAndDropEnvelopesUpTo(t, outputDir, nodeDir)
 			require.NoError(t, os.MkdirAll(stagingDir, 0o755))
 			require.NoError(t, os.WriteFile(stagingPath, stagedBytes, 0o644))
 
@@ -2553,8 +2778,7 @@ func TestPipeline_BlockResumeAfterMergeConfirmsDurabilityBeforeCompletion(t *tes
 			blockBytes, err := os.ReadFile(blockPath)
 			require.NoError(t, err)
 
-			reseedResumeMarkerFromSnapshotYAML(t, nodeDir)
-			require.NoError(t, os.Remove(snapshotPath))
+			reseedResumeMarkerAndDropEnvelopesUpTo(t, outputDir, nodeDir)
 			chunkDir := seedLeftoverBlockChunkDir(t, nodeDir)
 			chunkPath := filepath.Join(chunkDir, archive.ChunkFileName(0, ".zst"))
 
@@ -3077,6 +3301,91 @@ func makeBlockServer(t *testing.T, rawData []byte) *httptest.Server {
 	})
 
 	return httptest.NewServer(mux)
+}
+
+func makeSizedBlockServer(t *testing.T, size int64, value byte) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/block", func(w http.ResponseWriter, request *http.Request) {
+		reader := io.NewSectionReader(repeatedByteReaderAt{value: value}, 0, size)
+		http.ServeContent(w, request, "data", time.Time{}, reader)
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	return server
+}
+
+func twoDataChildPipelineConfig(t *testing.T, outputDir string, server *httptest.Server) pipeline.Config {
+	t.Helper()
+
+	return pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           buildTwoDataChildFakeClient(t),
+		OpenExport: func(
+			_ context.Context,
+			namespace string,
+			_ aggapi.NodeRef,
+			_ string,
+		) (*exporter.Export, error) {
+			return exporter.NewExport(
+				namespace,
+				"de-two-data-children",
+				"Block",
+				server.URL,
+				exporter.NewFetcher(server.Client()),
+			), nil
+		},
+	}
+}
+
+func twoDataChildDir(outputDir, name string) string {
+	return filepath.Join(outputDir, archive.SnapshotsDirName, archive.NodeDirName(childKind, name))
+}
+
+func buildTwoDataChildFakeClient(t *testing.T) client.Client {
+	t.Helper()
+
+	root := snapObj{
+		apiVersion: storageAPIVersion,
+		kind:       "Snapshot",
+		namespace:  testNS,
+		name:       rootSnapshot,
+		uid:        "uid-root",
+		sourceRef:  namespaceSourceRefMap(testNS, "uid-ns"),
+		children: []map[string]interface{}{
+			childRefMap(childAPIVersion, childKind, "disk-a"),
+			childRefMap(childAPIVersion, childKind, "disk-b"),
+		},
+	}.build()
+
+	childA := snapObj{
+		apiVersion: childAPIVersion,
+		kind:       childKind,
+		namespace:  testNS,
+		name:       "disk-a",
+		uid:        "uid-disk-a",
+		data:       pvcData(testNS, "pvc-a", "uid-pvc-a", "vsc-a"),
+	}.build()
+	childB := snapObj{
+		apiVersion: childAPIVersion,
+		kind:       childKind,
+		namespace:  testNS,
+		name:       "disk-b",
+		uid:        "uid-disk-b",
+		data:       pvcData(testNS, "pvc-b", "uid-pvc-b", "vsc-b"),
+	}.build()
+
+	return fake.NewClientBuilder().
+		WithScheme(buildScheme(t)).
+		WithObjects(root, childA, childB).
+		Build()
 }
 
 // buildFakeClient constructs a controller-runtime fake client pre-populated with
@@ -6007,6 +6316,13 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 	// nothing on the second run.
 	require.NoError(t, os.RemoveAll(pendingDir))
 
+	// The aggregator and the root committed to the five leaf envelopes just
+	// rolled back, and bottom-up publication could not have written either
+	// ancestor envelope while a descendant's was still missing. Roll them back
+	// too, so the fixture is a state a crash can actually produce rather than a
+	// stale parent commitment no publication transaction authorizes.
+	reseedResumeMarkerAndDropEnvelopesUpTo(t, outputDir, vmDir)
+
 	// Isolate run 2's instrumentation: everything captured so far belongs to
 	// run 1's full download and must not pollute the resume assertions below.
 	openExportCalls.reset()
@@ -6214,9 +6530,8 @@ func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testi
 		archive.SnapshotsDirName, archive.NodeDirName("VolumeSnapshot", "pvc-agg"))
 	assertNodeComplete(t, leafDir)
 
-	reseedResumeMarkerFromSnapshotYAML(t, leafDir)
 	chunkDir := seedLeftoverBlockChunkDir(t, leafDir)
-	require.NoError(t, os.Remove(filepath.Join(leafDir, archive.SnapshotYAMLName)))
+	reseedResumeMarkerAndDropEnvelopesUpTo(t, outputDir, leafDir)
 
 	secondCfg := firstCfg
 	secondCfg.OpenExport = func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {

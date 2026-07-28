@@ -183,6 +183,7 @@ func TestPublicationTransactionCleanupIsDurableAndConvergent(t *testing.T) {
 		treeDigest,
 		tasks,
 		map[*source.Node]bool{node: true},
+		destination.ComputeNodeChecksum,
 	)
 	if err != nil {
 		t.Fatalf("build transaction: %v", err)

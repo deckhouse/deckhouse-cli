@@ -319,13 +319,14 @@ func buildPublicationTransaction(
 	sourceTreeDigest string,
 	tasks []nodeTask,
 	publish map[*source.Node]bool,
+	computeNodeChecksum func(string) (archive.NodeChecksum, error),
 ) (*publicationTransaction, error) {
 	expected := make(map[*source.Node]publicationEntry, len(tasks))
 
 	for i := len(tasks) - 1; i >= 0; i-- {
 		task := tasks[i]
 
-		checksum, err := destination.ComputeNodeChecksum(task.nodeDir)
+		checksum, err := computeNodeChecksum(task.nodeDir)
 		if err != nil {
 			return nil, fmt.Errorf("compute publication checksum for %s: %w", task.node.DisplayLabel(), err)
 		}
@@ -489,13 +490,14 @@ func authorizePublicationMismatch(
 	return nil
 }
 
-func verifyPublicationEntry(
+func verifyPublicationEntryContent(
 	destination *archive.RootedDestination,
 	entry publicationEntry,
+	computeNodeChecksum func(string) (archive.NodeChecksum, error),
 ) error {
 	nodeDir := filepath.Join(destination.Path(), entry.Path)
 
-	checksum, err := destination.ComputeNodeChecksum(nodeDir)
+	checksum, err := computeNodeChecksum(nodeDir)
 	if err != nil {
 		return err
 	}
@@ -503,6 +505,15 @@ func verifyPublicationEntry(
 	if checksum.Hex != entry.NodeChecksum.Hex {
 		return fmt.Errorf("publication content changed at %s: %w", nodeDir, archive.ErrChecksumMismatch)
 	}
+
+	return nil
+}
+
+func verifyPublicationEntryEnvelope(
+	destination *archive.RootedDestination,
+	entry publicationEntry,
+) error {
+	nodeDir := filepath.Join(destination.Path(), entry.Path)
 
 	metadata, err := destination.ReadSnapshotYAML(nodeDir)
 	if err != nil {
@@ -517,8 +528,14 @@ func verifyPublicationEntry(
 			nodeDir, errPublicationTransactionInvalid)
 	}
 
-	if err := destination.VerifyNode(nodeDir); err != nil {
-		return err
+	childrenChecksum, err := destination.ComputeNodeChildrenChecksum(nodeDir)
+	if err != nil {
+		return fmt.Errorf("compute publication children checksum at %s: %w", nodeDir, err)
+	}
+
+	if childrenChecksum.Hex != entry.ChildrenChecksum.Hex {
+		return fmt.Errorf("publication child set changed at %s: %w",
+			nodeDir, archive.ErrChildrenChecksumMismatch)
 	}
 
 	return nil
@@ -601,7 +618,7 @@ func completePublicationTransaction(
 	transaction *publicationTransaction,
 ) error {
 	for _, entry := range transaction.Entries {
-		if err := verifyPublicationEntry(destination, entry); err != nil {
+		if err := verifyPublicationEntryEnvelope(destination, entry); err != nil {
 			return fmt.Errorf("verify completed publication %s: %w", entry.Path, err)
 		}
 	}

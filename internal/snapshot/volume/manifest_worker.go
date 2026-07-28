@@ -201,6 +201,23 @@ func FinalizeNodeRootedContext(
 	return finalizeNodeContext(ctx, destination, nodeDir, node)
 }
 
+// FinalizeNodeRootedContextWithChecksum finalizes a node through destination's
+// locked view using a checksum computed from that same view after content
+// preparation completed.
+func FinalizeNodeRootedContextWithChecksum(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	checksum archive.NodeChecksum,
+) error {
+	if destination == nil {
+		return errors.New("finalize node with checksum: rooted destination must be set")
+	}
+
+	return finalizeNodeWithChecksum(ctx, destination, nodeDir, node, checksum)
+}
+
 func finalizeNodeContext(
 	ctx context.Context,
 	destination *archive.RootedDestination,
@@ -222,10 +239,23 @@ func finalizeNodeContext(
 		return fmt.Errorf("compute checksum for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
+	return finalizeNodeWithChecksum(ctx, destination, nodeDir, node, checksum)
+}
+
+func finalizeNodeWithChecksum(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	checksum archive.NodeChecksum,
+) error {
 	// The direct-child commitment is computed from whatever children are on disk at this
 	// point, so callers MUST finalize every child (recursively) before finalizing a parent:
 	// the pipeline's bottom-up publication order (pipeline.run) guarantees this.
-	var childrenChecksum archive.NodeChecksum
+	var (
+		childrenChecksum archive.NodeChecksum
+		err              error
+	)
 
 	if destination == nil {
 		childrenChecksum, err = archive.ComputeNodeChildrenChecksum(nodeDir)

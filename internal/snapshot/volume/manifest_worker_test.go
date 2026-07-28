@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -283,6 +284,45 @@ func TestFinalizeNode_Idempotent(t *testing.T) {
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode after two FinalizeNode calls: %v", err)
+	}
+}
+
+func TestFinalizeNodeRootedContextWithChecksum_UsesPrecomputedChecksum(t *testing.T) {
+	nodeDir := setupNodeDir(t)
+	node := &source.Node{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-precomputed",
+	}
+
+	destination, err := archive.OpenRootedDestination(nodeDir, nil)
+	if err != nil {
+		t.Fatalf("OpenRootedDestination: %v", err)
+	}
+	t.Cleanup(func() { _ = destination.Close() })
+
+	precomputed := archive.NodeChecksum{
+		Algorithm: archive.ChecksumAlgorithmSHA256,
+		Hex:       strings.Repeat("a", 64),
+		Short:     "aaaaaaaa",
+	}
+	if err := volume.FinalizeNodeRootedContextWithChecksum(
+		context.Background(),
+		destination,
+		nodeDir,
+		node,
+		precomputed,
+	); err != nil {
+		t.Fatalf("FinalizeNodeRootedContextWithChecksum: %v", err)
+	}
+
+	metadata, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if metadata.Checksum != precomputed {
+		t.Fatalf("stored checksum = %#v, want %#v", metadata.Checksum, precomputed)
 	}
 }
 
