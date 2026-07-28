@@ -399,11 +399,8 @@ func DiagnoseConstraintParseError(err error, flagName string, rawValues ...strin
 		OriginalErr: err,
 		Suggestions: []diagnostic.Suggestion{
 			{
-				Cause: fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --%s only got %q", flagName, offender),
-				Solutions: []string{
-					fmt.Sprintf(`Quote the whole value: --%s "%s>=1.43.2"`, flagName, offender),
-					fmt.Sprintf(`Example: d8 mirror pull --license='****' --%s "console@>=1.43.2" ./console`, flagName),
-				},
+				Cause:     fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --%s only got %q", flagName, offender),
+				Solutions: []string{fmt.Sprintf(`Quote the whole value: --%s "%s>=1.43.2"`, flagName, offender)},
 			},
 			{
 				Cause:     "The version came from a variable that expanded to nothing",
@@ -448,26 +445,23 @@ func DiagnosePlatformConstraintParseError(err error, rawValue string) *diagnosti
 
 // --- detection functions ---
 
-// looksLikePath reports whether a value is shaped like a filesystem path rather
-// than a version constraint. A tilde constraint (~1.65.0) is not a home-relative
-// path, so only "~/" counts.
+// looksLikePath reports whether a value is a filesystem path rather than a
+// version constraint. A separator settles it: no constraint contains one.
+// A bare name like "bundle" is only taken as a path when it names an existing
+// directory, which the bundle argument always does.
 func looksLikePath(v string) bool {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return false
 	}
 
-	if filepath.IsAbs(v) {
+	if filepath.IsAbs(v) || strings.ContainsAny(v, `/\`) {
 		return true
 	}
 
-	for _, prefix := range []string{"./", "../", `.\`, `..\`, "~/"} {
-		if strings.HasPrefix(v, prefix) {
-			return true
-		}
-	}
+	info, err := os.Stat(v)
 
-	return false
+	return err == nil && info.IsDir()
 }
 
 func isEOF(err error) bool {

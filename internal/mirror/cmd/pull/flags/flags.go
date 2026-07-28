@@ -148,7 +148,7 @@ Given platform releases v1.63.x .. v1.71.x:
   "^1.65.0"         latest patch per minor from v1.65.x up
   "1.65.0"          same as ^1.65.0 here: platform majors are always >= 1
   "=v1.65.3"        only v1.65.3, published to every release channel
-  "=v1.65.3+stable" only v1.65.3, published to stable`,
+  "=v1.65.3+stable" only v1.65.3; the +channel suffix is accepted but changes nothing here`,
 	)
 	flagSet.StringVar(
 		&DeckhouseTag,
@@ -182,7 +182,7 @@ Given v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1:
   "module-name@>=1.3.0 <=1.4.0"   v1.3.0, v1.3.3, v1.4.0
   module-name@=v1.3.0             only v1.3.0, published to every release channel
   module-name@=v1.3.0+stable      only v1.3.0, published to stable
-  module-name@=bobV1              only the bobV1 tag
+  module-name@=bobV1              only the bobV1 tag, published to every release channel
 
 For a 0.x module the bare form spans the whole 0.x line (0.4.0 means >=0.4.0 <1.0.0) while the caret locks the minor (^0.4.0 means >=0.4.0 <0.5.0).`,
 	)

@@ -178,6 +178,7 @@ func TestDiagnoseConstraintParseError_NamesTheBrokenEntry(t *testing.T) {
 func TestDiagnoseConstraintParseError_CausesAreSingleLine(t *testing.T) {
 	// Format() indents only the first line of a cause.
 	diag := DiagnoseConstraintParseError(modules.ErrEmptyConstraint, "include-module", "console@")
+	require.NotNil(t, diag)
 	require.Len(t, diag.Suggestions, 2, "both the shell and the empty-variable cause are offered")
 
 	for _, s := range diag.Suggestions {
@@ -212,15 +213,21 @@ func TestDiagnosePlatformConstraintParseError_ConstraintTypoIsNotDiagnosed(t *te
 }
 
 func TestLooksLikePath(t *testing.T) {
-	for _, v := range []string{"./bundle", "../bundle", "/tmp/bundle", "~/bundle", `.\bundle`, `..\bundle`, " ./bundle "} {
+	for _, v := range []string{"./bundle", "../bundle", "/tmp/bundle", "~/bundle", `.\bundle`, "bundles/d8", "out/", " ./bundle "} {
 		assert.True(t, looksLikePath(v), "%q is a path", v)
 	}
 
 	// Constraint operators only. The tilde constraint is the trap: ~1.65.0 is
 	// semver shorthand, not a home-relative path.
-	for _, v := range []string{"~1.65.0", "^1.65.0", ">=1.64 <=1.68", "=v1.65.3", "1.65.0", "", "  "} {
+	for _, v := range []string{"~1.65.0", "^1.65.0", ">=1.64 <=1.68", "=v1.65.3", "1.65.0", "", "  ", "d8-bundle"} {
 		assert.False(t, looksLikePath(v), "%q is a constraint", v)
 	}
+
+	// A separator-free name is a path only when it exists as a directory,
+	// which the swallowed bundle argument always does.
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.Mkdir("d8-bundle", 0o755))
+	assert.True(t, looksLikePath("d8-bundle"), "an existing directory is a path")
 }
 
 func TestDiagnosePlatformConstraintParseError_BundlePathSwallowed(t *testing.T) {

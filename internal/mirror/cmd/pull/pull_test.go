@@ -1147,10 +1147,11 @@ func TestPullerCreateModuleFilter(t *testing.T) {
 	assert.NotNil(t, filter)
 }
 
-// TestPullerFilterQuotingDiagnostic covers the user-visible half of the quoting
-// hint: an entry the shell cut down to a bare "name@" must reach the top level
+// TestPullerFilterQuotingDiagnostic covers the wiring of the quoting hint: an
+// entry the shell cut down to a bare "name@" must leave the filter constructor
 // as a *diagnostic.HelpfulError naming the flag that was typed, not as the raw
-// "Prepare module filter" error.
+// "Prepare module filter" error. Everything above wraps with %w, so root.go
+// finds it with errors.As.
 func TestPullerFilterQuotingDiagnostic(t *testing.T) {
 	originalModulesWhitelist := pullflags.ModulesWhitelist
 	originalModulesBlacklist := pullflags.ModulesBlacklist
@@ -1207,7 +1208,7 @@ func TestPullerFilterQuotingDiagnostic(t *testing.T) {
 			require.Error(t, err)
 
 			var helpErr *diagnostic.HelpfulError
-			require.ErrorAs(t, err, &helpErr, "the hint must survive to the top level")
+			require.ErrorAs(t, err, &helpErr, "the hint must survive as a HelpfulError")
 			assert.Contains(t, helpErr.Format(), tt.wantFlag, "the hint must name the flag that was typed")
 			assert.Contains(t, helpErr.Format(), `"console@"`, "the hint must name the entry that was rejected")
 		})
