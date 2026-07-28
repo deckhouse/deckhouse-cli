@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/system/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
@@ -172,7 +173,7 @@ func resolveOptions(cmd *cobra.Command, name string) (createOptions, error) {
 		kubeconfigPath, _ := cmd.Flags().GetString(flagKubeconfig)
 		contextName, _ := cmd.Flags().GetString(flagContext)
 
-		namespace, err = utilk8s.KubeconfigNamespace(kubeconfigPath, contextName)
+		namespace, err = transport.KubeconfigNamespace(kubeconfigPath, contextName)
 		if err != nil {
 			return createOptions{}, err
 		}

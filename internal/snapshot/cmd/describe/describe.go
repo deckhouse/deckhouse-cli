@@ -39,7 +39,6 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/treeview"
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 const (
@@ -142,7 +141,7 @@ func resolveCommandNamespace(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("reading --%s flag: %w", flagContext, err)
 	}
 
-	namespace, err = utilk8s.KubeconfigNamespace(kubeconfigPath, contextName)
+	namespace, err = transport.KubeconfigNamespace(kubeconfigPath, contextName)
 	if err != nil {
 		return "", fmt.Errorf("resolving namespace from kubeconfig: %w", err)
 	}

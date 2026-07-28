@@ -158,7 +158,7 @@ func Run(log *slog.Logger, cmd *cobra.Command) error {
 		kubeconfigPath, _ := cmd.Flags().GetString(flagKubeconfig)
 		contextName, _ := cmd.Flags().GetString(flagContext)
 
-		namespace, err = utilk8s.KubeconfigNamespace(kubeconfigPath, contextName)
+		namespace, err = transport.KubeconfigNamespace(kubeconfigPath, contextName)
 		if err != nil {
 			return err
 		}
