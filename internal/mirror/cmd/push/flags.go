@@ -61,7 +61,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&ModulesPathSuffix,
 		"modules-path-suffix",
 		"/modules",
-		"Suffix to append to source repo path to locate modules.",
+		"Registry path suffix to push modules to, relative to the target repo. Use \"/\" to push modules to the repo root.",
 	)
 	flagSet.StringArrayVar(
 		&Files,

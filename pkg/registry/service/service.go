@@ -23,6 +23,7 @@ import (
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
 const (
@@ -47,14 +48,49 @@ type Service struct {
 	security         *SecurityServices
 	installer        *InstallerServices
 
+	// modulesPath is the registry path where modules live, relative to the
+	// edition root. Defaults to "modules"; empty means the edition root. May
+	// hold several segments (e.g. "my/mods"), so it is a path, not a segment.
+	modulesPath string
+
 	logger *log.Logger
 }
 
+// Option configures a Service at construction time.
+type Option func(*Service)
+
+// WithModulesPathSuffix sets the registry path where modules live, relative to
+// the edition root. Empty suffix keeps the default "modules"; "/" places
+// modules at the edition root. Leading and trailing slashes are ignored.
+func WithModulesPathSuffix(suffix string) Option {
+	return func(s *Service) {
+		s.modulesPath = NormalizeModulesPath(suffix)
+	}
+}
+
+// NormalizeModulesPath resolves the modules registry path from a
+// --modules-path-suffix value. Empty value keeps the default "modules";
+// surrounding slashes are trimmed so "/" yields an empty path (modules at the
+// edition/repo root). Shared by mirror push and pull so the suffix means the
+// same thing on both sides.
+func NormalizeModulesPath(suffix string) string {
+	if suffix == "" {
+		return moduleSegment
+	}
+
+	return strings.Trim(suffix, "/")
+}
+
 // NewService creates a new registry service with the given client and logger
-func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Service {
+func NewService(c client.Client, edition pkg.Edition, logger *log.Logger, opts ...Option) *Service {
 	s := &Service{
-		client: c,
-		logger: logger,
+		client:      c,
+		logger:      logger,
+		modulesPath: moduleSegment,
+	}
+
+	for _, opt := range opts {
+		opt(s)
 	}
 
 	// base is scoped to the edition sub-path when an edition is specified.
@@ -68,7 +104,7 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger) *Servi
 
 	s.editionBase = base
 
-	s.modulesService = NewModulesService(base.WithSegment(moduleSegment), logger.Named("modules"))
+	s.modulesService = NewModulesService(base.WithSegment(pkgclient.PathToSegments(s.modulesPath)...), logger.Named("modules"))
 	s.packagesService = NewPackagesService(base.WithSegment(packageSegment), logger.Named("packages"))
 	s.deckhouseService = NewDeckhouseService(base, logger.Named("deckhouse"))
 	s.security = NewSecurityServices(securityServiceName, base.WithSegment(securitySegment), logger.Named("security"))
@@ -97,6 +133,14 @@ func (s *Service) GetEditionRoot() string {
 // ModuleService returns the module service
 func (s *Service) ModuleService() *ModulesService {
 	return s.modulesService
+}
+
+// GetModulesPath returns the registry path where modules live, relative to the
+// edition root (default "modules", empty when modules are at the edition root).
+// Callers building module references must use it so their paths match the scope
+// of ModuleService.
+func (s *Service) GetModulesPath() string {
+	return s.modulesPath
 }
 
 // PackageService returns the packages service
