@@ -233,6 +233,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 		candidateChannels := slices.Concat(internal.GetAllDefaultReleaseChannels(), []string{internal.LTSChannel})
 
 		var lastNotFound error
+
 		for _, channel := range candidateChannels {
 			err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, channel)
 			if err == nil {
