@@ -68,6 +68,8 @@ const (
 	// fieldManager is the SSA field manager name used for all restore applies.
 	fieldManager = "d8-snapshot-restore"
 
+	restoreEditRetryHint = "hint: retry with --edit to review and modify the resolved manifests before applying"
+
 	readyConditionType = "Ready"
 	conditionFalse     = "False"
 	pvcPhaseBound      = "Bound"
@@ -278,6 +280,21 @@ type automaticEditAbortedError struct {
 	editErr    error
 }
 
+type existingBoundPVCError struct {
+	namespace string
+	name      string
+	phase     string
+}
+
+func (e *existingBoundPVCError) Error() string {
+	return fmt.Sprintf(
+		"restore target PVC %s/%s already exists in phase %q; refusing to reuse it because it may contain stale data from an earlier operation; preserve its data and remove or rename the claim before retrying",
+		e.namespace,
+		e.name,
+		e.phase,
+	)
+}
+
 func (e *automaticEditAbortedError) Error() string {
 	return fmt.Sprintf(
 		"automatic edit aborted after Kubernetes Invalid response: %v; original response: %v",
@@ -424,6 +441,8 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 		stage = editedStage
 	}
 
+	editorSessionRan := cfg.Edit
+
 	cfg.Log.Info("applying restore manifests",
 		slog.String("namespace", cfg.Namespace),
 		slog.String("snapshot", cfg.Snapshot),
@@ -433,7 +452,7 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 
 	for {
 		if _, err := preflightExistingBoundPVCs(ctx, cfg, stage); err != nil {
-			return err
+			return addRestoreEditHintForBoundPVC(err, editorSessionRan)
 		}
 
 		// Every candidate manifest set completes a full DryRunAll pass before the
@@ -452,10 +471,15 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 				!automaticEditAttempted &&
 				kubeerrors.IsInvalid(dryRunErr)
 			if !autoEditEligible {
+				if !editorSessionRan && isEditableDryRunRejection(dryRunErr) {
+					return addRestoreEditHint(preflightErr)
+				}
+
 				return preflightErr
 			}
 
 			automaticEditAttempted = true
+			editorSessionRan = true
 
 			editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages)
 			if editErr != nil {
@@ -487,7 +511,9 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	// absent or Pending before dry-run may have become Bound while validation ran.
 	pvcGuards, err := preflightExistingBoundPVCs(ctx, cfg, stage)
 	if err != nil {
-		return fmt.Errorf("post-dry-run PVC preflight: %w", err)
+		preflightErr := fmt.Errorf("post-dry-run PVC preflight: %w", err)
+
+		return addRestoreEditHintForBoundPVC(preflightErr, editorSessionRan)
 	}
 
 	// Real apply pass: every object passed the dry-run, so we apply without DryRun.
@@ -506,6 +532,26 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	}
 
 	return revalidatePVCsAfterApply(ctx, cfg, pvcs)
+}
+
+func isEditableDryRunRejection(err error) bool {
+	return kubeerrors.IsInvalid(err) ||
+		kubeerrors.IsConflict(err) ||
+		kubeerrors.IsAlreadyExists(err)
+}
+
+func addRestoreEditHintForBoundPVC(err error, editorSessionRan bool) error {
+	var boundErr *existingBoundPVCError
+
+	if editorSessionRan || !errors.As(err, &boundErr) {
+		return err
+	}
+
+	return addRestoreEditHint(err)
+}
+
+func addRestoreEditHint(err error) error {
+	return fmt.Errorf("%w; %s", err, restoreEditRetryHint)
 }
 
 func restageEditedManifests(
@@ -1541,12 +1587,11 @@ func preflightExistingBoundPVCs(
 		}
 
 		if phase == pvcPhaseBound {
-			return fmt.Errorf(
-				"restore target PVC %s/%s already exists in phase %q; refusing to reuse it because it may contain stale data from an earlier operation; preserve its data and remove or rename the claim before retrying",
-				namespace,
-				obj.GetName(),
-				phase,
-			)
+			return &existingBoundPVCError{
+				namespace: namespace,
+				name:      obj.GetName(),
+				phase:     phase,
+			}
 		}
 
 		if pvc.GetUID() == "" {

@@ -212,6 +212,14 @@ func assertNoPatchActions(t *testing.T, dyn *dynamicfake.FakeDynamicClient) {
 	}
 }
 
+func assertRestoreEditHintCount(t *testing.T, err error, want int) {
+	t.Helper()
+
+	if got := strings.Count(err.Error(), restoreEditRetryHint); got != want {
+		t.Errorf("restore edit hint count = %d, want %d in error %q", got, want, err)
+	}
+}
+
 // testMapper resolves every kind the restore tests apply, with the right scope.
 // defaultGroupVersions are required for version-less RESTMapping(gk) lookups used
 // by preflightLeaves when resolving spec.dataSourceRef / spec.dataSource targets
@@ -1347,6 +1355,8 @@ func TestRun_RealApplyTimeoutReportsPartialMutation(t *testing.T) {
 		}
 	}
 
+	assertRestoreEditHintCount(t, err, 0)
+
 	if patchCalls != 4 {
 		t.Errorf("Patch attempts = %d, want 4 (two dry-run and two real)", patchCalls)
 	}
@@ -2128,6 +2138,7 @@ func TestRun_LatePreflightFailuresCauseZeroPatchAndCleanup(t *testing.T) {
 				t.Errorf("Run error = %v, want text %q", err, tc.wantText)
 			}
 
+			assertRestoreEditHintCount(t, err, 0)
 			assertNoPatchActions(t, dyn)
 
 			stageFiles, globErr := filepath.Glob(filepath.Join(tempDir, "d8-restore-stage-*.jsonl"))
@@ -2990,6 +3001,8 @@ func TestRun_WaitTimeout(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error %q does not wrap context.DeadlineExceeded", err.Error())
 	}
+
+	assertRestoreEditHintCount(t, err, 0)
 }
 
 // TestRun_Wait_WFFCHealthyStates verifies the only two accepted WFFC states:
@@ -5609,6 +5622,8 @@ func TestRun_LeafPreflight_MissingAborts(t *testing.T) {
 		t.Errorf("error %q is not actionable about missing leaf", err.Error())
 	}
 
+	assertRestoreEditHintCount(t, err, 0)
+
 	// No object must be applied since we aborted before any apply pass.
 	_, getErr := dyn.Resource(pvcGVR).Namespace(testNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
 	if !kubeerrors.IsNotFound(getErr) {
@@ -5707,6 +5722,294 @@ func TestRun_Preflight_DryRunFailureAborts(t *testing.T) {
 	_, getErr := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "cm-1", metav1.GetOptions{})
 	if !kubeerrors.IsNotFound(getErr) {
 		t.Errorf("expected NotFound after dry-run failure, got %v", getErr)
+	}
+}
+
+func TestRun_DryRunRejectionsSuggestExplicitEdit(t *testing.T) {
+	tests := []struct {
+		name           string
+		apiErr         *kubeerrors.StatusError
+		explicitDryRun bool
+	}{
+		{
+			name: "Invalid",
+			apiErr: kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"rejected",
+				field.ErrorList{field.Required(field.NewPath("data"), "")},
+			),
+		},
+		{
+			name:   "Conflict",
+			apiErr: kubeerrors.NewConflict(cmGVR.GroupResource(), "rejected", errors.New("field ownership changed")),
+		},
+		{
+			name:   "AlreadyExists",
+			apiErr: kubeerrors.NewAlreadyExists(cmGVR.GroupResource(), "rejected"),
+		},
+		{
+			name: "explicit dry-run Invalid",
+			apiErr: kubeerrors.NewInvalid(
+				schema.GroupKind{Kind: "ConfigMap"},
+				"rejected",
+				field.ErrorList{field.Forbidden(field.NewPath("data"), "rejected by webhook")},
+			),
+			explicitDryRun: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeDynamic(readySnapshot())
+			dryRunPatches := 0
+			realPatches := 0
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					_ string,
+					_ []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != cmGVR {
+						return nil, false, nil
+					}
+
+					if len(opts.DryRun) == 0 {
+						realPatches++
+					} else {
+						dryRunPatches++
+					}
+
+					return nil, true, tc.apiErr
+				},
+			}
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("rejected"))},
+				dyn,
+			)
+			cfg.DryRun = tc.explicitDryRun
+
+			err := Run(context.Background(), cfg)
+			if !errors.Is(err, tc.apiErr) {
+				t.Fatalf("Run error = %v, want original API error", err)
+			}
+
+			var statusErr *kubeerrors.StatusError
+			if !errors.As(err, &statusErr) || statusErr != tc.apiErr {
+				t.Errorf("Run error = %v, want original StatusError through errors.As", err)
+			}
+
+			assertRestoreEditHintCount(t, err, 1)
+
+			if dryRunPatches != 1 {
+				t.Errorf("dry-run Patch calls = %d, want 1", dryRunPatches)
+			}
+
+			if realPatches != 0 {
+				t.Errorf("real Patch calls = %d, want 0", realPatches)
+			}
+		})
+	}
+}
+
+func TestRun_BoundPVCRefusalsSuggestExplicitEdit(t *testing.T) {
+	tests := []struct {
+		name               string
+		initialPhase       string
+		transitionAfterDry bool
+		wantPVCGets        int
+		wantDryRunPatches  int
+	}{
+		{
+			name:         "initial preflight",
+			initialPhase: pvcPhaseBound,
+			wantPVCGets:  1,
+		},
+		{
+			name:               "post-dry-run preflight",
+			initialPhase:       pvcPhasePending,
+			transitionAfterDry: true,
+			wantPVCGets:        2,
+			wantDryRunPatches:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const pvcName = "stale"
+
+			base := newFakeDynamic(
+				readySnapshot(),
+				readyVolumeSnapshot("vs-1"),
+				restoredPVCObject(pvcName, tc.initialPhase, "", false),
+				boundPVObject(pvcName),
+			)
+			pvcGets := 0
+			dryRunPatches := 0
+			realPatches := 0
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				intercept: func(
+					_ context.Context,
+					verb string,
+					gvr schema.GroupVersionResource,
+					namespace string,
+					name string,
+				) error {
+					if verb != "get" || gvr != pvcGVR {
+						return nil
+					}
+
+					pvcGets++
+					if !tc.transitionAfterDry || pvcGets != 2 {
+						return nil
+					}
+
+					bound := restoredPVCObject(name, pvcPhaseBound, "", false)
+					bound.SetResourceVersion("2")
+
+					return base.Tracker().Update(gvr, bound, namespace)
+				},
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					_ string,
+					_ []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != pvcGVR {
+						return nil, false, nil
+					}
+
+					if len(opts.DryRun) == 0 {
+						realPatches++
+					} else {
+						dryRunPatches++
+					}
+
+					return nil, false, nil
+				},
+			}
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, pvcManifest(pvcName, ""))},
+				dyn,
+			)
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run unexpectedly reused a Bound PVC")
+			}
+
+			for _, want := range []string{
+				"default/stale",
+				`phase "Bound"`,
+				"refusing to reuse it",
+				"stale data",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Run error = %q, want text %q", err, want)
+				}
+			}
+
+			assertRestoreEditHintCount(t, err, 1)
+
+			if pvcGets != tc.wantPVCGets {
+				t.Errorf("PVC GET calls = %d, want %d", pvcGets, tc.wantPVCGets)
+			}
+
+			if dryRunPatches != tc.wantDryRunPatches {
+				t.Errorf("dry-run Patch calls = %d, want %d", dryRunPatches, tc.wantDryRunPatches)
+			}
+
+			if realPatches != 0 {
+				t.Errorf("real Patch calls = %d, want 0", realPatches)
+			}
+
+			for _, action := range base.Actions() {
+				if action.GetVerb() == "create" {
+					t.Errorf("real Create occurred for %s", action.GetResource().Resource)
+				}
+			}
+		})
+	}
+}
+
+func TestRun_EditHintExcludedFromNonActionableDryRunErrors(t *testing.T) {
+	networkErr := errors.New("connection reset by peer")
+	genericErr := errors.New("generic dry-run failure")
+	tests := []struct {
+		name       string
+		cause      error
+		wantStatus bool
+	}{
+		{name: "network", cause: networkErr},
+		{name: "generic", cause: genericErr},
+		{name: "unauthorized", cause: kubeerrors.NewUnauthorized("authentication required"), wantStatus: true},
+		{
+			name: "forbidden",
+			cause: kubeerrors.NewForbidden(
+				cmGVR.GroupResource(),
+				"rejected",
+				errors.New("admission denied"),
+			),
+			wantStatus: true,
+		},
+		{name: "timeout", cause: context.DeadlineExceeded},
+		{name: "cancellation", cause: context.Canceled},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeDynamic(readySnapshot())
+			realPatches := 0
+			dyn := &interceptingDynamicClient{
+				Interface: base,
+				interceptPatch: func(
+					_ context.Context,
+					gvr schema.GroupVersionResource,
+					_ string,
+					_ string,
+					_ []byte,
+					opts metav1.PatchOptions,
+				) (*unstructured.Unstructured, bool, error) {
+					if gvr != cmGVR {
+						return nil, false, nil
+					}
+
+					if len(opts.DryRun) == 0 {
+						realPatches++
+					}
+
+					return nil, true, tc.cause
+				},
+			}
+			cfg := baseConfig(
+				&stubSource{body: mustArray(t, configMapManifest("rejected"))},
+				dyn,
+			)
+
+			err := Run(context.Background(), cfg)
+			if !errors.Is(err, tc.cause) {
+				t.Fatalf("Run error = %v, want original cause %v", err, tc.cause)
+			}
+
+			if tc.wantStatus {
+				var statusErr *kubeerrors.StatusError
+				if !errors.As(err, &statusErr) {
+					t.Errorf("Run error = %v, want StatusError through errors.As", err)
+				}
+			}
+
+			assertRestoreEditHintCount(t, err, 0)
+
+			if realPatches != 0 {
+				t.Errorf("real Patch calls = %d, want 0", realPatches)
+			}
+		})
 	}
 }
 
@@ -5857,10 +6160,12 @@ func TestRun_AutomaticEditExplicitModesAndRetryBound(t *testing.T) {
 		dryRun      bool
 		wantEditor  int
 		wantPatches int
+		wantHint    int
 	}{
 		{
 			name:        "automatic disabled",
 			wantPatches: 1,
+			wantHint:    1,
 		},
 		{
 			name:        "explicit edit suppresses automatic retry",
@@ -5874,6 +6179,7 @@ func TestRun_AutomaticEditExplicitModesAndRetryBound(t *testing.T) {
 			autoEdit:    true,
 			dryRun:      true,
 			wantPatches: 1,
+			wantHint:    1,
 		},
 		{
 			name:        "repeated Invalid opens once",
@@ -5927,6 +6233,8 @@ func TestRun_AutomaticEditExplicitModesAndRetryBound(t *testing.T) {
 			if patches != tc.wantPatches {
 				t.Errorf("Patch calls = %d, want %d", patches, tc.wantPatches)
 			}
+
+			assertRestoreEditHintCount(t, err, tc.wantHint)
 		})
 	}
 }
@@ -6002,6 +6310,8 @@ func TestRun_AutomaticEditAbortPreservesInvalidCause(t *testing.T) {
 			if !strings.Contains(err.Error(), "automatic edit aborted") {
 				t.Errorf("Run error = %q, want automatic-edit-aborted text", err)
 			}
+
+			assertRestoreEditHintCount(t, err, 0)
 
 			if editorCalls != 1 {
 				t.Errorf("editor calls = %d, want 1", editorCalls)
@@ -6144,6 +6454,8 @@ func TestRun_AutomaticEditNeverStartsAfterRealApply(t *testing.T) {
 	if editorCalls != 0 {
 		t.Errorf("editor calls = %d, want 0 after real apply began", editorCalls)
 	}
+
+	assertRestoreEditHintCount(t, err, 0)
 }
 
 func TestRun_StateSnapshotterServicePayloadCompatibility(t *testing.T) {
@@ -6446,6 +6758,8 @@ func TestRun_AutomaticEditRestagesAllPreflightChecks(t *testing.T) {
 			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
 				t.Errorf("Run error = %q, want text %q", err, tc.wantText)
 			}
+
+			assertRestoreEditHintCount(t, err, 0)
 
 			if editorCalls != 1 {
 				t.Errorf("editor calls = %d, want 1", editorCalls)
@@ -9951,6 +10265,21 @@ func (c *logCapture) countMsg(msg string) int {
 	return n
 }
 
+func (c *logCapture) countMsgContaining(text string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := 0
+
+	for _, r := range c.records {
+		if strings.Contains(r.Message, text) {
+			n++
+		}
+	}
+
+	return n
+}
+
 // TestRun_SelectedNode_UnknownSelectorErrors verifies a selector absent from the
 // positional root hierarchy returns an error before calling RestoreManifests.
 func TestRun_SelectedNode_UnknownSelectorErrors(t *testing.T) {
@@ -10006,6 +10335,10 @@ func TestRun_NormalRestore_NoWouldApplyLog(t *testing.T) {
 	if n := cap.countMsg("applied"); n < 1 {
 		t.Errorf("normal restore emitted %d 'applied' log lines (want >=1)", n)
 	}
+
+	if n := cap.countMsgContaining(restoreEditRetryHint); n != 0 {
+		t.Errorf("successful restore emitted %d restore edit hints", n)
+	}
 }
 
 // TestRun_DryRun_LogsWouldApply verifies that an explicit --dry-run restore
@@ -10028,5 +10361,9 @@ func TestRun_DryRun_LogsWouldApply(t *testing.T) {
 
 	if n := cap.countMsg("applied"); n != 0 {
 		t.Errorf("--dry-run restore emitted %d 'applied' log lines (want 0)", n)
+	}
+
+	if n := cap.countMsgContaining(restoreEditRetryHint); n != 0 {
+		t.Errorf("successful --dry-run restore emitted %d restore edit hints", n)
 	}
 }
