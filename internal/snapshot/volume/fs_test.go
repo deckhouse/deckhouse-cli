@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync"
@@ -3709,17 +3710,30 @@ func TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs(t *testing.T)
 }
 
 func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
+	// deltaLimit bounds how much more live heap 10x the entries may cost. The
+	// staging path retains at most fsInventorySortBatchSize items plus fixed
+	// buffers, so the measured delta is sampling jitter: well under a MiB across
+	// repeated runs, with tens of MiB of unrelated live heap in the binary and
+	// with every core busy.
+	// Retaining the listing itself would instead cost roughly 200 bytes per item,
+	// about 6 MiB at largeEntries, so 2 MiB still fails loudly on any linear
+	// retention while absorbing the jitter.
+	//
+	// smallEntries stays large enough for its run to outlive a handful of sampler
+	// ticks. A run that finishes in a few milliseconds is sampled a handful of
+	// times and reports a peak well below its real one, which shows up as a
+	// count-dependent delta that says nothing about retention.
 	const (
-		smallEntries = 500
+		smallEntries = 3_000
 		largeEntries = 30_000
-		deltaLimit   = 4 << 20
+		deltaLimit   = 2 << 20
 	)
 
 	smallPeak := measureLargeFlatInventoryHeap(t, smallEntries)
 	largePeak := measureLargeFlatInventoryHeap(t, largeEntries)
 	if largePeak > smallPeak+deltaLimit {
 		t.Fatalf(
-			"peak additional heap grew from %d to %d bytes for %d versus %d entries; count-dependent delta %d exceeds %d",
+			"peak additional live heap grew from %d to %d bytes for %d versus %d entries; count-dependent delta %d exceeds %d",
 			smallPeak,
 			largePeak,
 			smallEntries,
@@ -3730,8 +3744,28 @@ func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
 	}
 }
 
+// measureLargeFlatInventoryHeap returns the peak live heap that downloading an
+// inventory of entries link items adds on top of the binary's resting heap.
+//
+// It samples /gc/heap/live:bytes — bytes the previous collection marked as live —
+// rather than MemStats.HeapAlloc, which also counts garbage that has not been
+// collected yet. That garbage term is not a property of the code under test: it
+// is GOGC pacing headroom, proportional to the whole test binary's live heap and
+// to how long the run keeps allocating. Streaming largeEntries churns hundreds
+// of megabytes, so with HeapAlloc the same bounded-memory path reads tens of MiB
+// larger for the big inventory once the binary's resting heap is tens of MiB, as
+// it is in a full-package run, and larger still when a loaded CI runner starves
+// the collector. The marked-live series carries none of that.
 func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 	t.Helper()
+
+	// A forced collection every forceGCEvery ticks keeps the marked-live series
+	// advancing: it is only republished at mark termination, so a run that
+	// triggers few collections of its own would otherwise go unsampled.
+	const (
+		sampleInterval = 2 * time.Millisecond
+		forceGCEvery   = 5
+	)
 
 	srv := newLargeLinkInventoryServer(t, entries, false)
 	nodeDir := t.TempDir()
@@ -3740,27 +3774,31 @@ func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 
 	runtime.GC()
 
-	var baseline runtime.MemStats
-	runtime.ReadMemStats(&baseline)
+	baseline := markedLiveHeapBytes()
 
 	stop := make(chan struct{})
 	peak := make(chan uint64, 1)
 
 	go func() {
-		ticker := time.NewTicker(time.Millisecond)
+		ticker := time.NewTicker(sampleInterval)
 		defer ticker.Stop()
 
-		maxHeap := baseline.HeapAlloc
+		maxLive := baseline
+		ticks := 0
+
 		for {
 			select {
 			case <-ticker.C:
-				var current runtime.MemStats
-				runtime.ReadMemStats(&current)
-				if current.HeapAlloc > maxHeap {
-					maxHeap = current.HeapAlloc
+				ticks++
+				if ticks%forceGCEvery == 0 {
+					runtime.GC()
+				}
+
+				if live := markedLiveHeapBytes(); live > maxLive {
+					maxLive = live
 				}
 			case <-stop:
-				peak <- maxHeap
+				peak <- maxLive
 
 				return
 			}
@@ -3774,14 +3812,14 @@ func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 	)
 	close(stop)
 
-	maxHeap := <-peak
+	maxLive := <-peak
 	if err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
 	additional := uint64(0)
-	if maxHeap > baseline.HeapAlloc {
-		additional = maxHeap - baseline.HeapAlloc
+	if maxLive > baseline {
+		additional = maxLive - baseline
 	}
 
 	f, err := os.Open(tarPath)
@@ -3809,6 +3847,15 @@ func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 	}
 
 	return additional
+}
+
+// markedLiveHeapBytes reports the heap bytes the previous collection marked as
+// live, excluding anything allocated since.
+func markedLiveHeapBytes() uint64 {
+	sample := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
+	metrics.Read(sample)
+
+	return sample[0].Value.Uint64()
 }
 
 func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *testing.T) {
@@ -4224,20 +4271,46 @@ func TestDownloadFilesystemVolume_StagingIndependentWorkerCauseWins(t *testing.T
 }
 
 func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.T) {
-	const entries = 500
+	// The fixture pins the ordering this test needs. The job queue is capped at
+	// workers and no request can finish before the truncation below lands (the
+	// doer funnels every caller through one sync.Once), so at that moment the
+	// inventory reader has yielded at most 2*workers items and its bufio.Scanner
+	// holds only its first 4 KiB fill — the corrupt tail is still unread on disk.
+	// files therefore only has to exceed 2*workers, while the trailing links keep
+	// the inventory past 32 KiB. Links are not staged, so once the draining
+	// worker clears the handful of files the reader sails to the corrupt tail
+	// without further downloads, and that independent failure must cancel the one
+	// worker still parked in an in-flight request.
+	const (
+		files   = 8
+		links   = 400
+		workers = 2
+	)
 
-	srv := newLargeFileInventoryServer(t, entries, md5Hex([]byte("x")))
+	srv := newFileThenLinkInventoryServer(t, files, links, md5Hex([]byte("x")))
 	nodeDir := t.TempDir()
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
 	inventoryPath := filepath.Join(stagingDir, volume.FSMetaDirName, "inventory.jsonl")
 	requestStarted := make(chan struct{})
-	var truncateOnce sync.Once
+
+	var (
+		truncateOnce sync.Once
+		truncateErr  error
+	)
 
 	sourceDoer := &observedDoer{
 		do: func(req *http.Request) (*http.Response, error) {
-			var truncateErr error
+			blocking := false
 
+			// Concurrent callers block inside Do until the first one returns, so
+			// no job can complete before the inventory is corrupt on disk.
 			truncateOnce.Do(func() {
+				blocking = true
+
+				// Always unblock the test goroutine: a fixture failure must
+				// surface as the returned error, not as a hung test.
+				defer close(requestStarted)
+
 				info, err := os.Stat(inventoryPath)
 				if err != nil {
 					truncateErr = err
@@ -4245,16 +4318,28 @@ func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.
 					return
 				}
 
+				if info.Size() < 32<<10 {
+					truncateErr = fmt.Errorf(
+						"inventory fixture is %d bytes; it must exceed the reader's first buffer fill",
+						info.Size(),
+					)
+
+					return
+				}
+
 				truncateErr = os.Truncate(inventoryPath, info.Size()-64)
-				close(requestStarted)
 			})
 			if truncateErr != nil {
 				return nil, fmt.Errorf("truncate inventory fixture: %w", truncateErr)
 			}
 
-			<-req.Context().Done()
+			if blocking {
+				<-req.Context().Done()
 
-			return nil, req.Context().Err()
+				return nil, req.Context().Err()
+			}
+
+			return srv.Client().Do(req)
 		},
 	}
 
@@ -4266,7 +4351,7 @@ func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.
 			filepath.Join(nodeDir, archive.FsTarName),
 			stagingDir,
 			srv.URL+"/files/",
-			entries,
+			workers,
 			0,
 			exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
 			mustCodec(t, "none"),
@@ -4286,7 +4371,10 @@ func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.
 		if errors.Is(err, context.Canceled) {
 			t.Fatalf("inventory corruption was replaced by derivative cancellation: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	// The run itself needs a fraction of a second; the bound is only a hang
+	// detector, so it stays far above any plausible CI slowdown to keep a loaded
+	// runner from reporting a deadlock that is really just scheduling latency.
+	case <-time.After(30 * time.Second):
 		t.Fatal("DownloadFilesystemVolume deadlocked after independent inventory failure")
 	}
 
@@ -4345,6 +4433,69 @@ func newLargeFileInventoryServer(t *testing.T, entries int, advertisedMD5 string
 					URI:        fmt.Sprintf("file-%06d", index),
 					Attributes: map[string]any{"size": 1},
 				}); err != nil {
+					return
+				}
+			}
+
+			_, _ = io.WriteString(w, `]}`)
+
+			return
+		}
+
+		if r.Method == http.MethodHead {
+			w.Header().Set("X-Attribute-Hash-Md5", advertisedMD5)
+		}
+
+		http.ServeContent(w, r, filepath.Base(r.URL.Path), time.Time{}, strings.NewReader("x"))
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// newFileThenLinkInventoryServer serves a flat listing of files followed by
+// symlinks. Stored paths sort files ahead of links, so the resulting inventory
+// has a short staged prefix and a long tail that the reader streams without
+// queueing any download job.
+func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD5 string) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/files/" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+
+			encoder := json.NewEncoder(w)
+			written := 0
+
+			emit := func(item exporter.Item) bool {
+				if written > 0 {
+					_, _ = io.WriteString(w, ",")
+				}
+
+				written++
+
+				return encoder.Encode(item) == nil
+			}
+
+			for index := range files {
+				if !emit(exporter.Item{
+					Name:       fmt.Sprintf("file-%06d", index),
+					Type:       "file",
+					URI:        fmt.Sprintf("file-%06d", index),
+					Attributes: map[string]any{"size": 1},
+				}) {
+					return
+				}
+			}
+
+			for index := range links {
+				if !emit(exporter.Item{
+					Name:       fmt.Sprintf("link-%08d", index),
+					Type:       "link",
+					TargetPath: "target",
+					Attributes: map[string]any{},
+				}) {
 					return
 				}
 			}
