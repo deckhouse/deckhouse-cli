@@ -89,6 +89,39 @@ current-context: default
 	}
 }
 
+// newTestKubeconfigFlags builds a --kubeconfig flag pointing at a throwaway
+// kubeconfig fixture, so NewClient doesn't fall back to $HOME/.kube/config —
+// a file that doesn't exist on CI runners and shouldn't be relied on by tests.
+func newTestKubeconfigFlags(t *testing.T) *pflag.FlagSet {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://test.invalid
+contexts:
+- name: default
+  context:
+    cluster: default
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("kubeconfig", "", "")
+
+	if err := flags.Set("kubeconfig", kubeconfigPath); err != nil {
+		t.Fatalf("set kubeconfig flag: %v", err)
+	}
+
+	return flags
+}
+
 // TestClient_SetQPS asserts that SetQPS mutates the underlying rest.Config's
 // QPS/Burst fields to exactly the values passed, and that RESTConfig() (the deep
 // copy callers use to build their own clients, e.g. the aggregated-API client)
@@ -96,7 +129,7 @@ current-context: default
 func TestClient_SetQPS(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -122,7 +155,7 @@ func TestClient_SetQPS(t *testing.T) {
 func TestClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -143,7 +176,7 @@ func TestClient_SetQPS_DefaultUnchangedWithoutCall(t *testing.T) {
 func TestClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -172,7 +205,7 @@ func TestClient_SetResponseHeaderTimeout_AppliesToTransport(t *testing.T) {
 func TestClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -200,7 +233,7 @@ func TestClient_SetResponseHeaderTimeout_ChainsExistingWrapTransport(t *testing.
 func TestClient_ResponseHeaderTimeout_DefaultUnchangedWithoutCall(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -224,7 +257,7 @@ func (stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 func TestClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -256,7 +289,7 @@ func TestClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 func TestClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
 	t.Parallel()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -291,7 +324,7 @@ func TestClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sc, err := NewClient()
+	sc, err := NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

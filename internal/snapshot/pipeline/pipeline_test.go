@@ -39,6 +39,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 	"github.com/vbauerster/mpb/v8/decor"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -602,7 +603,7 @@ func TestPipeline_ProductionExportReusesAndClosesHTTPConnections(t *testing.T) {
 	readyExport := readyFilesystemDataExport(t, srv)
 	require.NoError(t, c.Create(context.Background(), readyExport))
 
-	sc, err := transport.NewClient()
+	sc, err := transport.NewClient(newTestKubeconfigFlags(t))
 	require.NoError(t, err)
 
 	cfg := pipeline.Config{
@@ -3656,6 +3657,40 @@ func buildTwoDataChildFakeClient(t *testing.T) client.Client {
 		WithScheme(buildScheme(t)).
 		WithObjects(root, childA, childB).
 		Build()
+}
+
+// newTestKubeconfigFlags builds a --kubeconfig flag pointing at a throwaway
+// kubeconfig fixture, so transport.NewClient doesn't fall back to
+// $HOME/.kube/config — a file that doesn't exist on CI runners and shouldn't
+// be relied on by tests.
+func newTestKubeconfigFlags(t *testing.T) *pflag.FlagSet {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://test.invalid
+contexts:
+- name: default
+  context:
+    cluster: default
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("kubeconfig", "", "")
+
+	if err := flags.Set("kubeconfig", kubeconfigPath); err != nil {
+		t.Fatalf("set kubeconfig flag: %v", err)
+	}
+
+	return flags
 }
 
 // buildFakeClient constructs a controller-runtime fake client pre-populated with

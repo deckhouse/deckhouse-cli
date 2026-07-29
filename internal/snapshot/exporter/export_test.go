@@ -34,15 +34,53 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
+
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
+
+// newTestKubeconfigFlags builds a --kubeconfig flag pointing at a throwaway
+// kubeconfig fixture, so transport.NewClient doesn't fall back to
+// $HOME/.kube/config — a file that doesn't exist on CI runners and shouldn't
+// be relied on by tests.
+func newTestKubeconfigFlags(t *testing.T) *pflag.FlagSet {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://test.invalid
+contexts:
+- name: default
+  context:
+    cluster: default
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("kubeconfig", "", "")
+
+	if err := flags.Set("kubeconfig", kubeconfigPath); err != nil {
+		t.Fatalf("set kubeconfig flag: %v", err)
+	}
+
+	return flags
+}
 
 func TestBuildSubClients_IsolatesConcurrentExportCAs(t *testing.T) {
 	t.Parallel()
@@ -56,7 +94,7 @@ func TestBuildSubClients_IsolatesConcurrentExportCAs(t *testing.T) {
 	)
 	serverBURL := serverURLForHost(t, serverB, "localhost")
 
-	sc, err := transport.NewClient()
+	sc, err := transport.NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -159,7 +197,7 @@ func TestBuildSubClients_RejectsInvalidPublishedIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			sc, err := transport.NewClient()
+			sc, err := transport.NewClient(newTestKubeconfigFlags(t))
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)
 			}
@@ -211,7 +249,7 @@ func TestBuildSubClients_RejectsWrongCAAndSANBeforeHTTPAuth(t *testing.T) {
 		[]string{"producer.invalid"},
 	)
 
-	sc, err := transport.NewClient()
+	sc, err := transport.NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -308,7 +346,7 @@ func TestBuildSubClients_BindsBothClientsToPublishedOrigin(t *testing.T) {
 		nil,
 	)
 
-	sc, err := transport.NewClient()
+	sc, err := transport.NewClient(newTestKubeconfigFlags(t))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

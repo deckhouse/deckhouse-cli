@@ -36,22 +36,6 @@ type archiveMountIdentity struct {
 	fsType     string
 }
 
-func openArchiveRootUnix(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, classifyArchiveOpenError(path, true, err)
-	}
-
-	dir := os.NewFile(uintptr(fd), path)
-	if dir == nil {
-		_ = unix.Close(fd)
-
-		return nil, fmt.Errorf("open archive root %s: invalid directory descriptor", path)
-	}
-
-	return dir, nil
-}
-
 func openArchiveAtUnix(
 	parent *os.File,
 	name string,
