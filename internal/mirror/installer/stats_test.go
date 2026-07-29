@@ -97,3 +97,39 @@ func TestStats_RealPull_SurvivesPacking(t *testing.T) {
 	require.Equal(t, 1, stats.Images,
 		"installer count must survive packing (captured before bundle.Pack deletes the layout)")
 }
+
+// TestStats_AccessFailure_ReportsNotAttempted is the regression test for the bug
+// where a gracefully-skipped installer pull (the installer repo returned 404, so
+// PullInstaller warns and returns nil) was still reported as a successful pull of
+// tag "latest" in the summary. With nothing pulled, Stats must report
+// Attempted=false so the summary renders "not pulled".
+func TestStats_AccessFailure_ReportsNotAttempted(t *testing.T) {
+	workingDir := t.TempDir()
+	bundleDir := t.TempDir()
+
+	stubClient := fake.NewRegistryClientStub()
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	regSvc := registryservice.NewService(stubClient, pkg.FEEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		workingDir,
+		&Options{
+			// Tag that does not exist in the stub registry: the access check
+			// fails, PullInstaller gracefully skips, nothing is pulled.
+			TargetTag: "v9.99.0",
+			BundleDir: bundleDir,
+			DryRun:    false,
+		},
+		logger,
+		userLogger,
+	)
+
+	require.NoError(t, svc.PullInstaller(context.Background()))
+
+	stats := svc.Stats()
+	require.False(t, stats.Attempted, "gracefully-skipped installer must not report a successful pull")
+	require.Equal(t, 0, stats.Images)
+}

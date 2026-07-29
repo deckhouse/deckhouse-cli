@@ -27,12 +27,12 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	localreg "github.com/deckhouse/deckhouse/pkg/registry"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 )
 
 // newTestPlatformService is a test helper that builds a Service with only the
@@ -66,6 +66,18 @@ func ltsOnlyStub() localreg.Client {
 // emptyStub returns a stub registry with no release channels at all.
 func emptyStub() localreg.Client {
 	return pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")))
+}
+
+// rockSolidOnlyStub returns a stub registry that publishes only the rock-solid
+// channel: neither the default "stable" nor the "lts" fallback exists, so access
+// validation must scan the remaining channels to succeed.
+func rockSolidOnlyStub() localreg.Client {
+	reg := upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"v1.68.0"}`).
+		MustBuild()
+	reg.MustAddImage("release-channel", "rock-solid", img)
+	return pkgclient.Adapt(upfake.NewClient(reg))
 }
 
 func TestService_validatePlatformAccess(t *testing.T) {
@@ -110,6 +122,12 @@ func TestService_validatePlatformAccess(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			name:       "only rock-solid channel exists, default stable scans and succeeds",
+			makeClient: rockSolidOnlyStub,
+			targetTag:  "",
+			wantErr:    false,
+		},
+		{
 			name:        "channel not found and LTS also missing returns error",
 			makeClient:  emptyStub,
 			targetTag:   "stable",
@@ -117,11 +135,20 @@ func TestService_validatePlatformAccess(t *testing.T) {
 			errContains: "release channel",
 		},
 		{
+			// The returned error must keep wrapping ErrImageNotFound so the
+			// errdetect diagnostics recognize it and print the --deckhouse-tag hint.
+			name:        "no channel at all stays an image-not-found error",
+			makeClient:  emptyStub,
+			targetTag:   "stable",
+			wantErr:     true,
+			errContains: "release channel found",
+		},
+		{
 			name:        "LTS channel missing with empty registry",
 			makeClient:  emptyStub,
 			targetTag:   "beta",
 			wantErr:     true,
-			errContains: "lts",
+			errContains: "release channel found",
 		},
 		{
 			name:       "semver tag exists in root repository",

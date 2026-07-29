@@ -30,6 +30,12 @@ type ComponentStats struct {
 // the planned count from the download list; otherwise it reports the actual
 // number of manifests pulled into the OCI layout, captured before packing (see
 // Service.pulledImages).
+//
+// When nothing was pulled (Images == 0) the phase is reported as not attempted
+// so the summary renders "not pulled" rather than falsely claiming the tag was
+// mirrored. PullInstaller gracefully skips on an access error (e.g. the installer
+// repo returns 404), leaving pulledImages at zero; reporting Attempted here would
+// misrepresent that skip as a successful pull.
 func (svc *Service) Stats() ComponentStats {
 	tag := defaultTargetTag
 	if svc.options.TargetTag != "" {
@@ -40,5 +46,5 @@ func (svc *Service) Stats() ComponentStats {
 		return ComponentStats{Attempted: true, Images: len(svc.downloadList.Installer), Tag: tag}
 	}
 
-	return ComponentStats{Attempted: true, Images: svc.pulledImages, Tag: tag}
+	return ComponentStats{Attempted: svc.pulledImages > 0, Images: svc.pulledImages, Tag: tag}
 }

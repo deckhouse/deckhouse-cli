@@ -217,7 +217,6 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	// Default to stable channel if no specific tag is set
 	targetTag := internal.StableChannel
-	fallbackTag := internal.LTSChannel
 
 	if svc.options.TargetTag != "" {
 		targetTag = svc.options.TargetTag
@@ -227,24 +226,30 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
-		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, targetTag)
-		if err == nil {
-			return nil
+		// Probe every known release channel, not just the requested one. Editions
+		// differ in which channels they publish (e.g. CSE ships only "lts"), so any
+		// existing channel proves registry access. Every valid channel is already in
+		// this list, so the requested targetTag is covered too.
+		candidateChannels := slices.Concat(internal.GetAllDefaultReleaseChannels(), []string{internal.LTSChannel})
+
+		var lastNotFound error
+		for _, channel := range candidateChannels {
+			err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, channel)
+			if err == nil {
+				return nil
+			}
+
+			// Everything but ErrImageNotFound means we can't reach the registry at all
+			if !errors.Is(err, client.ErrImageNotFound) {
+				return fmt.Errorf("failed to check release channel %q exists in registry: %w", channel, err)
+			}
+
+			lastNotFound = err
 		}
 
-		// Everything but ErrImageNotFound means we can't reach the registry at all
-		if !errors.Is(err, client.ErrImageNotFound) {
-			return fmt.Errorf("failed to check release channel %q exists in registry: %w", targetTag, err)
-		}
-
-		// Channel not found (CSE edition may not have "stable").
-		// Fall back to LTS to verify registry access.
-		fallbackErr := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, fallbackTag)
-		if fallbackErr != nil {
-			return fmt.Errorf("failed to check release channel %q exists in registry: %w", fallbackTag, fallbackErr)
-		}
-
-		return nil
+		// No channel exists in the registry. Keep wrapping ErrImageNotFound so the
+		// errdetect diagnostics fire and point the user at --deckhouse-tag.
+		return fmt.Errorf("no release channel found in the source registry (checked: %s): %w", strings.Join(candidateChannels, ", "), lastNotFound)
 	}
 
 	// For specific tags, check if the tag exists
