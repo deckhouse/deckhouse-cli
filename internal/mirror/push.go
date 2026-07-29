@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -38,6 +39,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pusher"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 const (
@@ -46,10 +49,14 @@ const (
 
 // PushServiceOptions contains configuration options for PushService
 type PushServiceOptions struct {
-	// BundleDir is the directory containing the bundle to push
-	BundleDir string
+	// Packages is the list of tar/chunked package archive paths to push.
+	Packages []string
 	// WorkingDir is the temporary directory for unpacking bundles
 	WorkingDir string
+	// ModulesPathSuffix is the registry path suffix to push modules to,
+	// relative to the target repo. Empty value keeps the default "modules".
+	// Leading and trailing slashes are ignored.
+	ModulesPathSuffix string
 }
 
 // PushService handles pushing OCI layouts to registry.
@@ -115,11 +122,14 @@ func NewPushService(
 //
 // The key principle: no path transformations. Whatever path the layout has
 // in the unpacked directory becomes its path in the registry.
-func (svc *PushService) Push(ctx context.Context) error {
+func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
+	// The modules path is known up front, so it is on the summary even on error.
+	summary := &PushSummary{ModulesPath: svc.modulesPathReport()}
+
 	// Create unified directory for unpacking
 	dirPath := filepath.Join(svc.options.WorkingDir, "unified")
 	if err := os.MkdirAll(dirPath, dirPermissions); err != nil {
-		return fmt.Errorf("create unified directory: %w", err)
+		return summary, fmt.Errorf("create unified directory: %w", err)
 	}
 
 	defer func() {
@@ -132,47 +142,83 @@ func (svc *PushService) Push(ctx context.Context) error {
 
 	// Unpack all packages into unified structure
 	if err := svc.unpackAllPackages(ctx, dirPath); err != nil {
-		return fmt.Errorf("unpack packages: %w", err)
+		return summary, fmt.Errorf("unpack packages: %w", err)
 	}
 
 	// Push all layouts recursively
 	if err := svc.userLogger.Process("Push to registry", func() error {
-		return svc.pushAllLayouts(ctx, dirPath)
+		return svc.pushAllLayouts(ctx, dirPath, summary)
 	}); err != nil {
-		return err
+		return summary, err
 	}
 
 	// Create modules index (deckhouse/modules:<module-name> tags for discovery)
 	if err := svc.userLogger.Process("Create modules index", func() error {
-		return svc.createModulesIndex(ctx, dirPath)
+		return svc.createModulesIndex(ctx, dirPath, summary)
 	}); err != nil {
-		return err
+		return summary, err
 	}
 
 	// Create packages index (deckhouse/packages:<package-name> tags for discovery)
-	return svc.userLogger.Process("Create packages index", func() error {
-		return svc.createPackagesIndex(ctx, dirPath)
-	})
+	if err := svc.userLogger.Process("Create packages index", func() error {
+		return svc.createPackagesIndex(ctx, dirPath, summary)
+	}); err != nil {
+		return summary, err
+	}
+
+	return summary, nil
 }
 
-// unpackAllPackages unpacks all tar packages from bundle directory into unified directory.
+// modulesPathReport resolves the target modules path for the push summary,
+// honoring --modules-path-suffix.
+func (svc *PushService) modulesPathReport() ModulesPathReport {
+	return BuildModulesPathReport(svc.client.GetRegistry(), svc.options.ModulesPathSuffix)
+}
+
+// modulesPath returns the registry path for module repositories, relative to
+// the target repo. Derived from ModulesPathSuffix; empty result means modules
+// go to the repo root.
+func (svc *PushService) modulesPath() string {
+	return registryservice.NormalizeModulesPath(svc.options.ModulesPathSuffix)
+}
+
+// remapModulesSegment rewrites the leading "modules" component of a
+// slash-separated registry segment to the configured modules path.
+// Modules are always stored under "modules/<name>" inside the bundle, so this
+// is where --modules-path-suffix takes effect. Segments outside "modules" are
+// returned unchanged.
+func (svc *PushService) remapModulesSegment(segment string) string {
+	modulesPrefix := internal.ModulesSegment + "/"
+
+	switch {
+	case segment == internal.ModulesSegment:
+		return svc.modulesPath()
+	case strings.HasPrefix(segment, modulesPrefix):
+		return path.Join(svc.modulesPath(), strings.TrimPrefix(segment, modulesPrefix))
+	default:
+		return segment
+	}
+}
+
+// unpackAllPackages unpacks all tar packages into the unified directory.
 // All packages are unpacked to the same root - the structure inside each tar
 // should already have the correct paths.
 func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) error {
-	entries, err := os.ReadDir(svc.options.BundleDir)
-	if err != nil {
-		return fmt.Errorf("read bundle dir: %w", err)
+	if len(svc.options.Packages) == 0 {
+		return fmt.Errorf("no packages found to push")
 	}
 
-	packages := svc.findPackages(entries)
-	if len(packages) == 0 {
-		return fmt.Errorf("no packages found in bundle directory %q", svc.options.BundleDir)
-	}
+	packages := slices.Clone(svc.options.Packages)
+	slices.Sort(packages)
+	// Drop duplicate archive paths so the same package is not unpacked twice
+	// (which would redo work and overwrite files in the unified directory).
+	packages = slices.Compact(packages)
 
 	svc.userLogger.Infof("Found %d packages to unpack", len(packages))
 
-	for _, pkgName := range packages {
-		if err := svc.unpackPackage(ctx, dirPath, pkgName); err != nil {
+	for _, pkgPath := range packages {
+		pkgName := packageNameFromPath(pkgPath)
+		if err := svc.unpackPackage(ctx, dirPath, pkgPath, pkgName); err != nil {
 			// Log warning but continue with other packages
 			svc.userLogger.Warnf("Failed to unpack %s: %v", pkgName, err)
 		}
@@ -181,43 +227,18 @@ func (svc *PushService) unpackAllPackages(ctx context.Context, dirPath string) e
 	return nil
 }
 
-// findPackages finds all package names (without .tar extension) in the bundle directory.
-// It handles both regular .tar files and chunked packages (.tar.chunk000).
-func (svc *PushService) findPackages(entries []os.DirEntry) []string {
-	packagesSet := make(map[string]struct{})
-
-	for _, entry := range entries {
-		name := entry.Name()
-
-		// Handle regular tar files
-		if strings.HasSuffix(name, ".tar") {
-			pkgName := strings.TrimSuffix(name, ".tar")
-			packagesSet[pkgName] = struct{}{}
-
-			continue
-		}
-
-		// Handle chunked files (e.g., "platform.tar.chunk000")
-		if idx := strings.Index(name, ".tar.chunk"); idx != -1 {
-			pkgName := name[:idx]
-			packagesSet[pkgName] = struct{}{}
-		}
-	}
-
-	packages := make([]string, 0, len(packagesSet))
-	for pkg := range packagesSet {
-		packages = append(packages, pkg)
-	}
-
-	slices.Sort(packages)
-
-	return packages
+// packageNameFromPath derives the package name (used for legacy module detection
+// during unpack) from a package archive path by stripping its directory and the
+// .tar suffix. Callers must pass canonical .tar paths - chunked packages are
+// already collapsed to their .tar name before reaching this point.
+func packageNameFromPath(pkgPath string) string {
+	return strings.TrimSuffix(filepath.Base(pkgPath), ".tar")
 }
 
-// unpackPackage unpacks a single package to the unified directory.
-func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName string) error {
+// unpackPackage unpacks a single package archive into the unified directory.
+func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgPath, pkgName string) error {
 	return svc.userLogger.Process(fmt.Sprintf("Unpack %s", pkgName), func() error {
-		pkg, err := svc.openPackage(pkgName)
+		pkg, err := openPackage(pkgPath)
 		if err != nil {
 			return fmt.Errorf("open package: %w", err)
 		}
@@ -232,26 +253,25 @@ func (svc *PushService) unpackPackage(ctx context.Context, dirPath, pkgName stri
 	})
 }
 
-// openPackage opens a package file, trying .tar first, then chunked format.
-func (svc *PushService) openPackage(pkgName string) (io.ReadCloser, error) {
-	tarPath := filepath.Join(svc.options.BundleDir, pkgName+".tar")
-
-	pkg, err := os.Open(tarPath)
+// openPackage opens a package archive by path, trying the path as a plain .tar
+// first, then falling back to the chunked format.
+func openPackage(pkgPath string) (io.ReadCloser, error) {
+	pkg, err := os.Open(pkgPath)
 	if err == nil {
 		return pkg, nil
 	}
 
 	if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("open tar package %q: %w", tarPath, err)
+		return nil, fmt.Errorf("open tar package %q: %w", pkgPath, err)
 	}
 
-	// Try chunked format
-	return chunked.Open(svc.options.BundleDir, pkgName+".tar")
+	// Try chunked format: chunks live next to the package as <name>.tar.NNNN.chunk
+	return chunked.Open(filepath.Dir(pkgPath), filepath.Base(pkgPath))
 }
 
 // pushAllLayouts recursively walks the directory and pushes each OCI layout found.
 // The relative path from root becomes the registry segment.
-func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string) error {
+func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string, summary *PushSummary) error {
 	layouts, err := svc.findLayouts(rootDir)
 	if err != nil {
 		return fmt.Errorf("scan layouts in %q: %w", rootDir, err)
@@ -269,7 +289,7 @@ func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string) erro
 			return err
 		}
 
-		if err := svc.pushSingleLayout(ctx, rootDir, layoutDir); err != nil {
+		if err := svc.pushSingleLayout(ctx, rootDir, layoutDir, summary); err != nil {
 			return err
 		}
 	}
@@ -304,7 +324,7 @@ func (svc *PushService) findLayouts(rootDir string) ([]string, error) {
 }
 
 // pushSingleLayout pushes a single OCI layout to the registry.
-func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir string) error {
+func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir string, summary *PushSummary) error {
 	// Check if layout has any images
 	hasImages, err := svc.layoutHasImages(layoutDir)
 	if err != nil {
@@ -319,27 +339,27 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		return nil
 	}
 
-	// Build registry segment from relative path
+	// Build registry segment from relative path. Use slash form so the
+	// segment is registry-native and OS-independent (filepath.Rel yields
+	// OS separators on Windows).
 	relPath, _ := filepath.Rel(rootDir, layoutDir)
 
 	segment := ""
 	if relPath != "." {
-		segment = relPath
+		segment = filepath.ToSlash(relPath)
 	}
 	// support old behavior when modules stored as "module-<name>.tar"
 	if strings.HasPrefix(layoutDir, "module-") {
 		segment = internal.ModulesSegment
 	}
 
-	// Create client with appropriate segments
-	targetClient := svc.client
+	// Classify by the bundle segment, before the modules remap rewrites it.
+	origSegment := segment
 
-	if segment != "" {
-		// Apply each path component as a segment
-		for _, seg := range strings.Split(segment, string(os.PathSeparator)) {
-			targetClient = targetClient.WithSegment(seg)
-		}
-	}
+	// Rewrite the leading "modules" component to honor --modules-path-suffix.
+	segment = svc.remapModulesSegment(segment)
+
+	targetClient := svc.client.WithSegment(pkgclient.PathToSegments(segment)...)
 
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
@@ -347,7 +367,25 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		return fmt.Errorf("push layout %q to registry %s: %w", relPath, targetClient.GetRegistry(), err)
 	}
 
+	recordPushedComponent(summary, origSegment)
+
 	return nil
+}
+
+// recordPushedComponent tallies a pushed layout into the summary by its bundle
+// segment. Modules and packages are counted from their index step, so their
+// layouts are ignored here.
+func recordPushedComponent(summary *PushSummary, segment string) {
+	first, _, _ := strings.Cut(segment, "/")
+
+	switch first {
+	case "", internal.InstallSegment, internal.InstallStandaloneSegment, internal.ReleaseChannelSegment:
+		summary.PlatformPushed = true
+	case internal.InstallerSegment:
+		summary.InstallerPushed = true
+	case internal.SecuritySegment:
+		summary.SecurityDatabases++
+	}
 }
 
 // layoutHasImages checks if an OCI layout has any images to push.
@@ -370,7 +408,7 @@ func (svc *PushService) layoutHasImages(layoutDir string) (bool, error) {
 // createModulesIndex creates the modules index in the registry.
 // This pushes a small random image for each module with tag = module name
 // to deckhouse/modules repo, enabling module discovery via ListTags.
-func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) error {
+func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
 	modulesDir := filepath.Join(rootDir, internal.ModulesSegment)
 
 	// Check if modules directory exists
@@ -399,10 +437,12 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 	}
 
 	slices.Sort(moduleNames)
+	summary.Modules = len(moduleNames)
 	svc.userLogger.Infof("Creating modules index with %d modules", len(moduleNames))
 
-	// Get client scoped to modules repo
-	modulesClient := svc.client.WithSegment(internal.ModulesSegment)
+	// Scope the client to the modules repo, honoring --modules-path-suffix.
+	// An empty suffix places discovery tags directly on the target repo.
+	modulesClient := svc.client.WithSegment(pkgclient.PathToSegments(svc.modulesPath())...)
 
 	// Push a small random image for each module with tag = module name
 	for _, moduleName := range moduleNames {
@@ -432,7 +472,7 @@ func (svc *PushService) createModulesIndex(ctx context.Context, rootDir string) 
 // createPackagesIndex creates the packages index in the registry.
 // This pushes a small random image for each package with tag = package name
 // to deckhouse/packages repo, enabling package discovery via ListTags.
-func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string) error {
+func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
 	packagesDir := filepath.Join(rootDir, internal.PackagesSegment)
 
 	// Check if packages directory exists
@@ -461,6 +501,7 @@ func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string)
 	}
 
 	slices.Sort(packageNames)
+	summary.Packages = len(packageNames)
 	svc.userLogger.Infof("Creating packages index with %d packages", len(packageNames))
 
 	// Get client scoped to packages repo

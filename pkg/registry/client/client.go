@@ -1,9 +1,33 @@
 package client
 
 import (
+	"strings"
+
 	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
 	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 )
+
+// PathToSegments splits a slash-separated path into its non-empty segments,
+// ready to spread into Client.WithSegment (which takes segments one by one and
+// does not split slashes). Leading, trailing, and doubled slashes - and the
+// empty string - drop out, so they never become a bogus empty segment.
+//
+//   - PathToSegments("modules/csi") -> ["modules", "csi"]
+//   - PathToSegments("/modules/")   -> ["modules"]
+//   - PathToSegments("")            -> [] (WithSegment() then leaves the client unchanged)
+func PathToSegments(path string) []string {
+	segments := make([]string, 0)
+
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "" {
+			continue
+		}
+
+		segments = append(segments, segment)
+	}
+
+	return segments
+}
 
 // adapter wraps the upstream dkpreg.Client interface and makes it satisfy
 // the local Client interface by overriding WithSegment to return the local type.

@@ -36,6 +36,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/push/errdetect"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/summaryui"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/validation"
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/operations/params"
@@ -43,7 +44,18 @@ import (
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
-// CLI Parameters
+// CLI Parameters.
+//
+// Shared state passed between the command's hooks, relying on cobra's
+// PreRun -> Run -> PostRun ordering:
+//   - PreRunE (parseAndValidateParameters) writes RegistryHost and RegistryPath
+//     from the registry argument, plus Packages, TempDir and ImagesBundlePath
+//     via resolvePackages.
+//   - RunE (NewPusher().Execute()) reads them to build the push params and the
+//     push service options.
+//   - PostRunE reads TempDir to remove the temporary directory.
+//
+// The remaining vars are bound to flags by addFlags before Run.
 var (
 	TempDir string
 
@@ -56,6 +68,11 @@ var (
 	Insecure         bool
 	TLSSkipVerify    bool
 	ImagesBundlePath string
+	Files            []string
+
+	// Packages holds the resolved list of tar/chunked package archive paths to push,
+	// assembled from the bundle directory argument and/or the --file flag.
+	Packages []string
 
 	MirrorTimeout time.Duration = -1
 )
@@ -89,13 +106,16 @@ valid license for any commercial version of the Deckhouse Kubernetes Platform.
 
 func NewCommand() *cobra.Command {
 	pushCmd := &cobra.Command{
-		Use:           "push <images-bundle-path> <registry>",
+		Use:           "push [images-bundle-path] <registry>",
 		Short:         "Copy Deckhouse Kubernetes Platform distribution to the third-party registry",
 		Long:          pushLong,
+		Args:          cobra.RangeArgs(1, 2),
 		ValidArgs:     []string{"images-bundle-path", "registry"},
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		PreRunE:       parseAndValidateParameters,
+		// PreRunE fills the package-level CLI Parameters that RunE and PostRunE
+		// consume; see the "CLI Parameters" var block for the write/read contract.
+		PreRunE: parseAndValidateParameters,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return NewPusher().Execute()
 		},
@@ -177,7 +197,11 @@ func NewPusher() *Pusher {
 
 // Execute runs the full push process
 func (p *Pusher) Execute() error {
+	summaryui.ConfigureColor()
+
 	p.logger.Infof("d8 version: %s", version.Version)
+
+	p.warnNonDefaultModulesPath()
 
 	if RegistryUsername != "" {
 		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
@@ -200,6 +224,22 @@ func (p *Pusher) Execute() error {
 	}
 
 	return nil
+}
+
+// warnNonDefaultModulesPath opens the log with the moved-modules-path warning,
+// so a non-standard layout is visible before anything is uploaded. The summary
+// repeats it, in its multi-line form, at the end of the run.
+//
+// Which components the bundle carries is unknown this early, so the warning
+// covers every non-default path.
+func (p *Pusher) warnNonDefaultModulesPath() {
+	target := path.Join(p.pushParams.RegistryHost, p.pushParams.RegistryPath)
+
+	report := mirror.BuildModulesPathReport(target, p.pushParams.ModulesPathSuffix)
+
+	if warning := report.Warning(); warning != "" {
+		p.logger.WarnLn(warning)
+	}
 }
 
 // executeNewPush runs the push using the push service.
@@ -238,25 +278,46 @@ func (p *Pusher) executeNewPush() error {
 	svc := mirror.NewPushService(
 		client,
 		&mirror.PushServiceOptions{
-			BundleDir:  p.pushParams.BundleDir,
-			WorkingDir: p.pushParams.WorkingDir,
+			Packages:          Packages,
+			WorkingDir:        p.pushParams.WorkingDir,
+			ModulesPathSuffix: p.pushParams.ModulesPathSuffix,
 		},
 		logger.Named("push"),
 		p.logger.(*log.SLogger),
 	)
 
-	err := svc.Push(ctx)
-	if err != nil {
-		// Handle context cancellation gracefully
-		if errors.Is(err, context.Canceled) {
-			p.logger.WarnLn("Operation cancelled by user")
-			return nil
-		}
+	start := time.Now()
+	// Push always returns a non-nil summary, even on error.
+	summary, err := svc.Push(ctx)
+	summary.Elapsed = time.Since(start)
 
-		return fmt.Errorf("push to registry: %w", err)
+	pushErr := classifyPushOutcome(summary, err)
+
+	p.logger.InfoLn(renderPushSummary(summary))
+
+	if summary.Cancelled {
+		p.logger.WarnLn("Operation cancelled by user")
 	}
 
-	return nil
+	return pushErr
+}
+
+// classifyPushOutcome records the push's terminal state on the summary and
+// returns the error Execute should propagate:
+//   - nil error        -> success, returns nil;
+//   - context.Canceled -> Cancelled, returns nil (a graceful interrupt is a clean exit);
+//   - any other error  -> Failed, returns the wrapped error.
+func classifyPushOutcome(summary *mirror.PushSummary, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.Canceled):
+		summary.Cancelled = true
+		return nil
+	default:
+		summary.Failed = true
+		return fmt.Errorf("push to registry: %w", err)
+	}
 }
 
 // validateRegistryAccess validates access to the registry

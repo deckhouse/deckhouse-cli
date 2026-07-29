@@ -28,9 +28,11 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
+	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
 
 // TestPullImages_AllowMissingTagsDoesNotSwallowContextCancellation locks in
@@ -115,6 +117,72 @@ func TestPullImages_AllowMissingTagsStillSwallowsRealNotFound(t *testing.T) {
 	ps := NewPullerService(dkplog.NewLogger(dkplog.WithLevel(slog.LevelError)), log.NewNop())
 	err := ps.PullImages(context.Background(), cfg)
 	require.NoError(t, err, "AllowMissingTags must continue to swallow regular not-found errors")
+}
+
+// TestVerifyPlannedImagesLanded_ReportsMissingImages locks in the
+// plan-vs-layout cross-check: a pull whose layout misses a planned image
+// must fail loudly instead of producing an incomplete bundle.
+func TestVerifyPlannedImagesLanded_ReportsMissingImages(t *testing.T) {
+	imgLayout, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	written := upfake.NewImageBuilder().WithFile("payload.txt", "written").MustBuild()
+	writtenDigest, err := written.Digest()
+	require.NoError(t, err)
+
+	writtenRef := "reg.example/repo@" + writtenDigest.String()
+	regImg, err := regimage.NewImage(written)
+	require.NoError(t, err)
+	regImg.SetMetadata(&regimage.ImageMeta{
+		TagReference:    writtenRef,
+		DigestReference: writtenRef,
+		Digest:          &writtenDigest,
+	})
+	require.NoError(t, imgLayout.AddImage(regImg, writtenDigest.Hex))
+
+	lostDigest, err := v1.NewHash("sha256:ae6870cab389252be4cda8bfd752fc50ef85f6846da25d37faf638650a70a0b1")
+	require.NoError(t, err)
+	lostRef := "reg.example/repo@" + lostDigest.String()
+
+	imageSet := map[string]*ImageMeta{
+		writtenRef: NewImageMeta("v1", writtenRef, &writtenDigest),
+		lostRef:    NewImageMeta("v1", lostRef, &lostDigest),
+	}
+
+	err = verifyPlannedImagesLanded(imageSet, imgLayout)
+	require.Error(t, err, "layout misses a planned image, the check must fail")
+	require.ErrorContains(t, err, lostRef)
+	require.NotContains(t, err.Error(), writtenDigest.Hex)
+
+	// Complete plan passes.
+	delete(imageSet, lostRef)
+	require.NoError(t, verifyPlannedImagesLanded(imageSet, imgLayout))
+}
+
+// TestPullImageSet_CompletePullPassesVerification guards the cross-check
+// against false positives: a healthy pull of both digest- and tag-style
+// references must not trip it.
+func TestPullImageSet_CompletePullPassesVerification(t *testing.T) {
+	imgLayout, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	fakeImg := upfake.NewImageBuilder().WithFile("payload.txt", "ok").MustBuild()
+	digest, err := fakeImg.Digest()
+	require.NoError(t, err)
+
+	digestRef := "reg.example/repo@" + digest.String()
+	tagRef := "reg.example/repo:v1.76.2"
+	imageSet := map[string]*ImageMeta{
+		digestRef: NewImageMeta("v1.76.2", digestRef, &digest),
+		tagRef:    NewImageMeta("v1.76.2", tagRef, &digest),
+	}
+
+	getter := func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error) {
+		return regimage.NewImage(fakeImg)
+	}
+
+	ps := NewPullerService(dkplog.NewLogger(dkplog.WithLevel(slog.LevelError)), log.NewNop())
+	require.NoError(t, ps.PullImageSet(context.Background(), imageSet, imgLayout, getter))
 }
 
 // fakeGetterService is a tiny pkg.BasicService that lets each test rewire

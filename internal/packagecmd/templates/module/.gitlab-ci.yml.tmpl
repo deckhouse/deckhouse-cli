@@ -40,6 +40,7 @@ Gotest:
 # --- Lint stage ---
 Golangci-lint:
   extends: .golangci-lint
+  allow_failure: false
 
 Verify:
   extends: .verify
@@ -55,6 +56,9 @@ Build dev:
     PACKAGES_REGISTRY: $DEV_PACKAGES_REGISTRY
     PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
     PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
+  # Empty needs decouples this job from stage ordering so it always runs,
+  # even if Verify/Golangci-lint/Gotest fail. Dev builds must stay available.
+  needs: []
   rules:
   - if: $CI_COMMIT_TAG
 

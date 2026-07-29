@@ -31,6 +31,8 @@ Dump module hooks values.
 
 © Flant JSC 2025`)
 
+var outputFormats = []string{"yaml", "json"}
+
 func NewCommand() *cobra.Command {
 	valuesCmd := &cobra.Command{
 		Use:           "values",
@@ -41,6 +43,7 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          valuesModule,
 	}
+	utilk8s.AddOutputFlag(valuesCmd, "yaml", outputFormats...)
 
 	return valuesCmd
 }
@@ -51,6 +54,11 @@ func valuesModule(cmd *cobra.Command, args []string) error {
 	}
 
 	moduleName := args[0]
+
+	format, err := utilk8s.GetOutputFormat(cmd, outputFormats...)
+	if err != nil {
+		return err
+	}
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -67,7 +75,7 @@ func valuesModule(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	pathFromOption := fmt.Sprintf("%s/values.yaml", moduleName)
+	pathFromOption := fmt.Sprintf("%s/values.%s", moduleName, format)
 
 	err = deckhouse.QueryAPI(config, kubeCl, pathFromOption)
 	if err != nil {

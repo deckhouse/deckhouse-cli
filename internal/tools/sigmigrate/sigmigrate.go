@@ -347,8 +347,10 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 
 		if runState.traceFile != nil {
 			traceWriteMu.Lock()
+
 			_ = runState.traceFile.Sync()
 			_ = runState.traceFile.Close()
+
 			traceWriteMu.Unlock()
 		}
 
@@ -618,11 +620,13 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 
 					if logLevel != "TRACE" {
 						progressMu.Lock()
+
 						if shouldEmitProgress(current, totalResources, &lastProgressPercent, &lastProgressPrintedAt) {
 							progress := int((current * 100) / totalResources)
 							greenProgress := color.New(color.FgGreen).SprintFunc()
 							fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
 						}
+
 						progressMu.Unlock()
 					}
 
@@ -630,6 +634,7 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 				}
 
 				objectsMu.Lock()
+
 				for _, item := range list.Items {
 					namespace := item.GetNamespace()
 					if namespace == "" {
@@ -639,17 +644,20 @@ func collectAllObjects(discoveryClient discovery.DiscoveryInterface, dynamicClie
 					name := item.GetName()
 					upsertCollectedObject(objects, namespace, name, info.gvr, preferredByGroup)
 				}
+
 				objectsMu.Unlock()
 
 				current := atomic.AddInt64(&processed, 1)
 
 				if logLevel != "TRACE" {
 					progressMu.Lock()
+
 					if shouldEmitProgress(current, totalResources, &lastProgressPercent, &lastProgressPrintedAt) {
 						progress := int((current * 100) / totalResources)
 						greenProgress := color.New(color.FgGreen).SprintFunc()
 						fmt.Printf("\rCalculating: [%s] Processed Resource: %s                                ", greenProgress(fmt.Sprintf("%d%%", progress)), info.gvr.Resource)
 					}
+
 					progressMu.Unlock()
 				}
 			}
@@ -730,9 +738,11 @@ func annotateObjects(
 
 					if logLevel != "TRACE" {
 						progressMu.Lock()
+
 						if shouldEmitProgress(current, total, &lastProgressPercent, &lastProgressPrintedAt) {
 							printAnnotationProgress(current, total, obj)
 						}
+
 						progressMu.Unlock()
 					}
 
@@ -753,9 +763,11 @@ func annotateObjects(
 
 				if logLevel != "TRACE" {
 					progressMu.Lock()
+
 					if shouldEmitProgress(current, total, &lastProgressPercent, &lastProgressPrintedAt) {
 						printAnnotationProgress(current, total, obj)
 					}
+
 					progressMu.Unlock()
 				}
 			}
@@ -984,7 +996,9 @@ func processObjectAnnotation(
 
 					tracef("method not supported after switch account for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 					unsupportedMu.Lock()
+
 					unsupportedTypes[obj.Kind] = true
+
 					unsupportedMu.Unlock()
 					color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported (after trying switch account).\n", obj.Kind)
 					recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("After switching to account %s: %v", switchAccount, err))
@@ -1017,7 +1031,9 @@ func processObjectAnnotation(
 
 			tracef("method not supported for %s/%s/%s: %s", obj.Kind, obj.Namespace, obj.Name, formatServerErrorDetails(err))
 			unsupportedMu.Lock()
+
 			unsupportedTypes[obj.Kind] = true
+
 			unsupportedMu.Unlock()
 			color.Yellow("\nAdding %s to unsupported annotation types due to MethodNotSupported.\n", obj.Kind)
 			recordSkippedObject(obj, "MethodNotSupported", fmt.Sprintf("Error: %v", err))

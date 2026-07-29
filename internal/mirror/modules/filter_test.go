@@ -130,6 +130,148 @@ func TestNewFilter_VersionParsing(t *testing.T) {
 	}
 }
 
+// TestFilter_BareVersionConstraint exercises the full --include-module parse
+// path (NewFilter -> parseVersionConstraint -> NewImplicitVersionConstraint)
+// for operator-less version literals. The 0.x case is the regression guard:
+// a bare `0.4.0` must span the whole 0.x line, not lock to the 0.4 minor the
+// way a caret (`^0.4.0` == `>=0.4.0 <0.5.0`) would.
+func TestFilter_BareVersionConstraint(t *testing.T) {
+	logger := log.NewSLogger(slog.LevelDebug)
+
+	tests := []struct {
+		name       string
+		expression string
+		releases   []string
+		want       []string
+	}{
+		{
+			// Regression: bare 0.x version must reach every intermediate minor
+			// up to (but not including) the next major, keeping only the latest
+			// patch per minor. Caret would have stopped at <0.5.0.
+			name:       "bare 0.x version spans the whole 0.x line",
+			expression: "module1@0.4.0",
+			releases: []string{
+				"v0.4.2", "v0.4.4",
+				"v0.5.1", "v0.5.3",
+				"v0.6.1",
+				"v0.7.2",
+			},
+			want: []string{"v0.4.4", "v0.5.3", "v0.6.1", "v0.7.2"},
+		},
+		{
+			// A bare >=1 version is unchanged from the old caret behaviour:
+			// spans the current major, latest patch per minor, no 2.x.
+			name:       "bare 1.x version keeps caret-equivalent behaviour",
+			expression: "module1@1.52.0",
+			releases: []string{
+				"v1.52.0",
+				"v1.53.1", "v1.53.2",
+				"v1.54.1",
+				"v1.55.1",
+				"v2.0.0",
+			},
+			want: []string{"v1.52.0", "v1.53.2", "v1.54.1", "v1.55.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter([]string{tt.expression}, FilterTypeWhitelist)
+			require.NoError(t, err)
+			filter.UseLogger(logger)
+
+			// A bare version is non-exact, so release channels must be mirrored.
+			require.True(t, filter.ShouldMirrorReleaseChannels("module1"))
+
+			mod := &Module{Name: "module1", Releases: tt.releases}
+			require.ElementsMatch(t, tt.want, filter.VersionsToMirror(mod))
+		})
+	}
+}
+
+// TestFilter_BareIncludeHasNoVersionConstraint covers "--include-module <name>"
+// with no "@version" part. Membership and version selection are separate
+// concerns: the name alone selects the module for mirroring, while the absent
+// version part means no version is pinned, so the release channels decide what
+// gets pulled and the registry tag list is never consulted.
+func TestFilter_BareIncludeHasNoVersionConstraint(t *testing.T) {
+	const moduleName = "csi-huawei"
+
+	filter, err := NewFilter([]string{moduleName}, FilterTypeWhitelist)
+	require.NoError(t, err)
+	filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+
+	require.True(t, filter.Match(&Module{Name: moduleName}),
+		"the name alone must select the module for mirroring")
+
+	_, hasConstraint := filter.GetConstraint(moduleName)
+	assert.False(t, hasConstraint,
+		"a bare include pins no version, so it must report no constraint")
+
+	assert.True(t, filter.ShouldMirrorReleaseChannels(moduleName),
+		"release channels are the only version source for a bare include")
+
+	mod := &Module{
+		Name:     moduleName,
+		Releases: []string{"v0.1.1", "v0.2.9", "v0.3.11", "v0.3.13"},
+	}
+	assert.Empty(t, filter.VersionsToMirror(mod),
+		"a bare include must not add version tags from the registry tag list")
+}
+
+// TestFilter_BareIncludeMergedWithExplicitConstraint covers a name declared
+// several times with and without a version part. A bare entry pins nothing, so
+// merging it must neither drop an explicitly pinned version nor widen the
+// selection back to the whole registry tag list.
+func TestFilter_BareIncludeMergedWithExplicitConstraint(t *testing.T) {
+	releases := []string{"v0.1.1", "v0.2.9", "v1.2.3", "v1.2.4", "v1.3.0"}
+
+	tests := []struct {
+		name           string
+		expressions    []string
+		wantConstraint bool     // GetConstraint reports a pinned constraint
+		wantVersions   []string // tags VersionsToMirror resolves to
+	}{
+		{
+			name:           "bare first, pinned second",
+			expressions:    []string{"module1", "module1@=v1.2.3"},
+			wantConstraint: true,
+			wantVersions:   []string{"v1.2.3"},
+		},
+		{
+			name:           "pinned first, bare second",
+			expressions:    []string{"module1@=v1.2.3", "module1"},
+			wantConstraint: true,
+			wantVersions:   []string{"v1.2.3"},
+		},
+		{
+			name:           "two bare entries stay channels-only",
+			expressions:    []string{"module1", "module1"},
+			wantConstraint: false,
+			wantVersions:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, err := NewFilter(tt.expressions, FilterTypeWhitelist)
+			require.NoError(t, err)
+			filter.UseLogger(log.NewSLogger(slog.LevelDebug))
+
+			constraint, hasConstraint := filter.GetConstraint("module1")
+			require.Equal(t, tt.wantConstraint, hasConstraint)
+
+			if tt.wantConstraint {
+				assert.True(t, constraint.IsExact(),
+					"merging a bare entry must keep the pinned tag exact")
+			}
+
+			assert.ElementsMatch(t, tt.wantVersions,
+				filter.VersionsToMirror(&Module{Name: "module1", Releases: releases}))
+		})
+	}
+}
+
 func TestFilter_Match(t *testing.T) {
 	logger := log.NewSLogger(slog.LevelDebug)
 	type args struct {

@@ -4,3 +4,8 @@ name: {{ .PackageName }}
 stage: Preview
 category: Misc
 version: dev # will be injected by CI/CD from the tag
+requirements:
+  deckhouse:
+    constraint: ">= v1.77"
+  kubernetes:
+    constraint: ">= v1.35"

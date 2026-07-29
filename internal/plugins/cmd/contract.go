@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package pluginscmd
 
 import (
 	"encoding/json"
@@ -24,37 +24,38 @@ import (
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 
+	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+
+	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
-	var (
-		version  string
-		useMajor int
-	)
-
-	cmd := &cobra.Command{
-		Use:   "contract [plugin-name]",
-		Short: "Get the contract for a specific plugin",
-		Long:  "Retrieve and display the contract specification for a specific plugin from the registry",
+func newContractCommand(manager *plugins.Manager, logger *dkplog.Logger) *cobra.Command {
+	return &cobra.Command{
+		Use:   "contract <plugin-name>",
+		Short: "Show a plugin's contract",
+		Long:  "Show the latest published contract of a plugin: version, description and requirements.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]
+			if err := plugins.ValidatePluginName(pluginName); err != nil {
+				return err
+			}
+
 			ctx := cmd.Context()
 
-			latestVersion, err := pc.fetchLatestVersion(ctx, pluginName)
+			latestVersion, err := manager.LatestVersion(ctx, pluginName)
 			if err != nil {
 				return fmt.Errorf("failed to fetch latest version: %w", err)
 			}
 
 			tag := latestVersion.Original()
 
-			pc.logger.Debug("Fetching contract for plugin", slog.String("plugin", pluginName), slog.String("tag", tag))
+			logger.Debug("Fetching contract for plugin", slog.String("plugin", pluginName), slog.String("tag", tag))
 
-			// Use service to get plugin contract
-			plugin, err := pc.service.GetPluginContract(ctx, pluginName, tag)
+			plugin, err := manager.PluginContract(ctx, pluginName, tag)
 			if err != nil {
-				pc.logger.Warn("Failed to get plugin contract",
+				logger.Warn("Failed to get plugin contract",
 					slog.String("plugin", pluginName),
 					slog.String("tag", tag),
 					slog.String("error", err.Error()))
@@ -80,9 +81,4 @@ func (pc *PluginsCommand) pluginsContractCommand() *cobra.Command {
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&version, "version", "", "Specific version of the plugin contract to retrieve")
-	cmd.Flags().IntVar(&useMajor, "use-major", 0, "Use specific major version (e.g., 1, 2)")
-
-	return cmd
 }

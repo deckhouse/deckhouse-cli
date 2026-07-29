@@ -31,6 +31,8 @@ Dump module hooks snapshots.
 
 © Flant JSC 2025`)
 
+var outputFormats = []string{"yaml", "json"}
+
 func NewCommand() *cobra.Command {
 	snapshotsCmd := &cobra.Command{
 		Use:           "snapshots",
@@ -41,12 +43,22 @@ func NewCommand() *cobra.Command {
 		SilenceUsage:  true,
 		RunE:          snapshotsModule,
 	}
+	utilk8s.AddOutputFlag(snapshotsCmd, "yaml", outputFormats...)
 
 	return snapshotsCmd
 }
 
 func snapshotsModule(cmd *cobra.Command, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("this command requires exactly 1 argument: module name")
+	}
+
 	moduleName := args[0]
+
+	format, err := utilk8s.GetOutputFormat(cmd, outputFormats...)
+	if err != nil {
+		return err
+	}
 
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -63,7 +75,7 @@ func snapshotsModule(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
 	}
 
-	pathFromOption := fmt.Sprintf("%s/snapshots.yaml", moduleName)
+	pathFromOption := fmt.Sprintf("%s/snapshots.%s", moduleName, format)
 
 	err = deckhouse.QueryAPI(config, kubeCl, pathFromOption)
 	if err != nil {

@@ -58,7 +58,19 @@ func TestValidationValidateSourceRegistry(t *testing.T) {
 			name:        "invalid registry format - no path",
 			registry:    "registry.example.com",
 			expectError: true,
-			errorMsg:    "no registry path",
+			errorMsg:    "is missing the repository path",
+		},
+		{
+			name:        "host with port but no path",
+			registry:    "localhost:5000",
+			expectError: true,
+			errorMsg:    `--source "localhost:5000" is missing the repository path: expected format registry-host[:port]/path, e.g. "localhost:5000/deckhouse/ee"`,
+		},
+		{
+			name:        "trailing slash without path",
+			registry:    "registry.example.com/",
+			expectError: true,
+			errorMsg:    "is missing the repository path",
 		},
 		{
 			name:        "invalid registry - malformed",
@@ -633,6 +645,58 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestValidationResolveModuleFlags(t *testing.T) {
+	tests := []struct {
+		name              string
+		noModules         bool
+		modulesWhitelist  []string
+		expectedNoModules bool
+	}{
+		{
+			name:              "include-module drops no-modules",
+			noModules:         true,
+			modulesWhitelist:  []string{"prometheus"},
+			expectedNoModules: false,
+		},
+		{
+			name:              "no-modules alone is kept",
+			noModules:         true,
+			modulesWhitelist:  nil,
+			expectedNoModules: true,
+		},
+		{
+			name:              "include-module without no-modules is untouched",
+			noModules:         false,
+			modulesWhitelist:  []string{"prometheus"},
+			expectedNoModules: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Snapshot global state — these flags are package-level.
+			originals := struct {
+				noModules        bool
+				modulesWhitelist []string
+			}{
+				noModules:        pullflags.NoModules,
+				modulesWhitelist: pullflags.ModulesWhitelist,
+			}
+			defer func() {
+				pullflags.NoModules = originals.noModules
+				pullflags.ModulesWhitelist = originals.modulesWhitelist
+			}()
+
+			pullflags.NoModules = tt.noModules
+			pullflags.ModulesWhitelist = tt.modulesWhitelist
+
+			resolveModuleFlags()
+
+			assert.Equal(t, tt.expectedNoModules, pullflags.NoModules)
 		})
 	}
 }

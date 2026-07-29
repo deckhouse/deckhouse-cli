@@ -45,8 +45,9 @@ import (
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
 	network "github.com/deckhouse/deckhouse-cli/internal/network"
 	packagecmd "github.com/deckhouse/deckhouse-cli/internal/packagecmd"
-	plugins "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd"
-	"github.com/deckhouse/deckhouse-cli/internal/plugins/cmd/flags"
+	pluginscmd "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd"
+	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
+	selfupdatecmd "github.com/deckhouse/deckhouse-cli/internal/selfupdate/cmd"
 	snapshot "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
@@ -86,14 +87,9 @@ func NewRootCommand() *RootCommand {
 		},
 	}
 
-	envCliPath := os.Getenv("DECKHOUSE_CLI_PATH")
+	envCliPath := os.Getenv(flags.EnvPluginsDir)
 	if envCliPath != "" {
 		flags.DeckhousePluginsDir = envCliPath
-	}
-
-	envRegistryRepo := os.Getenv("DECKHOUSE_REGISTRY_REPO")
-	if envRegistryRepo != "" {
-		flags.SourceRegistryRepo = envRegistryRepo
 	}
 
 	rootCmd.registerCommands()
@@ -130,12 +126,19 @@ func (r *RootCommand) registerCommands() {
 	if os.Getenv("DECKHOUSE_PLUGINS_ENABLED") != "true" {
 		r.cmd.AddCommand(system.NewCommand())
 	} else {
-		r.cmd.AddCommand(plugins.NewPluginCommand(plugins.SystemPluginName, "Operate system options in DKP", []string{"s", "p", "platform"}, r.logger.Named("system-command")))
+		r.cmd.AddCommand(pluginscmd.NewPluginCommand(pluginscmd.SystemPluginName, "Operate system options in DKP", []string{"s", "p", "platform"}, r.logger.Named("system-command")))
 	}
 
 	r.cmd.AddCommand(packagecmd.NewCommand())
 
-	r.cmd.AddCommand(plugins.NewCommand(r.logger.Named("plugins-command")))
+	// delivery-kit and package ship as built-in commands, not as plugins. Declaring
+	// them here satisfies a plugin's dependency on either name without a registry lookup.
+	r.cmd.AddCommand(pluginscmd.NewCommand(
+		r.logger.Named("plugins-command"),
+		[]string{commands.DeliveryKitCommandName, pluginscmd.PackagePluginName},
+	))
+
+	r.cmd.AddCommand(selfupdatecmd.NewCommand(r.logger.Named("cli-command")))
 }
 
 func (r *RootCommand) Execute() error {

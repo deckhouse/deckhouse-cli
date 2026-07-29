@@ -1,21 +1,18 @@
 package backup
 
 import (
-	"os"
-
 	"github.com/spf13/pflag"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 func addPersistentFlags(flagSet *pflag.FlagSet) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
-	}
+	defaultKubeconfigPath := utilk8s.DefaultKubeconfigPath()
 
 	flagSet.StringP(
 		"kubeconfig", "k",
 		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+		"Path to kubeconfig file. (default is $KUBECONFIG when it is set, otherwise the default kubeconfig path for the current OS user)",
 	)
 
 	flagSet.String("context", "", "The name of the kubeconfig context to use")

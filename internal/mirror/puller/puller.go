@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,5 +199,57 @@ func (ps *PullerService) PullImageSet(
 		pullCount++
 	}
 
-	return nil
+	return verifyPlannedImagesLanded(imageSet, imageSetLayout)
+}
+
+// verifyPlannedImagesLanded cross-checks the pull plan against the layout:
+// every planned image must be present in index.json under its short tag.
+// Defense in depth against silent-loss bugs - an incomplete bundle must fail
+// the pull instead of surfacing later as ImagePullBackOff in the cluster.
+// Nil metas are skipped: those images were never pulled (AllowMissingTags).
+func verifyPlannedImagesLanded(imageSet map[string]*ImageMeta, imageSetLayout *image.ImageLayout) error {
+	planned := make([]*ImageMeta, 0, len(imageSet))
+	for _, meta := range imageSet {
+		if meta != nil {
+			planned = append(planned, meta)
+		}
+	}
+
+	if len(planned) == 0 {
+		return nil
+	}
+
+	index, err := imageSetLayout.Path().ImageIndex()
+	if err != nil {
+		return fmt.Errorf("verify pulled layout: read image index: %w", err)
+	}
+
+	indexManifest, err := index.IndexManifest()
+	if err != nil {
+		return fmt.Errorf("verify pulled layout: parse index manifest: %w", err)
+	}
+
+	present := make(map[string]struct{}, len(indexManifest.Manifests))
+	for _, desc := range indexManifest.Manifests {
+		if tag, ok := desc.Annotations[image.AnnotationImageShortTag]; ok {
+			present[tag] = struct{}{}
+		}
+	}
+
+	var missing []string
+
+	for _, meta := range planned {
+		if _, found := present[meta.ImageTag]; !found {
+			missing = append(missing, meta.TagReference)
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	sort.Strings(missing)
+
+	return fmt.Errorf("pulled layout is incomplete: %d of %d planned images missing: %s",
+		len(missing), len(planned), strings.Join(missing, ", "))
 }

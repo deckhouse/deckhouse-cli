@@ -42,6 +42,8 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 		return err
 	}
 
+	resolveModuleFlags()
+
 	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
@@ -66,15 +68,26 @@ func validateSourceRegistry() error {
 		return nil // Default is fine
 	}
 
+	source := pullflags.SourceRegistryRepo
+
+	// Check the "host:port" format of the user-provided repository URL.
+	// It must have a path after the host and port.
+	if _, repoPath, _ := strings.Cut(source, "/"); repoPath == "" {
+		return fmt.Errorf(
+			"--source %q is missing the repository path: expected format registry-host[:port]/path, e.g. %q",
+			source, strings.TrimRight(source, "/")+"/deckhouse/ee",
+		)
+	}
+
 	// We first validate that passed repository reference is correct and can be parsed
-	if _, err := name.NewRepository(pullflags.SourceRegistryRepo); err != nil {
-		return fmt.Errorf("Validate registry address: %w", err)
+	if _, err := name.NewRepository(source); err != nil {
+		return fmt.Errorf("--source %q is not a valid registry address: %w", source, err)
 	}
 
 	// Then we parse it as URL to validate that it contains everything we need
-	registryURL, err := url.ParseRequestURI("docker://" + pullflags.SourceRegistryRepo)
+	registryURL, err := url.ParseRequestURI("docker://" + source)
 	if err != nil {
-		return fmt.Errorf("Validate source registry parameter: %w", err)
+		return fmt.Errorf("Parse --source registry address %q: %w", source, err)
 	}
 
 	if registryURL.Host == "" {
@@ -158,6 +171,17 @@ func parseAndValidateVersionFlags() error {
 	return nil
 }
 
+// resolveModuleFlags settles the contradiction between --no-modules and
+// --include-module. A whitelist means the user wants those modules, so it
+// wins: --no-modules is dropped and only the listed modules are mirrored.
+func resolveModuleFlags() {
+	if pullflags.NoModules && len(pullflags.ModulesWhitelist) > 0 {
+		pullflags.NoModules = false
+
+		fmt.Fprintln(os.Stderr, "Warning: --no-modules is ignored because --include-module is set; mirroring only the whitelisted modules.")
+	}
+}
+
 // validateProxyRegistryFlag enforces the combinations the proxy-registry
 // probe needs to work: each component that is actually being pulled (i.e.
 // not switched off via --no-platform / --no-modules / --only-extra-images)
@@ -206,11 +230,10 @@ func validateProxyRegistryFlag() error {
 			return errors.New("--proxy-registry requires --include-module (or --no-modules to skip module mirroring): the probe needs explicit module names and version anchors to start incrementing from")
 		}
 		// Every --include-module entry must come with an explicit
-		// version part. The implicit ">=0.0.0" fallback used by the
-		// regular pull mode is poisonous for the probe: it starts at
-		// v0.0.0 and stops on the first not-found, silently skipping
-		// any module whose lowest tag is above v0.0.0 / v0.1.0 /
-		// v1.0.0. Bail out loudly so the user picks a real anchor.
+		// version part. A bare include pins no version and pulls only
+		// what the release channels point at - the probe has no lower
+		// bound to increment from and would miss every version tag.
+		// Bail out loudly so the user picks a real anchor.
 		for _, entry := range pullflags.ModulesWhitelist {
 			if !strings.Contains(entry, "@") {
 				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q@^1.0.0); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry))

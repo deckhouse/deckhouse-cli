@@ -1,3 +1,4 @@
+# templates link: https://fox.flant.com/team/foxtrot/packages-gitlab-ci
 include:
   - project: 'team/foxtrot/packages-gitlab-ci'
     ref: main
@@ -8,6 +9,17 @@ include:
   - project: 'team/foxtrot/packages-gitlab-ci'
     ref: main
     file: 'templates/Publish.gitlab-ci.yml'
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+
+default:
+  # Mark all jobs as interruptible to cancel previous builds if new one is started
+  interruptible: true
+  # Use kubernetes runner by default
+  tags:
+  - werf-2-stable
 
 variables:
   PACKAGE_NAME: {{ .PackageName }}
@@ -27,20 +39,8 @@ variables:
   # PLUGINS_REGISTRY_LOGIN:
   # PLUGINS_REGISTRY_PASSWORD:
 
-default:
-  tags:
-  - werf-2-stable
 
-# --- Test stage ---
-Gotest:
-  extends: .go-test
-  allow_failure: false
-
-
-# --- Lint stage ---
-Golangci-lint:
-  extends: .golangci-lint
-
+# --- Test, Lint, Verify ---
 Verify:
   extends: .verify
   variables:
@@ -48,16 +48,30 @@ Verify:
     PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
     PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
 
+Golangci-lint:
+  extends: .golangci-lint
+  allow_failure: false
+
+Gotest:
+  extends: .go-test
+  allow_failure: false
+
+
 # --- Build ---
+# test for successful build
 Build dev:
   extends: .build
   variables:
     PACKAGES_REGISTRY: $DEV_PACKAGES_REGISTRY
     PACKAGES_REGISTRY_LOGIN: $DEV_PACKAGES_REGISTRY_LOGIN
     PACKAGES_REGISTRY_PASSWORD: $DEV_PACKAGES_REGISTRY_PASSWORD
+  # Empty needs decouples this job from stage ordering so it always runs,
+  # even if Verify/Golangci-lint/Gotest fail. Dev builds must stay available.
+  needs: []
   rules:
   - if: $CI_COMMIT_TAG
 
+# only build for prod will be used in future, build for dev will be replaced with d8 try command (when it will be implemented)
 Build prod:
   extends: .build
   variables:
@@ -78,12 +92,12 @@ Build prod:
 .editions-matrix:
   parallel:
     matrix:
-      - RELEASE_CHANNEL:
-          - alpha
-          - beta
-          - early-access
-          - stable
-          - rock-solid
+    - RELEASE_CHANNEL:
+      - alpha
+      - beta
+      - early-access
+      - stable
+      - rock-solid
 
 Publish dev:
   stage: publish

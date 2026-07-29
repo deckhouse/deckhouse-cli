@@ -28,6 +28,9 @@ type LintersSettings struct {
 
 	// OSS contains settings for optional oss.yaml metadata checks.
 	OSS OSSSettings `mapstructure:"oss"`
+
+	// Requirements contains settings for package.yaml requirements checks.
+	Requirements RequirementsSettings `mapstructure:"requirements"`
 }
 
 // LayoutSettings configures the layout linter and its rules.
@@ -106,6 +109,8 @@ type ImagesSettings struct {
 type ImagesRulesSettings struct {
 	// Patches configures checks that validate image patch layout and documentation.
 	Patches RuleSettings `mapstructure:"patches"`
+	// ImageName configures checks that reject underscores in image names.
+	ImageName RuleSettings `mapstructure:"image-name"`
 }
 
 // IconSettings configures the icon linter and its rules.
@@ -142,6 +147,23 @@ type OSSRulesSettings struct {
 	Fields RuleSettings `mapstructure:"fields"`
 	// Version configures checks for version and versions field usage.
 	Version RuleSettings `mapstructure:"version"`
+}
+
+// RequirementsSettings configures the requirements linter and its rules.
+type RequirementsSettings struct {
+	// Impact sets the maximum severity emitted by the requirements linter.
+	Impact string `mapstructure:"impact"`
+	// Rules contains per-rule requirements linter settings.
+	Rules RequirementsRulesSettings `mapstructure:"rules"`
+}
+
+// RequirementsRulesSettings configures individual requirements linter rules.
+type RequirementsRulesSettings struct {
+	// ModuleGroups configures checks that anyOf/noneOf module groups are well-formed
+	// and that no module lands in contradictory buckets.
+	ModuleGroups RuleSettings `mapstructure:"module-groups"`
+	// Constraints configures checks that declared version constraints are valid semver.
+	Constraints RuleSettings `mapstructure:"constraints"`
 }
 
 // RuleSettings configures a single rule.

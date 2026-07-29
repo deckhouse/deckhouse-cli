@@ -17,22 +17,19 @@ limitations under the License.
 package flags
 
 import (
-	"os"
-
 	"github.com/spf13/cobra"
+
+	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 func AddPersistentFlags(cmd *cobra.Command) {
-	defaultKubeconfigPath := os.ExpandEnv("$HOME/.kube/config")
-	if p := os.Getenv("KUBECONFIG"); p != "" {
-		defaultKubeconfigPath = p
-	}
+	defaultKubeconfigPath := utilk8s.DefaultKubeconfigPath()
 
 	cmd.PersistentFlags().StringP(
 		"kubeconfig",
 		"k",
 		defaultKubeconfigPath,
-		"KubeConfig of the cluster. (default is $KUBECONFIG when it is set, $HOME/.kube/config otherwise)",
+		"Path to kubeconfig file. (default is $KUBECONFIG when it is set, otherwise the default kubeconfig path for the current OS user)",
 	)
 
 	cmd.PersistentFlags().String("context", "", "The name of the kubeconfig context to use")

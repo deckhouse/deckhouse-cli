@@ -52,6 +52,14 @@ const (
 	channelVersion = "v1.45.2" // version every release channel points at
 )
 
+// baselineRootListTagsCalls is how many times PullModules lists tags at the
+// registry root regardless of the filter in use:
+//   - validateModulesAccess (reachability check)
+//   - pullModules (module-name enumeration)
+//
+// Anything above this baseline is a per-module tag listing.
+const baselineRootListTagsCalls int64 = 2
+
 // defaultRegistryVersions is a small but representative tag set for tests
 // that don't care about the exact list - a few patches and a few minors.
 var defaultRegistryVersions = []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.45.2"}
@@ -252,6 +260,51 @@ func TestPullModules_Issue220_LatestPatchPerMinor(t *testing.T) {
 	}
 }
 
+// TestPullModules_BareIncludePullsChannelsOnly pins the contract for
+// --include-module without a version part:
+//
+//	d8 mirror pull --include-module csi-huawei
+//
+// The module is selected for mirroring but no version is pinned, so the release
+// channels are the only version source - exactly like a default all-modules
+// pull. Versions that live in the registry but that no channel points at must
+// stay out of the bundle, and the per-module tag list must not be requested.
+//
+// The registry shape mirrors the reported csi-huawei case: several minors with
+// every channel pointing at the newest one. A bare include used to drag in
+// v0.1.1 and v0.2.9 (latest patch of each older minor), doubling the bundle.
+func TestPullModules_BareIncludePullsChannelsOnly(t *testing.T) {
+	const (
+		moduleName    = "csi-huawei"
+		channelTarget = "v0.3.13" // version every release channel points at
+	)
+
+	registryVersions := []string{"v0.1.1", "v0.2.9", "v0.3.11", channelTarget}
+
+	reg := singleModuleRegistry(moduleName, channelTarget, registryVersions)
+	counter := newListTagsCounter(upfake.NewClient(reg))
+	// Bare include: module name only, no "@version".
+	filter := mustNewFilter(t, FilterTypeWhitelist, moduleName)
+	svc := newService(t, pkgclient.Adapt(counter), filter)
+
+	require.NoError(t, svc.PullModules(context.Background()))
+
+	got := pulledModuleVersionRefs(t, svc, moduleName)
+
+	assert.ElementsMatch(t, taggedModuleRefs(moduleName, []string{channelTarget}), got,
+		"a bare --include-module must pull only channel-referenced versions")
+
+	// Headline regression: versions no channel points at must not be pulled.
+	for _, dropped := range []string{"v0.1.1", "v0.2.9", "v0.3.11"} {
+		assert.NotContains(t, got, taggedModuleRef(moduleName, dropped),
+			"%s is not referenced by any release channel and must not be pulled", dropped)
+	}
+
+	// No version is pinned, so the registry tag list is never needed.
+	assert.Equal(t, baselineRootListTagsCalls, counter.calls.Load(),
+		"a bare --include-module must not trigger a per-module ListTags")
+}
+
 // =============================================================================
 // Tests: per-module ListTags policy
 // =============================================================================
@@ -260,11 +313,6 @@ func TestPullModules_Issue220_LatestPatchPerMinor(t *testing.T) {
 // cost of a default pull or an exact-tag pull must not regress by adding an
 // unconditional per-module call.
 func TestPullModules_PerModuleListTagsCallCount(t *testing.T) {
-	// PullModules lists tags at the registry root twice:
-	//   - validateModulesAccess (reachability check)
-	//   - pullModules (module-name enumeration)
-	const baselineRootCalls int64 = 2
-
 	cases := []struct {
 		name        string
 		filterType  FilterType
@@ -300,7 +348,7 @@ func TestPullModules_PerModuleListTagsCallCount(t *testing.T) {
 
 			require.NoError(t, svc.PullModules(context.Background()))
 
-			assert.Equal(t, baselineRootCalls+tc.wantExtra, counter.calls.Load())
+			assert.Equal(t, baselineRootListTagsCalls+tc.wantExtra, counter.calls.Load())
 		})
 	}
 }

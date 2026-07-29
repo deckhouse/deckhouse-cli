@@ -169,14 +169,12 @@ func TestService_SubServiceScoping(t *testing.T) {
 			"DeckhouseService must be scoped to <root>/<edition>")
 	})
 
-	t.Run("plugin service is NOT edition-scoped", func(t *testing.T) {
-		// Plugins live at <root>/plugins regardless of edition. We assert it via
-		// the absence of the edition segment in the plugin service root.
-		// PluginService does not expose GetRoot, but its scope is reflected by
-		// Service.GetRoot — Service.GetRoot stays at the bare root so that the
-		// installer and plugin tree references stay correct.
+	t.Run("installer is NOT edition-scoped", func(t *testing.T) {
+		// The installer lives at <root>/installer regardless of edition, so
+		// Service.GetRoot must stay at the bare root (no edition segment) for the
+		// installer tree references to stay correct.
 		assert.Equal(t, host, svc.GetRoot(),
-			"Service.GetRoot must remain non-edition-scoped — plugins and installer rely on it")
+			"Service.GetRoot must remain non-edition-scoped - the installer relies on it")
 	})
 
 	t.Run("no edition keeps both roots equal across all sub-services", func(t *testing.T) {

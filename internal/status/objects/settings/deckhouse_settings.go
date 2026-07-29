@@ -75,6 +75,36 @@ func getModuleConfigSettings(ctx context.Context, dynamicClient dynamic.Interfac
 	return configSettingsFromMapProcessing(rawSettings), nil
 }
 
+// sensitiveValueMask replaces credential values in output.
+// Fixed length: must not reveal the secret's length.
+const sensitiveValueMask = "***"
+
+// sensitiveKeyMarkers match settings keys that may hold credentials,
+// e.g. registry password/license in ModuleConfig deckhouse.
+// Checked as case-insensitive substrings; false positives are acceptable.
+var sensitiveKeyMarkers = []string{
+	"password",
+	"secret",
+	"token",
+	"license",
+	"dockercfg",
+	"apikey",
+	"accesskey",
+	"credential",
+}
+
+// isSensitiveKey reports whether a settings key likely holds credentials.
+func isSensitiveKey(key string) bool {
+	lowerKey := strings.ToLower(key)
+	for _, marker := range sensitiveKeyMarkers {
+		if strings.Contains(lowerKey, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Processing converts raw resource data into a structured format for easier output and analysis.
 func configSettingsFromMapProcessing(settings map[string]interface{}) []ConfigSetting {
 	if len(settings) == 0 {
@@ -83,7 +113,7 @@ func configSettingsFromMapProcessing(settings map[string]interface{}) []ConfigSe
 
 	result := make([]ConfigSetting, 0, len(settings))
 	for key, value := range settings {
-		result = append(result, configSettingsProcessing(key, value))
+		result = append(result, configSettingsProcessing(key, value, false))
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -93,16 +123,19 @@ func configSettingsFromMapProcessing(settings map[string]interface{}) []ConfigSe
 	return result
 }
 
-func configSettingsProcessing(key string, data interface{}) ConfigSetting {
+func configSettingsProcessing(key string, data interface{}, sensitive bool) ConfigSetting {
 	if key == "" {
 		return ConfigSetting{}
 	}
+
+	// Sensitivity is inherited: everything nested under a credential key is masked.
+	sensitive = sensitive || isSensitiveKey(key)
 
 	// map[string]interface{}
 	if m, ok := data.(map[string]interface{}); ok {
 		children := make([]ConfigSetting, 0, len(m))
 		for k, v := range m {
-			children = append(children, configSettingsProcessing(k, v))
+			children = append(children, configSettingsProcessing(k, v, sensitive))
 		}
 
 		sort.Slice(children, func(i, j int) bool {
@@ -120,7 +153,7 @@ func configSettingsProcessing(key string, data interface{}) ConfigSetting {
 		items := make([]ConfigSetting, 0, len(arr))
 		for i, elem := range arr {
 			itemKey := fmt.Sprintf("#%d", i)
-			items = append(items, configSettingsProcessing(itemKey, elem))
+			items = append(items, configSettingsProcessing(itemKey, elem, sensitive))
 		}
 
 		return ConfigSetting{
@@ -130,9 +163,14 @@ func configSettingsProcessing(key string, data interface{}) ConfigSetting {
 	}
 
 	// default
+	value := fmt.Sprintf("%v", data)
+	if sensitive && data != nil && value != "" {
+		value = sensitiveValueMask
+	}
+
 	return ConfigSetting{
 		Key:   key,
-		Value: fmt.Sprintf("%v", data),
+		Value: value,
 	}
 }
 

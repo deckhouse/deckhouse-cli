@@ -420,6 +420,51 @@ func TestRenderPullSummary(t *testing.T) {
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
 			skippedCount: 5,
 		},
+		{
+			name: "moved modules path with modules pulled is warned about",
+			summary: &mirror.PullSummary{
+				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Modules: mirror.ModulesStats{
+					Attempted: true,
+					Modules:   []mirror.ModuleStat{{Name: "console", Images: 1}},
+				},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/"),
+			},
+			verbose: false,
+			contains: []string{
+				"Warning: modules use a non-default path (--modules-path-suffix)",
+				"Root Segment: registry.deckhouse.io/deckhouse/ee",
+				"default: registry.deckhouse.io/deckhouse/ee/modules",
+			},
+			// Only the moved modules path: no full layout, no other component paths.
+			notContains:  []string{"Registry:", "registry.deckhouse.io/deckhouse/ee/security"},
+			skippedCount: -1,
+		},
+		{
+			name: "moved modules path but no modules pulled is silent even in verbose",
+			summary: &mirror.PullSummary{
+				Platform:    mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Modules:     mirror.ModulesStats{Attempted: true, Modules: []mirror.ModuleStat{}},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/"),
+			},
+			verbose:      true,
+			notContains:  []string{"Warning", "default:", "Registry:"},
+			skippedCount: -1,
+		},
+		{
+			name: "default modules path is silent even with modules pulled",
+			summary: &mirror.PullSummary{
+				Platform: mirror.ComponentStats{Attempted: true, Versions: []string{"v1.69.0"}},
+				Modules: mirror.ModulesStats{
+					Attempted: true,
+					Modules:   []mirror.ModuleStat{{Name: "console", Images: 1}},
+				},
+				ModulesPath: mirror.BuildModulesPathReport("registry.deckhouse.io/deckhouse/ee", "/modules"),
+			},
+			verbose:      true,
+			notContains:  []string{"Warning", "default:", "Registry:"},
+			skippedCount: -1,
+		},
 	}
 
 	for _, tt := range tests {

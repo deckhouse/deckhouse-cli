@@ -65,10 +65,13 @@ func NewFilter(filterExpressions []string, filterType FilterType) (*Filter, erro
 			return nil, fmt.Errorf("Malformed filter expression %q: empty name", filterExpr)
 		}
 
+		// A bare "--include-module <name>" (no @version) selects the module
+		// for mirroring but pins no version: a nil constraint means "pull
+		// only what the release channels point at", the same behaviour as a
+		// default all-modules pull. An explicit @version is parsed as usual.
 		var constraint VersionConstraint
-		if !hasVersion {
-			constraint, _ = NewSemanticVersionConstraint(">=0.0.0")
-		} else {
+
+		if hasVersion {
 			var err error
 
 			constraint, err = parseVersionConstraint(versionStr)
@@ -108,9 +111,17 @@ func (f *Filter) Match(mod *Module) bool {
 
 func (f *Filter) Len() int { return len(f.modules) }
 
+// GetConstraint returns the version constraint registered for the module.
+// A bare "--include-module <name>" registers the name with a nil constraint;
+// that reports as "no constraint" (found == false) so callers pull only the
+// versions the release channels point at, never the full registry tag list.
 func (f *Filter) GetConstraint(moduleName string) (VersionConstraint, bool) {
 	constraint, found := f.modules[moduleName]
-	return constraint, found
+	if !found || constraint == nil {
+		return nil, false
+	}
+
+	return constraint, true
 }
 
 // IsWhitelist reports whether the filter is operating in whitelist mode.
@@ -148,7 +159,10 @@ func (f *Filter) ModuleNames() []string {
 //   - "=v1.2.3+stable"    → exact tag pinned to the named release channel
 //   - ">=1.2.0 <=1.3.0"   → semver range with inclusive anchors
 //   - "^1.2.0", "~1.2.0"  → semver shorthand
-//   - "1.2.0"             → implicit caret (^1.2.0), kept for backward compat
+//   - "1.2.0"             → implicit ">=1.2.0 <2.0.0" (bare version, same major
+//     line); for a 0.x version like "0.4.0" this spans
+//     the whole 0.x line (">=0.4.0 <1.0.0"), NOT a single
+//     minor as caret would — see NewImplicitVersionConstraint
 //
 // An empty or whitespace-only input is rejected so callers see a clear error
 // instead of silently producing a no-op constraint.
@@ -163,19 +177,18 @@ func parseVersionConstraint(v string) (VersionConstraint, error) {
 	}
 
 	switch v[0] {
-	// has user defined constraint (nothing to do)
-	case '=', '>', '<', '~', '^':
-	default:
-		// version without contraint (add ^ for backward compatibility)
-		v = "^" + v
-	}
-
 	// exact-match: "=1.2.3" or "=1.2.3+stable"
-	if v[0] == '=' {
+	case '=':
 		return parseExact(v[1:])
+	// user-supplied semver constraint (caret, tilde, range): honoured as-is.
+	case '>', '<', '~', '^':
+		return parseSemver(v)
+	// bare "X.Y.Z" with no operator: "this version or newer within the same
+	// major line". Expanded explicitly instead of via caret so 0.x majors are
+	// not locked to a single minor — see NewImplicitVersionConstraint.
+	default:
+		return NewImplicitVersionConstraint(v)
 	}
-	// semver constraint
-	return parseSemver(v)
 }
 
 func parseExact(body string) (VersionConstraint, error) {
@@ -205,7 +218,7 @@ func parseSemver(v string) (VersionConstraint, error) {
 }
 
 func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
-	constraint, hasConstraint := f.modules[moduleName]
+	constraint, hasConstraint := f.GetConstraint(moduleName)
 	if hasConstraint && constraint.IsExact() {
 		return false
 	}
@@ -237,7 +250,7 @@ func (f *Filter) ShouldMirrorReleaseChannels(moduleName string) bool {
 // channel still points at remains reachable through the channel snapshot even
 // when filterOnlyLatestPatches drops it from the constraint set.
 func (f *Filter) VersionsToMirror(mod *Module) []string {
-	constraint, hasConstraint := f.modules[mod.Name]
+	constraint, hasConstraint := f.GetConstraint(mod.Name)
 	if !hasConstraint {
 		return nil
 	}

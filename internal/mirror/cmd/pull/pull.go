@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -242,6 +241,12 @@ func NewPuller(cmd *cobra.Command) *Puller {
 func (p *Puller) Execute(ctx context.Context) error {
 	configureSummaryColor()
 
+	// Where modules are read from; honors --modules-path-suffix. Shared by the
+	// start-of-log warning and the summary, so both report the same path.
+	modulesPath := mirror.BuildModulesPathReport(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
+
+	p.warnNonDefaultModulesPath(modulesPath)
+
 	if err := p.cleanupWorkingDirectory(); err != nil {
 		return err
 	}
@@ -260,6 +265,8 @@ func (p *Puller) Execute(ctx context.Context) error {
 	// for a custom registry, where the renderer omits the Edition line.
 	_, edition := registryservice.GetEditionFromRegistryPath(p.params.DeckhouseRegistryRepo)
 	summary.Edition = string(edition)
+
+	summary.ModulesPath = modulesPath
 
 	// pullErr is nil for success and for a graceful Ctrl+C (which still renders a
 	// partial summary); non-nil for a hard failure (which also renders, then
@@ -303,6 +310,27 @@ func (p *Puller) Execute(ctx context.Context) error {
 	p.renderSummary(summary)
 
 	return p.finalCleanup()
+}
+
+// warnNonDefaultModulesPath opens the log with the moved-modules-path warning,
+// so a non-standard layout is visible before anything is downloaded. The
+// summary repeats it, in its multi-line form, at the end of the run.
+//
+// Silent when the pull carries no modules: the path is then irrelevant.
+func (p *Puller) warnNonDefaultModulesPath(m mirror.ModulesPathReport) {
+	if !modulesWillBePulled() {
+		return
+	}
+
+	if warning := m.Warning(); warning != "" {
+		p.logger.WarnLn(warning)
+	}
+}
+
+// modulesWillBePulled reports whether the pull includes modules: --no-modules
+// drops them, but --only-extra-images keeps their extra images in play.
+func modulesWillBePulled() bool {
+	return !pullflags.NoModules || pullflags.OnlyExtraImages
 }
 
 // renderSummary prints the end-of-pull summary block. PullService.Pull always
@@ -366,7 +394,8 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 		edition = pkg.NoEdition
 	}
 
-	// Scope to the registry path and modules suffix
+	// Scope to the registry path. The modules path suffix is applied in
+	// NewService below, via WithModulesPathSuffix.
 	if p.params.RegistryPath != "" {
 		c = c.WithSegment(p.params.RegistryPath)
 	}
@@ -384,7 +413,9 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 	}
 
 	svc := mirror.NewPullService(
-		registryservice.NewService(c, edition, logger),
+		registryservice.NewService(c, edition, logger,
+			registryservice.WithModulesPathSuffix(p.params.ModulesPathSuffix),
+		),
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
@@ -451,20 +482,6 @@ func (p *Puller) validatePlatformAccess() error {
 
 	if accessErr != nil {
 		return fmt.Errorf("Source registry is not accessible: %w", accessErr)
-	}
-
-	return nil
-}
-
-// validateModulesAccess validates access to the modules registry
-func (p *Puller) validateModulesAccess() error {
-	modulesRepo := path.Join(p.params.DeckhouseRegistryRepo, p.params.ModulesPathSuffix)
-
-	ctx, cancel := context.WithTimeout(p.cmd.Context(), 15*time.Second)
-	defer cancel()
-
-	if err := p.accessValidator.ValidateListAccessForRepo(ctx, modulesRepo, p.validationOpts...); err != nil {
-		return fmt.Errorf("Source registry is not accessible: %w", err)
 	}
 
 	return nil
