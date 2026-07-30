@@ -226,31 +226,7 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 
 	// Check if target is a release channel (like "stable", "beta") or a specific tag
 	if internal.ChannelIsValid(targetTag) {
-		// Probe every known release channel, not just the requested one. Editions
-		// differ in which channels they publish (e.g. CSE ships only "lts"), so any
-		// existing channel proves registry access. Every valid channel is already in
-		// this list, so the requested targetTag is covered too.
-		candidateChannels := slices.Concat(internal.GetAllDefaultReleaseChannels(), []string{internal.LTSChannel})
-
-		var lastNotFound error
-
-		for _, channel := range candidateChannels {
-			err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, channel)
-			if err == nil {
-				return nil
-			}
-
-			// Everything but ErrImageNotFound means we can't reach the registry at all
-			if !errors.Is(err, client.ErrImageNotFound) {
-				return fmt.Errorf("failed to check release channel %q exists in registry: %w", channel, err)
-			}
-
-			lastNotFound = err
-		}
-
-		// No channel exists in the registry. Keep wrapping ErrImageNotFound so the
-		// errdetect diagnostics fire and point the user at --deckhouse-tag.
-		return fmt.Errorf("no release channel found in the source registry (checked: %s): %w", strings.Join(candidateChannels, ", "), lastNotFound)
+		return svc.validateReleaseChannelAccess(ctx, targetTag, svc.options.TargetTag != "")
 	}
 
 	// For specific tags, check if the tag exists
@@ -260,6 +236,73 @@ func (svc *Service) validatePlatformAccess(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// validateReleaseChannelAccess verifies registry access through release channels.
+//
+// The requested channel is probed first: its existence both proves access and
+// guarantees the pull has something to fetch. When the channel was requested
+// explicitly (--deckhouse-tag) and is missing, that is a hard error listing
+// the channels the registry does publish - proceeding would produce an empty
+// bundle. For a default pull any existing channel proves access: editions
+// differ in which channels they publish (e.g. CSE ships only "lts").
+func (svc *Service) validateReleaseChannelAccess(ctx context.Context, channel string, explicit bool) error {
+	err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, channel)
+	if err == nil {
+		return nil
+	}
+
+	// Everything but ErrImageNotFound means we can't reach the registry at all
+	if !errors.Is(err, client.ErrImageNotFound) {
+		return fmt.Errorf("failed to check release channel %q exists in registry: %w", channel, err)
+	}
+
+	requestedErr := err
+	lastNotFound := err
+
+	allChannels := slices.Concat(internal.GetAllDefaultReleaseChannels(), []string{internal.LTSChannel})
+	existing := make([]string, 0, len(allChannels))
+
+	for _, ch := range allChannels {
+		if ch == channel {
+			continue
+		}
+
+		err := svc.deckhouseService.ReleaseChannels().CheckImageExists(ctx, ch)
+		if err == nil {
+			if !explicit {
+				return nil
+			}
+
+			existing = append(existing, ch)
+
+			continue
+		}
+
+		if !errors.Is(err, client.ErrImageNotFound) {
+			// The explicit channel is already missing and is the error to
+			// report; a broken sibling channel must not mask it.
+			if explicit {
+				svc.logger.Debug("Skipping release channel probe failure", slog.String("channel", ch), slog.String("error", err.Error()))
+
+				continue
+			}
+
+			return fmt.Errorf("failed to check release channel %q exists in registry: %w", ch, err)
+		}
+
+		lastNotFound = err
+	}
+
+	if explicit && len(existing) > 0 {
+		return fmt.Errorf("release channel %q not found in the source registry (available: %s): %w",
+			channel, strings.Join(existing, ", "), requestedErr)
+	}
+
+	// No channel exists in the registry. ErrNoReleaseChannels drives the
+	// errdetect hint pointing the user at --deckhouse-tag; the wrapped
+	// not-found chain keeps the underlying 404 diagnosable.
+	return fmt.Errorf("%w (checked: %s): %w", internal.ErrNoReleaseChannels, strings.Join(allChannels, ", "), lastNotFound)
 }
 
 // findTagsToMirror determines which Deckhouse release tags should be mirrored
