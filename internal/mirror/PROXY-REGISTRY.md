@@ -104,6 +104,8 @@ The "(probe)" steps are the only network behaviour that changes — they're the 
 
 The walk never invents tags: only versions that the registry confirmed are written to the bundle, and the latest-patch-per-minor / inclusive-anchor rules described in [README.MD: Platform Version Filtering](./README.MD#platform-version-filtering) and [README.MD: Module Filtering](./README.MD#module-filtering) are applied to the result the same way they would be after a normal `ListTags`.
 
+For **modules** whose version constraint is an OR of several ranges (e.g. `>=1 <2 || >=3 <4`), the walk above runs once per sub-range independently. Platform constraints are always a single range, so this applies to modules only.
+
 ---
 
 ## Worked example
@@ -143,10 +145,10 @@ The platform probe issues the following HEAD requests in order. The right column
 | 10 | `release-channel:v1.67.0` | 404 | new-minor probe failed; jump to next major (2.0.0) |
 | 11 | (skipped) `v2.0.0` is outside `<=1.68.0` | n/a | constraint excludes 2.0.0; **probe terminates** |
 
-After the probe finishes, the downstream pipeline keeps only the highest patch per `(major, minor)` (so `v1.64.0` and `v1.64.1` are dropped because `v1.64.2` is newer in the same minor). The final platform set written to `platform.tar` is therefore:
+After the probe finishes, the downstream pipeline keeps only the highest patch per `(major, minor)`, so `v1.64.1` is dropped in favour of `v1.64.2`. However, the lower bound `>=1.64.0` is an **inclusive anchor**: because the probe confirmed `v1.64.0` exists (step 1), it is preserved even though `v1.64.2` is a newer patch in the same minor — see the inclusive-anchor rule in [README.MD: Platform Version Filtering](./README.MD#platform-version-filtering). The final platform set written to `platform.tar` is therefore:
 
 ```
-v1.64.2, v1.65.0, v1.66.1
+v1.64.0, v1.64.2, v1.65.0, v1.66.1
 ```
 
 …plus any version pinned by an existing release channel snapshot (alpha/beta/etc.) that also satisfies the constraint.
@@ -157,10 +159,10 @@ Note that `v1.67.x` and `v1.68.x` would have been pulled too if the proxy regist
 
 ## What "exists" and "not found" mean on the wire
 
-The probe relies on the standard registry-v2 manifest endpoint:
+The probe uses the standard registry-v2 manifest endpoint. It issues a `HEAD` first and, if the registry answers the `HEAD` with anything other than a clean success or a `404`, it retries the same tag with a `GET` before deciding:
 
 ```
-HEAD /v2/<repo>/manifests/<tag>
+HEAD /v2/<repo>/manifests/<tag>   # retried as GET /v2/<repo>/manifests/<tag> on a non-404 error
 ```
 
 The mapping from HTTP response to probe action is:
@@ -172,7 +174,7 @@ The mapping from HTTP response to probe action is:
 | `401 Unauthorized`, `403 Forbidden` | Auth failure | Abort the entire pull with the error |
 | `5xx`, network error, timeout | Real failure | Abort the entire pull with the error |
 
-In other words: only an unambiguous "the registry does not have this tag" stops the probe — everything else is propagated so a transient network blip never gets silently mistaken for "release series ended". This is the same error policy used by `CheckImageExists` in the rest of the pull pipeline.
+In other words: only an unambiguous "the registry does not have this tag" stops the probe — everything else is propagated so a transient network blip never gets silently mistaken for "release series ended". This is the same error policy used by `CheckImageExists` in the rest of the pull pipeline. Because a `HEAD` that fails with a non-404 error is retried as a `GET`, a proxy that refuses `HEAD` requests but serves `GET` still works.
 
 If a proxy registry returns `200 OK` for tags it later refuses to serve the manifest of, the per-tag GET in the normal pull step (step 3d / 6d of the flow) will surface a clear error against that exact tag.
 
@@ -205,7 +207,7 @@ The reason this works: every operation other than the three `ListTags` calls is 
 | `--no-platform` is set | `--include-platform` is **not** required |
 | modules are being pulled (default) or `--only-extra-images` | At least one `--include-module <name>@<constraint>`. Every entry **must** include `@<constraint>` — `--include-module foo` alone is rejected because the probe would otherwise start at `v0.0.0` and silently miss every real tag |
 | `--no-modules` is set | `--include-module` is **not** required |
-| `--exclude-module` | Honoured (subtracts from the include list) |
+| `--exclude-module` | Cannot be used with the required `--include-module` (the two are mutually exclusive). Accepted only together with `--no-modules`, where it has no effect |
 | `--deckhouse-tag` | **Conflict**: a single pinned tag is already a direct check; do not combine with `--proxy-registry` |
 | `--since-version` | **Conflict**: `--since-version` has no upper bound and the probe cannot terminate. Use `--include-platform` with an explicit range instead |
 | `--dry-run` | Honoured — runs the probe and prints the plan without downloading any blobs |

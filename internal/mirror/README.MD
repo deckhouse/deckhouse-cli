@@ -54,7 +54,8 @@ d8 mirror pull <images-bundle-path> [flags]
 |------|-------------|
 | `--since-version` | Minimal Deckhouse release to pull (lower bound, inclusive). Ignored if above current Rock Solid release. Conflicts with `--deckhouse-tag` and `--include-platform` |
 | `--include-platform` | Select platform releases by semver constraint (e.g. `">=1.64 <=1.68"`). Uses the same constraint dialect as `--include-module`. Conflicts with `--deckhouse-tag` and `--since-version`. See [Platform Version Filtering](#platform-version-filtering) |
-| `--deckhouse-tag` | Specific Deckhouse build tag to pull. Conflicts with `--since-version` and `--include-platform`. If the registry contains a release channel image for the specified tag, all release channels in the bundle will point to it |
+| `--deckhouse-tag` | Specific Deckhouse build to pull. Accepts a **release channel name** (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts`), a **semver version** (`v1.69.3`), or **any custom tag** (`pr12345`, dev builds). Conflicts with `--since-version` and `--include-platform`. If the registry contains a release channel image for the value, all release channels in the bundle will point to it. See [Release Channel Selection](#release-channel-selection) |
+| `--ignore-suspend` | Mirror even when a release channel the request resolves to is marked suspended upstream. Use with caution. See [Suspended Release Channels](#suspended-release-channels) |
 
 #### Module Filtering
 
@@ -64,25 +65,38 @@ d8 mirror pull <images-bundle-path> [flags]
 | `--exclude-module` | `-e` | Blacklist specific modules. Format: `module-name[@version]`. Use one flag per module. Overridden by `--include-module` |
 | `--modules-path-suffix` | | Suffix to append to source repo path to locate modules (default: `/modules`) |
 
+#### Package Filtering
+
+Packages are mirrored with the same `name[@version-constraint]` dialect as modules (see [Module Filtering](#module-filtering)). See [Package Mirroring](#package-mirroring) for the full behavior.
+
+| Flag | Description |
+|------|-------------|
+| `--include-package` | Whitelist specific packages. Use one flag per package. Disables `--exclude-package` |
+| `--exclude-package` | Blacklist specific packages. Format: `package-name[@version]`. Use one flag per package. Overridden by `--include-package` |
+
 #### Component Selection
 
 | Flag | Description |
 |------|-------------|
 | `--no-platform` | Do not pull Deckhouse Kubernetes Platform into bundle |
-| `--no-security-db` | Do not pull security databases into bundle |
-| `--no-modules` | Do not pull Deckhouse modules into bundle |
-| `--only-extra-images` | Pull only extra images for modules (security databases, scanners, etc.) without main module images |
-| `--no-installer` | Do not pull Deckhouse installer into bundle |
-| `--installer-tag` | Specific Deckhouse installer build tag to pull. |
+| `--no-security-db` | Do not pull security databases into bundle. No effect on editions that ship no security databases. See [Security Databases](#security-databases) |
+| `--no-modules` | Do not pull Deckhouse modules into bundle. Overridden by `--include-module` (a whitelist wins; a warning is printed to stderr) |
+| `--no-packages` | Do not pull Deckhouse packages into bundle. Note: `package-versions.tar` is produced regardless. See [Package Mirroring](#package-mirroring) |
+| `--only-extra-images` | Pull only the extra images (scanners, etc.) of modules **and packages**, without their main images. Also re-enables the modules/packages phase even when `--no-modules`/`--no-packages` is set |
+| `--no-installer` | Do not pull the standalone Deckhouse installer (`installer.tar`). Does not affect the installer images embedded in `platform.tar`, which are governed by `--no-platform` |
+| `--installer-tag` | Specific Deckhouse installer build tag to pull (default: `latest`) |
+| `--skip-vex-images` | Do not pull VEX vulnerability-attestation (`.att`) images. Applies to platform, modules and packages. See [VEX Images](#vex-vulnerability-attestation-images) |
 
 #### Bundle Options
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--images-bundle-chunk-size` | `-c` | Split resulting bundle into chunks of at most N gigabytes (default: 0 = no splitting) |
-| `--gost-digest` | | Calculate GOST R 34.11-2012 STREEBOG digest for downloaded bundle |
+| `--images-bundle-chunk-size` | `-c` | Split resulting bundle into chunks of at most N gigabytes (decimal GB = 1000³ bytes; default: 0 = no splitting). Chunk files are named `<name>.tar.NNNN.chunk` |
+| `--gost-digest` | | Calculate GOST R 34.11-2012 Streebog-256 digest for each downloaded `.tar` and `.chunk` (writes `.gostsum` files) |
 | `--force` | | Overwrite existing bundle packages if they conflict with current pull operation |
-| `--no-pull-resume` | | Do not continue last unfinished pull operation; start from scratch |
+| `--no-pull-resume` | | Do not continue last unfinished pull operation; start from scratch. Otherwise an unfinished pull is resumed automatically for 24 hours (resume state is kept per source registry) |
+| `--dry-run` | | Print what would be pulled without downloading any images or writing a bundle. See [Dry Run](../../docs/mirror-pull-dry-run.md) |
+| `--verbose-summary` | | List every module and package (with resolved versions and VEX counts) in the end-of-pull summary instead of only totals. Output only; does not change what is pulled |
 
 #### Proxy/Cache Registry Discovery
 
@@ -145,6 +159,59 @@ d8 mirror pull /tmp/d8-bundle \
 
 ---
 
+### Release Channel Selection
+
+`--deckhouse-tag` is described above as a way to pin a specific build, but the value it accepts has three forms — and two of them are how you mirror **by release channel** instead of by version.
+
+| Value form | Example | What is pulled |
+|------------|---------|----------------|
+| Release channel name | `--deckhouse-tag stable` | Only the version the named channel currently points at. Valid channels: `alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts` |
+| Semver version | `--deckhouse-tag v1.69.3` | Only that exact release |
+| Any other tag | `--deckhouse-tag pr12345` | That tag as-is (dev/PR builds); it is matched against no channel |
+
+#### Pull a single release channel
+
+To mirror only the current `stable` release — the smallest platform bundle for a single channel:
+
+```bash
+d8 mirror pull /tmp/d8-bundle \
+  --license $LICENSE_TOKEN \
+  --deckhouse-tag stable
+```
+
+A default pull (no version flags) discovers every release between the `rock-solid` and `alpha` channels — see [Platform Release Discovery](#platform-release-discovery) — and downloads all of them. Selecting a channel by name downloads the images of one version only. Channel metadata is still read over the network for every channel, but only the selected channel's images are pulled.
+
+#### Behaviour of tag-pinned pulls
+
+Any `--deckhouse-tag <value>` (and the exact-tag form `--include-platform "=vX.Y.Z"`) changes two things beyond narrowing the version set:
+
+- **All release channels in the bundle are re-pointed to the pinned build.** If the source registry serves a release-channel image for the value, every default channel (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`) in the resulting bundle is aliased to it. After push, a cluster on any channel receives the pinned version. This aliasing only re-tags an already-downloaded image — it pulls no extra data. For a channel-name value this is what makes "`stable` only" work end to end; for a custom tag it happens only when such a release-channel image exists.
+- **No `deckhousereleases.yaml` is generated.** The per-version `DeckhouseRelease` manifests are produced only for range/discovery pulls. A tag-pinned bundle relies on the channel aliases above instead of the release manifest.
+
+> The `+channel` suffix of the exact-tag form (e.g. `--include-platform "=v1.65.3+stable"`) restricts channel propagation **for modules**, but has no effect for the platform: a pinned platform tag is always propagated to all default channels, exactly like `--deckhouse-tag`.
+
+#### Suspended Release Channels
+
+A release channel can be marked `suspend: true` in its `version.json` on the source registry (for example while a release is being retracted). By default:
+
+- A pull that **resolves to** a suspended channel is refused with an error, so you never mirror a version upstream has pulled back.
+- A channel that is suspended but that your request does **not** resolve to is ignored. A suspended `alpha` does not block `--deckhouse-tag stable`, and a specific `--deckhouse-tag vX.Y.Z` (or a custom tag) that matches no channel is unaffected.
+
+Pass `--ignore-suspend` to mirror regardless. Use with caution — you may distribute a version that is actively being retracted upstream.
+
+#### LTS Channel and CSE Editions
+
+`lts` is a valid release channel in addition to the five default channels, and is the channel the CSE edition ships:
+
+- `--deckhouse-tag lts` mirrors the current LTS release, exactly like any other channel name.
+- On editions that ship only `lts` (CSE), the absence of the standard channels (`alpha` … `rock-solid`) is not an error. Registry access validation also falls back from `stable` to `lts` automatically, so a plain `d8 mirror pull` works against a CSE source without extra flags.
+
+#### VEX (Vulnerability Attestation) Images
+
+For each platform image, the pull looks up a matching VEX attestation — an `.att` tag carrying Vulnerability-Exploitability-eXchange data — and, when present, adds it to the bundle. This happens by default. Pass `--skip-vex-images` to exclude these attestations and produce a smaller bundle.
+
+---
+
 ### Proxy Registry Mode
 
 `--proxy-registry` adapts the pull command to source registries that act as a transparent proxy or cache in front of another registry and do **not** implement the registry catalog API (`/v2/_catalog`, `/v2/<name>/tags/list`). Instead of calling `ListTags`, the pull walks individual semver tags forward from a starting point you supply via `--include-platform` / `--include-module` and probes each one with a single manifest `HEAD` request.
@@ -183,13 +250,13 @@ module-name[@version-constraint]
    --include-module mymodule
    ```
 
-2. **Semver caret constraint (^)** - Compatible versions (default when version is specified without operator)
+2. **Bare version / caret (^)** - a version given without an operator, or with a caret
    ```bash
-   --include-module mymodule@1.3.0
-   --include-module mymodule@^1.3.0  # equivalent
+   --include-module mymodule@1.3.0    # bare version: >=1.3.0 <2.0.0 (same major line)
+   --include-module mymodule@^1.3.0   # caret: >=1.3.0 <2.0.0 for major >= 1
    ```
-   - Example: For available versions `v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1`
-   - Constraint `^1.3.0` includes: `v1.3.3, v1.4.1`
+   - Example: For available versions `v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.1`, both include `v1.3.3, v1.4.1`.
+   - **The bare form is NOT identical to caret for `0.x`:** `mymodule@0.4.0` expands to `>=0.4.0 <1.0.0` (the whole `0.x` line), whereas `^0.4.0` locks the minor (`>=0.4.0 <0.5.0`). For major ≥ 1 the two coincide. Prefer the bare form for step-by-step upgrades that must capture every intermediate minor.
    - Only the highest patch in each `(major, minor)` series is kept, matching the platform release discovery rule. Use the exact-tag form (`=`) to pin a specific older patch.
    - Versions currently pinned by release channels (alpha, beta, early-access, stable, rock-solid, lts) are pulled in addition, regardless of the patch filter.
    - Also pulls current versions from all release channels
@@ -219,7 +286,7 @@ module-name[@version-constraint]
    --include-module mymodule@=v1.3.0
    ```
    - Includes only `v1.3.0`
-   - Publishes to all release channels (alpha, beta, early-access, stable, rock-solid)
+   - Publishes to all release channels (alpha, beta, early-access, stable, rock-solid, **and `lts`**)
 
 6. **Exact tag with custom build identifier**
    ```bash
@@ -234,6 +301,17 @@ module-name[@version-constraint]
    ```
    - Includes only `v1.3.0`
    - Publishes only to the `stable` channel
+   - An unrecognized channel in the suffix (e.g. `+bogus`) is ignored: the pin falls back to publishing to all channels, as in items 5–6.
+
+#### Pinning several versions at once
+
+Repeating `--include-module` for the **same** module OR-combines the constraints, so you can pin multiple versions in one pull:
+
+```bash
+--include-module mymodule@=v1.3.0 --include-module mymodule@=v1.4.0   # pulls both
+```
+
+When more than one exact tag is pinned for the same module, the "publish to all channels" behavior of a single pin no longer applies — only tags that name their own `+channel` suffix are aliased to a channel; the rest are pulled as plain tags. The same rule applies to `--include-package`.
 
 #### Examples
 
@@ -280,6 +358,53 @@ d8 mirror pull /tmp/d8-bundle \
   --deckhouse-tag v1.59.0
 ```
 
+---
+
+### Package Mirroring
+
+Packages are a component mirrored much like modules, but under the `packages/` registry segment. They are selected with `--include-package` / `--exclude-package` (same `name[@version-constraint]` dialect as [Module Filtering](#module-filtering)) and skipped with `--no-packages`. A default pull mirrors **all** packages the source registry exposes.
+
+Registry layout (under the edition root, e.g. `registry.deckhouse.ru/deckhouse/fe`):
+
+| Path | Contents |
+|------|----------|
+| `<root>/packages/<name>:<version>` | Main package image |
+| `<root>/packages/<name>/version:<channel\|vX.Y.Z>` | Release-channel and per-version release metadata (segment is `version`, not modules' `release`) |
+| `<root>/packages/<name>/extra/<image>:<tag>` | Extra images (listed in the release image's `extra_images.json`) |
+
+**Bundle output:** one `package-<name>.tar` per package that pulled at least one image, plus a single `package-versions.tar`.
+
+**`package-versions.tar` is produced on every pull** — regardless of `--no-packages` or the include/exclude filter. It clones the full package release-metadata catalog (all package names, every `version:` tag) so the bundle's package release metadata stays in sync. Do not rely on `--no-packages` to suppress it.
+
+Differences from modules:
+
+- There is no `--packages-path-suffix`; the `packages/` segment is fixed.
+- `--only-extra-images`, `--skip-vex-images`, `--dry-run` and `--verbose-summary` apply to packages exactly as to modules.
+- Exact-tag pins and multi-version pinning follow the same channel-alias rules as modules (see [Pinning several versions at once](#pinning-several-versions-at-once)).
+
+If the source registry has no `packages` repository (some public/CE registries), the package phase and `package-versions.tar` are skipped with a warning instead of failing the pull.
+
+---
+
+### Security Databases
+
+The security phase mirrors four Trivy databases into `security.tar`, each pinned at a fixed schema tag under `<root>/<edition>/security/`:
+
+| Database | Tag | Contents |
+|----------|-----|----------|
+| `trivy-db` | `2` | Main Trivy vulnerability database |
+| `trivy-bdu` | `1` | Russian BDU (FSTEC) vulnerability feed |
+| `trivy-java-db` | `1` | Java package index |
+| `trivy-checks` | `0` | Misconfiguration policy checks |
+
+These tags are rolling schema pointers, not release versions: a pull always fetches their current contents, and the set is **not** affected by `--deckhouse-tag`, `--include-platform`, `--since-version` or any release channel. Security-database freshness is therefore independent of which platform versions you mirror.
+
+**Edition availability.** Availability is detected automatically by probing `trivy-db:2`. Editions that do not ship security databases (e.g. CE, BE, SE) return "not found", so the whole phase is skipped silently — no `security.tar` is written, no error is raised, and `--no-security-db` has nothing to skip. EE/FE ship the databases.
+
+**Partial sets.** Only `trivy-db` gates the phase; the other three are best-effort, so a missing `trivy-bdu`/`trivy-java-db`/`trivy-checks` tag is skipped rather than failing the pull. The end-of-pull summary reports `N/4 databases` and flags the line when `N < 4`.
+
+---
+
 ### Environment Variables
 
 Additional configuration options are available through environment variables:
@@ -291,6 +416,7 @@ Additional configuration options are available through environment variables:
 | `HTTP_PROXY` | URL of proxy server for HTTP requests to hosts not listed in `NO_PROXY` |
 | `HTTPS_PROXY` | URL of proxy server for HTTPS requests to hosts not listed in `NO_PROXY` |
 | `NO_PROXY` | Comma-separated list of hosts to exclude from proxying. Supports IP addresses, CIDR notations, domains, and asterisk. Domains match name and subdomains. A single `*` disables all proxying |
+| `D8_MIRROR_TIMEOUT` | Per-request timeout for registry operations, as a Go duration (e.g. `30s`, `5m`). Applies to all pull operations, including platform. A negative or unset value leaves the client default in place |
 
 ### Bundle Structure
 
@@ -298,13 +424,18 @@ The pull command creates a bundle with the following structure:
 
 ```
 <images-bundle-path>/
-├── platform.tar              # Deckhouse platform images (if not --no-platform)
-├── security.tar              # Security databases (if not --no-security-db)
-├── module-<name>.tar         # Individual module bundles (if not --no-modules)
-└── module-<name>-<n>.chunk   # Chunked bundles (if --images-bundle-chunk-size is set)
+├── platform.tar              # Platform images incl. embedded install/install-standalone (if not --no-platform)
+├── installer.tar             # Standalone Deckhouse installer (if not --no-installer)
+├── security.tar              # Security databases: trivy-db/bdu/java-db/checks (if available for the edition)
+├── module-<name>.tar         # One archive per module (if not --no-modules)
+├── package-<name>.tar        # One archive per package (if not --no-packages)
+├── package-versions.tar      # Package release-metadata catalog (always produced)
+└── <name>.tar.NNNN.chunk     # Chunk parts, when --images-bundle-chunk-size is set (NNNN = 0000, 0001, …)
 ```
 
-If `--gost-digest` is specified, `.gostsum` files are created alongside each `.tar` file.
+When a component is chunked, its `<name>.tar` is written as a sequence of `<name>.tar.NNNN.chunk` parts (4-digit, zero-padded, starting at `0000`) instead of a single `.tar`; `d8 mirror push` reassembles them transparently.
+
+If `--gost-digest` is specified, a GOST R 34.11-2012 Streebog-256 `.gostsum` file is written next to every `.tar` **and** every `.chunk`.
 
 ---
 
@@ -314,16 +445,21 @@ If `--gost-digest` is specified, `.gostsum` files are created alongside each `.t
 
 Uploads a previously downloaded Deckhouse Kubernetes Platform distribution bundle to a third-party container registry. This is typically used to populate an air-gapped registry with Deckhouse images.
 
+Before uploading, push runs a write-access check against the target repository (15-second timeout, or `D8_MIRROR_TIMEOUT`); set `MIRROR_BYPASS_ACCESS_CHECKS=1` to proceed even if that check fails. Chunked packages (`<name>.tar.NNNN.chunk`) are reassembled transparently, and each image upload is retried up to 4 times. After the layouts are pushed, small discovery-index tags are created at `<repo>/modules:<module>` and `<repo>/packages:<package>` so the mirrored modules and packages can be enumerated by tag listing.
+
 ### Synopsis
 
 ```bash
-d8 mirror push <images-bundle-path> <registry> [flags]
+d8 mirror push [images-bundle-path] <registry> [flags]
+
+# Push individual package files instead of a bundle directory:
+d8 mirror push <registry> --file platform.tar --file module-foo.tar [flags]
 ```
 
 ### Arguments
 
-- `<images-bundle-path>` - Path to the directory containing the bundle created by `d8 mirror pull`
-- `<registry>` - Target registry address (format: `registry-host[:port]/path`, e.g. `registry.corp.local:5000/deckhouse`)
+- `<registry>` - Target registry address, always the **last** positional argument (format: `registry-host[:port]/path`, e.g. `registry.corp.local:5000/deckhouse`). `http://`/`https://` prefixes are stripped; a bare registry root with no path is rejected; the repository path must be 2–255 characters.
+- `[images-bundle-path]` - **Optional** path to the bundle directory (or a single tar/chunked package) created by `d8 mirror pull`. May be omitted when packages are supplied via `--file`.
 
 ### Flags
 
@@ -332,7 +468,7 @@ d8 mirror push <images-bundle-path> <registry> [flags]
 | Flag | Short | Environment Variable | Description |
 |------|-------|---------------------|-------------|
 | `--registry-login` | `-u` | `D8_MIRROR_REGISTRY_LOGIN` | Username to log into the target registry |
-| `--registry-password` | `-p` | `D8_MIRROR_REGISTRY_PASSWORD` | Password to log into the target registry |
+| `--registry-password` | `-p` | `D8_MIRROR_REGISTRY_PASSWORD` | Password to log into the target registry. Requires `--registry-login` to be set as well |
 
 #### Connection Options
 
@@ -341,6 +477,12 @@ d8 mirror push <images-bundle-path> <registry> [flags]
 | `--tls-skip-verify` | Disable TLS certificate validation |
 | `--insecure` | Interact with registries over HTTP |
 | `--tmp-dir` | Path to temporary directory for processing. Ensure sufficient disk space for the entire bundle |
+
+#### Package Selection
+
+| Flag | Description |
+|------|-------------|
+| `--file` | Path to a single tar or chunked package to push. May be repeated. Can replace the `[images-bundle-path]` argument or be combined with it |
 
 #### Other Options
 
@@ -378,6 +520,8 @@ The same environment variables used by `d8 mirror pull` are also supported:
 | `HTTP_PROXY` | HTTP proxy server URL |
 | `HTTPS_PROXY` | HTTPS proxy server URL |
 | `NO_PROXY` | Comma-separated list of hosts to exclude from proxying |
+| `D8_MIRROR_TIMEOUT` | Per-request timeout for registry operations, as a Go duration (e.g. `30s`, `5m`). Also caps the pre-push access check |
+| `MIRROR_BYPASS_ACCESS_CHECKS` | Set to `1` to continue the push even when the registry write-access pre-check fails |
 
 ---
 
@@ -425,7 +569,7 @@ The same environment variables used by `d8 mirror pull` are also supported:
 **Problem:** Pull operation fails due to lack of disk space.
 
 **Solution:** 
-- Use `--tmp-dir` to specify a location with more space
+- Use `--tmp-dir` to specify a location with more space. By default the temp directory is `<images-bundle-path>/.tmp`, i.e. on the **same volume as the bundle** — point `--tmp-dir` elsewhere if that volume is small
 - Use `--images-bundle-chunk-size` to split the bundle into smaller chunks
 - Use component flags (`--no-modules`, `--no-security-db`) to reduce bundle size
 
@@ -459,14 +603,23 @@ The same environment variables used by `d8 mirror pull` are also supported:
 
 ### Debug Logging
 
-Enable debug logging to troubleshoot issues:
+Enable debug logging to troubleshoot issues via the `MIRROR_DEBUG_LOG` environment variable (an integer, higher = more verbose):
+
+| Level | Output |
+|-------|--------|
+| `0` | No debug logging (default) |
+| `1` | Image-transfer progress to stderr |
+| `2` | Level 1 + registry-client warnings to stderr |
+| `3` | Level 2 + mirror debug messages to stdout |
+| `4` | Level 3 + full registry requests/responses to stderr |
 
 ```bash
-# Set debug level (1-4, higher = more verbose)
-export D8_LOG_LEVEL=3
+export MIRROR_DEBUG_LOG=3
 
 d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 ```
+
+> Note: `D8_LOG_LEVEL` does **not** control mirror verbosity — use `MIRROR_DEBUG_LOG`.
 
 ---
 
@@ -492,7 +645,7 @@ d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 2. **Use `--include-platform`:** To pull a bounded window of releases (e.g. `">=1.64 <=1.68"`) — useful for staged incremental updates where you want to move up a few minors at a time without pulling the entire channel history
 3. **Specific Versions:** Use `--deckhouse-tag` (or `--include-platform "=vX.Y.Z"`) for fully controlled, single-release deployments
 4. **Module Versioning:** Leverage semver constraints in `--include-module` for flexible module version management; `--include-platform` speaks the same dialect
-5. **Release Channels:** Pulling respects all configured release channels (alpha, beta, early-access, stable, rock-solid); channels whose snapshot falls outside an `--include-platform` constraint are automatically excluded from the bundle
+5. **Release Channels:** Pulling respects all configured release channels (alpha, beta, early-access, stable, rock-solid, lts); channels whose snapshot falls outside an `--include-platform` constraint are automatically excluded from the bundle
 
 ### Bundle Management
 
@@ -507,15 +660,19 @@ d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 
 ### Bundle Components
 
-The mirror system handles three primary component types:
+The mirror system handles these component types, each packed into its own archive(s):
 
-1. **Platform Images:** Core Deckhouse Kubernetes Platform containers
-2. **Modules:** Optional Deckhouse modules with versioned releases
-3. **Security Databases:** Vulnerability scanning databases and related data
+1. **Platform images** (`platform.tar`) — core platform containers, plus the edition-scoped `install` and `install-standalone` installer images.
+2. **Standalone installer** (`installer.tar`) — the non-edition-scoped `installer` image, controlled by `--installer-tag` / `--no-installer`.
+3. **Modules** (`module-<name>.tar`) — optional modules with versioned releases; see [Module Filtering](#module-filtering).
+4. **Packages** (`package-<name>.tar`, plus the always-present `package-versions.tar`) — see [Package Mirroring](#package-mirroring).
+5. **Security databases** (`security.tar`) — four Trivy databases; see [Security Databases](#security-databases).
+
+For each module and package version, the pull additionally fetches release-metadata images, images referenced by the release image's `images_digests.json`, extra images listed in `extra_images.json`, and (unless `--skip-vex-images` is set) `.att` VEX attestation images.
 
 ### Platform Release Discovery
 
-By default, the platform service discovers releases between the current `rock-solid` channel version (lower bound) and the current `alpha` channel version (upper bound), keeping the highest patch per `(major, minor)`.
+By default, the platform service discovers releases between the current `rock-solid` channel version (lower bound) and the current `alpha` channel version (upper bound), keeping the highest patch per `(major, minor)`. To narrow this to a single channel, a single version, or a custom build, use `--deckhouse-tag` — see [Release Channel Selection](#release-channel-selection). Suspended channels, the `lts`/CSE special cases, and VEX attestation images are covered there as well.
 
 `--since-version` raises the lower bound above `rock-solid` when the user wants to skip older minors.
 
@@ -529,6 +686,10 @@ By default, the platform service discovers releases between the current `rock-so
 - **Blacklist Mode:** All modules except specified ones are included (default)
 - **Version Constraints:** Semver-based filtering for granular control (same dialect as `--include-platform`)
 - **Release Channels:** Each module can have multiple release channel versions
+
+### Editions
+
+The last path segment of `--source` selects the Deckhouse edition and is stripped to form the *edition root* that scopes the deckhouse, modules, packages and security repositories. Recognized editions: `ee`, `fe`, `se`, `se-plus`, `be`, `ce`. A source whose last segment is not one of these is treated as a plain path with no edition (the end-of-pull summary then omits the Edition line). The standalone `installer` image is always pulled from the non-edition root. Editions differ in which components exist — for example, only EE/FE ship [security databases](#security-databases).
 
 ### Storage Layout
 
