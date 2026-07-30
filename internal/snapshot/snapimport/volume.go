@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -105,6 +106,13 @@ var dataImportGVR = schema.GroupVersionResource{Group: "storage-foundation.deckh
 // ErrForeignDataImport is returned when a shared DataImport name is occupied by an
 // object whose content identity or normalized upload spec belongs to another archive.
 var ErrForeignDataImport = errors.New("foreign DataImport collision")
+
+// errDataImportRecheck signals EnsureDataImport that the DataImport changed under our feet
+// while alignDataImportTTL was retrying a conflicting update — it was deleted, or it
+// transitioned to Ready=False/Expired — so the object must be re-evaluated from the top of
+// EnsureDataImport's reconcile loop (recreate or delete-and-recreate) rather than patched as
+// if it were still the healthy object the caller started with.
+var errDataImportRecheck = errors.New("DataImport changed during TTL alignment")
 
 // VolumeImporter imports a data leaf's volume bytes by creating an SVDM DataImport,
 // waiting for the importer to be ready, streaming the archive bytes, finalising the
@@ -268,7 +276,11 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 			if !conditionFalseWithReason(existing, conditionReady, reasonExpired) {
 				// Align spec.ttl with the current run so retrying a stalled import with a
 				// longer --ttl is honoured instead of keeping the first create's value.
-				if tErr := c.alignDataImportTTL(ctx, ri, existing); tErr != nil {
+				if tErr := c.alignDataImportTTL(ctx, ri, existing, leaf); tErr != nil {
+					if errors.Is(tErr, errDataImportRecheck) {
+						continue
+					}
+
 					return "", tErr
 				}
 
@@ -403,27 +415,80 @@ func validateDataImportSpec(obj *unstructured.Unstructured, leaf PlannedNode) er
 
 // alignDataImportTTL patches a reused DataImport's spec.ttl to the current run's TTL when it
 // drifted, so increasing --ttl on a retry takes effect. No-op when already aligned.
-func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured) error {
-	cur, _, _ := unstructured.NestedString(existing.Object, "spec", "ttl")
-	if cur == c.ttl {
+//
+// The whole body runs inside retry.RetryOnConflict, mirroring reconcileExistingMarker: a
+// conflicting Update forces a re-Get on the next attempt (current = nil), and the re-Get's
+// result is re-validated against leaf and re-checked for the Expired condition before any
+// patch is attempted, so a concurrent run cannot cause a stale-revision TTL patch to land on
+// a foreign or already-expired object. errDataImportRecheck is returned as-is (never wrapped)
+// when the re-Get finds the object gone or expired, so EnsureDataImport's caller can tell
+// "retry from scratch" apart from a genuine patch failure via errors.Is.
+func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, leaf PlannedNode) error {
+	current := existing
+	didUpdate := false
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if current == nil {
+			latest, getErr := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+				func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+					return ri.Get(requestCtx, existing.GetName(), metav1.GetOptions{})
+				})
+			if getErr != nil {
+				if kubeerrors.IsNotFound(getErr) {
+					return errDataImportRecheck
+				}
+
+				return fmt.Errorf("get DataImport %s/%s after conflict: %w", existing.GetNamespace(), existing.GetName(), getErr)
+			}
+
+			current = latest
+		}
+
+		if matchErr := validateDataImport(current, leaf); matchErr != nil {
+			return matchErr
+		}
+
+		if conditionFalseWithReason(current, conditionReady, reasonExpired) {
+			return errDataImportRecheck
+		}
+
+		cur, _, _ := unstructured.NestedString(current.Object, "spec", "ttl")
+		if cur == c.ttl {
+			return nil
+		}
+
+		candidate := current.DeepCopy()
+		if setErr := unstructured.SetNestedField(candidate.Object, c.ttl, "spec", "ttl"); setErr != nil {
+			return fmt.Errorf("set DataImport ttl: %w", setErr)
+		}
+
+		patched, updateErr := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
+			func(requestCtx context.Context) (*unstructured.Unstructured, error) {
+				return ri.Update(requestCtx, candidate, metav1.UpdateOptions{})
+			})
+		if updateErr != nil {
+			current = nil
+
+			return updateErr
+		}
+
+		current = patched
+		didUpdate = true
+
 		return nil
-	}
-
-	updated := existing.DeepCopy()
-	if err := unstructured.SetNestedField(updated.Object, c.ttl, "spec", "ttl"); err != nil {
-		return fmt.Errorf("set DataImport ttl: %w", err)
-	}
-
-	_, err := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
-		func(requestCtx context.Context) (*unstructured.Unstructured, error) {
-			return ri.Update(requestCtx, updated, metav1.UpdateOptions{})
-		})
+	})
 	if err != nil {
+		if errors.Is(err, errDataImportRecheck) || errors.Is(err, ErrForeignDataImport) {
+			return err
+		}
+
 		return fmt.Errorf("patch DataImport %s/%s ttl: %w", existing.GetNamespace(), existing.GetName(), err)
 	}
 
-	c.log.Info("aligned DataImport ttl",
-		slog.String("namespace", existing.GetNamespace()), slog.String("name", existing.GetName()), slog.String("ttl", c.ttl))
+	if didUpdate {
+		c.log.Info("aligned DataImport ttl",
+			slog.String("namespace", existing.GetNamespace()), slog.String("name", existing.GetName()), slog.String("ttl", c.ttl))
+	}
 
 	return nil
 }

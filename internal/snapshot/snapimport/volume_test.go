@@ -4927,6 +4927,240 @@ func TestEnsureDataImport_AlignsTTLOnReuse(t *testing.T) {
 	}
 }
 
+// TestEnsureDataImport_AlignsTTLRetryingConflict validates the basis of the retry fix itself:
+// a 409 Conflict on the TTL-align Update, produced by runControlRequest's errors.Join wrapping,
+// must still be recognized by retry.RetryOnConflict (via apierrors.IsConflict's errors.As
+// support for Unwrap() []error), and must force a re-Get rather than a blind resubmit of the
+// same stale revision.
+func TestEnsureDataImport_AlignsTTLRetryingConflict(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+
+	updateCalls := 0
+	dyn.PrependReactor("update", dataImportGVR.Resource, func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			return true, nil, kubeerrors.NewConflict(
+				dataImportGVR.GroupResource(),
+				imp.DataImportName(leaf),
+				errors.New("concurrent ttl update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport after ttl conflict: %v", err)
+	}
+
+	if updateCalls != 2 {
+		t.Fatalf("update calls = %d, want 2", updateCalls)
+	}
+
+	if g := countDataImportActions(dyn, "get"); g < 2 {
+		t.Errorf("get calls = %d, want >= 2 (a conflict must force a re-Get, not a blind retry)", g)
+	}
+
+	if c := countDataImportActions(dyn, "create"); c != 0 {
+		t.Errorf("create calls = %d, want 0 (a conflicted TTL align must not fall back to recreate)", c)
+	}
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).
+		Get(context.Background(), imp.DataImportName(leaf), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want 1h (aligned after conflict retry)", ttl)
+	}
+}
+
+// TestEnsureDataImport_TTLConflictRevalidatesFreshObject covers the race the retry loop must
+// close: if a concurrent writer replaces the DataImport with a foreign one in the window between
+// the conflicting Update and alignDataImportTTL's re-Get, the re-Get's result must be
+// re-validated against leaf before any patch — never blindly reused from the pre-conflict
+// revision.
+func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+
+	foreign := dataImportObjForLeaf(targetNS, leaf, false)
+	annotations := foreign.GetAnnotations()
+	annotations[dataImportCodecAnnotation] = "zstd"
+	foreign.SetAnnotations(annotations)
+
+	updateCalls := 0
+	dyn.PrependReactor("update", dataImportGVR.Resource, func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			// Simulate a concurrent writer swapping in a foreign DataImport in the exact
+			// window the conflict forces alignDataImportTTL to re-Get.
+			if err := dyn.Tracker().Update(dataImportGVR, foreign, targetNS); err != nil {
+				return true, nil, fmt.Errorf("swap in foreign DataImport: %w", err)
+			}
+
+			return true, nil, kubeerrors.NewConflict(
+				dataImportGVR.GroupResource(),
+				imp.DataImportName(leaf),
+				errors.New("concurrent ttl update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	_, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+	if !errors.Is(err, ErrForeignDataImport) {
+		t.Fatalf("EnsureDataImport error = %v, want ErrForeignDataImport", err)
+	}
+
+	if updateCalls != 1 {
+		t.Errorf("update calls = %d, want 1 (a foreign object found on re-Get must not be patched)", updateCalls)
+	}
+}
+
+// TestEnsureDataImport_TTLTargetVanishedRecreates covers a conflict whose re-Get finds the
+// DataImport gone: alignDataImportTTL must surface errDataImportRecheck (not a hard failure) so
+// EnsureDataImport's outer loop re-evaluates from scratch and creates a fresh DataImport.
+func TestEnsureDataImport_TTLTargetVanishedRecreates(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+
+	updateCalls := 0
+	dyn.PrependReactor("update", dataImportGVR.Resource, func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			if err := dyn.Tracker().Delete(dataImportGVR, targetNS, imp.DataImportName(leaf)); err != nil {
+				return true, nil, fmt.Errorf("delete raced DataImport: %w", err)
+			}
+
+			return true, nil, kubeerrors.NewConflict(
+				dataImportGVR.GroupResource(),
+				imp.DataImportName(leaf),
+				errors.New("concurrent ttl update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	name, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+	if err != nil {
+		t.Fatalf("EnsureDataImport after target vanished mid-alignment: %v", err)
+	}
+
+	if want := imp.DataImportName(leaf); name != want {
+		t.Errorf("name = %q, want %q", name, want)
+	}
+
+	if c := countDataImportActions(dyn, "create"); c != 1 {
+		t.Errorf("create calls = %d, want 1 (a vanished target must be recreated)", c)
+	}
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("recreated DataImport not found: %v", err)
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want 1h", ttl)
+	}
+}
+
+// TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates mirrors
+// TestEnsureDataImport_RecreatesExpired for the conflict-retry path: if the re-Get after a
+// conflicting TTL Update finds the DataImport now Ready=False/Expired, alignDataImportTTL must
+// surface errDataImportRecheck so EnsureDataImport's outer loop deletes and recreates it instead
+// of patching a dying object.
+func TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+
+	expired := dataImportObjForLeaf(targetNS, leaf, true)
+
+	updateCalls := 0
+	dyn.PrependReactor("update", dataImportGVR.Resource, func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			if err := dyn.Tracker().Update(dataImportGVR, expired, targetNS); err != nil {
+				return true, nil, fmt.Errorf("swap in expired DataImport: %w", err)
+			}
+
+			return true, nil, kubeerrors.NewConflict(
+				dataImportGVR.GroupResource(),
+				imp.DataImportName(leaf),
+				errors.New("concurrent ttl update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	name, err := imp.EnsureDataImport(context.Background(), leaf, targetNS)
+	if err != nil {
+		t.Fatalf("EnsureDataImport after target expired mid-alignment: %v", err)
+	}
+
+	if d := countDataImportActions(dyn, "delete"); d != 1 {
+		t.Errorf("delete calls = %d, want 1 (a target that expires mid-alignment must be deleted)", d)
+	}
+
+	if c := countDataImportActions(dyn, "create"); c != 1 {
+		t.Errorf("create calls = %d, want 1 (a target that expires mid-alignment must be recreated)", c)
+	}
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("recreated DataImport not found: %v", err)
+	}
+
+	if conditionFalseWithReason(got, conditionReady, reasonExpired) {
+		t.Errorf("recreated DataImport must not be in the Ready=False/Expired state")
+	}
+}
+
+// TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate is a regression anchor for the ordering
+// requirement in alignDataImportTTL: the ttl-equality check must run after any re-Get, but it
+// must still short-circuit to zero Updates on the common already-aligned path.
+func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	dyn := newFakeDataImportDyn(dataImportObj(targetNS, "pvc-1", false)) // spec.ttl: "1h"
+	imp := newTestVolumeImporter(dyn)                                   // ttl: "1h"
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 0 {
+		t.Errorf("update calls = %d, want 0 (ttl already aligned)", u)
+	}
+}
+
 func TestEnsureDataImport_RecreatesExpired(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
 

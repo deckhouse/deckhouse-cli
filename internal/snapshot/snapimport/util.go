@@ -54,6 +54,12 @@ func conditionTrue(obj *unstructured.Unstructured, condType string) bool {
 // reason. It detects the DataImport/DataExport terminal Expired state, which the producer now signals as
 // Ready=False with reason "Expired" (the standalone "Expired" condition type was removed from the catalog
 // in favour of a reason + a status.phase).
+//
+// condType is always conditionReady at today's call sites; the parameter is kept to document the
+// general Status/Reason contract mirrored from conditionTrue, since narrowing it to a single
+// hardcoded condition type is an unrelated signature change outside this fix's scope.
+//
+//nolint:unparam // condType is always "Ready" today; kept general to mirror conditionTrue's contract.
 func conditionFalseWithReason(obj *unstructured.Unstructured, condType, reason string) bool {
 	conds, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
