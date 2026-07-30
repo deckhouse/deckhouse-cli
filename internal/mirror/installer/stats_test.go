@@ -133,3 +133,39 @@ func TestStats_AccessFailure_ReportsNotAttempted(t *testing.T) {
 	require.False(t, stats.Attempted, "gracefully-skipped installer must not report a successful pull")
 	require.Equal(t, 0, stats.Images)
 }
+
+// TestStats_DryRun_AccessFailure_ReportsNotAttempted mirrors the access-failure
+// regression test for dry-run: a gracefully-skipped installer must not appear in
+// the pull plan either. Before the accessSkipped flag, the dry-run branch of
+// Stats unconditionally reported Attempted=true, so the summary rendered the
+// installer tag as planned even though the phase was skipped.
+func TestStats_DryRun_AccessFailure_ReportsNotAttempted(t *testing.T) {
+	workingDir := t.TempDir()
+	bundleDir := t.TempDir()
+
+	stubClient := fake.NewRegistryClientStub()
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	regSvc := registryservice.NewService(stubClient, pkg.FEEdition, logger)
+
+	svc := NewService(
+		regSvc,
+		workingDir,
+		&Options{
+			// Tag that does not exist in the stub registry: the access check
+			// fails, PullInstaller gracefully skips, nothing is planned.
+			TargetTag: "v9.99.0",
+			BundleDir: bundleDir,
+			DryRun:    true,
+		},
+		logger,
+		userLogger,
+	)
+
+	require.NoError(t, svc.PullInstaller(context.Background()))
+
+	stats := svc.Stats()
+	require.False(t, stats.Attempted, "gracefully-skipped installer must not appear in the dry-run plan")
+	require.Equal(t, 0, stats.Images)
+}
