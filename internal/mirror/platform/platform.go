@@ -529,7 +529,7 @@ var ErrSomeChannelsFailed = errors.New("some channels failed to fetch")
 func (svc *Service) validateChannelResults(results map[string]releaseChannelVersionResult) (channelVersions, error) {
 	versions := make(channelVersions, len(results))
 
-	someChannelsIsFailed := false
+	failedChannels := make([]string, 0, len(results))
 
 	for channel, result := range results {
 		if result.err == nil {
@@ -538,16 +538,19 @@ func (svc *Service) validateChannelResults(results map[string]releaseChannelVers
 			continue
 		}
 
-		if result.err != nil {
-			someChannelsIsFailed = true
-		}
+		failedChannels = append(failedChannels, channel)
 	}
 
-	if someChannelsIsFailed {
-		return versions, ErrSomeChannelsFailed
+	if len(failedChannels) == 0 {
+		return versions, nil
 	}
 
-	return versions, nil
+	// Keep one underlying failure in the chain: it carries the not-found
+	// context the errdetect diagnostics need. Sort for a stable message.
+	slices.Sort(failedChannels)
+	first := failedChannels[0]
+
+	return versions, fmt.Errorf("%w: channel %q: %w", ErrSomeChannelsFailed, first, results[first].err)
 }
 
 // matchChannelsToTags matches requested tags to channel versions and returns matching versions and channels

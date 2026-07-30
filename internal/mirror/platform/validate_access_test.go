@@ -388,6 +388,23 @@ func TestService_findTagsToMirror(t *testing.T) {
 	}
 }
 
+// TestService_findTagsToMirror_PartialRegistryKeepsNotFoundCause covers a
+// registry that passes access validation (one channel exists) but misses
+// required default channels: the resulting failure must keep the underlying
+// not-found chain so the errdetect diagnostics stay actionable.
+func TestService_findTagsToMirror_PartialRegistryKeepsNotFoundCause(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newTestPlatformService(rockSolidOnlyStub(), &Options{}, logger, userLogger)
+
+	_, _, err := svc.findTagsToMirror(context.Background())
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSomeChannelsFailed)
+	assert.ErrorIs(t, err, localreg.ErrImageNotFound)
+}
+
 // mustParseSemver is a test helper that panics if version parsing fails.
 func mustParseSemver(v string) *semver.Version {
 	ver, err := semver.NewVersion(v)
