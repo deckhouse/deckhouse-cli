@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/errdetect"
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
@@ -164,6 +165,10 @@ func parseAndValidateVersionFlags() error {
 	if pullflags.PlatformConstraintString != "" {
 		pullflags.PlatformConstraint, err = modules.ParseVersionConstraint(pullflags.PlatformConstraintString)
 		if err != nil {
+			if diag := errdetect.DiagnosePlatformConstraintParseError(err, pullflags.PlatformConstraintString); diag != nil {
+				return diag
+			}
+
 			return fmt.Errorf("Parse --include-platform constraint: %w", err)
 		}
 	}
@@ -236,7 +241,7 @@ func validateProxyRegistryFlag() error {
 		// Bail out loudly so the user picks a real anchor.
 		for _, entry := range pullflags.ModulesWhitelist {
 			if !strings.Contains(entry, "@") {
-				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q@^1.0.0); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry))
+				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry)+"@^1.0.0")
 			}
 		}
 	}

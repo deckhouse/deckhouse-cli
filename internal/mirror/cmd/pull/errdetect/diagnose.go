@@ -27,29 +27,34 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 const (
-	categoryEOF           = "Connection terminated unexpectedly (EOF)"
-	categoryTLS           = "TLS/certificate verification failed"
-	categoryAuth          = "Authentication failed"
-	categoryAuth401       = "Authentication failed (HTTP 401 Unauthorized)"
-	categoryAuth403       = "Access denied (HTTP 403 Forbidden)"
-	categoryRateLimit     = "Rate limited by registry (HTTP 429 Too Many Requests)"
-	categoryServerError   = "Registry server error"
-	categoryDNS           = "DNS resolution failed"
-	categoryTimeout       = "Operation timed out"
-	categoryNetwork       = "Network connection failed"
-	categoryDiskFull      = "Disk space exhausted"
-	categoryPermission    = "Permission denied"
-	categoryImageNotFound = "Image not found in registry"
-	categoryRepoNotFound  = "Repository not found in registry"
+	categoryEOF             = "Connection terminated unexpectedly (EOF)"
+	categoryTLS             = "TLS/certificate verification failed"
+	categoryAuth            = "Authentication failed"
+	categoryAuth401         = "Authentication failed (HTTP 401 Unauthorized)"
+	categoryAuth403         = "Access denied (HTTP 403 Forbidden)"
+	categoryRateLimit       = "Rate limited by registry (HTTP 429 Too Many Requests)"
+	categoryServerError     = "Registry server error"
+	categoryDNS             = "DNS resolution failed"
+	categoryTimeout         = "Operation timed out"
+	categoryNetwork         = "Network connection failed"
+	categoryDiskFull        = "Disk space exhausted"
+	categoryPermission      = "Permission denied"
+	categoryImageNotFound   = "Image not found in registry"
+	categoryRepoNotFound    = "Repository not found in registry"
+	categoryEmptyConstraint = "Version constraint is missing after '@'"
+	categoryPathConstraint  = "Version constraint is a path, not a version"
 )
 
 // Diagnose analyzes an error and returns a *diagnostic.HelpfulError
@@ -353,7 +358,111 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	return nil
 }
 
+// DiagnoseConstraintParseError explains a filter expression that carries the
+// '@' separator with nothing after it, e.g. "console@".
+//
+// The usual cause is quoting. An unquoted value is split by the shell before
+// d8 ever sees it:
+//
+//	--include-module console@>=1.43.2
+//
+// bash keeps the word "console@" and turns ">=1.43.2" into an output
+// redirection into a file named "=1.43.2". A script interpolating a version
+// variable that expanded to nothing lands on the same value, so both causes
+// are offered.
+//
+// flagName names the flag in the suggestion text (e.g. "include-module").
+// rawValues are the exact strings cobra stored for that flag. The first one
+// ending with '@' is the entry the parser rejected and is quoted back to the
+// user; without it the caller falls through to its own error.
+func DiagnoseConstraintParseError(err error, flagName string, rawValues ...string) *diagnostic.HelpfulError {
+	if !errors.Is(err, modules.ErrEmptyConstraint) {
+		return nil
+	}
+
+	offender := ""
+
+	for _, v := range rawValues {
+		if v = strings.TrimSpace(v); strings.HasSuffix(v, "@") {
+			offender = v
+
+			break
+		}
+	}
+
+	if offender == "" {
+		return nil
+	}
+
+	return &diagnostic.HelpfulError{
+		Category:    categoryEmptyConstraint,
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause:     fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --%s only got %q", flagName, offender),
+				Solutions: []string{fmt.Sprintf(`Quote the whole value: --%s "%s>=1.43.2"`, flagName, offender)},
+			},
+			{
+				Cause:     "The version came from a variable that expanded to nothing",
+				Solutions: []string{fmt.Sprintf("Check what the calling script puts after '@' in --%s", flagName)},
+			},
+		},
+	}
+}
+
+// DiagnosePlatformConstraintParseError explains a --include-platform value that
+// turned out to be a filesystem path.
+//
+// The flag takes a bare constraint with no "name@" prefix, so an unquoted value
+// leaves nothing behind:
+//
+//	--include-platform >=1.64 ./bundle
+//
+// bash redirects ">=1.64" into a file named "=1.64" and the flag swallows the
+// bundle path that followed it, so the constraint parser is handed a directory.
+//
+// Returns nil for a value that is not path-shaped, so a plain typo in the
+// constraint keeps the parser's own message.
+func DiagnosePlatformConstraintParseError(err error, rawValue string) *diagnostic.HelpfulError {
+	if err == nil || !looksLikePath(rawValue) {
+		return nil
+	}
+
+	return &diagnostic.HelpfulError{
+		Category:    categoryPathConstraint,
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause: fmt.Sprintf("An unquoted >= or <= was eaten by the shell, so --include-platform swallowed the bundle path %q", strings.TrimSpace(rawValue)),
+				Solutions: []string{
+					`Quote the constraint: --include-platform ">=1.64"`,
+					`Example: d8 mirror pull --license='****' --include-platform ">=1.64 <=1.68" ./bundle`,
+				},
+			},
+		},
+	}
+}
+
 // --- detection functions ---
+
+// looksLikePath reports whether a value is a filesystem path rather than a
+// version constraint. A separator settles it: no constraint contains one.
+// A bare name like "bundle" is only taken as a path when it names an existing
+// directory, which the bundle argument always does.
+func looksLikePath(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+
+	if filepath.IsAbs(v) || strings.ContainsAny(v, `/\`) {
+		return true
+	}
+
+	info, err := os.Stat(v)
+
+	return err == nil && info.IsDir()
+}
 
 func isEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)

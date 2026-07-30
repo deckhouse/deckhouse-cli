@@ -17,6 +17,7 @@ limitations under the License.
 package modules
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -170,10 +171,14 @@ func ParseVersionConstraint(v string) (VersionConstraint, error) {
 	return parseVersionConstraint(v)
 }
 
+// ErrEmptyConstraint is returned for an expression that carries the '@'
+// separator with nothing after it, e.g. "console@".
+var ErrEmptyConstraint = errors.New("empty constraint")
+
 func parseVersionConstraint(v string) (VersionConstraint, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return nil, fmt.Errorf("empty constraint")
+		return nil, ErrEmptyConstraint
 	}
 
 	switch v[0] {
