@@ -5171,7 +5171,7 @@ func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
 
 	dyn := newFakeDataImportDyn(dataImportObj(targetNS, "pvc-1", false)) // spec.ttl: "1h"
-	imp := newTestVolumeImporter(dyn)                                   // ttl: "1h"
+	imp := newTestVolumeImporter(dyn)                                    // ttl: "1h"
 
 	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
 		t.Fatalf("EnsureDataImport: %v", err)
