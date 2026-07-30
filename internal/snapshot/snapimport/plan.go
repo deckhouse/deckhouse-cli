@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package snapimport implements the `d8 snapshot import` command: it reconstructs a
+// Package snapimport implements the `d8 snapshot upload` command: it reconstructs a
 // snapshot tree in a target namespace from a local archive produced by
 // `d8 snapshot download`, walking the tree bottom-up and, per node, creating an
 // import-mode CR, importing volume data for data leaves (via SVDM DataImport), and
