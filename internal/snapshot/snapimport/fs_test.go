@@ -5389,6 +5389,11 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 	tracker := &requestBodyReadTracker{}
 	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
 
+	// See memoryBoundedStreamingTimeout: bound the upload so a pathologically slow
+	// environment fails THIS test instead of eating the whole package's 10-minute budget.
+	ctx, cancel := context.WithTimeout(context.Background(), memoryBoundedStreamingTimeout)
+	defer cancel()
+
 	// Arm the baseline AFTER every fixture allocation (content, the tar buffer, the on-disk
 	// file) so those stay folded into the baseline and only new allocations made by
 	// importFSFromTar itself move the delta.
@@ -5398,7 +5403,7 @@ func TestImportFSFromTar_StreamingIsMemoryBounded(t *testing.T) {
 
 	var lastTotal int64
 
-	err = importFSFromTar(context.Background(), doer, srv.URL, tarPath, discardLogger(),
+	err = importFSFromTar(ctx, doer, srv.URL, tarPath, discardLogger(),
 		func(n int64) { lastTotal = n }, func(n int) { reported += n }, nil)
 	if err != nil {
 		t.Fatalf("importFSFromTar: %v", err)

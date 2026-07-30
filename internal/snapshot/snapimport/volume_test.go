@@ -4130,6 +4130,22 @@ func TestPutBlockCompressed_NoTempFilesCreated(t *testing.T) {
 	}
 }
 
+// memoryBoundedStreamingTimeout bounds how long the two >=200 MiB streaming-upload
+// regression tests (TestImportFSFromTar_StreamingIsMemoryBounded and
+// TestPutBlockCompressed_StreamingIsMemoryBounded) may spend inside the code under test.
+//
+// Both push a 200 MiB payload through a real httptest.Server, which takes ~0.1s on a
+// healthy machine. Without a bound, an environment whose loopback/decode throughput
+// collapses does not fail these two tests -- it consumes the WHOLE 10-minute `go test`
+// package budget, so the binary dies on the package timeout and every top-level test
+// still parked in t.Parallel() is reported as a failure too. That happened in CI on
+// 2026-07-30 (throughput fell to ~165 KiB/s): one stalled test surfaced as 18 failures
+// and the timeout dump was the only place naming the test that actually stalled.
+// Failing these tests on their own deadline instead keeps the diagnosis local and the
+// rest of the package runnable. The value is deliberately ~1000x the healthy runtime so
+// it can only ever fire on a pathological environment, never on a merely slow one.
+const memoryBoundedStreamingTimeout = 2 * time.Minute
+
 // requestBodyReadTracker records two signals about every outgoing PUT request body a
 // trackingBodyDoer forwards.
 //
@@ -4366,6 +4382,11 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 	tracker := &requestBodyReadTracker{}
 	doer := &trackingBodyDoer{client: srv.Client(), tracker: tracker}
 
+	// See memoryBoundedStreamingTimeout: bound the upload so a pathologically slow
+	// environment fails THIS test instead of eating the whole package's 10-minute budget.
+	ctx, cancel := context.WithTimeout(context.Background(), memoryBoundedStreamingTimeout)
+	defer cancel()
+
 	// Arm the baseline AFTER every fixture allocation (payload, the on-disk file) so those
 	// stay folded into the baseline and only new allocations made by putBlock itself move
 	// the delta.
@@ -4373,7 +4394,7 @@ func TestPutBlockCompressed_StreamingIsMemoryBounded(t *testing.T) {
 
 	var reported int64
 
-	err := putBlock(context.Background(), doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) }, nil)
+	err := putBlock(ctx, doer, srv.URL, dataFile, ".zst", int64(len(payload)), discardLogger(), func(n int) { reported += int64(n) }, nil)
 	if err != nil {
 		t.Fatalf("putBlock: %v", err)
 	}
