@@ -294,6 +294,16 @@ tasks:
     cmds:
       - golangci-lint run ./... --build-tags="{{ .goTags }}"
 
+  lint:dev:
+    desc: Run golangci-lint with auto-fix
+    cmds:
+      - golangci-lint run ./... --fix --build-tags="{{ .goDevTags }}"
+
+  lint:dev:check:
+    desc: Run golangci-lint without fixes (CI mode)
+    cmds:
+      - golangci-lint run ./... --build-tags="{{ .goDevTags }}"
+
   check:kubectl:
     desc: Check kubectlVersion matches k8s.io/kubectl in go.mod
     cmds:
