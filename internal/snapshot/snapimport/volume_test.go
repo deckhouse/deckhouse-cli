@@ -48,6 +48,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 
+	diapi "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
@@ -6529,5 +6530,17 @@ func TestRequestBodyAttestation_DiscriminatesResponseOnlyAcceptance(t *testing.T
 
 	if err := body.Close(); err != nil {
 		t.Fatalf("close unread baseline body: %v", err)
+	}
+}
+
+// TestDataImportGVR_MatchesDataImportAPIGroup guards against dataImportGVR's hardcoded group
+// drifting from the typed DataImport client's APIGroup again (the exact class of bug this
+// package's dataImportGVR literal happened to dodge while register.go still pointed at the
+// legacy storage.deckhouse.io group).
+func TestDataImportGVR_MatchesDataImportAPIGroup(t *testing.T) {
+	t.Parallel()
+
+	if got, want := dataImportGVR.GroupVersion().String(), diapi.SchemeGroupVersion.String(); got != want {
+		t.Fatalf("dataImportGVR group/version %q does not match internal/data/dataimport/api/v1alpha1.SchemeGroupVersion %q", got, want)
 	}
 }

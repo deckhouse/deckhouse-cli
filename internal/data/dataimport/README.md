@@ -5,7 +5,7 @@ This command drives the **standalone PVC import** mode of `DataImport`
 (`targetRef.kind: PersistentVolumeClaim`): the target PVC is fully defined by the
 PVC template you pass to `create`, data is uploaded straight into it, and no
 snapshot/`VolumeSnapshotContent` artifact is produced. (The snapshot-leaf import
-mode is driven separately by `d8 snapshot import`.)
+mode is driven separately by `d8 snapshot upload`.)
 
 The PVC template **must** carry `metadata.name` — the DataImport targets the PVC by
 that name; `create` rejects a template without it before contacting the API server.

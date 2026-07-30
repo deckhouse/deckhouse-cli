@@ -41,10 +41,10 @@ type DataImportList struct {
 }
 
 // KindPersistentVolumeClaim is the targetRef.kind discriminator value that selects the
-// standalone PVC-import mode (Mode B) of the unified storage.deckhouse.io/v1alpha1 DataImport
-// CRD: data bytes are streamed straight into a PVC built from pvcTemplate, with no snapshot
-// capture and no VolumeSnapshotContent artifact. `d8 data import` only ever creates Mode B
-// DataImports; the snapshot-leaf import mode (Mode A) is driven by `d8 snapshot import`.
+// standalone PVC-import mode (Mode B) of the unified storage-foundation.deckhouse.io/v1alpha1
+// DataImport CRD: data bytes are streamed straight into a PVC built from pvcTemplate, with no
+// snapshot capture and no VolumeSnapshotContent artifact. `d8 data import` only ever creates
+// Mode B DataImports; the snapshot-leaf import mode (Mode A) is driven by `d8 snapshot upload`.
 const KindPersistentVolumeClaim = "PersistentVolumeClaim"
 
 // DataImportSpec mirrors the Mode B subset of the unified DataImport CRD spec that the CLI
