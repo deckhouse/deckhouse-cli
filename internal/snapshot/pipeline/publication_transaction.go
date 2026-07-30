@@ -315,7 +315,12 @@ func writePublicationTransaction(
 // the whole archive with archive.ErrNonRegularArchiveArtifact; localscan.scanDir
 // and archive.computeNodeChildrenChecksum enumerate the same directory under the
 // same convention and survive a stray entry today only because they skip
-// non-directories, which is tolerance, not permission. A dot-prefixed,
+// non-directories, which is tolerance, not permission. (A child directory that IS
+// a directory but carries no snapshot.yaml — an orphaned archive.CollisionNodeDir
+// leftover of an interrupted-and-resumed download — is a separate, narrower case
+// all three consumers now skip uniformly; see plan.go's hasSnapshotYAML and
+// localscan.go's per-child probe. It does not relax the "directories only"
+// invariant this comment is about.) A dot-prefixed,
 // versioned, machinery-only name beside snapshot.yaml is the convention
 // archive.NodeIdentityMarkerName already follows, and the node-directory root is
 // a namespace no user- or server-provided name can reach under any codec: block

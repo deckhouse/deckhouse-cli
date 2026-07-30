@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -84,11 +85,19 @@ func runGet(log *slog.Logger, cmd *cobra.Command, args []string) error {
 				"legacy compatibility cannot distinguish a genuine pre-version archive from a downgraded tampered archive"))
 	}
 
-	node, err := localscan.ScanVerifiedWithOptions(dir, archive.SnapshotYAMLReadOptions{
+	node, skipped, err := localscan.ScanVerifiedWithOptionsReportingSkips(dir, archive.SnapshotYAMLReadOptions{
 		AllowUnauthenticatedLegacy: allowUnauthenticatedLegacy,
 	})
 	if err != nil {
 		return fmt.Errorf("scanning snapshot at %s: %w", dir, err)
+	}
+
+	if skipped.Total > 0 {
+		log.Warn("skipped archive directories without snapshot.yaml; "+
+			"they are leftovers of an interrupted download redirected to a collision path "+
+			"and carry no importable node",
+			slog.Int("skipped_dirs", skipped.Total),
+			slog.String("paths", strings.Join(skipped.Paths, ", ")))
 	}
 
 	ns := node.Namespace

@@ -51,6 +51,11 @@ const (
 	defaultPlanMaxManifestBytes      = 16 << 20
 	defaultPlanMaxTotalMetadataBytes = 256 << 20
 	defaultPlanMaxManifestsPerNode   = 10_000
+
+	// maxReportedSkippedDirs bounds how many skipped-directory paths BuildPlan's
+	// reporting variant retains for the caller's warning log. skippedNodeDirs.Total
+	// is never truncated, only the Paths sample used for the human-readable message.
+	maxReportedSkippedDirs = 32
 )
 
 // ErrPlanBudget is returned when archive planning exceeds a configured resource limit.
@@ -136,6 +141,15 @@ type planTopology struct {
 	parents map[string]int
 }
 
+// skippedNodeDirs reports archive child directories BuildPlan's reporting variant skipped
+// because they carry no snapshot.yaml — leftovers of an interrupted-and-resumed download
+// redirected to a collision path (see archive.CollisionNodeDir), not importable nodes.
+// Paths is truncated to maxReportedSkippedDirs; Total counts every skip regardless.
+type skippedNodeDirs struct {
+	Paths []string
+	Total int
+}
+
 type plannedManifest struct {
 	name   string
 	digest [sha256.Size]byte
@@ -158,6 +172,24 @@ type planBuilder struct {
 	snapshotReadOptions archive.SnapshotYAMLReadOptions
 	nodeCount           int
 	metadataBytes       int64
+	skippedDirs         []string
+	skippedDirsTotal    int
+}
+
+// recordSkippedDir records a child directory skipped for carrying no snapshot.yaml. The
+// sample kept for the caller's warning log is bounded by maxReportedSkippedDirs; the total
+// count is not, so a warning can always report exactly how many were skipped.
+func (b *planBuilder) recordSkippedDir(path string) {
+	b.skippedDirsTotal++
+
+	if len(b.skippedDirs) < maxReportedSkippedDirs {
+		b.skippedDirs = append(b.skippedDirs, path)
+	}
+}
+
+// skips returns the skipped-directory report accumulated over the traversal so far.
+func (b *planBuilder) skips() skippedNodeDirs {
+	return skippedNodeDirs{Paths: b.skippedDirs, Total: b.skippedDirsTotal}
 }
 
 // Ref returns the node's aggregated-API node ref (target namespace applied by the caller).
@@ -221,21 +253,33 @@ func buildPlanFromVerifiedArchiveWithOptions(
 	view *archive.VerifiedArchive,
 	options archive.SnapshotYAMLReadOptions,
 ) ([]PlannedNode, error) {
+	plan, _, err := buildPlanFromVerifiedArchiveReportingSkips(view, options)
+
+	return plan, err
+}
+
+// buildPlanFromVerifiedArchiveReportingSkips builds an import plan exactly like
+// buildPlanFromVerifiedArchiveWithOptions, additionally reporting archive child directories
+// skipped for carrying no snapshot.yaml (see hasSnapshotYAML and planBuilder.recordSkippedDir).
+func buildPlanFromVerifiedArchiveReportingSkips(
+	view *archive.VerifiedArchive,
+	options archive.SnapshotYAMLReadOptions,
+) ([]PlannedNode, skippedNodeDirs, error) {
 	builder, err := newPlanBuilder(DefaultPlanLimits(), options)
 	if err != nil {
-		return nil, err
+		return nil, skippedNodeDirs{}, err
 	}
 
 	var plan []PlannedNode
 	if _, err := builder.appendPostOrder(view.RootSource(), &plan, 0); err != nil {
-		return nil, err
+		return nil, skippedNodeDirs{}, err
 	}
 
 	if _, err := indexPlanTopology(plan); err != nil {
-		return nil, err
+		return nil, skippedNodeDirs{}, err
 	}
 
-	return plan, nil
+	return plan, builder.skips(), nil
 }
 
 func buildPlan(rootDir string, hook archive.OpenBoundaryHook) ([]PlannedNode, error) {
@@ -498,6 +542,32 @@ func (b *planBuilder) appendPostOrder(
 				filepath.Join(snapshotsDir.Path(), childName), openErr)
 		}
 
+		// A child directory with no snapshot.yaml is never a finalized node: it is a
+		// collision/resume directory archive.CollisionNodeDir left behind for an
+		// interrupted-and-resumed download (see archive/resume.go), authenticated as
+		// absent from the parent's ChildrenChecksum by computeNodeChildrenChecksum's
+		// identical tolerance. Skip it rather than fail the whole plan; a non-regular
+		// snapshot.yaml (symlink, directory) still fails hard, since that is not the
+		// leftover shape this tolerance exists for.
+		present, checkErr := hasSnapshotYAML(child)
+		if checkErr != nil {
+			return PlannedNode{}, errors.Join(
+				fmt.Errorf("check snapshot.yaml presence in %s: %w", child.Path(), checkErr),
+				child.Close(),
+			)
+		}
+
+		if !present {
+			b.recordSkippedDir(child.Path())
+
+			if closeErr := child.Close(); closeErr != nil {
+				return PlannedNode{}, fmt.Errorf("close skipped child node directory %s: %w",
+					child.Path(), closeErr)
+			}
+
+			continue
+		}
+
 		childNode, appendErr := b.appendPostOrder(child, plan, depth+1)
 		closeErr := child.Close()
 
@@ -519,6 +589,28 @@ func (b *planBuilder) appendPostOrder(
 	*plan = append(*plan, node)
 
 	return node, nil
+}
+
+// hasSnapshotYAML reports whether source's directory holds a regular snapshot.yaml file.
+// os.ErrNotExist is the only tolerated outcome (false, nil); any other error — including a
+// non-regular snapshot.yaml such as a symlink or a directory — is fatal, so this check cannot
+// be widened beyond the orphaned collision/resume directories it exists to tolerate.
+func hasSnapshotYAML(source *archive.RootedSource) (bool, error) {
+	file, err := source.OpenRegularFile(archive.SnapshotYAMLName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	if closeErr := file.Close(); closeErr != nil {
+		return false, fmt.Errorf("close %s: %w",
+			filepath.Join(source.Path(), archive.SnapshotYAMLName), closeErr)
+	}
+
+	return true, nil
 }
 
 // readNode reads a single node directory's snapshot.yaml, own manifests and data file.

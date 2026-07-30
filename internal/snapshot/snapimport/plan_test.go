@@ -889,6 +889,178 @@ func TestBuildPlan_MissingSnapshotYAML(t *testing.T) {
 	}
 }
 
+// TestBuildPlan_SkipsChildDirWithoutSnapshotYAML proves BuildPlan tolerates an orphaned
+// child directory left behind by archive.CollisionNodeDir (an identity marker but no
+// snapshot.yaml, e.g. after an interrupted-and-resumed download): it is skipped rather than
+// failing the whole plan, matching computeNodeChildrenChecksum's identical tolerance in
+// checksum.go.
+func TestBuildPlan_SkipsChildDirWithoutSnapshotYAML(t *testing.T) {
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		blockData:  []byte("rawbytes"),
+	})
+
+	orphan := childDir(root, "VolumeSnapshot", "orphan")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatalf("mkdir orphan: %v", err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(orphan, archive.NodeIdentity{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "orphan",
+	}); err != nil {
+		t.Fatalf("write identity marker: %v", err)
+	}
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if len(plan) != 2 {
+		t.Fatalf("plan length = %d, want 2 (leaf + root)", len(plan))
+	}
+
+	root2 := plan[len(plan)-1]
+	if root2.Kind != snapshotKind || root2.Name != "root" {
+		t.Fatalf("last plan entry = %s/%s, want %s/root", root2.Kind, root2.Name, snapshotKind)
+	}
+
+	if len(root2.Children) != 1 {
+		t.Fatalf("root children = %d, want 1", len(root2.Children))
+	}
+
+	if root2.Children[0].Name != "pvc-1" {
+		t.Errorf("root child = %q, want %q", root2.Children[0].Name, "pvc-1")
+	}
+}
+
+// TestBuildPlan_NonRegularSnapshotYAMLInChildStaysFatal proves the orphaned-directory
+// tolerance does NOT widen to cover a non-regular snapshot.yaml (a symlink or a directory) in
+// a child node directory: BuildPlan must still fail hard, exactly as it does today for the
+// archive root and every other archive artifact (TestBuildPlanRejectsHostFilesystemSymlinks).
+func TestBuildPlan_NonRegularSnapshotYAMLInChildStaysFatal(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+
+				path := filepath.Join(dir, archive.SnapshotYAMLName)
+				if err := os.WriteFile(path, []byte("kind: Snapshot\n"), 0o600); err != nil {
+					t.Fatalf("write snapshot.yaml: %v", err)
+				}
+
+				moveOutsideAndSymlink(t, path)
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+
+				if err := os.MkdirAll(filepath.Join(dir, archive.SnapshotYAMLName), 0o755); err != nil {
+					t.Fatalf("mkdir snapshot.yaml: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+
+			writeArchiveNode(t, root, archiveNode{
+				apiVersion: snapshotAPIVersion,
+				kind:       snapshotKind,
+				name:       "root",
+			})
+
+			bogus := childDir(root, "VolumeSnapshot", "bogus")
+			if err := os.MkdirAll(bogus, 0o755); err != nil {
+				t.Fatalf("mkdir bogus child: %v", err)
+			}
+
+			tc.setup(t, bogus)
+
+			if _, err := BuildPlan(root); err == nil {
+				t.Fatal("BuildPlan() error = nil, want error for non-regular snapshot.yaml")
+			}
+		})
+	}
+}
+
+// TestBuildPlanReportingSkips_ReturnsSkippedPaths proves the reporting plan-build variant
+// returns every skipped orphaned child directory, truncating the reported Paths sample to
+// maxReportedSkippedDirs while keeping an untruncated Total.
+func TestBuildPlanReportingSkips_ReturnsSkippedPaths(t *testing.T) {
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	const orphanCount = maxReportedSkippedDirs + 5
+
+	for i := 0; i < orphanCount; i++ {
+		name := fmt.Sprintf("orphan-%02d", i)
+		orphan := childDir(root, "VolumeSnapshot", name)
+
+		if err := os.MkdirAll(orphan, 0o755); err != nil {
+			t.Fatalf("mkdir orphan %s: %v", name, err)
+		}
+
+		if err := archive.WriteNodeIdentityMarker(orphan, archive.NodeIdentity{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshot",
+			Name:       name,
+		}); err != nil {
+			t.Fatalf("write identity marker %s: %v", name, err)
+		}
+	}
+
+	view, err := archive.OpenVerifiedArchive(root)
+	if err != nil {
+		t.Fatalf("open verified archive: %v", err)
+	}
+
+	defer func() { _ = view.Close() }()
+
+	plan, skipped, err := buildPlanFromVerifiedArchiveReportingSkips(view, archive.SnapshotYAMLReadOptions{})
+	if err != nil {
+		t.Fatalf("buildPlanFromVerifiedArchiveReportingSkips: %v", err)
+	}
+
+	if len(plan) != 1 {
+		t.Fatalf("plan length = %d, want 1 (root only, every child skipped)", len(plan))
+	}
+
+	if skipped.Total != orphanCount {
+		t.Errorf("skipped.Total = %d, want %d", skipped.Total, orphanCount)
+	}
+
+	if len(skipped.Paths) != maxReportedSkippedDirs {
+		t.Errorf("len(skipped.Paths) = %d, want %d (truncated)", len(skipped.Paths), maxReportedSkippedDirs)
+	}
+}
+
 func TestBuildPlan_DomainDataLeaf_SourceObjectRef(t *testing.T) {
 	root := t.TempDir()
 

@@ -1960,6 +1960,15 @@ func TestPipeline_StaleParentWithIncompleteSiblingIsRejectedAtRunStart(t *testin
 // convention and happen to skip non-directories, so they tolerate a stray entry
 // rather than sanction one. Download machinery sidecars therefore belong beside
 // snapshot.yaml in the node directory root, never inside snapshots/.
+//
+// A directory entry that IS a directory but carries no snapshot.yaml (an
+// orphaned archive.CollisionNodeDir leftover of an interrupted-and-resumed
+// download, see archive/resume.go) is a distinct, narrower case this invariant
+// does not police: all three consumers now skip it uniformly rather than fail
+// (snapimport.BuildPlan and localscan.Scan/ScanVerified were brought in line with
+// archive.computeNodeChildrenChecksum's pre-existing tolerance — see
+// TestPipeline_OrphanedCollisionDirIsSkippedByAllConsumers). Only a stray
+// non-directory entry still breaks this invariant and aborts upload planning.
 func assertChildDirectoriesOnly(t *testing.T, root string) {
 	t.Helper()
 
@@ -2178,6 +2187,103 @@ func TestPipeline_PublicationStateKeepsUploadAndLocalScanWorking(t *testing.T) {
 	assertChildDirectoriesOnly(t, outputDir)
 	require.Equal(t, wantPlan, planLabels(t, outputDir))
 	assertLocalScan(t, localscan.ScanVerified, "localscan.ScanVerified after resume")
+}
+
+// TestPipeline_OrphanedCollisionDirIsSkippedByAllConsumers reproduces the on-disk aftermath of
+// an interrupted-and-resumed download: archive.CollisionNodeDir (archive/resume.go) redirects
+// a stale/foreign node to a fresh path beside a real child inside snapshots/, leaving behind an
+// identity-marker-only directory with no snapshot.yaml once the run that created it never
+// finalizes it. All three downstream consumers of a downloaded archive must tolerate that
+// directory identically: checksum verification (already tolerant, see checksum.go's
+// "not a finalized child" skip), snapimport.BuildPlan, and localscan.Scan/ScanVerified (the
+// latter two fixed by this task). The "snapshots/ holds child directories only" invariant
+// (assertChildDirectoriesOnly) is unaffected: the orphan is still a directory, just one with no
+// snapshot.yaml inside.
+func TestPipeline_OrphanedCollisionDirIsSkippedByAllConsumers(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("U"), e2eBlockSize)
+	fsFiles := []fsE2EFile{
+		{rel: "alpha.txt", content: []byte("orphan-alpha")},
+		{rel: "subdir/beta.txt", content: []byte("orphan-beta")},
+	}
+
+	blockSrv := makeE2EBlockServer(t, rawBlock)
+	fsSrv := makeE2EFSServer(t, fsFiles)
+
+	outputDir := t.TempDir()
+	cfg := pipeline.Config{
+		Namespace:            e2eNS,
+		RootSnapshot:         e2eRootSnap,
+		OutputDir:            outputDir,
+		Workers:              2,
+		PerVolumeConcurrency: 2,
+		KubeClient:           buildUploadLayoutFakeClient(t),
+		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			switch leafRef.Name {
+			case e2eBlockDisk:
+				return exporter.NewExport(namespace, "de-orphan-block", "Block", blockSrv.URL,
+					exporter.NewFetcher(blockSrv.Client())), nil
+			case e2eFSDisk:
+				return exporter.NewExport(namespace, "de-orphan-fs", "Filesystem", fsSrv.URL,
+					exporter.NewFetcher(fsSrv.Client())), nil
+			default:
+				return nil, fmt.Errorf("orphan-collision: unknown leaf %q", leafRef.Name)
+			}
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+	assertChildDirectoriesOnly(t, outputDir)
+
+	orphanDir := archive.CollisionNodeDir(
+		filepath.Join(outputDir, archive.SnapshotsDirName), "Snapshot", "orphan", "deadbeef")
+	require.NoError(t, os.MkdirAll(orphanDir, 0o755))
+	require.NoError(t, archive.WriteNodeIdentityMarker(orphanDir, archive.NodeIdentity{
+		Kind: "Snapshot",
+		Name: "orphan",
+	}))
+
+	// Still a directory: the snapshots/-holds-directories-only invariant is untouched.
+	assertChildDirectoriesOnly(t, outputDir)
+
+	view, err := archive.OpenVerifiedArchive(outputDir)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { require.NoError(t, view.Close()) })
+	require.NoError(t, view.VerifyNodeChildrenChecksum(context.Background(), outputDir),
+		"root's checksum-authenticated children commitment must stay valid with the orphan present")
+
+	plan, err := snapimport.BuildPlan(outputDir)
+	require.NoError(t, err, "BuildPlan must skip the orphaned collision directory rather than fail")
+
+	wantPlan := []string{
+		e2eDiskKind + "/" + e2eBlockDisk,
+		e2eDiskKind + "/" + e2eFSDisk,
+		e2eVMKind + "/" + e2eVMSnap,
+		"Snapshot/" + e2eRootSnap,
+	}
+
+	labels := make([]string, 0, len(plan))
+	for _, node := range plan {
+		labels = append(labels, node.Kind+"/"+node.Name)
+	}
+
+	require.Equal(t, wantPlan, labels)
+
+	assertLocalScanSkipsOrphan := func(t *testing.T, scan func(string) (*localscan.Node, error), name string) {
+		t.Helper()
+
+		root, err := scan(outputDir)
+		require.NoError(t, err, "%s must skip the orphaned collision directory rather than fail", name)
+		require.Equal(t, e2eRootSnap, root.Name)
+		require.Len(t, root.Children, 1)
+		require.Equal(t, e2eVMSnap, root.Children[0].Name)
+		require.Len(t, root.Children[0].Children, 2)
+	}
+
+	assertLocalScanSkipsOrphan(t, localscan.Scan, "localscan.Scan")
+	assertLocalScanSkipsOrphan(t, localscan.ScanVerified, "localscan.ScanVerified")
 }
 
 // TestPipeline_PayloadChecksumReadsAreBounded bounds the payload bytes the

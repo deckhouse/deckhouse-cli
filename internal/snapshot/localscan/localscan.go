@@ -32,6 +32,11 @@ import (
 const (
 	defaultScanMaxDepth = 64
 	defaultScanMaxNodes = 10_000
+
+	// maxReportedSkippedDirs bounds how many skipped-directory paths the reporting scan
+	// variant retains for the caller's warning log. SkippedDirs.Total is never truncated,
+	// only the Paths sample used for the human-readable message.
+	maxReportedSkippedDirs = 32
 )
 
 // ErrScanBudget is returned when an archive tree exceeds a configured scan limit.
@@ -103,6 +108,25 @@ func ScanVerifiedWithOptions(
 	return ScanVerifiedWithLimitsAndOptions(root, DefaultScanLimits(), options)
 }
 
+// SkippedDirs reports archive child directories a scan skipped because they carry no
+// snapshot.yaml — leftovers of an interrupted-and-resumed download redirected to a collision
+// path (see archive.CollisionNodeDir), not scannable nodes. Paths is truncated to
+// maxReportedSkippedDirs; Total counts every skip regardless of truncation.
+type SkippedDirs struct {
+	Paths []string
+	Total int
+}
+
+// ScanVerifiedWithOptionsReportingSkips verifies every node under an explicit snapshot.yaml
+// compatibility policy exactly like ScanVerifiedWithOptions, additionally reporting archive
+// child directories skipped for carrying no snapshot.yaml (see treeScanner.recordSkippedDir).
+func ScanVerifiedWithOptionsReportingSkips(
+	root string,
+	options archive.SnapshotYAMLReadOptions,
+) (*Node, SkippedDirs, error) {
+	return scanReportingSkips(root, DefaultScanLimits(), options, true)
+}
+
 // ScanVerifiedWithLimitsAndOptions verifies every node subject to explicit traversal limits
 // and snapshot.yaml compatibility policy.
 func ScanVerifiedWithLimitsAndOptions(
@@ -157,21 +181,32 @@ func scan(
 	options archive.SnapshotYAMLReadOptions,
 	verifyIntegrity bool,
 ) (*Node, error) {
+	node, _, err := scanReportingSkips(root, limits, options, verifyIntegrity)
+
+	return node, err
+}
+
+func scanReportingSkips(
+	root string,
+	limits ScanLimits,
+	options archive.SnapshotYAMLReadOptions,
+	verifyIntegrity bool,
+) (*Node, SkippedDirs, error) {
 	if limits.MaxDepth < 0 {
-		return nil, fmt.Errorf("local snapshot scan maxDepth must be non-negative: %w", ErrScanBudget)
+		return nil, SkippedDirs{}, fmt.Errorf("local snapshot scan maxDepth must be non-negative: %w", ErrScanBudget)
 	}
 
 	if limits.MaxNodes <= 0 {
-		return nil, fmt.Errorf("local snapshot scan maxNodes must be positive: %w", ErrScanBudget)
+		return nil, SkippedDirs{}, fmt.Errorf("local snapshot scan maxNodes must be positive: %w", ErrScanBudget)
 	}
 
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, fmt.Errorf("scan root %s: %w", root, err)
+		return nil, SkippedDirs{}, fmt.Errorf("scan root %s: %w", root, err)
 	}
 
 	if !info.IsDir() {
-		return nil, fmt.Errorf("scan root %s: not a directory", root)
+		return nil, SkippedDirs{}, fmt.Errorf("scan root %s: not a directory", root)
 	}
 
 	scanner := treeScanner{
@@ -181,7 +216,12 @@ func scan(
 		verifyIntegrity:     verifyIntegrity,
 	}
 
-	return scanner.scanDir(root, 0)
+	node, err := scanner.scanDir(root, 0)
+	if err != nil {
+		return nil, SkippedDirs{}, err
+	}
+
+	return node, scanner.skips(), nil
 }
 
 type treeScanner struct {
@@ -190,6 +230,24 @@ type treeScanner struct {
 	snapshotReadOptions archive.SnapshotYAMLReadOptions
 	verifyIntegrity     bool
 	nodeCount           int
+	skippedDirs         []string
+	skippedDirsTotal    int
+}
+
+// recordSkippedDir records a child directory skipped for carrying no snapshot.yaml. The
+// sample kept for the caller's warning log is bounded by maxReportedSkippedDirs; the total
+// count is not, so a warning can always report exactly how many were skipped.
+func (s *treeScanner) recordSkippedDir(path string) {
+	s.skippedDirsTotal++
+
+	if len(s.skippedDirs) < maxReportedSkippedDirs {
+		s.skippedDirs = append(s.skippedDirs, path)
+	}
+}
+
+// skips returns the skipped-directory report accumulated over the traversal so far.
+func (s *treeScanner) skips() SkippedDirs {
+	return SkippedDirs{Paths: s.skippedDirs, Total: s.skippedDirsTotal}
 }
 
 // scanDir reads snapshot.yaml from dir and discovers child nodes under dir/snapshots/.
@@ -263,6 +321,22 @@ func (s *treeScanner) scanDir(dir string, depth int) (*Node, error) {
 		}
 
 		childDir := filepath.Join(snapshotsDir, entry.Name())
+
+		// A child directory with no snapshot.yaml is not a finalized node: it is a
+		// collision/resume directory archive.CollisionNodeDir left behind for an
+		// interrupted-and-resumed download (see archive/resume.go). Lstat, never Stat,
+		// so a symlinked snapshot.yaml is NOT treated as present here — scanDir still
+		// recurses into it and its no-follow RootedSource open fails as a non-regular
+		// artifact, rather than the entry being silently skipped.
+		if _, statErr := os.Lstat(filepath.Join(childDir, archive.SnapshotYAMLName)); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				s.recordSkippedDir(childDir)
+
+				continue
+			}
+
+			return nil, fmt.Errorf("check snapshot.yaml presence in %s: %w", childDir, statErr)
+		}
 
 		child, err := s.scanDir(childDir, depth+1)
 		if err != nil {

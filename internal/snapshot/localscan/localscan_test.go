@@ -18,6 +18,7 @@ package localscan_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -946,5 +947,182 @@ func TestScan_NonDirEntryInSnapshotsSubdir(t *testing.T) {
 
 	if len(node.Children) != 1 {
 		t.Errorf("Children: got %d, want 1 (non-dir entry must be skipped)", len(node.Children))
+	}
+}
+
+// writeOrphanCollisionDir creates a child directory under parent/snapshots/ that carries an
+// identity marker but no snapshot.yaml — the on-disk shape archive.CollisionNodeDir leaves
+// behind for an interrupted-and-resumed download (see archive/resume.go). Scan must skip it
+// rather than fail.
+func writeOrphanCollisionDir(t *testing.T, parent, name string) {
+	t.Helper()
+
+	dir := filepath.Join(parent, archive.SnapshotsDirName, name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll orphan %s: %v", dir, err)
+	}
+
+	if err := archive.WriteNodeIdentityMarker(dir, archive.NodeIdentity{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       name,
+	}); err != nil {
+		t.Fatalf("write identity marker in %s: %v", dir, err)
+	}
+}
+
+// TestScan_SkipsChildDirWithoutSnapshotYAML proves Scan tolerates an orphaned collision/resume
+// directory (see writeOrphanCollisionDir): it is skipped rather than failing the whole scan.
+func TestScan_SkipsChildDirWithoutSnapshotYAML(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeNodeYAML(t, root, archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root-snap",
+	})
+
+	makeChildDir(t, root, "snapshot_child", archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "child-snap",
+	})
+
+	writeOrphanCollisionDir(t, root, "snapshot_orphan__deadbeef")
+
+	node, err := localscan.Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	if len(node.Children) != 1 {
+		t.Fatalf("Children: got %d, want 1 (orphan directory without snapshot.yaml must be skipped)",
+			len(node.Children))
+	}
+
+	if node.Children[0].Name != "child-snap" {
+		t.Errorf("Children[0].Name: got %q, want %q", node.Children[0].Name, "child-snap")
+	}
+}
+
+// TestScanVerified_SkipsChildDirWithoutSnapshotYAML proves the verified scan path skips an
+// orphaned collision/resume directory WITHOUT attempting to verify its integrity: since the
+// orphan carries no snapshot.yaml, VerifyNode/ReadSnapshotYAML would fail immediately if the
+// verified path recursed into it, so a successful scan here proves it did not.
+func TestScanVerified_SkipsChildDirWithoutSnapshotYAML(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+	finalizeVerifiedNode(t, child, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child"})
+	finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+	writeOrphanCollisionDir(t, root, "snapshot_orphan__deadbeef")
+
+	node, err := localscan.ScanVerified(root)
+	if err != nil {
+		t.Fatalf("ScanVerified: %v", err)
+	}
+
+	if len(node.Children) != 1 {
+		t.Fatalf("Children: got %d, want 1 (orphan directory must be skipped, not verified)", len(node.Children))
+	}
+}
+
+// TestScan_NonRegularSnapshotYAMLInChildStaysError proves the orphaned-directory tolerance
+// does NOT widen to cover a non-regular snapshot.yaml (a symlink or a directory) in a child
+// node directory: Scan must still fail hard.
+func TestScan_NonRegularSnapshotYAMLInChildStaysError(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+
+				path := filepath.Join(dir, archive.SnapshotYAMLName)
+				if err := os.WriteFile(path, []byte("kind: Snapshot\n"), 0o600); err != nil {
+					t.Fatalf("write snapshot.yaml: %v", err)
+				}
+
+				outside := filepath.Join(t.TempDir(), "elsewhere.yaml")
+				if err := os.Rename(path, outside); err != nil {
+					t.Fatalf("move snapshot.yaml outside: %v", err)
+				}
+
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatalf("symlink snapshot.yaml: %v", err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+
+				if err := os.MkdirAll(filepath.Join(dir, archive.SnapshotYAMLName), 0o755); err != nil {
+					t.Fatalf("mkdir snapshot.yaml: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeNodeYAML(t, root, archive.SnapshotYAML{
+				APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+				Kind:       "Snapshot",
+				Name:       "root-snap",
+			})
+
+			bogus := filepath.Join(root, archive.SnapshotsDirName, "snapshot_bogus")
+			if err := os.MkdirAll(bogus, 0o755); err != nil {
+				t.Fatalf("mkdir bogus child: %v", err)
+			}
+
+			tc.setup(t, bogus)
+
+			if _, err := localscan.Scan(root); err == nil {
+				t.Fatal("Scan() error = nil, want error for non-regular snapshot.yaml")
+			}
+		})
+	}
+}
+
+// TestScanVerifiedWithOptionsReportingSkips_ReportsPaths proves the reporting scan variant
+// returns every skipped orphaned collision/resume directory, truncating the reported Paths
+// sample while keeping an untruncated Total.
+func TestScanVerifiedWithOptionsReportingSkips_ReportsPaths(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, archive.SnapshotsDirName, "snapshot_child")
+	finalizeVerifiedNode(t, child, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "child"})
+	finalizeVerifiedNode(t, root, archive.SnapshotYAML{Kind: "Snapshot", APIVersion: "v1", Name: "root"})
+
+	const orphanCount = 40 // exceeds the package's internal reporting cap, proving truncation
+
+	for i := 0; i < orphanCount; i++ {
+		writeOrphanCollisionDir(t, root, fmt.Sprintf("snapshot_orphan-%02d", i))
+	}
+
+	node, skipped, err := localscan.ScanVerifiedWithOptionsReportingSkips(root, archive.SnapshotYAMLReadOptions{})
+	if err != nil {
+		t.Fatalf("ScanVerifiedWithOptionsReportingSkips: %v", err)
+	}
+
+	if len(node.Children) != 1 {
+		t.Fatalf("Children: got %d, want 1", len(node.Children))
+	}
+
+	if skipped.Total != orphanCount {
+		t.Errorf("skipped.Total = %d, want %d", skipped.Total, orphanCount)
+	}
+
+	if len(skipped.Paths) >= orphanCount {
+		t.Errorf("len(skipped.Paths) = %d, want a truncated sample smaller than Total (%d)",
+			len(skipped.Paths), orphanCount)
 	}
 }

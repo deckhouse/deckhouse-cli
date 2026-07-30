@@ -199,9 +199,17 @@ func runVerifiedArchive(ctx context.Context, cfg Config, view *archive.VerifiedA
 		AllowUnauthenticatedLegacy: cfg.AllowUnauthenticatedLegacy,
 	}
 
-	plan, err := buildPlanFromVerifiedArchiveWithOptions(view, snapshotReadOptions)
+	plan, skipped, err := buildPlanFromVerifiedArchiveReportingSkips(view, snapshotReadOptions)
 	if err != nil {
 		return fmt.Errorf("build import plan: %w", err)
+	}
+
+	if skipped.Total > 0 {
+		cfg.Log.Warn("skipped archive directories without snapshot.yaml; "+
+			"they are leftovers of an interrupted download redirected to a collision path "+
+			"and carry no importable node",
+			slog.Int("skipped_dirs", skipped.Total),
+			slog.String("paths", strings.Join(skipped.Paths, ", ")))
 	}
 
 	if len(plan) == 0 {
