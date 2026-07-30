@@ -20,9 +20,11 @@ import (
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
+// var instead of const to allow test override.
+var maxRetryAttempts = 60
+
 const (
-	maxRetryAttempts = 60
-	retryInterval    = 3
+	retryInterval = 3
 
 	// uploadFinishedSubpath is the importer endpoint that finalises an upload. It hangs off the
 	// same base URL as the /api/v1/{files,block} data endpoints (status.url / status.publicURL).
@@ -128,7 +130,17 @@ func GetDataImportWithRestart(
 		var notReadyErr error
 
 		for _, condition := range diObj.Status.Conditions {
-			if condition.Type == "Expired" && condition.Status == "True" {
+			// The DataImport controller no longer carries a standalone "Expired" condition; expiry is
+			// now the Ready condition with Status=False and Reason="Expired" (symmetric with
+			// DataExport). Detect it on the Ready condition and auto-restart the import, rather than
+			// waiting for the producer's GC (which only deletes an expired DataImport after its
+			// retention TTL).
+			if condition.Type != "Ready" {
+				continue
+			}
+
+			switch {
+			case condition.Status == "False" && condition.Reason == "Expired":
 				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
 					return nil, err
 				}
@@ -150,14 +162,16 @@ func GetDataImportWithRestart(
 				); err != nil {
 					return nil, err
 				}
-			}
-
-			if condition.Type == "Ready" {
-				if condition.Status != "True" {
-					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
-						diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
-						condition.Message, condition.Reason)
-				}
+				// Recreated: the stale object's status.url/status.volumeMode still belong to the
+				// dead importer until retention-GC reaps it, so we must not let this object fall
+				// through to the readiness checks below as if it were done. Keep retrying until the
+				// fresh import becomes Ready.
+				notReadyErr = fmt.Errorf("DataImport %s/%s expired; recreated, waiting for the new import to become Ready",
+					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
+			case condition.Status != "True":
+				notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
+					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
+					condition.Message, condition.Reason)
 			}
 		}
 
