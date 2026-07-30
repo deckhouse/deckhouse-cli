@@ -58,10 +58,16 @@ const DataImportModeCreatePVC DataImportMode = "CreatePVC"
 // mode == CreatePVC, so those PopulateData-only fields are deliberately absent here.
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
-	TTL                  string         `json:"ttl"`
-	Publish              bool           `json:"publish,omitempty"`
-	WaitForFirstConsumer bool           `json:"waitForFirstConsumer,omitempty"`
-	Mode                 DataImportMode `json:"mode,omitempty"`
+	TTL     string `json:"ttl"`
+	Publish bool   `json:"publish,omitempty"`
+
+	// WaitForFirstConsumer must not carry omitempty, unlike the other bool in this spec: the CRD
+	// defaults this field to true, so an absent key means true on the server. omitempty drops
+	// the zero value, which for a bool is exactly the false the caller asked for — making
+	// `--wffc=false` (and hence the flag's own default) impossible to express.
+	WaitForFirstConsumer bool `json:"waitForFirstConsumer"`
+
+	Mode DataImportMode `json:"mode,omitempty"`
 
 	// PvcTemplate fully describes the destination PVC. Its metadata.name is mandatory — the
 	// controller names the imported PVC after it and the server CEL rejects an empty name.
