@@ -77,7 +77,7 @@ func CreateDataImport(
 		ttl = dataio.DefaultTTL
 	}
 
-	// Mode B requires a pvcTemplate whose metadata.name is set: the controller names the
+	// CreatePVC requires a pvcTemplate whose metadata.name is set: the controller names the
 	// imported PVC after it, and the server CEL rejects an empty name. Fail early with a
 	// clear message instead of surfacing an opaque admission error.
 	if pvcTpl == nil || pvcTpl.Name == "" {
@@ -97,10 +97,11 @@ func CreateDataImport(
 			TTL:                  ttl,
 			Publish:              publish,
 			WaitForFirstConsumer: waitForFirstConsumer,
-			TargetRef: v1alpha1.DataImportTargetRefSpec{
-				Kind:        v1alpha1.KindPersistentVolumeClaim,
-				PvcTemplate: pvcTpl,
-			},
+			// Sent explicitly even though the CRD defaults it: mode is immutable after creation,
+			// so relying on the server-side default would silently bind the object to whatever
+			// default a future CRD revision ships.
+			Mode:        v1alpha1.DataImportModeCreatePVC,
+			PvcTemplate: pvcTpl,
 		},
 	}
 
@@ -146,8 +147,8 @@ func GetDataImportWithRestart(
 				}
 
 				pvcTemplate := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
-				if diObj.Spec.TargetRef.PvcTemplate != nil {
-					pvcTemplate = diObj.Spec.TargetRef.PvcTemplate
+				if diObj.Spec.PvcTemplate != nil {
+					pvcTemplate = diObj.Spec.PvcTemplate
 				}
 
 				if err := CreateDataImport(

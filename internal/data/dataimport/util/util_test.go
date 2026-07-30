@@ -18,6 +18,7 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -45,7 +46,11 @@ func readyCond(status metav1.ConditionStatus, reason, message string) metav1.Con
 	}
 }
 
-func TestCreateDataImport_BuildsModeBSpec(t *testing.T) {
+// TestCreateDataImport_BuildsCreatePVCSpec pins the wire shape the CLI must produce for the current
+// CRD: spec.mode=CreatePVC plus a top-level spec.pvcTemplate. The obsolete spec.targetRef nesting
+// would be pruned by the structural schema and then rejected by the CEL rule
+// "mode CreatePVC requires pvcTemplate".
+func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 
@@ -61,11 +66,23 @@ func TestCreateDataImport_BuildsModeBSpec(t *testing.T) {
 	var stored v1alpha1.DataImport
 	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "import-into-pvc", Namespace: "my-ns"}, &stored))
 
-	assert.Equal(t, v1alpha1.KindPersistentVolumeClaim, stored.Spec.TargetRef.Kind)
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, stored.Spec.Mode)
 	assert.Equal(t, "15m", stored.Spec.TTL)
 	assert.True(t, stored.Spec.WaitForFirstConsumer)
-	require.NotNil(t, stored.Spec.TargetRef.PvcTemplate)
-	assert.Equal(t, "restored-pvc", stored.Spec.TargetRef.PvcTemplate.Name)
+	require.NotNil(t, stored.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", stored.Spec.PvcTemplate.Name)
+
+	// Guard the serialised shape in addition to the Go fields, because a wrong json tag or a
+	// reintroduced nested struct would keep the Go assertions above passing while changing what
+	// the apiserver actually receives. Scope of this check: it exercises this package's own json
+	// tags only. It says nothing about whether the server accepts the object -- the
+	// controller-runtime fake client applies neither structural-schema pruning nor CEL
+	// validation, so only a real cluster (or envtest with the CRD installed) can prove that.
+	raw, marshalErr := json.Marshal(stored.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(raw), `"mode":"CreatePVC"`)
+	assert.Contains(t, string(raw), `"pvcTemplate"`)
+	assert.NotContains(t, string(raw), `"targetRef"`)
 }
 
 func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
@@ -258,10 +275,8 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 			TTL:                  "15m",
 			Publish:              true,
 			WaitForFirstConsumer: true,
-			TargetRef: v1alpha1.DataImportTargetRefSpec{
-				Kind:        v1alpha1.KindPersistentVolumeClaim,
-				PvcTemplate: pvcTpl,
-			},
+			Mode:                 v1alpha1.DataImportModeCreatePVC,
+			PvcTemplate:          pvcTpl,
 		},
 		Status: v1alpha1.DataExportImportStatus{
 			// Deliberately filled in, as a dying importer's status is until retention-GC reaps it.
@@ -291,8 +306,9 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 	assert.Equal(t, "15m", recreated.Spec.TTL, "TTL must be carried over to the fresh import")
 	assert.True(t, recreated.Spec.Publish, "Publish must be carried over to the fresh import")
 	assert.True(t, recreated.Spec.WaitForFirstConsumer, "WaitForFirstConsumer must be carried over to the fresh import")
-	require.NotNil(t, recreated.Spec.TargetRef.PvcTemplate)
-	assert.Equal(t, "restored-pvc", recreated.Spec.TargetRef.PvcTemplate.Name, "PvcTemplate must be carried over to the fresh import")
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, recreated.Spec.Mode, "Mode must be set on the fresh import")
+	require.NotNil(t, recreated.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", recreated.Spec.PvcTemplate.Name, "PvcTemplate must be carried over to the fresh import")
 }
 
 // TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed asserts the contract change: a

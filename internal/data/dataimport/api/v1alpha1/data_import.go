@@ -40,31 +40,31 @@ type DataImportList struct {
 	Items []DataImport `json:"items"`
 }
 
-// KindPersistentVolumeClaim is the targetRef.kind discriminator value that selects the
-// standalone PVC-import mode (Mode B) of the unified storage-foundation.deckhouse.io/v1alpha1
-// DataImport CRD: data bytes are streamed straight into a PVC built from pvcTemplate, with no
-// snapshot capture and no VolumeSnapshotContent artifact. `d8 data import` only ever creates
-// Mode B DataImports; the snapshot-leaf import mode (Mode A) is driven by `d8 snapshot upload`.
-const KindPersistentVolumeClaim = "PersistentVolumeClaim"
+// DataImportMode is spec.mode — the explicit discriminator that selects what a DataImport does
+// with the imported bytes. It replaced the former polymorphic targetRef.kind discrimination; the
+// current CRD has no spec.targetRef at all (it is pruned by the structural schema).
+// See storage-foundation/api/v1alpha1/data_import.go for the SSOT.
+type DataImportMode string
 
-// DataImportSpec mirrors the Mode B subset of the unified DataImport CRD spec that the CLI
-// produces. Mode B carries no root storageClassName/size/volumeMode (those live in pvcTemplate)
-// and no targetRef.group/name; the server's CEL rules reject those fields when
-// targetRef.kind == PersistentVolumeClaim.
+// DataImportModeCreatePVC is the standalone PVC-import mode: data bytes are streamed straight
+// into a preserved PVC built from spec.pvcTemplate, with no snapshot capture and no
+// VolumeSnapshotContent artifact. `d8 data import` only ever creates CreatePVC DataImports; the
+// snapshot-leaf mode (PopulateData) is driven by `d8 snapshot upload`, which builds its own
+// unstructured spec.
+const DataImportModeCreatePVC DataImportMode = "CreatePVC"
+
+// DataImportSpec mirrors the CreatePVC subset of the unified DataImport CRD spec that the CLI
+// produces. The CRD CEL rules require pvcTemplate and forbid snapshotRef/storageParams when
+// mode == CreatePVC, so those PopulateData-only fields are deliberately absent here.
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
-	TTL                  string                  `json:"ttl"`
-	Publish              bool                    `json:"publish,omitempty"`
-	WaitForFirstConsumer bool                    `json:"waitForFirstConsumer,omitempty"`
-	TargetRef            DataImportTargetRefSpec `json:"targetRef"`
-}
+	TTL                  string         `json:"ttl"`
+	Publish              bool           `json:"publish,omitempty"`
+	WaitForFirstConsumer bool           `json:"waitForFirstConsumer,omitempty"`
+	Mode                 DataImportMode `json:"mode,omitempty"`
 
-// DataImportTargetRefSpec is the Mode B view of the unified targetRef: Kind is always
-// KindPersistentVolumeClaim and PvcTemplate fully describes the destination PVC (its
-// metadata.name is mandatory — the controller names the imported PVC after it).
-// +k8s:deepcopy-gen=true
-type DataImportTargetRefSpec struct {
-	Kind        string                             `json:"kind"`
+	// PvcTemplate fully describes the destination PVC. Its metadata.name is mandatory — the
+	// controller names the imported PVC after it and the server CEL rejects an empty name.
 	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
 }
 
