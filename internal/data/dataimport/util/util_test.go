@@ -337,6 +337,95 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 	assert.NotContains(t, string(recreatedRaw), `"targetRef"`)
 }
 
+// TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec exercises the recreate path on an
+// object that arrived the way a real one does — decoded from apiserver JSON in the current
+// mode/pvcTemplate shape — instead of one hand-built as Go structs like every other test here.
+// That closes two blind spots at once:
+//
+//   - the read direction: the recreate rebuilds the fresh spec from the decoded object, so if
+//     pvcTemplate failed to decode the recreate would abort with "requires a PVC template with
+//     metadata.name set" rather than carry the template over;
+//   - waitForFirstConsumer=false through the recreate: the sibling test only carries a true over,
+//     which is exactly the value an omitempty regression would leave intact.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
+func TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	// Shaped as the apiserver returns it: mode populated, waitForFirstConsumer explicitly present,
+	// pvcTemplate at the top level of the spec, and a stale Ready=False/Expired status.
+	const serverJSON = `{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind": "DataImport",
+		"metadata": {"name": "test-di", "namespace": "test-ns"},
+		"spec": {
+			"ttl": "42m",
+			"publish": false,
+			"waitForFirstConsumer": false,
+			"mode": "CreatePVC",
+			"pvcTemplate": {
+				"metadata": {"name": "restored-pvc"},
+				"spec": {
+					"accessModes": ["ReadWriteOnce"],
+					"resources": {"requests": {"storage": "10Gi"}},
+					"storageClassName": "linstor-thin-r1",
+					"volumeMode": "Filesystem"
+				}
+			}
+		},
+		"status": {
+			"url": "https://10.0.0.1:8085/",
+			"publicURL": "",
+			"accessTimestamp": null,
+			"volumeMode": "Filesystem",
+			"conditions": [{
+				"type": "Ready",
+				"status": "False",
+				"reason": "Expired",
+				"message": "import idle timeout reached",
+				"lastTransitionTime": "2026-07-30T10:00:00Z"
+			}]
+		}
+	}`
+
+	expired := &v1alpha1.DataImport{}
+	require.NoError(t, json.Unmarshal([]byte(serverJSON), expired))
+	require.NotNil(t, expired.Spec.PvcTemplate, "fixture sanity: the server shape must decode into spec.pvcTemplate")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
+
+	var recreated v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &recreated))
+
+	assert.Equal(t, "42m", recreated.Spec.TTL, "TTL must survive the decode/recreate round trip")
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, recreated.Spec.Mode)
+	assert.False(t, recreated.Spec.WaitForFirstConsumer, "a false waitForFirstConsumer must not be upgraded by the recreate")
+	require.NotNil(t, recreated.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", recreated.Spec.PvcTemplate.Name)
+	require.NotNil(t, recreated.Spec.PvcTemplate.StorageClassName)
+	assert.Equal(t, "linstor-thin-r1", *recreated.Spec.PvcTemplate.StorageClassName,
+		"the whole template, not just its name, must be carried over — a dropped storageClassName would silently reprovision on the default class")
+
+	// The rebuilt spec has to leave for the server with the false intact, which is the property the
+	// Go-level assertion above cannot distinguish from an omitted key.
+	recreatedRaw, marshalErr := json.Marshal(recreated.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(recreatedRaw), `"waitForFirstConsumer":false`)
+}
+
 // TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed asserts the contract change: a
 // legacy standalone Type=="Expired" condition (the old, now version-skewed, detection signal) must
 // not trigger a recreate anymore. Only the current controller's Ready=False/Reason=Expired signal
