@@ -232,9 +232,11 @@ func TestEnsureDataImportPublish(t *testing.T) {
 // status.volumeMode) must be deleted and recreated, and the call must return an error asking the
 // caller to keep polling for the fresh import rather than returning the stale object as if it were
 // ready.
+// Deliberately NOT t.Parallel: this test overrides the package-level maxRetryAttempts, which is
+// shared mutable state. Running it concurrently with the other overriding tests is a data race
+// (caught by -race) and lets one test observe another's restored value, turning a one-iteration
+// run into a 60-attempt / ~3-minute wait with the wrong error.
 func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
-	t.Parallel()
-
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 
@@ -297,9 +299,10 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 // legacy standalone Type=="Expired" condition (the old, now version-skewed, detection signal) must
 // not trigger a recreate anymore. Only the current controller's Ready=False/Reason=Expired signal
 // does.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
 func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) {
-	t.Parallel()
-
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 
@@ -338,9 +341,9 @@ func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) 
 // TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired guards against too broad a predicate:
 // a Ready=False/Reason=Completed condition (normal completion signalling, not expiry) must fall into
 // the not-Ready branch, not the recreate branch.
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
 func TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired(t *testing.T) {
-	t.Parallel()
-
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 
