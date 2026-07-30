@@ -83,6 +83,22 @@ func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
 	assert.Contains(t, string(raw), `"mode":"CreatePVC"`)
 	assert.Contains(t, string(raw), `"pvcTemplate"`)
 	assert.NotContains(t, string(raw), `"targetRef"`)
+
+	t.Run("waitForFirstConsumer=false reaches the wire", func(t *testing.T) {
+		// The CRD defaults waitForFirstConsumer to true, so a false from the caller has to travel
+		// as an explicit key. If it is ever dropped as a zero value, the server flips it back to
+		// true and `--wffc=false` becomes silently inoperative.
+		cWithoutWFFC := fake.NewClientBuilder().WithScheme(scheme).Build()
+		require.NoError(t, CreateDataImport(ctx, "no-wffc", "my-ns", "15m", false, false, pvcTpl, cWithoutWFFC))
+
+		var withoutWFFC v1alpha1.DataImport
+		require.NoError(t, cWithoutWFFC.Get(ctx, ctrlclient.ObjectKey{Name: "no-wffc", Namespace: "my-ns"}, &withoutWFFC))
+		assert.False(t, withoutWFFC.Spec.WaitForFirstConsumer)
+
+		rawWithoutWFFC, err := json.Marshal(withoutWFFC.Spec)
+		require.NoError(t, err)
+		assert.Contains(t, string(rawWithoutWFFC), `"waitForFirstConsumer":false`)
+	})
 }
 
 func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
@@ -309,6 +325,16 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, recreated.Spec.Mode, "Mode must be set on the fresh import")
 	require.NotNil(t, recreated.Spec.PvcTemplate)
 	assert.Equal(t, "restored-pvc", recreated.Spec.PvcTemplate.Name, "PvcTemplate must be carried over to the fresh import")
+
+	// The recreate path rebuilds the spec from the stale object's fields rather than copying it,
+	// so it is a second, independent place the shape can regress in. Same scope as the check in
+	// TestCreateDataImport_BuildsCreatePVCSpec: this covers this package's json tags only, not
+	// server-side pruning or CEL.
+	recreatedRaw, marshalErr := json.Marshal(recreated.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(recreatedRaw), `"mode":"CreatePVC"`)
+	assert.Contains(t, string(recreatedRaw), `"pvcTemplate"`)
+	assert.NotContains(t, string(recreatedRaw), `"targetRef"`)
 }
 
 // TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed asserts the contract change: a
