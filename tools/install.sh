@@ -388,8 +388,9 @@ install_binary() {
     if user_can_sudo; then
       fmt_info "Installing ${BINARY_NAME} to ${target_path} (requires sudo)..."
       sudo mkdir -p "$INSTALL_DIR"
-      sudo cp "$binary_path" "$target_path"
-      sudo chmod +x "$target_path"
+      sudo cp "$binary_path" "${target_path}.tmp.$$"
+      sudo chmod +x "${target_path}.tmp.$$"
+      sudo mv -f "${target_path}.tmp.$$" "$target_path"
     else
       fmt_error "Cannot write to ${INSTALL_DIR} and sudo is not available"
       fmt_error "Please run with sudo or choose a different installation directory"
@@ -398,8 +399,9 @@ install_binary() {
   else
     fmt_info "Installing ${BINARY_NAME} to ${target_path}..."
     mkdir -p "$INSTALL_DIR"
-    cp "$binary_path" "$target_path"
-    chmod +x "$target_path"
+    cp "$binary_path" "${target_path}.tmp.$$"
+    chmod +x "${target_path}.tmp.$$"
+    mv -f "${target_path}.tmp.$$" "$target_path"
   fi
   
   fmt_success "${BINARY_NAME} installed successfully!"
