@@ -40,7 +40,8 @@ D8 provides comprehensive cluster management capabilities:
 | [**backup**](internal/backup/) | Backup operations | ETCD snapshots, configuration backups, data export |
 | [**cr**](internal/cr/) | Container registry tool | Pull/push images, list tags & repos, inspect manifests/configs, browse image filesystems |
 | [**mirror**](internal/mirror/) | Module mirroring | Registry operations, image synchronization, air-gapped deployments |
-| [**system**](internal/system/) | System diagnostics | Debug info collection, logs analysis, troubleshooting |
+| [**status**](internal/status/README.md) | Cluster status report | Read-only health snapshot: nodes, Deckhouse pods, releases, edition, settings, registry, alerts, CNI, queue |
+| [**system**](internal/system/README.md) | Platform operations | Config get/edit, module lifecycle, package scans, queue dumps, controller logs, debug archives |
 | **user-operation** | Local user operations | Request `UserOperation` in `user-authn` (ResetPassword/Reset2FA/Lock/Unlock) |
 
 ### 🚀 Module Management

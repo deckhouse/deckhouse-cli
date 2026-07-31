@@ -30,13 +30,23 @@ split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
 
 ## Plugin source
 
-`rppPluginSource` (`rpp_source.go`) implements the `PluginSource` interface
-(`source.go`) and is the only source: plugins are pulled through the in-cluster
-registry-packages-proxy using the **kubeconfig identity**, with no registry
-credentials on the user side (ADR: deckhouse-cli reaches the registry
-exclusively through the proxy, so every command needs a reachable cluster).
-See `internal/selfupdate/README.md` for what RPP is and how authorization works;
-the plugin routes are `/v1/images/deckhouse-cli/plugins/<name>/...`.
+The `pluginSource` interface (`source.go`) has two implementations, chosen in
+`InitPluginServices` (`init.go`) by whether the hidden `--source` flag is set:
+
+- **`rppPluginSource` (`rpp_source.go`) - the default and only supported
+  source.** Plugins are pulled through the in-cluster registry-packages-proxy
+  using the **kubeconfig identity**, with no registry credentials on the user
+  side (ADR #386: deckhouse-cli reaches the registry exclusively through the
+  proxy, so every command needs a reachable cluster). See
+  `internal/selfupdate/README.md` for what RPP is and how authorization works -
+  plugin download is gated by the `d8:registry-packages-proxy:packages-download`
+  ClusterRole, distinct from self-update's `cli-download`. The plugin routes are
+  `/v1/images/deckhouse-cli/plugins/<name>/{tags,manifests/<ref>,images/<version>}`.
+- **`registryPluginSource` (`source_legacy.go`) - a temporary, hidden `--source`
+  bypass.** It pulls straight from a registry repo with go-containerregistry,
+  skipping the proxy and the cluster, and force-sets `--skip-cluster-checks`. It
+  exists for pre-#386 workflows and is documented for removal (grep marker
+  `legacy --source`).
 
 ## What a plugin image contains
 
@@ -105,18 +115,25 @@ A failure at any step leaves the previous version installed and working.
 
 ## Requirements enforcement
 
-- **Cluster-side** (`kubernetes`, `deckhouse`, `modules` incl.
-  mandatory/conditional/anyOf): verified against a one-shot cluster snapshot
-  (the `requirements/` package); the cluster is queried only when the plugin
-  actually declares such requirements, so contract-less plugins install offline.
+- **Cluster-side** (`kubernetes`, `deckhouse`, and `modules` -
+  mandatory/conditional/anyOf/**noneOf**, the last *forbidding* a module):
+  verified against a one-shot cluster snapshot (the `requirements/` package)
+  built from three reads - the API-server version, the `deckhouse` deployment's
+  `core.deckhouse.io/version` annotation, and a `modules.deckhouse.io` list. The
+  snapshot is lazy (built only when the plugin declares such requirements, so
+  contract-less plugins install offline), cached once per run, and bounded by a
+  30s probe timeout. A non-release Deckhouse version (e.g. `dev`) skips the
+  Deckhouse check with a warning rather than failing.
 - **Plugin-to-plugin**: a plugin's mandatory dependencies are installed and
   upgraded automatically (the resolution planner: constraint-aware, newest
   satisfying version, within each dependency's own major - or across it when
   `--use-major` cascades). Conflicts with already-installed plugins skip a
-  candidate during selection.
-- **At runtime**: the wrapper re-validates requirements before EVERY plugin run
-  (the gate is skipped for purely local queries: `--help`, `--version`,
-  `completion`).
+  candidate during selection. Conditional dependencies are enforced only when
+  that plugin is already installed and are never auto-installed.
+- **At runtime**: the wrapper re-validates requirements before EVERY plugin run.
+  The gate is skipped for local-only invocations - `--help`/`-h` (anywhere
+  before a `--`), `--version`/`-v` or `help`/`completion` as the first arg, and
+  cobra's `__complete*` requests - and when the plugin ships no contract.
 - Escape hatch for air-gapped setups: `--skip-cluster-checks` /
   `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` (downgrades the check to a warning).
 
@@ -156,16 +173,20 @@ A failure at any step leaves the previous version installed and working.
 | `plugins.go` | the `Manager`: shared state of the plugin machinery |
 | `install.go` | the install pipeline: lock, staged download, smoke, atomic swap, idempotency |
 | `select.go` | newest-compatible version selection, contract memoization |
+| `planner.go` | plugin-to-plugin dependency resolution: constraint-aware planning, conflict/cycle/depth guards, upgrade-only |
 | `update.go` | `UpdateAll`, installed-plugin discovery, home-fallback switch |
 | `remove.go` | `Remove` / `RemoveAll` |
 | `validators.go` | plugin-to-plugin requirement checks + the Manager glue over `requirements/` (snapshot cache, kubeconfig clients, `--skip-cluster-checks`) |
 | `requirements/` | cluster-side requirements: the one-shot cluster snapshot (k8s / Deckhouse / modules) and the named checks against it |
 | `run.go` | running an installed plugin: requirement gate, env injection, exec |
 | `list.go` / `versions.go` | data for the `list` / `versions` commands |
-| `source.go` / `rpp_source.go` / `init.go` | the `PluginSource` interface, its RPP implementation, source wiring |
+| `source.go` / `rpp_source.go` / `init.go` | the `pluginSource` interface, its default RPP implementation, and source selection |
+| `source_legacy.go` | the hidden `--source` direct-registry bypass (temporary, pre-#386; force-enables `--skip-cluster-checks`) |
+| `builtins.go` | built-in command names (`delivery-kit`, `package`) that satisfy a same-named plugin dependency by presence - no version check, no registry lookup |
 | `layout/` | on-disk path layout |
 | `flags/` | the `d8 plugins` flag set |
 | `cmd/` | the `d8 plugins ...` command tree and the per-plugin wrapper command, one file per command |
+| `cmd/errdetect/` | maps registry-packages-proxy errors (401/403/404/5xx/endpoint-discovery) to actionable hints |
 
 Related: `internal/rpp` (proxy HTTP client), `internal/lockfile` (install lock),
 `internal/selfupdate` (the same store-and-symlink update pattern for the d8
