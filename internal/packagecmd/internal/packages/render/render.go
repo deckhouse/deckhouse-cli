@@ -16,7 +16,7 @@ import (
 type Options struct {
 	Path        string   // Path to the chart directory
 	ValuesPaths []string // Paths to values files
-	RootValues  string   // Values in JSON format
+	RootValues  []string // Values in JSON format
 
 	ExtraCapabilitities []string // Extra capabilities
 }
@@ -44,15 +44,10 @@ func Render(ctx context.Context, namespace, releaseName string, opts Options) ([
 		return nil, nil
 	}
 
-	var valuesSet []string
-	if len(opts.RootValues) > 0 {
-		valuesSet = append(valuesSet, opts.RootValues)
-	}
-
 	res, err := action.ChartRender(ctx, action.ChartRenderOptions{
 		ValuesOptions: common.ValuesOptions{
 			ValuesFiles: opts.ValuesPaths,
-			RootSetJSON: valuesSet,
+			RootSetJSON: opts.RootValues,
 		},
 		OutputFilePath:         "/dev/null", // No output file, we return the manifest as a string
 		Chart:                  opts.Path,

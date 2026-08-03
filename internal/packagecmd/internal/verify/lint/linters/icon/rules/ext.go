@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/iconutil"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/iconutil"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 )
 
@@ -35,10 +35,10 @@ func NewExtRule(icon iconutil.Icon, collector *diag.Collector) *ExtRule {
 
 // Check reports an error when the icon's extension is not supported.
 func (r *ExtRule) Check(_ context.Context) {
-	if slices.Contains(allowedExts, r.icon.Ext) {
-		return
+	if !slices.Contains(allowedExts, r.icon.Ext) {
+		r.collector.With(diag.Value(r.icon.Ext)).
+			Error("icon extension is not supported (allowed: %s)", strings.Join(allowedExts, ", "))
 	}
 
-	r.collector.With(diag.Value(r.icon.Ext)).
-		Error("icon extension is not supported (allowed: %s)", strings.Join(allowedExts, ", "))
+	r.collector.Commit()
 }

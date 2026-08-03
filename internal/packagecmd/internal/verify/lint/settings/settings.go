@@ -1,19 +1,47 @@
+// Package settings maps the on-disk .pkglint.yaml document onto typed configuration
+// and converts it into runtime-ready linter severities.
+//
+// The document is grouped by verification scope. `static` configures linting of a
+// package directory on disk; `remote.bundle` and `remote.release` configure linting
+// of the two images a published package consists of. Every scope carries a full,
+// independent LintersSettings tree because the three sources hold different files
+// and therefore warrant different severities.
 package settings
 
-// Config describes lint settings loaded from a package .pkglint.yaml file.
+// Config is the decoded .pkglint.yaml document.
 type Config struct {
 	// Version identifies the .pkglint.yaml schema version.
 	Version string `mapstructure:"version"`
 
+	// Static contains settings applied when verifying a package directory on disk.
+	Static ScopeSettings `mapstructure:"static"`
+
+	// Remote contains settings applied when verifying a package published to a registry.
+	Remote RemoteSettings `mapstructure:"remote"`
+}
+
+// RemoteSettings groups the per-image settings used by remote verification.
+// A published package is two images with different contents, so each gets its own scope.
+type RemoteSettings struct {
+	// Bundle contains settings for the bundle image, published as <repository>:<version>.
+	// It carries the renderable package: charts, templates, openapi, docs and metadata.
+	Bundle ScopeSettings `mapstructure:"bundle"`
+
+	// Release contains settings for the release image, published as <repository>/release:<release>.
+	// It carries release metadata only: version.json, changelog, openapi, docs and the icon.
+	Release ScopeSettings `mapstructure:"release"`
+}
+
+// ScopeSettings holds the linter configuration for one verification scope.
+type ScopeSettings struct {
 	// Linters contains settings grouped by linter.
 	Linters LintersSettings `mapstructure:"linters"`
 }
 
 // LintersSettings groups configuration for all supported linters.
+// A zero value is meaningful: every field decodes to its documented default severity,
+// so a scope omitted from .pkglint.yaml behaves exactly like a scope left at defaults.
 type LintersSettings struct {
-	// Layout contains settings for application layout checks.
-	Layout LayoutSettings `mapstructure:"layout"`
-
 	// Templates contains settings for application template checks.
 	Templates TemplatesSettings `mapstructure:"templates"`
 
@@ -28,35 +56,6 @@ type LintersSettings struct {
 
 	// OSS contains settings for optional oss.yaml metadata checks.
 	OSS OSSSettings `mapstructure:"oss"`
-
-	// Requirements contains settings for package.yaml requirements checks.
-	Requirements RequirementsSettings `mapstructure:"requirements"`
-}
-
-// LayoutSettings configures the layout linter and its rules.
-type LayoutSettings struct {
-	// Impact sets the maximum severity emitted by the layout linter.
-	Impact string `mapstructure:"impact"`
-	// Rules contains per-rule layout linter settings.
-	Rules LayoutRulesSettings `mapstructure:"rules"`
-}
-
-// LayoutRulesSettings configures individual layout linter rules.
-type LayoutRulesSettings struct {
-	// NoWerf configures checks that reject Werf files in application packages.
-	NoWerf RuleSettings `mapstructure:"no-werf"`
-	// NoChart configures checks that report Helm chart metadata in the package root.
-	NoChart RuleSettings `mapstructure:"no-chart"`
-	// NoHelmignore configures checks that reject committed .helmignore files.
-	NoHelmignore RuleSettings `mapstructure:"no-helmignore"`
-	// Gitignore configures checks that require .gitignore in the package root.
-	Gitignore RuleSettings `mapstructure:"gitignore"`
-	// Changelog configures checks that require changelog.yaml in the package root.
-	Changelog RuleSettings `mapstructure:"changelog"`
-	// Docs configures checks that require docs/ in the package root.
-	Docs RuleSettings `mapstructure:"docs"`
-	// Icon configures checks that require an icon.<ext> in the package root.
-	Icon RuleSettings `mapstructure:"icon"`
 }
 
 // TemplatesSettings configures the templates linter and its rules.
@@ -147,23 +146,6 @@ type OSSRulesSettings struct {
 	Fields RuleSettings `mapstructure:"fields"`
 	// Version configures checks for version and versions field usage.
 	Version RuleSettings `mapstructure:"version"`
-}
-
-// RequirementsSettings configures the requirements linter and its rules.
-type RequirementsSettings struct {
-	// Impact sets the maximum severity emitted by the requirements linter.
-	Impact string `mapstructure:"impact"`
-	// Rules contains per-rule requirements linter settings.
-	Rules RequirementsRulesSettings `mapstructure:"rules"`
-}
-
-// RequirementsRulesSettings configures individual requirements linter rules.
-type RequirementsRulesSettings struct {
-	// ModuleGroups configures checks that anyOf/noneOf module groups are well-formed
-	// and that no module lands in contradictory buckets.
-	ModuleGroups RuleSettings `mapstructure:"module-groups"`
-	// Constraints configures checks that declared version constraints are valid semver.
-	Constraints RuleSettings `mapstructure:"constraints"`
 }
 
 // RuleSettings configures a single rule.

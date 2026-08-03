@@ -82,6 +82,8 @@ func (r *ImageNameRule) Check(_ context.Context) {
 			r.checkWerfInc(werfInc)
 		}
 	}
+
+	r.collector.Commit()
 }
 
 // checkWerfInc reports underscores in every top-level image: declaration of a werf.inc.yaml file.

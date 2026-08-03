@@ -1,6 +1,6 @@
 // Package icon validates package-icon content (format, size, dimensions). The
-// companion layout linter owns the existence check; this linter silently
-// no-ops at Ignored level when no icon is present.
+// package linter's has_icon rule owns the existence check; this linter silently no-ops
+// at Ignored level when no icon is present.
 package icon
 
 import (
@@ -8,7 +8,7 @@ import (
 	"errors"
 	"path/filepath"
 
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/iconutil"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/iconutil"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/icon/rules"
@@ -16,6 +16,10 @@ import (
 
 // LinterID is the stable identifier used to reference this linter in configuration and diagnostics.
 const LinterID = "icon"
+
+// Scopes lists the verification targets this linter is processed in. The icon is packaged
+// into both images, so its content is checked everywhere it ships.
+var Scopes = lint.EveryType(lint.AllScopes...)
 
 // Config holds the path and settings required to construct a Linter.
 type Config struct {
@@ -56,7 +60,7 @@ type Linter struct {
 }
 
 // Lint discovers the package icon once and runs each rule against the captured
-// Icon value. Existence of the icon file itself is the layout linter's concern;
+// Icon value. Existence of the icon file itself is the package linter's concern;
 // when no icon is present, this linter logs an Ignored-level note and exits.
 func (l *Linter) Lint(ctx context.Context) {
 	icon, err := iconutil.Find(l.config.Path)

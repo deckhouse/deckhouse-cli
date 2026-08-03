@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/bootstrap"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/logs"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/logs"
 )
 
 var (
@@ -31,12 +31,12 @@ func NewCmdBootstrap() *cobra.Command {
 		Long: `Bootstrap a new package from templates.
 
 Use 'bootstrap module <name>' for a module (with hooks, CRDs).
-Use 'bootstrap application <name>' for an application package (per-instance resources).
+Use 'bootstrap app <name>' for an application package (per-instance resources).
 `,
 	}
 
 	cmd.AddCommand(NewCmdBootstrapModule())
-	cmd.AddCommand(NewCmdBootstrapApplication())
+	cmd.AddCommand(NewCmdBootstrapApp())
 
 	return cmd
 }

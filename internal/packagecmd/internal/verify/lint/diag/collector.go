@@ -30,6 +30,7 @@ type context struct {
 	linterID  string
 	ruleID    string
 	objectID  string
+	source    string
 
 	rootPath   string
 	path       string
@@ -100,6 +101,14 @@ func ObjectID(objectID string) CopyOption {
 	return func(r *Collector) { r.current.objectID = objectID }
 }
 
+// Source names the artifact a finding was produced from — the bundle image, the
+// release image, and so on. Remote verification lints several artifacts
+// concurrently into one store, and this is what keeps their findings apart.
+// Static verification leaves it empty, so the source line is omitted entirely.
+func Source(source string) CopyOption {
+	return func(r *Collector) { r.current.source = source }
+}
+
 // Value sets the offending value context field.
 func Value(value any) CopyOption {
 	return func(r *Collector) { r.current.value = value }
@@ -129,6 +138,29 @@ func (r *Collector) Warn(str string, args ...any) {
 // Error records an error-level finding with the current context.
 func (r *Collector) Error(str string, args ...any) {
 	r.commit(fmt.Sprintf(str, args...), lint.Error)
+}
+
+// Commit closes out the current rule, recording that it ran and found nothing to
+// report. A rule calls it as its last step, whichever branches it took: the call is a
+// no-op when the rule already reported a finding through this scope, and when the rule
+// is configured as ignored, since a switched-off rule reports neither problems nor
+// successes.
+//
+// Unlike Warn and Error it bypasses the severity cap. A pass is a result rather than a
+// severity, so capping it would turn every clean rule into a finding.
+func (r *Collector) Commit() {
+	if r.store == nil {
+		r.store = new(store)
+	}
+
+	if r.maxLevel != nil && *r.maxLevel == lint.Ignored {
+		return
+	}
+
+	r.store.addPassOnce(errLog{
+		context: r.current,
+		level:   lint.Pass,
+	})
 }
 
 func (r *Collector) commit(str string, level lint.Level) {
@@ -165,8 +197,8 @@ func (r *Collector) HasErrors() bool {
 
 // Print writes all collected findings to stdout, most-severe first, followed by a
 // one-line summary. Ignored findings are skipped unless showIgnored is true;
-// warnings are skipped if hideWarns is true. Counts in the summary always reflect
-// the full set, regardless of filtering.
+// warnings are skipped if hideWarns is true. Passes are never rendered, only counted.
+// Counts in the summary always reflect the full set, regardless of filtering.
 func (r *Collector) Print(showIgnored, hideWarns bool) {
 	logs := r.store.getLogs()
 	if len(logs) == 0 {
@@ -176,6 +208,7 @@ func (r *Collector) Print(showIgnored, hideWarns bool) {
 	slices.SortFunc(logs, func(a, b errLog) int {
 		return cmp.Or(
 			cmp.Compare(b.level, a.level),
+			cmp.Compare(a.source, b.source),
 			cmp.Compare(a.packageID, b.packageID),
 			cmp.Compare(a.linterID, b.linterID),
 			cmp.Compare(a.ruleID, b.ruleID),
@@ -185,8 +218,8 @@ func (r *Collector) Print(showIgnored, hideWarns bool) {
 	})
 
 	var (
-		errCount, warnCount, ignoredCount int
-		shown                             int
+		passedCount, errCount, warnCount, ignoredCount int
+		shown                                          int
 	)
 
 	for _, log := range logs {
@@ -205,6 +238,12 @@ func (r *Collector) Print(showIgnored, hideWarns bool) {
 			if !showIgnored {
 				continue
 			}
+		case lint.Pass:
+			passedCount++
+
+			// Passes only feed the summary tally; rendering one line per clean rule
+			// would bury the findings the run is about.
+			continue
 		}
 
 		if shown > 0 {
@@ -220,7 +259,7 @@ func (r *Collector) Print(showIgnored, hideWarns bool) {
 		fmt.Fprintln(os.Stdout)
 	}
 
-	renderSummary(os.Stdout, errCount, warnCount, ignoredCount)
+	renderSummary(os.Stdout, passedCount, errCount, warnCount, ignoredCount)
 }
 
 // styleSpec holds the glyph and color applied to a finding based on its severity.
@@ -262,6 +301,10 @@ func renderFinding(w io.Writer, log errLog) {
 	fmt.Fprintln(w, header)
 
 	arrow := dim("→")
+
+	if log.source != "" {
+		fmt.Fprintf(w, "  %s source:  %s\n", arrow, log.source)
+	}
 
 	if loc := locationOf(log); loc != "" {
 		fmt.Fprintf(w, "  %s path:    %s\n", arrow, loc)
@@ -344,12 +387,20 @@ func identifierOf(log errLog) string {
 }
 
 // renderSummary writes a one-line tally; segments are coloured only when their count is non-zero.
-func renderSummary(w io.Writer, errs, warns, ignored int) {
+func renderSummary(w io.Writer, passed, errs, warns, ignored int) {
 	red := color.New(color.FgRed).SprintfFunc()
 	yellow := color.New(color.FgYellow).SprintfFunc()
 	faint := color.New(color.Faint).SprintfFunc()
+	green := color.New(color.FgGreen).SprintfFunc()
 
 	var parts []string
+
+	passedLabel := fmt.Sprintf("%d %s", passed, plural(passed, "pass", "passes"))
+	if passed > 0 {
+		passedLabel = green("%s", passedLabel)
+	}
+
+	parts = append(parts, passedLabel)
 
 	errLabel := fmt.Sprintf("%d %s", errs, plural(errs, "error", "errors"))
 	if errs > 0 {

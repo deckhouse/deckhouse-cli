@@ -47,4 +47,6 @@ func (r *InstancePrefixRule) Check(_ context.Context) {
 			diag.Path(obj.FilePath),
 		).Error("object name does not start with the required d8a- instance prefix")
 	}
+
+	r.collector.Commit()
 }

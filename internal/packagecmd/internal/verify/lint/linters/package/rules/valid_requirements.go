@@ -2,6 +2,7 @@ package rules
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/Masterminds/semver/v3"
 
@@ -9,40 +10,57 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 )
 
-// Rule purpose: reject ill-formed anyOf/noneOf module groups before the package is
-// shipped, so the author sees the problem here rather than when the controller
-// rejects the package at install time.
+// Rule purpose: reject ill-formed requirements before the package is shipped.
 
-// ModuleGroupsRuleID is the stable identifier used to reference this rule in configuration.
-const ModuleGroupsRuleID = "module-groups"
+// ValidRequirementsRuleID is the stable identifier used to reference this rule in diagnostics.
+const ValidRequirementsRuleID = "valid_requirements"
 
-// moduleGroupsRule checks that anyOf/noneOf groups are well-formed and that no module
-// is declared in contradictory buckets.
-type moduleGroupsRule struct {
-	collector *diag.Collector
-	modules   packages.ModulesRequirements
+// ValidRequirementsRule checks that package.yaml requirements are valid and consistent.
+type ValidRequirementsRule struct {
+	collector    *diag.Collector
+	requirements packages.Requirements
 }
 
-// NewModuleGroupsRule constructs a rule that validates the anyOf/noneOf module groups.
-func NewModuleGroupsRule(modules packages.ModulesRequirements, collector *diag.Collector) *moduleGroupsRule {
-	return &moduleGroupsRule{
-		modules:   modules,
-		collector: collector.With(diag.RuleID(ModuleGroupsRuleID), diag.Path(packages.DefinitionFile)),
+// NewValidRequirementsRule constructs a rule that validates the requirements block.
+func NewValidRequirementsRule(requirements packages.Requirements, collector *diag.Collector) *ValidRequirementsRule {
+	return &ValidRequirementsRule{
+		requirements: requirements,
+		collector:    collector.With(diag.RuleID(ValidRequirementsRuleID), diag.Path(packages.DefinitionFile)),
 	}
 }
 
-// Check validates both group buckets, then the collisions between all buckets.
-func (r *moduleGroupsRule) Check(_ context.Context) {
-	anyOf := r.checkBucket(r.modules.AnyOf, "anyOf")
-	noneOf := r.checkBucket(r.modules.NoneOf, "noneOf")
+// Check validates platform constraints, module constraints and module groups.
+func (r *ValidRequirementsRule) Check(_ context.Context) {
+	r.checkConstraint("requirements.kubernetes.constraint", r.requirements.Kubernetes.Constraint)
+	r.checkConstraint("requirements.deckhouse.constraint", r.requirements.Deckhouse.Constraint)
+
+	for _, dep := range r.requirements.Modules.Mandatory {
+		r.checkConstraint(fmt.Sprintf("mandatory module %q", dep.Name), dep.Constraint)
+	}
+
+	for _, dep := range r.requirements.Modules.Conditional {
+		r.checkConstraint(fmt.Sprintf("conditional module %q", dep.Name), dep.Constraint)
+	}
+
+	anyOf := r.checkBucket(r.requirements.Modules.AnyOf, "anyOf")
+	noneOf := r.checkBucket(r.requirements.Modules.NoneOf, "noneOf")
 
 	r.checkCollisions(anyOf, noneOf)
 }
 
-// checkBucket validates one bucket of groups and returns its members as
-// module name -> declaring group name, for the cross-bucket checks. The same
-// module in two distinct groups of one bucket is allowed.
-func (r *moduleGroupsRule) checkBucket(groups []packages.ModuleGroup, bucket string) map[string]string {
+// checkConstraint reports a finding when constraint is set but is not valid semver.
+func (r *ValidRequirementsRule) checkConstraint(subject, constraint string) {
+	if constraint == "" {
+		return
+	}
+
+	if _, err := semver.NewConstraint(constraint); err != nil {
+		r.collector.With(diag.Value(constraint)).Error("%s: invalid version constraint", subject)
+	}
+}
+
+// checkBucket validates one bucket of groups and returns its members.
+func (r *ValidRequirementsRule) checkBucket(groups []packages.ModuleGroup, bucket string) map[string]string {
 	members := make(map[string]string)
 	seenGroups := make(map[string]struct{}, len(groups))
 
@@ -75,7 +93,7 @@ func (r *moduleGroupsRule) checkBucket(groups []packages.ModuleGroup, bucket str
 }
 
 // checkGroupModules validates the modules of one group and records them in members.
-func (r *moduleGroupsRule) checkGroupModules(group packages.ModuleGroup, bucket string, members map[string]string) {
+func (r *ValidRequirementsRule) checkGroupModules(group packages.ModuleGroup, bucket string, members map[string]string) {
 	seen := make(map[string]struct{}, len(group.Modules))
 
 	for _, module := range group.Modules {
@@ -95,23 +113,16 @@ func (r *moduleGroupsRule) checkGroupModules(group packages.ModuleGroup, bucket 
 
 		seen[module.Name] = struct{}{}
 
-		if module.Constraint != "" {
-			if _, err := semver.NewConstraint(module.Constraint); err != nil {
-				r.collector.With(diag.Value(module.Constraint)).
-					Error("%s group %q module %q: invalid version constraint", bucket, group.Name, module.Name)
-			}
-		}
+		r.checkConstraint(fmt.Sprintf("%s group %q module %q", bucket, group.Name, module.Name), module.Constraint)
 
 		members[module.Name] = group.Name
 	}
 }
 
-// checkCollisions reports modules declared in contradictory buckets: a module cannot be
-// both required and forbidden, and a group member that is already an unconditional
-// dependency makes the group dead weight.
-func (r *moduleGroupsRule) checkCollisions(anyOf, noneOf map[string]string) {
-	mandatory := moduleNames(r.modules.Mandatory)
-	conditional := moduleNames(r.modules.Conditional)
+// checkCollisions reports modules declared in contradictory buckets.
+func (r *ValidRequirementsRule) checkCollisions(anyOf, noneOf map[string]string) {
+	mandatory := moduleNames(r.requirements.Modules.Mandatory)
+	conditional := moduleNames(r.requirements.Modules.Conditional)
 
 	for name := range conditional {
 		if _, dup := mandatory[name]; dup {

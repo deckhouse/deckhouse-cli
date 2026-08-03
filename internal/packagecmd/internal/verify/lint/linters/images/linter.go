@@ -13,6 +13,10 @@ import (
 // LinterID is the stable identifier used to reference this linter in configuration and diagnostics.
 const LinterID = "images"
 
+// Scopes lists the verification targets this linter is processed in. It reads images/,
+// which holds build inputs and is never packaged, so it applies to the source tree only.
+var Scopes = lint.EveryType(lint.ScopeStatic)
+
 // Config holds the path and settings required to construct a Linter.
 type Config struct {
 	Path     string

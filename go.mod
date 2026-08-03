@@ -60,6 +60,7 @@ require (
 
 require (
 	github.com/docker/cli v29.3.0+incompatible
+	golang.org/x/sync v0.22.0
 	k8s.io/klog/v2 v2.140.0
 )
 
@@ -645,7 +646,6 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
