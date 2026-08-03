@@ -687,9 +687,13 @@ func TestScanFSStagingProgress_RejectsLinkAndReplacementEscapes(t *testing.T) {
 		},
 		{
 			name: "FinalMetadataReplacement",
-			prepare: func(t *testing.T, _, chunksRoot, outside string) archive.OpenBoundaryHook {
+			prepare: func(t *testing.T, stagingDir, _, outside string) archive.OpenBoundaryHook {
 				t.Helper()
-				chunkDir := filepath.Join(chunksRoot, "file.d")
+				// The scanner only ever descends into chunks.meta for a directory
+				// named exactly archive.FsFileChunksLeafName(ext) (see
+				// scanFSProgressDirectory's leaf-name check), so this attack must be
+				// staged at that exact name to reach the code path it targets.
+				chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("file", "")))
 				require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 				require.NoError(t, archive.WriteChunkMeta(
 					chunkDir,
@@ -773,10 +777,12 @@ func TestScanBlockChunkProgress_BoundsGeometryAndCancellation(t *testing.T) {
 
 func TestScanFSStagingProgress_RejectsAggregateOverflow(t *testing.T) {
 	stagingDir := t.TempDir()
-	chunksRoot := filepath.Join(stagingDir, volume.FSMetaDirName, archive.FSChunksDirName)
 
-	for _, name := range []string{"a.d", "b.d"} {
-		chunkDir := filepath.Join(chunksRoot, name)
+	// Named per archive.FsFileChunksDirName, not an arbitrary "a.d"/"b.d": the
+	// scanner only trusts a directory as a chunk leaf when its name matches
+	// archive.FsFileChunksLeafName(ext) (see scanFSProgressDirectory).
+	for _, relPath := range []string{"a", "b"} {
+		chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName(relPath, "")))
 		require.NoError(t, os.MkdirAll(chunkDir, 0o755))
 		require.NoError(t, archive.WriteChunkMeta(
 			chunkDir,

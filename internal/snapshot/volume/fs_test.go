@@ -3208,7 +3208,7 @@ func TestReadFSSizesSidecar_LegacyFallback(t *testing.T) {
 // TestScanFSStagingProgress_CountsChunkDirsUnderReservedNamespace verifies the
 // staging-progress accounting boundary after chunk dirs moved under the reserved
 // metadata namespace: a real in-progress per-file chunk dir now lives at
-// stagingDir/.d8-meta/chunks/<relPath><ext>.d (via FsFileChunksDirName) and MUST
+// stagingDir/.d8-meta/chunks/<relPath>/<leaf><ext>.d (via FsFileChunksDirName) and MUST
 // be counted, while a chunk-dir-shaped tree planted directly under .d8-meta
 // (outside the chunks/ subtree — e.g. a stray artifact) must contribute nothing,
 // because the scan descends ONLY into .d8-meta/chunks.
@@ -3268,6 +3268,165 @@ func TestScanFSStagingProgress_CountsChunkDirsUnderReservedNamespace(t *testing.
 
 	if committed != chunkSize {
 		t.Errorf("committed = %d; want %d (only the chunk dir under .d8-meta/chunks; the stray dir must be skipped)", committed, chunkSize)
+	}
+}
+
+// TestScanFSStagingProgress_NestedConfDLayoutCreditsBothFiles pins the
+// resolution of the conf.d collision fixed in FsFileChunksDirName's relocation
+// (chunks/<relPath>/<leaf> instead of chunks/<relPath><ext>.d): a file "sudoers"
+// and a nested sibling "sudoers.d/override" now sit on entirely disjoint tree
+// branches (their common ancestor is the chunks/ root itself, not one being a
+// child of the other's chunk dir), so the scan must recurse into and credit
+// BOTH — this is a regression guard, not a fix, since the scanner needed no
+// change for this case once the naming scheme changed.
+func TestScanFSStagingProgress_NestedConfDLayoutCreditsBothFiles(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize int64 = 100
+
+	codec := mustCodec(t, "zstd")
+	ext := codec.Ext()
+
+	stagingDir := t.TempDir()
+
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+
+	seed := func(relPath string) {
+		dir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName(relPath, ext)))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := archive.WriteChunkMeta(dir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize}); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(dir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// "sudoers" (plain file) and "sudoers.d/override" (the standard unix
+	// conf.d pattern) are the exact pair FsFileChunksDirName's doc comment
+	// describes as colliding under the OLD naming scheme.
+	seed("sudoers")
+	seed("sudoers.d/override")
+
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, ext)
+	if err != nil {
+		t.Fatalf("ScanFSStagingProgress: %v", err)
+	}
+
+	if want := 2 * chunkSize; committed != want {
+		t.Errorf("committed = %d; want %d (both sudoers and sudoers.d/override must be credited)", committed, want)
+	}
+}
+
+// TestScanFSStagingProgress_LegacyFlatChunkDirNotCredited pins the fix for an
+// orphaned pre-relocation flat chunk dir (.d8-meta/chunks/<relPath><ext>.d,
+// with chunks.meta directly inside rather than nested one level further under
+// FsFileChunksLeafName(ext)): the download machinery never writes or reads
+// this shape any more (stageChunkedFile/ensureChunkGeometry only ever use
+// FsFileChunksDirName's current form), so crediting its bytes here would
+// overstate progress for a directory that will never be merged.
+func TestScanFSStagingProgress_LegacyFlatChunkDirNotCredited(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize int64 = 100
+
+	codec := mustCodec(t, "zstd")
+	ext := codec.Ext()
+
+	stagingDir := t.TempDir()
+
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+
+	// Built by hand (not via archive.FsFileChunksDirName, which now returns
+	// the NEW nested form) to reproduce the old flat layout exactly.
+	legacyDir := filepath.Join(stagingDir, archive.FSMetaDirName, archive.FSChunksDirName, "big.bin"+ext+".d")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := archive.WriteChunkMeta(legacyDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(legacyDir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, ext)
+	if err != nil {
+		t.Fatalf("ScanFSStagingProgress: %v", err)
+	}
+
+	if committed != 0 {
+		t.Errorf("committed = %d; want 0 (an orphaned legacy flat chunk dir must not be credited)", committed)
+	}
+}
+
+// TestScanFSStagingProgress_LeafNameDisambiguatesSiblingDirs plants BOTH the
+// correctly-named leaf (archive.FsFileChunksLeafName(ext)) and an old-style,
+// differently-named chunk-shaped directory as SIBLINGS under the same
+// chunks/<relPath>/ intermediate directory. Only the name match identifies a
+// trusted leaf (see scanFSProgressDirectory's leafName comparison), so the
+// scan must credit the correctly-named sibling and skip the other one, even
+// though both contain a valid chunks.meta plus a chunk frame.
+func TestScanFSStagingProgress_LeafNameDisambiguatesSiblingDirs(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize int64 = 100
+
+	codec := mustCodec(t, "zstd")
+	ext := codec.Ext()
+
+	stagingDir := t.TempDir()
+
+	frame, err := codec.EncodeFrame(bytes.Repeat([]byte("A"), int(chunkSize)))
+	if err != nil {
+		t.Fatalf("encode frame: %v", err)
+	}
+
+	writeChunkShapedDir := func(dir string) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := archive.WriteChunkMeta(dir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: chunkSize}); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(dir, archive.ChunkFileName(0, ext)), frame, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The trusted leaf, at the exact path FsFileChunksDirName synthesizes.
+	trustedLeaf := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName("payload.bin", ext)))
+	writeChunkShapedDir(trustedLeaf)
+
+	// An old-style sibling under the SAME intermediate directory
+	// (chunks/payload.bin/), named after the file itself rather than the
+	// fixed leaf — must never be credited even though its shape (chunks.meta
+	// + one chunk frame) is otherwise indistinguishable from a real leaf.
+	intermediateDir := filepath.Dir(trustedLeaf)
+	staleSibling := filepath.Join(intermediateDir, "payload.bin"+ext+".d")
+	writeChunkShapedDir(staleSibling)
+
+	committed, err := volume.ScanFSStagingProgress(context.Background(), stagingDir, ext)
+	if err != nil {
+		t.Fatalf("ScanFSStagingProgress: %v", err)
+	}
+
+	if want := chunkSize; committed != want {
+		t.Errorf("committed = %d; want %d (only the correctly-named leaf sibling must be credited)", committed, want)
 	}
 }
 
@@ -3401,10 +3560,225 @@ func TestDownloadFilesystemVolume_CodecNone_ChunkDirNameCannotClobberSiblingBlob
 	}
 }
 
+// preSeedCompleteFileChunkDir plants a fully-downloaded, geometry-matching
+// per-file chunk directory for relPath at codec none — the on-disk shape a
+// prior run leaves behind when a file finished chunking but the process
+// crashed before (or during) the merge step. content is split into
+// chunkSize-sized frames verbatim, since codec none's "frame" is the raw
+// chunk bytes.
+func preSeedCompleteFileChunkDir(t *testing.T, stagingDir, relPath string, content []byte, chunkSize int64) {
+	t.Helper()
+
+	const ext = "" // codec none
+
+	chunkDir := filepath.Join(stagingDir, filepath.FromSlash(archive.FsFileChunksDirName(relPath, ext)))
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	total := int64(len(content))
+	if err := archive.WriteChunkMeta(chunkDir, archive.ChunkMeta{ChunkSize: chunkSize, TotalSize: total}); err != nil {
+		t.Fatal(err)
+	}
+
+	numChunks := int((total + chunkSize - 1) / chunkSize)
+	for i := range numChunks {
+		start := int64(i) * chunkSize
+
+		end := start + chunkSize
+		if end > total {
+			end = total
+		}
+
+		if err := os.WriteFile(filepath.Join(chunkDir, archive.ChunkFileName(i, ext)), content[start:end], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// newConfDLayoutServer builds an httptest.Server serving the standard unix
+// conf.d layout that collided with the OLD flat chunk-dir naming: a file
+// "sudoers" alongside a REAL directory "sudoers.d/" holding the file
+// "sudoers.d/override" (e.g. /etc/sudoers + /etc/sudoers.d/override). It
+// returns a per-path GET counter (HEAD requests, used only for the source-MD5
+// check, are excluded) so callers can prove an already-complete chunk dir was
+// never re-fetched.
+func newConfDLayoutServer(t *testing.T, sudoers, override []byte) (*httptest.Server, func(path string) int) {
+	t.Helper()
+
+	sudoersMD5 := hexMD5(sudoers)
+	overrideMD5 := hexMD5(override)
+
+	var (
+		mu       sync.Mutex
+		bodyGETs = map[string]int{}
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/files/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"sudoers","type":"file","uri":"sudoers","attributes":{"size":`+strconv.Itoa(len(sudoers))+`}},`+
+				`{"name":"sudoers.d","type":"dir","uri":"sudoers.d/","attributes":{}}`+
+				`]}`)
+
+		case "/files/sudoers.d/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`+
+				`{"name":"override","type":"file","uri":"sudoers.d/override","attributes":{"size":`+strconv.Itoa(len(override))+`}}`+
+				`]}`)
+
+		case "/files/sudoers":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", sudoersMD5)
+			} else {
+				mu.Lock()
+				bodyGETs["sudoers"]++
+				mu.Unlock()
+			}
+
+			http.ServeContent(w, r, "sudoers", time.Time{}, bytes.NewReader(sudoers))
+
+		case "/files/sudoers.d/override":
+			if r.Method == http.MethodHead {
+				w.Header().Set("X-Attribute-Hash-Md5", overrideMD5)
+			} else {
+				mu.Lock()
+				bodyGETs["sudoers.d/override"]++
+				mu.Unlock()
+			}
+
+			http.ServeContent(w, r, "override", time.Time{}, bytes.NewReader(override))
+
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	getCount := func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return bodyGETs[path]
+	}
+
+	return srv, getCount
+}
+
+// TestDownloadFilesystemVolume_CodecNone_NestedConfDLayoutKeepsChunkDirsDisjoint
+// pins the fix for FsFileChunksDirName's flat naming: at codec none (ext ==
+// ""), the OLD scheme suffixed the FILE's own name ("<relPath><ext>.d"), so a
+// chunked file "sudoers" synthesized the chunk-dir path "sudoers.d" — the
+// exact same path a real conf.d layout uses for the directory "sudoers.d/"
+// holding "sudoers.d/override". The NEW scheme gives every chunk dir its own
+// intermediate directory (chunks/<relPath>/<leaf>), so one file's chunk dir
+// can never sit on another file's chunk-dir path. Both subtests assert
+// override's already-durable chunk work is never re-fetched, which is what a
+// clobbered chunk dir would force.
+func TestDownloadFilesystemVolume_CodecNone_NestedConfDLayoutKeepsChunkDirsDisjoint(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize int64 = 50
+
+	sudoers := bytes.Repeat([]byte("S"), 70)  // 2 chunks: 50 + 20
+	override := bytes.Repeat([]byte("O"), 65) // 2 chunks: 50 + 15
+
+	t.Run("merge order", func(t *testing.T) {
+		t.Parallel()
+
+		srv, bodyGETs := newConfDLayoutServer(t, sudoers, override)
+
+		nodeDir := t.TempDir()
+		tarPath := filepath.Join(nodeDir, archive.FsTarName)
+		stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+		codec := mustCodec(t, "none")
+
+		// Pre-seed BOTH chunk dirs fully complete, as a prior run would have
+		// left them right before a crash at the merge step. sudoers is
+		// processed first (BFS inventory order puts a directory's own root-level
+		// file entries before it recurses into that directory's children), so
+		// its merge's post-merge chunk-dir RemoveAll is the one that can clobber
+		// override's chunk dir under the OLD naming.
+		preSeedCompleteFileChunkDir(t, stagingDir, "sudoers", sudoers, chunkSize)
+		preSeedCompleteFileChunkDir(t, stagingDir, "sudoers.d/override", override, chunkSize)
+
+		if err := volume.DownloadFilesystemVolume(
+			context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+			1, chunkSize, newFSFetcher(srv), codec, nil, nil,
+		); err != nil {
+			t.Fatalf("DownloadFilesystemVolume: %v", err)
+		}
+
+		entries := readTarContents(t, tarPath)
+
+		if !bytes.Equal(entries["sudoers"], sudoers) {
+			t.Errorf("tar entry sudoers = %q; want %q", entries["sudoers"], sudoers)
+		}
+
+		if !bytes.Equal(entries["sudoers.d/override"], override) {
+			t.Errorf("tar entry sudoers.d/override = %q; want %q", entries["sudoers.d/override"], override)
+		}
+
+		if got := bodyGETs("sudoers"); got != 0 {
+			t.Errorf("sudoers body GETs = %d; want 0 (its chunk dir was pre-seeded complete)", got)
+		}
+
+		if got := bodyGETs("sudoers.d/override"); got != 0 {
+			t.Errorf("sudoers.d/override body GETs = %d; want 0 — a non-zero count means sudoers' post-merge "+
+				"chunk-dir cleanup deleted override's already-durable chunks", got)
+		}
+	})
+
+	t.Run("fresh geometry", func(t *testing.T) {
+		t.Parallel()
+
+		srv, bodyGETs := newConfDLayoutServer(t, sudoers, override)
+
+		nodeDir := t.TempDir()
+		tarPath := filepath.Join(nodeDir, archive.FsTarName)
+		stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+		codec := mustCodec(t, "none")
+
+		// Pre-seed ONLY override's chunk dir, as a prior interrupted run would
+		// have left it; sudoers has nothing on disk yet. sudoers is processed
+		// first, so its OWN ensureChunkGeometry call is the one that, under the
+		// OLD naming, finds override's chunk dir sitting on its own chunk-dir
+		// path and purges it before sudoers has even started downloading.
+		preSeedCompleteFileChunkDir(t, stagingDir, "sudoers.d/override", override, chunkSize)
+
+		if err := volume.DownloadFilesystemVolume(
+			context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
+			1, chunkSize, newFSFetcher(srv), codec, nil, nil,
+		); err != nil {
+			t.Fatalf("DownloadFilesystemVolume: %v", err)
+		}
+
+		entries := readTarContents(t, tarPath)
+
+		if !bytes.Equal(entries["sudoers"], sudoers) {
+			t.Errorf("tar entry sudoers = %q; want %q", entries["sudoers"], sudoers)
+		}
+
+		if !bytes.Equal(entries["sudoers.d/override"], override) {
+			t.Errorf("tar entry sudoers.d/override = %q; want %q", entries["sudoers.d/override"], override)
+		}
+
+		if got := bodyGETs("sudoers.d/override"); got != 0 {
+			t.Errorf("sudoers.d/override body GETs = %d; want 0 — a non-zero count means sudoers' chunk-geometry "+
+				"check purged override's already-durable chunk dir before sudoers even started", got)
+		}
+	})
+}
+
 // TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir verifies an
 // interrupted chunked FS file download keeps its durable partial under the
-// reserved chunk-dir location (.d8-meta/chunks/<relPath><ext>.d) and resumes
-// from there on the next run.
+// reserved chunk-dir location (.d8-meta/chunks/<relPath>/<leaf><ext>.d) and
+// resumes from there on the next run.
 func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.T) {
 	t.Parallel()
 

@@ -107,6 +107,13 @@ const (
 	// user's already-staged blob (inv. #10a).
 	FSChunksDirName = "chunks"
 
+	// FSFileChunksLeafBase is the fixed leaf directory name inside a per-file
+	// chunk directory (see FsFileChunksDirName). Dot-prefixed and kept ending in
+	// ".d" purely as a naming convention consistent with FsTarStagingDirName/
+	// BlockChunksDirName — checksum exclusion does NOT depend on this suffix (see
+	// FsFileChunksDirName doc for why).
+	FSFileChunksLeafBase = ".d8-chunks"
+
 	// DataDirName is the top-level directory for multi-volume output files.
 	//
 	// Multi-volume block files:       data/<pvc>.bin[.<ext>]
@@ -348,33 +355,63 @@ func ChunkFileName(i int, ext string) string {
 	return fmt.Sprintf("chunk_%05d%s", i, ext)
 }
 
+// FsFileChunksLeafName returns the fixed leaf directory name for a per-file
+// chunk directory at the given codec extension. ext is retained in the leaf
+// name so switching codecs between runs never mixes frames from two codecs
+// in the same directory.
+func FsFileChunksLeafName(ext string) string {
+	return FSFileChunksLeafBase + ext + ".d"
+}
+
 // FsFileChunksDirName returns the per-file chunk directory path for one
 // filesystem-volume file, RELATIVE to the FS staging directory:
-// ".d8-meta/chunks/<relPath><ext>.d". relPath is the item's forward-slash
-// relative path within the volume (e.g. "disk/payload.bin") and ext is the codec
-// extension (e.g. ".zst", or "" for the none codec).
+// ".d8-meta/chunks/<relPath>/<leaf>", where <leaf> is FsFileChunksLeafName(ext).
+// relPath is the item's forward-slash relative path within the volume (e.g.
+// "disk/payload.bin") and ext is the codec extension (e.g. ".zst", or "" for
+// the none codec).
 //
-// The directory lives under the reserved metadata namespace (FSMetaDirName /
-// FSChunksDirName), NOT beside the staged blob, precisely so it can never alias a
-// server-provided staged blob path (stagingDir/<relPath><ext>). At codec none
-// (ext == "") a user file named "<x>.d" would otherwise occupy the chunk-dir path
-// of a chunked user file "<x>", and MergeBlockChunks' post-merge
-// os.RemoveAll(chunkDir) (as well as ensureChunkGeometry's purge) would delete
-// that already-staged user blob, forcing a needless re-download every resume.
-// Because no server path can enter FSMetaDirName (volume.sanitizeRelPath rejects
-// it at the single ingestion checkpoint under ANY codec) and relPath is unique
-// per file, the returned path collides with neither a staged blob nor another
-// chunk dir (inv. #10a). Nesting the leaf under FSChunksDirName mirrors the
-// source subtree; it is the identity map, so distinct files map to distinct
-// paths without any lossy separator substitution.
+// An EARLIER version of this function suffixed the FILE's own name instead
+// ("chunks/<relPath><ext>.d"). At codec none (ext == "") that made the
+// synthesized chunk-dir path for a file "x" literally "chunks/x.d" — which
+// collides with a perfectly ordinary volume layout: a file "x" alongside a
+// REAL directory "x.d/" holding further files (the standard unix conf.d
+// pattern, e.g. "/etc/sudoers" + "/etc/sudoers.d/override"). Once that happens,
+// "x"'s chunk dir sits ON THE PATH of "x.d/override"'s own chunk dir
+// ("chunks/x.d/override.d"), so processing "x" alone can destroy "override"'s
+// in-progress chunk work: MergeBlockChunks' post-merge os.RemoveAll(chunkDir)
+// deletes "chunks/x.d" wholesale once "x" merges, and ensureChunkGeometry's
+// stale-geometry purge does the same the moment it sees "chunks/x.d" already
+// exists without its OWN chunks.meta at that level. Both failures are
+// fail-closed (the affected file just re-downloads after a loud
+// ErrMissingChunk-class error), but the collision is real and not limited to
+// concurrent merges.
+//
+// Joining "/" + relPath (rather than appending to relPath) is what makes the
+// NEW path scheme collision-free: for one file's chunk dir to be an ancestor
+// of another's, relPath would have to name BOTH an ordinary file (so it has
+// its own chunk dir) and a directory (so something nests under it) at the
+// same time — impossible on any filesystem, since a file has no children.
+// That is a strictly weaker precondition to break than the old scheme's ("no
+// volume directory is named exactly <some file>ext + \".d\""), which the
+// ordinary sudoers/sudoers.d/ layout above violates outright. The leaf still
+// ends in ".d" — see FSFileChunksLeafBase — but only as a naming convention;
+// nothing here or in checksum.go (collectNodeFiles never walks the staging
+// dir at all; collectLegacyDataFiles skips the WHOLE top-level staging
+// directory by its own ".d" suffix and never recurses into it) depends on
+// that suffix for correctness.
 //
 // A caller joins this (via filepath.FromSlash) under the FS staging directory
-// (FsTarStagingDirName). Chunks accumulate here
-// while a known-size file is downloaded via Range GETs and are merged into
-// "<relPath><ext>" (the same path DownloadBlockChunks/MergeBlockChunks use for a
-// single block volume) once complete. In-flight chunk dirs from trees written
-// before this relocation (the old flat "stagingDir/<relPath><ext>.d") are simply
+// (FsTarStagingDirName). Chunks accumulate under the leaf while a known-size
+// file is downloaded via Range GETs and are merged into "<relPath><ext>" (the
+// same path DownloadBlockChunks/MergeBlockChunks use for a single block
+// volume) once complete — which also removes the leaf directory itself. The
+// intermediate directory "chunks/<relPath>/" this adds is NOT removed at that
+// point (only its leaf child was); it is left empty and cleaned up only when
+// the FS staging directory's own lifecycle ends (removed whole once the
+// volume's tar is assembled). In-flight chunk dirs from trees written before
+// this relocation (either the original flat "stagingDir/<relPath><ext>.d", or
+// this function's own earlier "chunks/<relPath><ext>.d" form) are simply
 // abandoned — such a file re-downloads once.
 func FsFileChunksDirName(relPath, ext string) string {
-	return FSMetaDirName + "/" + FSChunksDirName + "/" + relPath + ext + ".d"
+	return FSMetaDirName + "/" + FSChunksDirName + "/" + relPath + "/" + FsFileChunksLeafName(ext)
 }

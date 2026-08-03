@@ -1936,13 +1936,15 @@ func stageWholeFile(
 // ScanFSStagingProgress computes durably-committed raw bytes across every
 // still-open per-file chunk directory, purely from local state — no network
 // call. Per-file chunk dirs live under the reserved metadata namespace
-// (stagingDir/.d8-meta/chunks/<relPath><ext>.d) so no server-provided path can
-// alias one, so this scans ONLY that subtree. A per-file chunk directory is
-// identified by the presence of a readable chunks.meta sidecar — the same
-// marker createChunkDir writes for both block volumes and per-file FS chunks
-// (see stageChunkedFile, which reuses DownloadBlockChunks/MergeBlockChunks
-// unchanged) — and its contribution is computed via the identical
-// ScanBlockChunkProgress formula.
+// (stagingDir/.d8-meta/chunks/<relPath>/<leaf><ext>.d, per
+// archive.FsFileChunksDirName) so no server-provided path can alias one, so
+// this scans ONLY that subtree. A per-file chunk directory is identified
+// STRICTLY by its name matching archive.FsFileChunksLeafName(ext) — not
+// merely by the presence of a chunks.meta sidecar inside it — and, once
+// matched, its contribution is computed via the identical
+// ScanBlockChunkProgress formula from the same marker createChunkDir writes
+// for both block volumes and per-file FS chunks (see stageChunkedFile, which
+// reuses DownloadBlockChunks/MergeBlockChunks unchanged).
 //
 // Deliberately excluded:
 //   - The sizes sidecar (also under .d8-meta) carries no chunks.meta, so it is
@@ -1960,9 +1962,18 @@ func stageWholeFile(
 //     wraps its onProgress with pipeline.skipSeededBytes(seeded, ...) so that
 //     later re-derived credit is discarded instead of double-counted, rather
 //     than resetting the stream to 0 before staging begins).
-//   - Legacy flat chunk dirs from trees written before the relocation
-//     (stagingDir/<relPath><ext>.d) are not scanned; such a file re-downloads
-//     once, which is acceptable and preferable to risking a user-blob alias.
+//   - Two obsolete on-disk shapes are never scanned as leaves, both rejected by
+//     the same leaf-name check: the original flat layout written before any
+//     relocation (stagingDir/<relPath><ext>.d, entirely outside .d8-meta) is
+//     outside the chunks/ subtree this scan even descends into; a directory
+//     from the FIRST relocation, named after the file itself
+//     (.d8-meta/chunks/<relPath><ext>.d) rather than the fixed leaf name, sits
+//     INSIDE the scanned subtree but its name never matches
+//     archive.FsFileChunksLeafName(ext), so it is treated as an intermediate
+//     directory instead of a trusted leaf even though it may still carry its
+//     own chunks.meta. Both cases leave the affected file to simply
+//     re-download once, which is acceptable and preferable to crediting bytes
+//     for a directory the current download machinery will never merge.
 func ScanFSStagingProgress(ctx context.Context, stagingDir, ext string) (int64, error) {
 	return scanFSStagingProgress(ctx, nil, stagingDir, ext, nil)
 }
@@ -2084,6 +2095,11 @@ func scanFSStagingProgress(
 	reader := bufio.NewReaderSize(readerFile, fsInventoryMaxRecordSize)
 	queued := int64(1)
 
+	// Computed once: scanFSProgressDirectory trusts a directory as a chunk
+	// leaf only when its NAME matches this, not merely because it happens to
+	// contain a chunks.meta file (see the leafName comparison below for why).
+	leafName := archive.FsFileChunksLeafName(ext)
+
 	var committed int64
 
 	for processed := int64(0); processed < queued; processed++ {
@@ -2101,6 +2117,7 @@ func scanFSStagingProgress(
 			openDirectory,
 			record.RelPrefix,
 			ext,
+			leafName,
 			queueFile,
 		)
 		if err != nil {
@@ -2131,6 +2148,7 @@ func scanFSProgressDirectory(
 	openDirectory func(string) (*archive.PinnedDirectory, error),
 	relPath string,
 	ext string,
+	leafName string,
 	queueFile *os.File,
 ) (int64, int64, error) {
 	if len(relPath) > fsProgressMaxPathSize {
@@ -2182,7 +2200,28 @@ func scanFSProgressDirectory(
 				return 0, 0, openErr
 			}
 
-			metaFile, metaOpenErr := child.OpenRegularFile(archive.ChunkMetaFileName)
+			// A directory is trusted as a chunk leaf ONLY when its name matches
+			// leafName exactly — never merely because a chunks.meta happens to sit
+			// inside it. Without this, an orphaned pre-relocation flat chunk dir
+			// (.d8-meta/chunks/<relPath><ext>.d, chunks.meta directly inside rather
+			// than nested one level further under the leaf) would still be trusted
+			// and its bytes wrongly credited toward progress, even though
+			// stageChunkedFile/ensureChunkGeometry never write or read that shape
+			// any more — the directory will never be merged, so crediting it
+			// overstates progress for a file that has not actually made any. A
+			// name mismatch is treated exactly like a missing chunks.meta: queue
+			// the directory for further descent, without even opening the file.
+			var (
+				metaFile    *os.File
+				metaOpenErr error
+			)
+
+			if entry.Name() == leafName {
+				metaFile, metaOpenErr = child.OpenRegularFile(archive.ChunkMetaFileName)
+			} else {
+				metaOpenErr = os.ErrNotExist
+			}
+
 			if metaOpenErr == nil {
 				meta, found, metaErr := archive.ReadChunkMetaFrom(
 					ctx,

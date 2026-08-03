@@ -626,10 +626,10 @@ func TestFsFileChunksDirName(t *testing.T) {
 		ext     string
 		want    string
 	}{
-		{"payload.bin", ".zst", ".d8-meta/chunks/payload.bin.zst.d"},
-		{"disk/payload.bin", ".zst", ".d8-meta/chunks/disk/payload.bin.zst.d"},
-		{"payload.bin", "", ".d8-meta/chunks/payload.bin.d"},
-		{"a/b/c.img", ".lz4", ".d8-meta/chunks/a/b/c.img.lz4.d"},
+		{"payload.bin", ".zst", ".d8-meta/chunks/payload.bin/.d8-chunks.zst.d"},
+		{"disk/payload.bin", ".zst", ".d8-meta/chunks/disk/payload.bin/.d8-chunks.zst.d"},
+		{"payload.bin", "", ".d8-meta/chunks/payload.bin/.d8-chunks.d"},
+		{"a/b/c.img", ".lz4", ".d8-meta/chunks/a/b/c.img/.d8-chunks.lz4.d"},
 	}
 
 	for _, tc := range tests {
@@ -637,5 +637,88 @@ func TestFsFileChunksDirName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("FsFileChunksDirName(%q, %q) = %q; want %q", tc.relPath, tc.ext, got, tc.want)
 		}
+	}
+}
+
+// TestFsFileChunksDirName_DifferentExtSameRelPathAreDistinct pins the claim
+// made in FsFileChunksLeafName's doc comment: switching codecs between runs
+// for the SAME file must never reuse the previous run's chunk directory,
+// since a stale directory from a different codec would mix incompatible
+// frames. ext is embedded in the leaf name precisely to prevent that.
+func TestFsFileChunksDirName_DifferentExtSameRelPathAreDistinct(t *testing.T) {
+	t.Parallel()
+
+	relPath := "disk/payload.bin"
+
+	none := archive.FsFileChunksDirName(relPath, "")
+	zst := archive.FsFileChunksDirName(relPath, ".zst")
+	lz4 := archive.FsFileChunksDirName(relPath, ".lz4")
+
+	if none == zst || none == lz4 || zst == lz4 {
+		t.Errorf("expected distinct chunk dirs per codec for the same relPath, got none=%q zst=%q lz4=%q", none, zst, lz4)
+	}
+}
+
+// TestFsFileChunksDirName_PathsAreMutuallyDisjoint pins the invariant the
+// FsFileChunksDirName doc comment argues for: no two distinct (relPath, ext)
+// pairs can produce a result where one is a directory-prefix of the other.
+// This is what actually prevents the conf.d-layout collision the OLD flat
+// naming hit — a chunked file's chunk dir can never sit on the path of
+// another chunked file's chunk dir.
+func TestFsFileChunksDirName_PathsAreMutuallyDisjoint(t *testing.T) {
+	t.Parallel()
+
+	type pathExt struct {
+		relPath string
+		ext     string
+	}
+
+	tests := []struct {
+		name string
+		a    pathExt
+		b    pathExt
+	}{
+		{
+			name: "conf.d layout at codec none",
+			a:    pathExt{relPath: "sudoers", ext: ""},
+			b:    pathExt{relPath: "sudoers.d/override", ext: ""},
+		},
+		{
+			name: "conf.d-shaped layout at a non-none codec",
+			a:    pathExt{relPath: "disk", ext: ".zst"},
+			b:    pathExt{relPath: "disk.zst.d/payload", ext: ".zst"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			a := archive.FsFileChunksDirName(tc.a.relPath, tc.a.ext)
+			b := archive.FsFileChunksDirName(tc.b.relPath, tc.b.ext)
+
+			if a == b {
+				t.Fatalf("FsFileChunksDirName(%q, %q) == FsFileChunksDirName(%q, %q) == %q; want distinct paths",
+					tc.a.relPath, tc.a.ext, tc.b.relPath, tc.b.ext, a)
+			}
+
+			if strings.HasPrefix(a+"/", b+"/") {
+				t.Errorf("%q is a directory-prefix of %q; chunk dirs must be mutually disjoint", b, a)
+			}
+
+			if strings.HasPrefix(b+"/", a+"/") {
+				t.Errorf("%q is a directory-prefix of %q; chunk dirs must be mutually disjoint", a, b)
+			}
+
+			if !strings.HasSuffix(a, ".d") {
+				t.Errorf("FsFileChunksDirName(%q, %q) = %q; want a leaf ending in \".d\" (naming convention)",
+					tc.a.relPath, tc.a.ext, a)
+			}
+
+			if !strings.HasSuffix(b, ".d") {
+				t.Errorf("FsFileChunksDirName(%q, %q) = %q; want a leaf ending in \".d\" (naming convention)",
+					tc.b.relPath, tc.b.ext, b)
+			}
+		})
 	}
 }
