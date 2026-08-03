@@ -70,6 +70,12 @@ type Service struct {
 	// it, so the count must be taken now, not in Stats() which runs afterwards.
 	pulledImages int
 
+	// accessSkipped records that PullInstaller gracefully skipped the phase
+	// because the installer access check failed (e.g. the repo returned 404).
+	// Stats() uses it to report the phase as not attempted instead of
+	// misrepresenting the skip as a successful pull.
+	accessSkipped bool
+
 	// logger is for internal debug logging
 	logger *dkplog.Logger
 	// userLogger is for user-facing informational messages
@@ -114,6 +120,7 @@ func (svc *Service) PullInstaller(ctx context.Context) error {
 	err := svc.validateInstallerAccess(ctx)
 	if err != nil {
 		svc.userLogger.Warnf("installer access: %v", err)
+		svc.accessSkipped = true
 
 		return nil
 	}

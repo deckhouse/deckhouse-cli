@@ -30,10 +30,20 @@ type ComponentStats struct {
 // the planned count from the download list; otherwise it reports the actual
 // number of manifests pulled into the OCI layout, captured before packing (see
 // Service.pulledImages).
+//
+// When PullInstaller gracefully skipped the phase on an access error (e.g. the
+// installer repo returns 404), the phase is reported as not attempted so the
+// summary renders "not pulled" rather than falsely claiming the tag was
+// mirrored. This applies to dry-run as well: a skipped phase must not show up
+// in the plan.
 func (svc *Service) Stats() ComponentStats {
 	tag := defaultTargetTag
 	if svc.options.TargetTag != "" {
 		tag = svc.options.TargetTag
+	}
+
+	if svc.accessSkipped {
+		return ComponentStats{Attempted: false, Tag: tag}
 	}
 
 	if svc.options.DryRun {

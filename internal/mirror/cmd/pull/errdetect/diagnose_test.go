@@ -31,6 +31,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	dkpclient "github.com/deckhouse/deckhouse/pkg/registry/client"
+
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
@@ -65,6 +68,7 @@ func TestDiagnose_AllCategories(t *testing.T) {
 		{"Permission", fmt.Errorf("create file: %w", os.ErrPermission), categoryPermission},
 		{"ImageNotFound", errors.New("MANIFEST_UNKNOWN: not found"), categoryImageNotFound},
 		{"RepoNotFound", errors.New("NAME_UNKNOWN: repo"), categoryRepoNotFound},
+		{"NoReleaseChannels", fmt.Errorf("%w: %w", internal.ErrNoReleaseChannels, errors.New("image not found")), categoryNoReleaseChannels},
 	}
 
 	for _, tt := range tests {
@@ -107,6 +111,57 @@ func allSolutions(diag *diagnostic.HelpfulError) string {
 		parts = append(parts, s.Solutions...)
 	}
 	return strings.Join(parts, " ")
+}
+
+// releaseChannelHEAD404 mimics the error the registry client returns for a
+// tag probed with HEAD that is missing: the ErrImageNotFound sentinel wrapping
+// a *transport.Error with no diagnostic codes (HEAD responses have no body).
+func releaseChannelHEAD404() error {
+	return fmt.Errorf("failed to check if image exists: %w",
+		fmt.Errorf("%w: %w", dkpclient.ErrImageNotFound, &transport.Error{StatusCode: http.StatusNotFound}))
+}
+
+// TestDiagnose_NoReleaseChannels feeds the production-shaped chain built by
+// validatePlatformAccess when the scan finds no channel at all: the dedicated
+// category must fire and point the user at --deckhouse-tag.
+func TestDiagnose_NoReleaseChannels(t *testing.T) {
+	err := fmt.Errorf("pull from registry: pull platform: validate platform access: %w",
+		fmt.Errorf("%w (checked: alpha, beta, early-access, stable, rock-solid, lts): %w",
+			internal.ErrNoReleaseChannels, releaseChannelHEAD404()))
+
+	diag := Diagnose(err)
+	require.NotNil(t, diag)
+	assert.Equal(t, categoryNoReleaseChannels, diag.Category)
+	assert.Contains(t, allSolutions(diag), "--deckhouse-tag=<version>")
+}
+
+// TestDiagnose_NoReleaseChannels_WinsOverImageNotFound pins the switch order:
+// the chain also matches the generic image-not-found matcher (MANIFEST_UNKNOWN
+// diagnostic code), but the dedicated no-channels category must win.
+func TestDiagnose_NoReleaseChannels_WinsOverImageNotFound(t *testing.T) {
+	getShaped := &transport.Error{
+		StatusCode: http.StatusNotFound,
+		Errors:     []transport.Diagnostic{{Code: transport.ManifestUnknownErrorCode}},
+	}
+	err := fmt.Errorf("%w: %w", internal.ErrNoReleaseChannels,
+		fmt.Errorf("%w: %w", dkpclient.ErrImageNotFound, getShaped))
+
+	diag := Diagnose(err)
+	require.NotNil(t, diag)
+	assert.Equal(t, categoryNoReleaseChannels, diag.Category)
+}
+
+// TestDiagnose_ImageNotFound_HeadShapedChain covers the production shape for a
+// missing specific tag (no sentinel in the chain): HEAD 404 carries no
+// diagnostic codes, so the "404 Not Found" string fallback must classify it as
+// image-not-found and surface the --deckhouse-tag suggestion.
+func TestDiagnose_ImageNotFound_HeadShapedChain(t *testing.T) {
+	err := fmt.Errorf(`failed to check Deckhouse tag "v9.99.9" exists in registry: %w`, releaseChannelHEAD404())
+
+	diag := Diagnose(err)
+	require.NotNil(t, diag)
+	assert.Equal(t, categoryImageNotFound, diag.Category)
+	assert.Contains(t, allSolutions(diag), "--deckhouse-tag")
 }
 
 func TestDiagnose_NoUnsupportedOCI(t *testing.T) {
