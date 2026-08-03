@@ -58,11 +58,15 @@ func Render(ctx context.Context, def Definition, path string) ([]render.Object, 
 	defer os.Remove(valuesPath)
 
 	marshalled, _ := json.Marshal(buildRuntimeValues(def, repo, digests, valuesStore.GetSettings()))
+	marshalledPlatform, _ := json.Marshal(buildPlatformValues())
 
 	opts := render.Options{
-		Path:                path,
-		ValuesPaths:         []string{valuesPath},
-		RootValues:          fmt.Sprintf("Application=%s", marshalled),
+		Path:        path,
+		ValuesPaths: []string{valuesPath},
+		RootValues: []string{
+			fmt.Sprintf("Application=%s", marshalled),
+			fmt.Sprintf("Platform=%s", marshalledPlatform),
+		},
 		ExtraCapabilitities: []string{"autoscaling.k8s.io/v1/VerticalPodAutoscaler", "cert-manager.io/v1"},
 	}
 
@@ -125,6 +129,20 @@ func buildRuntimeValues(def Definition, repo Remote, digests map[string]string, 
 	}
 }
 
+// buildPlatformValues returns the platform values for the package.
+func buildPlatformValues() any {
+	return map[string]any{
+		"applications": map[string]any{
+			"certManager": map[string]any{
+				"clusterIssuerName": "letsencrypt",
+				"mode":              "CertManager",
+			},
+			"ingressClass":         "nginx",
+			"publicDomainTemplate": "%s.%s.%s.domain.io",
+		},
+	}
+}
+
 // createTmpValuesFile writes values to a uniquely-named YAML file in the
 // system temp dir. Caller must os.Remove the returned path.
 func createTmpValuesFile(name string, values map[string]any) (string, error) {
@@ -136,7 +154,7 @@ func createTmpValuesFile(name string, values map[string]any) (string, error) {
 	tmpName := fmt.Sprintf("%s.package-values.yaml-%s", name, uuid.New().String())
 	path := filepath.Join(os.TempDir(), tmpName)
 
-	if err := os.WriteFile(path, marshalled, 0600); err != nil {
+	if err := os.WriteFile(path, marshalled, 0o600); err != nil {
 		return "", fmt.Errorf("failed to dump values: %w", err)
 	}
 

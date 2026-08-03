@@ -53,6 +53,8 @@ func (r *ServicePortRule) Check(_ context.Context) {
 
 		checkServicePorts(service, baseID, collector)
 	}
+
+	r.collector.Commit()
 }
 
 // checkServicePorts emits diagnostics for service ports that use a numeric target port.

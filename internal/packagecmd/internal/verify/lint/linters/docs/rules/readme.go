@@ -49,4 +49,6 @@ func (r *ReadmeRule) Check(_ context.Context) {
 	if info.Size() == 0 {
 		r.collector.With(diag.Path(path)).Error("README.md file is empty")
 	}
+
+	r.collector.Commit()
 }

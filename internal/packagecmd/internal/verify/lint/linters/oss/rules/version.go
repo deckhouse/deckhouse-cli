@@ -57,4 +57,6 @@ func (r *VersionRule) Check(_ context.Context) {
 			}
 		}
 	}
+
+	r.collector.Commit()
 }

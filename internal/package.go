@@ -16,6 +16,8 @@ limitations under the License.
 
 package internal
 
+import "errors"
+
 const (
 	AlphaChannel       = "alpha"
 	BetaChannel        = "beta"
@@ -24,6 +26,10 @@ const (
 	RockSolidChannel   = "rock-solid"
 	LTSChannel         = "lts"
 )
+
+// ErrNoReleaseChannels means the source registry serves the repository but
+// publishes none of the known release channels.
+var ErrNoReleaseChannels = errors.New("no release channel found in the source registry")
 
 func GetAllDefaultReleaseChannels() []string {
 	return []string{

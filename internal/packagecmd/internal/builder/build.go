@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/Masterminds/semver/v3"
 	"sigs.k8s.io/yaml"
 
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/execute"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/find"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/logs"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/registry"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/execute"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/find"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/logs"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/registry"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/templates"
 )
 
@@ -53,6 +54,8 @@ const (
 	envPackageVersion = "PACKAGE_TAG"
 	// envWerfRepository points werf to the destination image repository.
 	envWerfRepository = "WERF_REPO"
+	// envWerfFinalRepository points werf to the final image repository.
+	envWerfFinalRepository = "WERF_FINAL_REPO"
 	// envSignManifest enables signing of image manifests.
 	envSignManifest = "WERF_SIGN_MANIFEST"
 	// envSignELFFiles enables signing of ELF files.
@@ -72,21 +75,14 @@ const (
 	imagePackage = "package"
 	// imageRelease is the build report key for the release image.
 	imageRelease = "release"
-
-	// helmignoreFile is generated during build and consumed by Helm packaging.
-	helmignoreFile = ".helmignore"
-
-	// chartsDir is the root directory containing chart dependencies.
-	chartsDir = "charts"
-
-	// templatesDir is the root directory containing Helm templates.
-	templatesDir = "templates"
 )
 
 // Options configures registry authentication, build behavior, and image signing.
 type Options struct {
 	// Credentials contains registry destination and authentication settings.
-	Credentials Credentials
+	RepositoryCredentials Credentials
+	// FinalRepositoryCredentials contains the final image repository credentials.
+	FinalRepositoryCredentials Credentials
 	// Force allows rebuilding and publishing a version that already exists.
 	Force bool
 	// Debug keeps generated build files in the package root after build.
@@ -149,23 +145,43 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 	}
 
 	// Construct full repository path with package name
-	repo := opts.Credentials.Repository
+	repo := opts.RepositoryCredentials.Repository
 	if len(repo) > 0 {
 		repo = fmt.Sprintf("%s/%s", repo, pkg)
 	}
 
-	if len(opts.Credentials.Username) > 0 && len(opts.Credentials.Token) > 0 {
+	if len(opts.RepositoryCredentials.Username) > 0 && len(opts.RepositoryCredentials.Token) > 0 {
 		logger.Info("✨ Login registry '%s'", repo)
 
-		if err = login(ctx, repo, opts.Credentials.Username, opts.Credentials.Token); err != nil {
+		if err = login(ctx, repo, opts.RepositoryCredentials.Username, opts.RepositoryCredentials.Token); err != nil {
 			return fmt.Errorf("login registry: %w", err)
+		}
+	}
+
+	finalRepo := opts.FinalRepositoryCredentials.Repository
+	if len(finalRepo) > 0 {
+		finalRepo = fmt.Sprintf("%s/%s", finalRepo, pkg)
+	}
+
+	if len(opts.FinalRepositoryCredentials.Username) > 0 && len(opts.FinalRepositoryCredentials.Token) > 0 {
+		logger.Info("✨ Login final registry '%s'", finalRepo)
+
+		if err = login(ctx, finalRepo, opts.FinalRepositoryCredentials.Username, opts.FinalRepositoryCredentials.Token); err != nil {
+			return fmt.Errorf("login final registry: %w", err)
 		}
 	}
 
 	repoLog := "local"
 	if len(repo) > 0 {
 		repoLog = repo
-		if err = registry.Exists(ctx, fmt.Sprintf("%s:%s", repo, version)); !opts.Force && err == nil {
+	}
+
+	if len(finalRepo) > 0 {
+		repoLog = finalRepo
+	}
+
+	if repoLog != "local" {
+		if err = registry.Exists(ctx, fmt.Sprintf("%s:%s", repoLog, version)); !opts.Force && err == nil {
 			logger.Info("✅ Version '%s' already exists in the registry", version)
 			return nil
 		}
@@ -194,7 +210,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 
 	logger.Info("✨ Build and push images to '%s'...", repoLog)
 
-	if err = build(ctx, repo, path, version, opts.Sign); err != nil {
+	if err = build(ctx, finalRepo, repo, path, version, opts.Sign); err != nil {
 		return fmt.Errorf("failed to build package: %w", err)
 	}
 
@@ -202,13 +218,13 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 
 	// Skip publishing steps for local builds
 	if repoLog != "local" {
-		if err = registry.PushPackageIndex(ctx, repo); err != nil {
+		if err = registry.PushPackageIndex(ctx, repoLog); err != nil {
 			return fmt.Errorf("failed to register index: %w", err)
 		}
 
 		logger.Info("✨ Publish version '%s'...", version)
 
-		if err = publishVersionImage(ctx, repo, version, path); err != nil {
+		if err = publishVersionImage(ctx, repoLog, version, path); err != nil {
 			return fmt.Errorf("failed to publish version: %w", err)
 		}
 	}
@@ -239,7 +255,7 @@ func login(ctx context.Context, registry, username, token string) error {
 
 // build executes the package build process using d8 delivery-kit.
 // For local builds, it skips the image-spec-stage; for registry builds, it sets WERF_REPO.
-func build(ctx context.Context, registry, packageDir, version string, signOpts SignOptions) error {
+func build(ctx context.Context, finalRegistry, registry, packageDir, version string, signOpts SignOptions) error {
 	args := []execute.Arg{
 		argDeliveryPlugin,
 		argBuild,
@@ -273,6 +289,10 @@ func build(ctx context.Context, registry, packageDir, version string, signOpts S
 	} else {
 		// Skip image spec stage for local builds
 		args = append(args, flagSkipSpecStage)
+	}
+
+	if len(finalRegistry) > 0 {
+		env = append(env, execute.NewEnv(envWerfFinalRepository, finalRegistry))
 	}
 
 	return commandCli.Execute(ctx, execute.WithArgs(args...), execute.WithEnv(env...), execute.WithPath(packageDir))
@@ -344,6 +364,18 @@ func getPackageNameByDir(path string) (string, error) {
 	return def.Name, nil
 }
 
+// excludedHelmIgnore is a list of directories and files to exclude from .helmignore.
+var excludedHelmIgnore = []string{
+	// charts dir is the root directory containing chart dependencies.
+	"charts",
+	// templates dir is the root directory containing Helm templates.
+	"templates",
+	// monitoring dir is the directory containing monitoring configuration.
+	"monitoring",
+	// helmignore file is generated during build and consumed by Helm packaging.
+	".helmignore",
+}
+
 // getHelmIgnored returns package root entries excluded from Helm packages.
 func getHelmIgnored(path string) ([]string, error) {
 	entries, err := os.ReadDir(path)
@@ -354,7 +386,7 @@ func getHelmIgnored(path string) ([]string, error) {
 	ignored := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == helmignoreFile || name == chartsDir || name == templatesDir {
+		if slices.Contains(excludedHelmIgnore, name) {
 			continue
 		}
 

@@ -87,4 +87,6 @@ func (r *BilingualRule) Check(_ context.Context) {
 			r.collector.With(diag.Path(rel)).Error("Russian counterpart is missing: need to create a matching .ru.md in docs/")
 		}
 	}
+
+	r.collector.Commit()
 }

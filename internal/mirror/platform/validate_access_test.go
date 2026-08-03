@@ -19,20 +19,23 @@ package platform
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
-	localreg "github.com/deckhouse/deckhouse/pkg/registry"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
-	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
+	"github.com/deckhouse/deckhouse-cli/internal"
 	localfake "github.com/deckhouse/deckhouse-cli/pkg/fake"
+	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
+	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
+	localreg "github.com/deckhouse/deckhouse/pkg/registry"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 )
 
 // newTestPlatformService is a test helper that builds a Service with only the
@@ -68,6 +71,52 @@ func emptyStub() localreg.Client {
 	return pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")))
 }
 
+// rockSolidOnlyStub returns a stub registry that publishes only the rock-solid
+// channel: neither "stable" nor "lts" exists, so access validation must scan
+// the remaining channels to succeed.
+func rockSolidOnlyStub() localreg.Client {
+	reg := upfake.NewRegistry("registry.deckhouse.ru/deckhouse/fe")
+	img := upfake.NewImageBuilder().
+		WithFile("version.json", `{"version":"v1.68.0"}`).
+		MustBuild()
+	reg.MustAddImage("release-channel", "rock-solid", img)
+	return pkgclient.Adapt(upfake.NewClient(reg))
+}
+
+// erroringClient wraps a stub client and fails CheckImageExists for one tag
+// with a fixed error, so tests can exercise non-404 probe outcomes.
+type erroringClient struct {
+	localreg.Client
+	failTag string
+	failErr error
+}
+
+// WithSegment re-wraps the derived client: without this the decoration is
+// lost when the service scopes into the release-channel repository.
+func (c *erroringClient) WithSegment(segments ...string) localreg.Client {
+	return &erroringClient{Client: c.Client.WithSegment(segments...), failTag: c.failTag, failErr: c.failErr}
+}
+
+func (c *erroringClient) CheckImageExists(ctx context.Context, tag string) error {
+	if tag == c.failTag {
+		return c.failErr
+	}
+
+	return c.Client.CheckImageExists(ctx, tag)
+}
+
+// erroring builds a makeClient callback that decorates the given stub with a
+// per-tag CheckImageExists failure.
+func erroring(makeInner func() localreg.Client, failTag string, statusCode int) func() localreg.Client {
+	return func() localreg.Client {
+		return &erroringClient{
+			Client:  makeInner(),
+			failTag: failTag,
+			failErr: &transport.Error{StatusCode: statusCode},
+		}
+	}
+}
+
 func TestService_validatePlatformAccess(t *testing.T) {
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
@@ -78,6 +127,7 @@ func TestService_validatePlatformAccess(t *testing.T) {
 		targetTag   string
 		wantErr     bool
 		errContains string
+		wantErrIs   []error
 	}{
 		{
 			name:       "no target tag defaults to stable channel which exists",
@@ -104,24 +154,93 @@ func TestService_validatePlatformAccess(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "channel not found falls back to LTS successfully",
+			name:       "default pull with lts-only registry passes",
 			makeClient: ltsOnlyStub,
-			targetTag:  "stable",
+			targetTag:  "",
 			wantErr:    false,
 		},
 		{
-			name:        "channel not found and LTS also missing returns error",
+			name:       "explicitly requested lts exists",
+			makeClient: ltsOnlyStub,
+			targetTag:  "lts",
+			wantErr:    false,
+		},
+		{
+			name:       "only rock-solid channel exists, default stable scans and succeeds",
+			makeClient: rockSolidOnlyStub,
+			targetTag:  "",
+			wantErr:    false,
+		},
+		{
+			// An explicitly requested channel must exist: proceeding on a
+			// sibling channel would end in an empty bundle.
+			name:        "explicitly requested channel missing fails listing available channels",
+			makeClient:  ltsOnlyStub,
+			targetTag:   "stable",
+			wantErr:     true,
+			errContains: "available: lts",
+			wantErrIs:   []error{localreg.ErrImageNotFound},
+		},
+		{
+			name:        "explicit channel missing on partial registry lists available",
+			makeClient:  rockSolidOnlyStub,
+			targetTag:   "beta",
+			wantErr:     true,
+			errContains: "available: rock-solid",
+			wantErrIs:   []error{localreg.ErrImageNotFound},
+		},
+		{
+			// The wrap contract the errdetect hints depend on: the sentinel
+			// selects the dedicated no-channels category, the not-found chain
+			// keeps the underlying 404 diagnosable.
+			name:        "no channel at all returns no-channels error",
 			makeClient:  emptyStub,
 			targetTag:   "stable",
 			wantErr:     true,
-			errContains: "release channel",
+			errContains: "release channel found",
+			wantErrIs:   []error{localreg.ErrImageNotFound, internal.ErrNoReleaseChannels},
 		},
 		{
-			name:        "LTS channel missing with empty registry",
+			name:        "explicit beta on empty registry returns no-channels error",
 			makeClient:  emptyStub,
 			targetTag:   "beta",
 			wantErr:     true,
-			errContains: "lts",
+			errContains: "release channel found",
+			wantErrIs:   []error{internal.ErrNoReleaseChannels},
+		},
+		{
+			name:       "requested channel healthy while sibling channel is broken",
+			makeClient: erroring(ltsOnlyStub, "alpha", http.StatusInternalServerError),
+			targetTag:  "lts",
+			wantErr:    false,
+		},
+		{
+			name:        "explicit missing channel skips broken sibling",
+			makeClient:  erroring(ltsOnlyStub, "alpha", http.StatusInternalServerError),
+			targetTag:   "stable",
+			wantErr:     true,
+			errContains: "available: lts",
+		},
+		{
+			name:        "default pull aborts on non-404 error during scan",
+			makeClient:  erroring(ltsOnlyStub, "alpha", http.StatusInternalServerError),
+			targetTag:   "",
+			wantErr:     true,
+			errContains: `channel "alpha"`,
+		},
+		{
+			name:        "broken requested channel fails naming it",
+			makeClient:  erroring(localfake.NewRegistryClientStub, "stable", http.StatusInternalServerError),
+			targetTag:   "",
+			wantErr:     true,
+			errContains: `channel "stable"`,
+		},
+		{
+			name:        "unauthorized on requested channel fails fast",
+			makeClient:  erroring(localfake.NewRegistryClientStub, "stable", http.StatusUnauthorized),
+			targetTag:   "",
+			wantErr:     true,
+			errContains: "401",
 		},
 		{
 			name:       "semver tag exists in root repository",
@@ -168,6 +287,9 @@ func TestService_validatePlatformAccess(t *testing.T) {
 				require.Error(t, err)
 				if tt.errContains != "" {
 					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				for _, target := range tt.wantErrIs {
+					assert.ErrorIs(t, err, target)
 				}
 			} else {
 				require.NoError(t, err)
@@ -264,6 +386,23 @@ func TestService_findTagsToMirror(t *testing.T) {
 			assert.ElementsMatch(t, tt.wantChannels, channels, "channels mismatch")
 		})
 	}
+}
+
+// TestService_findTagsToMirror_PartialRegistryKeepsNotFoundCause covers a
+// registry that passes access validation (one channel exists) but misses
+// required default channels: the resulting failure must keep the underlying
+// not-found chain so the errdetect diagnostics stay actionable.
+func TestService_findTagsToMirror_PartialRegistryKeepsNotFoundCause(t *testing.T) {
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := newTestPlatformService(rockSolidOnlyStub(), &Options{}, logger, userLogger)
+
+	_, _, err := svc.findTagsToMirror(context.Background())
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrSomeChannelsFailed)
+	assert.ErrorIs(t, err, localreg.ErrImageNotFound)
 }
 
 // mustParseSemver is a test helper that panics if version parsing fails.

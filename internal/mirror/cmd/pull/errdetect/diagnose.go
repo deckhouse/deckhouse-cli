@@ -33,28 +33,30 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
 
 const (
-	categoryEOF             = "Connection terminated unexpectedly (EOF)"
-	categoryTLS             = "TLS/certificate verification failed"
-	categoryAuth            = "Authentication failed"
-	categoryAuth401         = "Authentication failed (HTTP 401 Unauthorized)"
-	categoryAuth403         = "Access denied (HTTP 403 Forbidden)"
-	categoryRateLimit       = "Rate limited by registry (HTTP 429 Too Many Requests)"
-	categoryServerError     = "Registry server error"
-	categoryDNS             = "DNS resolution failed"
-	categoryTimeout         = "Operation timed out"
-	categoryNetwork         = "Network connection failed"
-	categoryDiskFull        = "Disk space exhausted"
-	categoryPermission      = "Permission denied"
-	categoryImageNotFound   = "Image not found in registry"
-	categoryRepoNotFound    = "Repository not found in registry"
-	categoryEmptyConstraint = "Version constraint is missing after '@'"
-	categoryPathConstraint  = "Version constraint is a path, not a version"
+	categoryEOF               = "Connection terminated unexpectedly (EOF)"
+	categoryTLS               = "TLS/certificate verification failed"
+	categoryAuth              = "Authentication failed"
+	categoryAuth401           = "Authentication failed (HTTP 401 Unauthorized)"
+	categoryAuth403           = "Access denied (HTTP 403 Forbidden)"
+	categoryRateLimit         = "Rate limited by registry (HTTP 429 Too Many Requests)"
+	categoryServerError       = "Registry server error"
+	categoryDNS               = "DNS resolution failed"
+	categoryTimeout           = "Operation timed out"
+	categoryNetwork           = "Network connection failed"
+	categoryDiskFull          = "Disk space exhausted"
+	categoryPermission        = "Permission denied"
+	categoryImageNotFound     = "Image not found in registry"
+	categoryRepoNotFound      = "Repository not found in registry"
+	categoryEmptyConstraint   = "Version constraint is missing after '@'"
+	categoryPathConstraint    = "Version constraint is a path, not a version"
+	categoryNoReleaseChannels = "No release channels found in source registry"
 )
 
 // Diagnose analyzes an error and returns a *diagnostic.HelpfulError
@@ -309,6 +311,24 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 				{
 					Cause:     "Source registry is down or temporarily unreachable",
 					Solutions: []string{"Check your network connection and the source registry status"},
+				},
+			},
+		}
+
+	case errors.Is(err, internal.ErrNoReleaseChannels):
+		return &diagnostic.HelpfulError{
+			Category:    categoryNoReleaseChannels,
+			OriginalErr: err,
+			Suggestions: []diagnostic.Suggestion{
+				{
+					Cause: "The source registry publishes no Deckhouse release channels (e.g. it was filled from a tag-based mirror bundle)",
+					Solutions: []string{
+						"Specify the version to pull explicitly: --deckhouse-tag=<version> (e.g. --deckhouse-tag=v1.70.4)",
+					},
+				},
+				{
+					Cause:     "License key does not have access to the requested edition or version",
+					Solutions: []string{"Verify the --license key grants access to the requested Deckhouse edition"},
 				},
 			},
 		}

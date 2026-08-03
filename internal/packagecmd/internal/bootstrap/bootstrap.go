@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/packages"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/logs"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/logs"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/templates"
 )
 

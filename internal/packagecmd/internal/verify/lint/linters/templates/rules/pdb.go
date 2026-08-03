@@ -60,6 +60,8 @@ func (r *PDBRule) Check(_ context.Context) {
 
 		ensurePDBMatches(obj, selectors, collector)
 	}
+
+	r.collector.Commit()
 }
 
 // collectPDBSelectors parses every PDB object into a namespace-scoped selector.

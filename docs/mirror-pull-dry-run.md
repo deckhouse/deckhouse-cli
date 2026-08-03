@@ -2,10 +2,9 @@
 
 ## What dry-run does
 
-`--dry-run` runs the full planning pipeline of `d8 mirror pull` — version resolution,
-release-channel discovery, module filtering, installer tag lookup — then **prints the
-complete list of images that would be downloaded** and exits without writing any bundle
-output to the bundle directory.
+`--dry-run` runs the full planning pipeline of `d8 mirror pull` — version resolution, release-channel discovery, module and package filtering, installer tag lookup — then **prints the images that would be downloaded** and exits without writing any bundle output to the bundle directory.
+
+> The **platform** plan is complete (the full component digest list is streamed from the installer image). For **modules** and **packages**, the plan lists release-channel refs and per-version images, but does **not** resolve `extra_images.json` extra images or `.att` VEX attestations — those require a real pull, so the plan and its counts undercount what a real pull downloads for each module/package.
 
 The key distinction from a no-op:
 
@@ -14,16 +13,16 @@ The key distinction from a no-op:
 | Validate registry access | yes | yes |
 | Resolve versions / channels | yes | yes |
 | Read installer `images_digests.json` (platform) | via OCI layout in tmpDir | **streamed from the registry** (no layout) |
-| Stage installer/security/module OCI layout dirs in tmpDir | yes (with blobs) | **scaffolding only** (no image blobs) |
+| Stage installer/security/module/package OCI layout dirs in tmpDir | yes (with blobs) | **scaffolding only** (no image blobs) |
 | Pull release-channel metadata | yes | yes |
 | Download platform/module/security blobs | yes | **no** |
-| Write `platform.tar`, `security.tar`, module tarballs | yes | **no** |
+| Write `platform.tar`, `security.tar`, module/package tarballs, `package-versions.tar` | yes | **no** |
 | Write `deckhousereleases.yaml` | yes | **no** |
 | Compute GOST digests | yes | **no** |
 
 In dry-run the **platform** service streams the built-in image digest list
 (`images_tags.json` / `images_digests.json`) straight from the remote installer image,
-layer by layer, without writing an OCI layout. The `installer`, `security` and `modules`
+layer by layer, without writing an OCI layout. The `installer`, `security`, `modules` and `packages`
 services still create their OCI layout directories under `--tmp-dir` (or
 `<bundle-path>/.tmp`), but in dry-run they pull no image blobs (only layout scaffolding),
 so `--tmp-dir` ends up non-empty while the **bundle directory** (first positional
@@ -230,10 +229,14 @@ Puller.Execute()
             │    ├─ validateSecurityAccess()
             │    ├─ downloadList.FillSecurityImages()
             │    └─ [dry-run guard] print plan → return nil
-            └─ modules.Service.PullModules()             [DryRun=true]
-                 ├─ discover modules (ListRepositories)
-                 ├─ per module: extractVersionsFromReleaseChannels()
-                 └─ [dry-run guard] print plan → return nil
+            ├─ modules.Service.PullModules()             [DryRun=true]
+            │    ├─ discover modules (ListTags)
+            │    ├─ per module: extractVersionsFromReleaseChannels()
+            │    └─ [dry-run guard] print plan → return nil
+            ├─ packages.Service.PullPackages()           [DryRun=true]
+            │    └─ [dry-run guard] print per-package plan → return nil
+            └─ packages.Service.PullPackageVersions()    [DryRun=true, ALWAYS runs]
+                 └─ [dry-run guard] print package-versions plan → return nil
 
   After Pull() returns:
     if DryRun → print summary "No images were downloaded (dry-run)." → return nil
@@ -255,10 +258,11 @@ what a real pull actually downloads.
 |----------|---------------------|-------------|
 | `<tmpDir>/platform/...` | **no** | Platform digests are streamed; no platform OCI layout is written |
 | `<tmpDir>/installer/` | **yes** | Installer OCI layout dir (scaffolding only, no blobs) |
-| `<tmpDir>/security*/`, `<tmpDir>/modules*/` | **yes** | Security / module OCI layout dirs (scaffolding only, no blobs) |
+| `<tmpDir>/security*/`, `<tmpDir>/modules*/`, `<tmpDir>/packages*/` | **yes** | Security / module / package OCI layout dirs (scaffolding only, no blobs) |
 | `<bundleDir>/platform.tar` | no | Not created |
 | `<bundleDir>/security.tar` | no | Not created |
-| `<bundleDir>/modules-*.tar` | no | Not created |
+| `<bundleDir>/module-*.tar` | no | Not created |
+| `<bundleDir>/package-*.tar`, `package-versions.tar` | no | Not created |
 | `<bundleDir>/deckhousereleases.yaml` | no | Not created |
 
 `tmpDir` is cleaned up by a subsequent normal pull or can be removed manually.

@@ -3,7 +3,7 @@ package rules
 import (
 	"context"
 
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/iconutil"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/iconutil"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 )
 
@@ -37,4 +37,6 @@ func (r *ShapeRule) Check(_ context.Context) {
 		r.collector.Error("icon is %dx%d, exceeds %dx%d",
 			r.icon.Shape.Width, r.icon.Shape.Height, maxIconSide, maxIconSide)
 	}
+
+	r.collector.Commit()
 }

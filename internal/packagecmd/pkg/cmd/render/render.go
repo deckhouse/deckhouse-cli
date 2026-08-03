@@ -2,17 +2,22 @@ package render
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/packages"
 	pkgrender "github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/packages/render"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/find"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/find"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/imagefs"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/registry"
 )
 
 var (
@@ -20,6 +25,21 @@ var (
 	file string
 	// renderFile, when set, is the path the clean render (no '# Source:' headers) is written to.
 	renderFile string
+
+	// remote is an optional published bundle image, <registry-path>/<package>:<version>,
+	// rendered instead of the local package directory.
+	remote string
+	// remoteUser is the registry username used to pull the remote image.
+	remoteUser string
+	// remotePassword is the registry password or token used to pull the remote image.
+	remotePassword string
+)
+
+const (
+	// envRemoteUser is the environment fallback for --remote-user.
+	envRemoteUser = "PACKAGE_REMOTE_USER"
+	// envRemotePassword is the environment fallback for --remote-password.
+	envRemotePassword = "PACKAGE_REMOTE_PASSWORD"
 )
 
 // NewCmdRender creates a command that renders a package's templates to
@@ -33,6 +53,17 @@ func NewCmdRender() *cobra.Command {
 Use 'package render' in a package directory to preview the manifests that would be
 installed in a cluster. Image digests, registry and credentials are stubbed, so the
 output is a smoke-check preview, not a faithful representation of a real cluster.
+
+Use 'package render --remote <registry-path>/<package>:<version>' to render a
+published bundle image instead of the current directory. The image must exist and
+must carry an explicit tag or digest. Only the bundle image is renderable: the
+release image ships without a templates directory.
+
+Registry credentials default to the ambient Docker keychain. Pass --remote-user and
+--remote-password to authenticate explicitly, or set them in the environment:
+
+  PACKAGE_REMOTE_USER      fallback for --remote-user
+  PACKAGE_REMOTE_PASSWORD  fallback for --remote-password
 
 Use --file to print only the manifests rendered from the template with that file
 name, and --render-file to write a clean render (without '# Source:' headers) to a file.`,
@@ -50,7 +81,16 @@ name, and --render-file to write a clean render (without '# Source:' headers) to
   package render --render-file rendered.yaml
 
   # Write a clean render of a single template to a file
-  package render --file deployment.yaml --render-file deployment.out.yaml`,
+  package render --file deployment.yaml --render-file deployment.out.yaml
+
+  # Render a published bundle image
+  package render --remote registry.io/packages/app:1.0.0
+
+  # Render one template of a published bundle image
+  package render --remote registry.io/packages/app:1.0.0 --file deployment.yaml
+
+  # Render a published bundle image with explicit registry credentials
+  package render --remote registry.io/packages/app:1.0.0 --remote-user robot --remote-password s3cret`,
 		Args:         cobra.MaximumNArgs(0),
 		SilenceUsage: true,
 		RunE:         render,
@@ -58,17 +98,24 @@ name, and --render-file to write a clean render (without '# Source:' headers) to
 
 	cmd.Flags().StringVar(&file, "file", "", "Show only manifests rendered from the template with this file name")
 	cmd.Flags().StringVar(&renderFile, "render-file", "", "Write the clean render (without '# Source:' headers) to this file path")
+	cmd.Flags().StringVarP(&remote, "remote", "r", "",
+		"Render a published bundle image by its reference, <registry-path>/<package>:<version>")
+	cmd.Flags().StringVar(&remoteUser, "remote-user", "",
+		"Registry user for --remote (env: "+envRemoteUser+")")
+	cmd.Flags().StringVar(&remotePassword, "remote-password", "",
+		"Registry password or token for --remote (env: "+envRemotePassword+")")
 
 	return cmd
 }
 
-// render finds the current package, renders its templates, and either prints the
+// render resolves the package source, renders its templates, and either prints the
 // resulting manifests to stdout or writes a clean render to the --render-file path.
 func render(cmd *cobra.Command, _ []string) error {
-	path, err := find.PackageDir()
+	path, cleanup, err := resolvePath(cmd.Context())
 	if err != nil {
-		return fmt.Errorf("find package dir: %w", err)
+		return err
 	}
+	defer cleanup()
 
 	def, err := packages.LoadDefinitionByDir(path)
 	if err != nil {
@@ -92,6 +139,74 @@ func render(cmd *cobra.Command, _ []string) error {
 	}
 
 	return writeObjects(os.Stdout, objects, true)
+}
+
+// resolvePath returns the package directory to render and a cleanup function to call
+// when rendering is done. Without --remote the directory is discovered from the current
+// working directory and cleanup is a no-op; with --remote the published bundle image is
+// extracted into a temp directory that cleanup removes.
+func resolvePath(ctx context.Context) (string, func(), error) {
+	if remote == "" {
+		if remoteUser != "" || remotePassword != "" {
+			return "", nil, errors.New("--remote-user and --remote-password require --remote")
+		}
+
+		path, err := find.PackageDir()
+		if err != nil {
+			return "", nil, fmt.Errorf("find package dir: %w", err)
+		}
+
+		return path, func() {}, nil
+	}
+
+	if !hasTag(remote) {
+		return "", nil, errors.New("remote reference must carry a tag, <registry-path>/<package>:<version>")
+	}
+
+	auth := registry.WithBasicAuth(credentials())
+
+	// Checked before pulling so a typo fails fast instead of after a needless download.
+	if err := registry.Exists(ctx, remote, auth); err != nil {
+		return "", nil, fmt.Errorf("bundle image: %w", err)
+	}
+
+	path, err := imagefs.ExtractToTemp(ctx, remote, auth)
+	if err != nil {
+		return "", nil, fmt.Errorf("extract bundle image: %w", err)
+	}
+
+	return path, func() {
+		if err := os.RemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN remove bundle temp directory: %s\n", err)
+		}
+	}, nil
+}
+
+// credentials returns the registry user and password, falling back to the environment
+// when the flags are unset. Empty values mean the ambient Docker keychain is used.
+func credentials() (string, string) {
+	user := remoteUser
+	if user == "" {
+		user = os.Getenv(envRemoteUser)
+	}
+
+	password := remotePassword
+	if password == "" {
+		password = os.Getenv(envRemotePassword)
+	}
+
+	return user, password
+}
+
+// hasTag reports whether ref carries an explicit tag or digest. Only the last path
+// element is inspected, since a registry host may itself contain a port.
+func hasTag(ref string) bool {
+	last := ref
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		last = ref[i+1:]
+	}
+
+	return strings.ContainsAny(last, ":@")
 }
 
 // filterByFile returns the objects rendered from a template whose file name equals name.

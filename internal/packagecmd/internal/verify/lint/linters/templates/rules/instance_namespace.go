@@ -40,4 +40,6 @@ func (r *InstanceNamespaceRule) Check(_ context.Context) {
 			diag.Value(namespace),
 		).Error("object must not hardcode metadata.namespace; the runtime injects the instance namespace")
 	}
+
+	r.collector.Commit()
 }

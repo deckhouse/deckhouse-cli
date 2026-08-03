@@ -14,6 +14,41 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/stream"
 )
 
+// options holds the resolved configuration of a registry request.
+type options struct {
+	// auth authenticates the request.
+	auth remote.Option
+}
+
+// Option customizes how a registry request authenticates.
+type Option func(*options)
+
+// WithBasicAuth authenticates requests with username and password instead of the
+// ambient Docker keychain. An empty username or password leaves the keychain in place,
+// so a partially configured caller keeps working rather than losing its credentials.
+func WithBasicAuth(username, password string) Option {
+	return func(o *options) {
+		if username == "" || password == "" {
+			return
+		}
+
+		o.auth = remote.WithAuth(&authn.Basic{Username: username, Password: password})
+	}
+}
+
+// Auth resolves opts into the authentication option for a remote request, defaulting
+// to the ambient Docker keychain. It is exported for packages that issue their own
+// registry requests instead of going through this one, such as imagefs.
+func Auth(opts ...Option) remote.Option {
+	o := options{auth: remote.WithAuthFromKeychain(authn.DefaultKeychain)}
+
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return o.auth
+}
+
 // Copy copies a container image from srcRef to destRef using credentials from the default keychain.
 func Copy(ctx context.Context, srcRef, destRef string) error {
 	ref, err := name.ParseReference(srcRef, name.Insecure)
@@ -82,19 +117,30 @@ func PushPackageIndex(ctx context.Context, repository string) error {
 	return nil
 }
 
+// Tags lists the tags of repository, which is a repository path without a tag.
+// An empty result means the repository exists but carries no tags.
+func Tags(ctx context.Context, repository string, opts ...Option) ([]string, error) {
+	repo, err := name.NewRepository(repository)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse repository: %w", err)
+	}
+
+	tags, err := remote.List(repo, Auth(opts...), remote.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tags of %q: %w", repository, err)
+	}
+
+	return tags, nil
+}
+
 // Exists verifies that ref exists by performing a HEAD request for its manifest.
-func Exists(ctx context.Context, ref string) error {
+func Exists(ctx context.Context, ref string, opts ...Option) error {
 	r, err := name.ParseReference(ref)
 	if err != nil {
 		return fmt.Errorf("failed to parse reference: %w", err)
 	}
 
-	opts := []remote.Option{
-		remote.WithAuthFromKeychain(authn.DefaultKeychain),
-		remote.WithContext(ctx),
-	}
-
-	if _, err = remote.Head(r, opts...); err != nil {
+	if _, err = remote.Head(r, Auth(opts...), remote.WithContext(ctx)); err != nil {
 		return fmt.Errorf("image %q not found in registry: %w", ref, err)
 	}
 

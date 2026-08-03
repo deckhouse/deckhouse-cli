@@ -72,6 +72,8 @@ func (r *VPARule) Check(_ context.Context) {
 
 		ensureVPAContainersMatch(obj, containers[target], collector)
 	}
+
+	r.collector.Commit()
 }
 
 // collectVPAs returns the set of VPA-covered targets along with their covered

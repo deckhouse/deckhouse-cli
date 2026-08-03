@@ -3,7 +3,7 @@ package rules
 import (
 	"context"
 
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/iconutil"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/iconutil"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/diag"
 )
 
@@ -36,4 +36,6 @@ func (r *SizeRule) Check(_ context.Context) {
 		r.collector.With(diag.Value(r.icon.Size)).
 			Error("icon exceeds %d KB limit", maxIconBytes/1024)
 	}
+
+	r.collector.Commit()
 }

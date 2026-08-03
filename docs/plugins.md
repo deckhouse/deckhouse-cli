@@ -7,7 +7,7 @@ Plugins are versioned binaries distributed through the cluster registry.
 [Versions & majors](#versions-majors-and-switching) ·
 [Requirements](#requirements) ·
 [Flags & env](#flags-and-environment-variables) ·
-[Troubleshooting](#troubleshooting)
+[Troubleshooting](#troubleshooting) · [Advanced](#advanced-hidden-flags)
 
 > [!NOTE]
 > The `d8 plugins` command group is hidden from the root `--help` while the
@@ -16,19 +16,26 @@ Plugins are versioned binaries distributed through the cluster registry.
 ## Plugin source
 
 Plugins are pulled from the in-cluster **registry-packages-proxy**, the same
-channel as d8 self-update. There is no direct-registry path: every `d8 plugins`
+channel as d8 self-update. This is the only supported path: every `d8 plugins`
 command reaches the registry through the proxy, so a reachable cluster is
-required. The access model:
+required. (A hidden, temporary `--source` flag pulls straight from a registry
+repo instead - see [Advanced](#advanced-hidden-flags) - but it bypasses the
+cluster and is not the intended flow.) The access model:
 
 - Authentication: the **Bearer token** from your kubeconfig (client
   certificates do not work).
-- Authorization: the ClusterRole `d8:registry-packages-proxy:cli-download`,
-  bound by the cluster administrator.
-- Endpoint: discovered automatically; override with `--rpp-endpoint` /
-  `D8_RPP_ENDPOINT`, pass a private CA with `--rpp-ca-file`.
+- Authorization: the ClusterRole
+  `d8:registry-packages-proxy:packages-download`, bound by the cluster
+  administrator. Authorization is cached for about 5 minutes, so after the
+  binding is created, retry with a fresh token.
+- Endpoint: discovered automatically through your kubeconfig's API server;
+  override with `--rpp-endpoint` / `D8_RPP_ENDPOINT`, pass a private CA with
+  `--rpp-ca-file`.
 
-See [self-update.md - How access works](self-update.md#how-access-works) for
-the full picture (RBAC binding example, OIDC kubeconfig, endpoint discovery).
+The access model is shared with d8 self-update (see
+[self-update.md - How access works](self-update.md#how-access-works) for the
+OIDC-kubeconfig and endpoint-discovery details), but the ClusterRole differs:
+plugins need `packages-download`, CLI self-update needs `cli-download`.
 
 ## Commands
 
@@ -78,13 +85,17 @@ Rules that follow from this layout:
 
 ## Requirements
 
-A plugin's contract may declare requirements:
+A plugin's contract may declare requirements, all validated **before** anything
+is downloaded or switched:
 
-- other plugins;
-- Kubernetes / Deckhouse versions;
-- enabled modules.
-
-They are validated **before** anything is downloaded or switched:
+- **Kubernetes / Deckhouse version** constraints (semver). A cluster whose
+  Deckhouse version is not a release semver - e.g. a `dev` build - skips the
+  Deckhouse check with a warning instead of failing.
+- **Modules**: required-enabled (optionally with a version constraint),
+  conditional (checked only if the module is enabled), any-of (at least one of
+  a group must be enabled), and forbidden (a module that must *not* be enabled).
+- **Other plugins**: mandatory dependencies, and conditional ones that are
+  enforced only if that plugin is already installed.
 
 ```console
 $ d8 plugins install package
@@ -92,10 +103,13 @@ $ d8 plugins install package
 Error: plugin requirements not satisfied      # e.g. requires plugin delivery-kit
 ```
 
-Plugins this one depends on are installed/upgraded automatically.
+Mandatory plugin dependencies are installed and upgraded automatically during
+`install` / `update`. Cluster-side requirements (Kubernetes / Deckhouse /
+modules) are only *verified* - d8 never changes the cluster for you.
 
-- `--skip-cluster-checks` (or `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) - skip
-  cluster-side checks, e.g. in air-gapped scenarios.
+- `--skip-cluster-checks` (or `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) downgrades the
+  cluster-side checks to a warning - useful when the cluster is unreachable or
+  air-gapped. Plugin-to-plugin requirements are still enforced.
 
 ## Flags and environment variables
 
@@ -107,11 +121,41 @@ Plugins this one depends on are installed/upgraded automatically.
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
 | `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
+| `--version X` *(install only)* | - | install an exact version; may be a pre-release |
+| `--use-major N` *(install, update)* | - | cross to major `N`; by default operations stay within the installed major |
+| `--force` *(install only)* | - | reinstall even if already current (re-pull and re-verify) |
+
+The persistent flags above are shared by every `d8 plugins` subcommand; the
+`--source*` family is hidden - see [Advanced](#advanced-hidden-flags).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `image or tag not found` (404) on a plugin | the plugin is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
-| `plugin requirements not satisfied` | the contract requires other plugins or cluster versions/modules | see `d8 plugins contract <name>`; plugin deps are auto-installed, cluster requirements are not |
-| 401 / 403 / `x509: ...` reaching the proxy | access or TLS issue with the registry-packages-proxy | see [self-update.md - Troubleshooting](self-update.md#troubleshooting) - the access model is shared |
+| `image or tag not found` (404) | that plugin - or that specific version - is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
+| `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Kubeconfig Generator or `d8 login`) |
+| `... forbidden (403)` | your identity may not download plugins | ask an admin to bind the ClusterRole `d8:registry-packages-proxy:packages-download`; authorization is cached ~5 min, so retry with a fresh token |
+| `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 plugins install <dep>`) |
+| `... requires Kubernetes/Deckhouse/module ...` | a **cluster-side** requirement is unmet (a different message from the row above) | upgrade the cluster/module, or pass `--skip-cluster-checks` to bypass verification |
+| `... upstream error (5xx)` | the proxy could not reach the backing registry | retry shortly, or check the `registry-packages-proxy` pods in `d8-cloud-instance-manager` |
+| `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert, or skip discovery with `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) |
+| `cannot reach the cluster to ...` | the cluster is needed to verify requirements or select a version, but is unreachable | pass `--skip-cluster-checks` (`D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) |
+
+The access model is shared with d8 self-update; see
+[self-update.md - Troubleshooting](self-update.md#troubleshooting) for the
+registry-packages-proxy side.
+
+## Advanced (hidden flags)
+
+These flags are hidden from `--help` and exist as a temporary escape hatch;
+prefer the proxy flow above.
+
+- `--source <registry-repo>` pulls plugins **directly from a registry
+  repository, bypassing the cluster and the proxy**. It automatically enables
+  `--skip-cluster-checks`, so cluster-side requirements are not verified.
+  Credentials come from `--source-login` / `--source-password`, or `--license`
+  (a shortcut for `--source-login=license-token`), or your
+  `~/.docker/config.json` - in that order. `--tls-skip-verify` and `--insecure`
+  relax TLS / allow HTTP for that registry.
+- `--rpp-insecure-skip-tls-verify` skips registry-packages-proxy TLS
+  verification (debugging only).
