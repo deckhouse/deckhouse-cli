@@ -6772,6 +6772,281 @@ func TestRun_AutomaticEditRestagesAllPreflightChecks(t *testing.T) {
 	}
 }
 
+// TestRun_Edit_ObjectRemovedInEditorAppliesRemaining verifies that removing an
+// object during a manual --edit session is a legitimate restore path (not an
+// abort trigger): the remaining object is applied and the removed one is never
+// patched.
+func TestRun_Edit_ObjectRemovedInEditorAppliesRemaining(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("keep"), configMapManifest("drop"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cfg := baseConfig(src, dyn)
+	cfg.Edit = true
+	cfg.editManifests = func(
+		_ context.Context,
+		objs []unstructured.Unstructured,
+	) ([]unstructured.Unstructured, error) {
+		kept := make([]unstructured.Unstructured, 0, 1)
+
+		for _, obj := range objs {
+			if obj.GetName() == "keep" {
+				kept = append(kept, obj)
+			}
+		}
+
+		return kept, nil
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := dyn.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "keep", metav1.GetOptions{}); err != nil {
+		t.Errorf("kept ConfigMap not applied: %v", err)
+	}
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() != "patch" {
+			continue
+		}
+
+		if getAction, ok := action.(clienttesting.PatchAction); ok && getAction.GetName() == "drop" {
+			t.Errorf("removed ConfigMap %q must not be patched", getAction.GetName())
+		}
+	}
+}
+
+// TestRun_AutomaticEdit_RemovingRejectedObjectCompletesRestore verifies the same
+// legitimate removal path through the automatic edit session opened after a
+// dry-run Invalid: the automatic editor removes the rejected object and the
+// restore of the remaining object completes without an abort.
+func TestRun_AutomaticEdit_RemovingRejectedObjectCompletesRestore(t *testing.T) {
+	invalidErr := kubeerrors.NewInvalid(
+		schema.GroupKind{Kind: "ConfigMap"},
+		"rejected",
+		field.ErrorList{field.Forbidden(field.NewPath("data"), "rejected by webhook")},
+	)
+
+	base := newFakeDynamic(readySnapshot())
+	dyn := &interceptingDynamicClient{
+		Interface: base,
+		interceptPatch: func(
+			_ context.Context,
+			gvr schema.GroupVersionResource,
+			_ string,
+			name string,
+			_ []byte,
+			opts metav1.PatchOptions,
+		) (*unstructured.Unstructured, bool, error) {
+			if gvr == cmGVR && len(opts.DryRun) != 0 && name == "rejected" {
+				return nil, true, invalidErr
+			}
+
+			return nil, false, nil
+		},
+	}
+
+	editorCalls := 0
+	cfg := baseConfig(
+		&stubSource{body: mustArray(t, configMapManifest("keep"), configMapManifest("rejected"))},
+		dyn,
+	)
+	cfg.AutoEdit = true
+	cfg.editManifests = func(
+		_ context.Context,
+		objs []unstructured.Unstructured,
+	) ([]unstructured.Unstructured, error) {
+		editorCalls++
+
+		kept := make([]unstructured.Unstructured, 0, 1)
+
+		for _, obj := range objs {
+			if obj.GetName() == "keep" {
+				kept = append(kept, obj)
+			}
+		}
+
+		return kept, nil
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if editorCalls != 1 {
+		t.Errorf("editor calls = %d, want 1", editorCalls)
+	}
+
+	if _, err := base.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "keep", metav1.GetOptions{}); err != nil {
+		t.Errorf("kept ConfigMap not applied: %v", err)
+	}
+
+	if _, err := base.Resource(cmGVR).Namespace(testNS).Get(context.Background(), "rejected", metav1.GetOptions{}); !kubeerrors.IsNotFound(err) {
+		t.Errorf("rejected ConfigMap must not have been applied, get error = %v", err)
+	}
+}
+
+// TestRun_Edit_RemovedObjectsAreLogged verifies that a manual edit session that
+// shrinks the restore set logs a WARN diagnostic naming the removed object and
+// the before/after object counts, instead of silently continuing or aborting.
+func TestRun_Edit_RemovedObjectsAreLogged(t *testing.T) {
+	src := &stubSource{body: mustArray(t, configMapManifest("keep"), configMapManifest("drop"))}
+	dyn := newFakeDynamic(readySnapshot())
+	cap := &logCapture{}
+	cfg := baseConfig(src, dyn)
+	cfg.Log = slog.New(cap)
+	cfg.Edit = true
+	cfg.editManifests = func(
+		_ context.Context,
+		objs []unstructured.Unstructured,
+	) ([]unstructured.Unstructured, error) {
+		kept := make([]unstructured.Unstructured, 0, 1)
+
+		for _, obj := range objs {
+			if obj.GetName() == "keep" {
+				kept = append(kept, obj)
+			}
+		}
+
+		return kept, nil
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	record, found := cap.recordWithMsg("edit session removed objects from the restore set")
+	if !found {
+		t.Fatal("expected a log record for the edit session object removal")
+	}
+
+	attrs := recordAttrs(record)
+
+	if got := attrs["objects_before"].Int64(); got != 2 {
+		t.Errorf("objects_before = %d, want 2", got)
+	}
+
+	if got := attrs["objects_after"].Int64(); got != 1 {
+		t.Errorf("objects_after = %d, want 1", got)
+	}
+
+	if got := attrs["removed_objects"].String(); !strings.Contains(got, `name="drop"`) {
+		t.Errorf("removed_objects = %q, want it to mention name=%q", got, "drop")
+	}
+}
+
+// TestConfig_LogEditedObjectDiff exercises logEditedObjectDiff directly (rather
+// than only through a full Run session), covering the cases an end-to-end test
+// can't cheaply drive: an unchanged set logs nothing at all, and more than
+// maxLoggedEditedObjectIdentities removed/added identities truncates the
+// listed names and reports the remainder as an omitted count.
+func TestConfig_LogEditedObjectDiff(t *testing.T) {
+	t.Parallel()
+
+	manyObjs := func(n int, prefix string) []unstructured.Unstructured {
+		objs := make([]unstructured.Unstructured, 0, n)
+
+		for i := range n {
+			objs = append(objs, identityObj("v1", "ConfigMap", fmt.Sprintf("%s-%d", prefix, i)))
+		}
+
+		return objs
+	}
+
+	tests := []struct {
+		name           string
+		before         []unstructured.Unstructured
+		after          []unstructured.Unstructured
+		wantRemovedLog bool
+		wantAddedLog   bool
+		wantOmitted    map[string]int64 // attr key -> expected value, only checked when set
+	}{
+		{
+			name:           "success: unchanged set logs nothing",
+			before:         []unstructured.Unstructured{identityObj("v1", "ConfigMap", "cm-1")},
+			after:          []unstructured.Unstructured{identityObj("v1", "ConfigMap", "cm-1")},
+			wantRemovedLog: false,
+			wantAddedLog:   false,
+		},
+		{
+			name: "success: removal only logs WARN, no INFO addition log",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "keep"),
+				identityObj("v1", "ConfigMap", "drop"),
+			},
+			after:          []unstructured.Unstructured{identityObj("v1", "ConfigMap", "keep")},
+			wantRemovedLog: true,
+			wantAddedLog:   false,
+		},
+		{
+			name:           "success: addition only logs INFO, no WARN removal log",
+			before:         []unstructured.Unstructured{identityObj("v1", "ConfigMap", "keep")},
+			after:          []unstructured.Unstructured{identityObj("v1", "ConfigMap", "keep"), identityObj("v1", "ConfigMap", "new")},
+			wantRemovedLog: false,
+			wantAddedLog:   true,
+		},
+		{
+			name:           "success: more than max removed identities reports an omitted count",
+			before:         manyObjs(25, "drop"),
+			after:          nil,
+			wantRemovedLog: true,
+			wantOmitted:    map[string]int64{"removed_omitted": 5},
+		},
+		{
+			name:         "success: more than max added identities reports an omitted count",
+			before:       nil,
+			after:        manyObjs(25, "new"),
+			wantAddedLog: true,
+			wantOmitted:  map[string]int64{"added_omitted": 5},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cap := &logCapture{}
+			cfg := Config{Log: slog.New(cap)}
+
+			cfg.logEditedObjectDiff(editSessionManual, tc.before, tc.after)
+
+			_, gotRemoved := cap.recordWithMsg("edit session removed objects from the restore set")
+			if gotRemoved != tc.wantRemovedLog {
+				t.Errorf("removed log present = %v, want %v", gotRemoved, tc.wantRemovedLog)
+			}
+
+			_, gotAdded := cap.recordWithMsg("edit session added objects to the restore set")
+			if gotAdded != tc.wantAddedLog {
+				t.Errorf("added log present = %v, want %v", gotAdded, tc.wantAddedLog)
+			}
+
+			if !tc.wantRemovedLog && !tc.wantAddedLog && len(cap.records) != 0 {
+				t.Errorf("expected no log records for an unchanged set, got %d", len(cap.records))
+			}
+
+			for key, want := range tc.wantOmitted {
+				msg := "edit session removed objects from the restore set"
+				if strings.HasPrefix(key, "added") {
+					msg = "edit session added objects to the restore set"
+				}
+
+				record, found := cap.recordWithMsg(msg)
+				if !found {
+					t.Fatalf("expected a log record for %q", msg)
+				}
+
+				got, ok := recordAttrs(record)[key]
+				if !ok {
+					t.Fatalf("record for %q missing attribute %q", msg, key)
+				}
+
+				if got.Int64() != want {
+					t.Errorf("%s = %d, want %d", key, got.Int64(), want)
+				}
+			}
+		})
+	}
+}
+
 // TestRun_Preflight_RealApplyAfterDryRun verifies that when the dry-run pass succeeds,
 // the real apply pass runs exactly once per object, resulting in a persisted object.
 // The SSA patch is intercepted to count calls: dry-run=1 + real=1 = 2 total.
@@ -10278,6 +10553,34 @@ func (c *logCapture) countMsgContaining(text string) int {
 	}
 
 	return n
+}
+
+// recordWithMsg returns the first captured record whose Message equals msg.
+func (c *logCapture) recordWithMsg(msg string) (slog.Record, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, r := range c.records {
+		if r.Message == msg {
+			return r, true
+		}
+	}
+
+	return slog.Record{}, false
+}
+
+// recordAttrs collects r's key-value attributes into a map for assertions that
+// don't care about attribute order.
+func recordAttrs(r slog.Record) map[string]slog.Value {
+	attrs := make(map[string]slog.Value, r.NumAttrs())
+
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value
+
+		return true
+	})
+
+	return attrs
 }
 
 // TestRun_SelectedNode_UnknownSelectorErrors verifies a selector absent from the

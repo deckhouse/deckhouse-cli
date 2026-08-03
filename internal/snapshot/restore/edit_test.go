@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -594,56 +595,283 @@ func TestMarshalDecodeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDecodeMultiDocYAML_EmptyDocsSkipped verifies that blank documents in a YAML
-// stream are silently skipped and do not produce empty unstructured objects.
-func TestDecodeMultiDocYAML_EmptyDocsSkipped(t *testing.T) {
-	yaml := []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\n   \n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n")
+// TestDecodeMultiDocYAML covers the document-splitting edge cases that motivated
+// switching from a literal "\n---\n" byte split to utilyaml.YAMLReader: CRLF line
+// endings, a trailing space or comment on the separator line, leading/trailing
+// separators, and blank or fully-commented documents.
+func TestDecodeMultiDocYAML(t *testing.T) {
+	t.Parallel()
 
-	result, err := decodeMultiDocYAML(yaml)
-	if err != nil {
-		t.Fatalf("decodeMultiDocYAML: %v", err)
-	}
-
-	if len(result) != 2 {
-		t.Fatalf("got %d objects (want 2); empty doc must be skipped", len(result))
-	}
-}
-
-// TestSplitYAMLDocs verifies the --- separator splitting logic for edge cases.
-func TestSplitYAMLDocs(t *testing.T) {
 	cases := []struct {
-		name     string
-		input    string
-		wantDocs int
+		name      string
+		input     string
+		wantNames []string
+		wantErr   string
 	}{
 		{
-			name:     "single doc no separator",
-			input:    "apiVersion: v1\nkind: ConfigMap\n",
-			wantDocs: 1,
+			name:      "success: LF two docs",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n",
+			wantNames: []string{"cm-1", "cm-2"},
 		},
 		{
-			name:     "two docs with separator",
-			input:    "apiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n",
-			wantDocs: 2,
+			name:      "success: CRLF two docs",
+			input:     "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: cm-1\r\n---\r\napiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: cm-2\r\n",
+			wantNames: []string{"cm-1", "cm-2"},
 		},
 		{
-			name:     "leading separator",
-			input:    "---\napiVersion: v1\nkind: ConfigMap\n",
-			wantDocs: 2,
+			name:      "success: separator with trailing spaces",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---  \napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n",
+			wantNames: []string{"cm-1", "cm-2"},
 		},
 		{
-			name:     "empty input",
-			input:    "",
-			wantDocs: 1,
+			name:      "success: separator with comment",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n--- # keep this\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n",
+			wantNames: []string{"cm-1", "cm-2"},
+		},
+		{
+			name:      "success: leading separator",
+			input:     "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n",
+			wantNames: []string{"cm-1"},
+		},
+		{
+			name:      "success: trailing separator",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\n",
+			wantNames: []string{"cm-1"},
+		},
+		{
+			name:      "success: whitespace-only doc skipped",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\n   \n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n",
+			wantNames: []string{"cm-1", "cm-2"},
+		},
+		{
+			name:      "success: comment-only doc skipped",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\n# fully commented out\n",
+			wantNames: []string{"cm-1"},
+		},
+		{
+			name:      "success: empty input",
+			input:     "",
+			wantNames: []string{},
+		},
+		{
+			name:    "error: bare separator with non-comment suffix at column 0",
+			input:   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---foo\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2\n",
+			wantErr: "invalid Yaml document separator",
+		},
+		{
+			name:      "success: last document missing trailing newline",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-2",
+			wantNames: []string{"cm-1", "cm-2"},
+		},
+		{
+			name:      "success: mixed LF and CRLF separators in one stream",
+			input:     "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\napiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: cm-2\r\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-3\n",
+			wantNames: []string{"cm-1", "cm-2", "cm-3"},
+		},
+		{
+			name:    "error: invalid YAML content within a document reports its index",
+			input:   "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm-1\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n\tname: cm-2\n",
+			wantErr: "decode YAML document 1",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			docs := splitYAMLDocs([]byte(tc.input))
+			t.Parallel()
 
-			if len(docs) != tc.wantDocs {
-				t.Errorf("splitYAMLDocs(%q) = %d docs, want %d", tc.input, len(docs), tc.wantDocs)
+			result, err := decodeMultiDocYAML([]byte(tc.input))
+
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("decodeMultiDocYAML(%q): expected error containing %q, got nil", tc.input, tc.wantErr)
+				}
+
+				if !contains(err.Error(), tc.wantErr) {
+					t.Fatalf("decodeMultiDocYAML(%q) error = %q, want it to contain %q", tc.input, err.Error(), tc.wantErr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("decodeMultiDocYAML(%q): %v", tc.input, err)
+			}
+
+			if len(result) != len(tc.wantNames) {
+				t.Fatalf("decodeMultiDocYAML(%q) = %d objects, want %d", tc.input, len(result), len(tc.wantNames))
+			}
+
+			for i, want := range tc.wantNames {
+				if result[i].GetName() != want {
+					t.Errorf("object[%d].name = %q, want %q", i, result[i].GetName(), want)
+				}
+			}
+		})
+	}
+}
+
+// identityObj builds a minimal unstructured object carrying only the fields
+// objectIdentity/diffObjectIdentities read (apiVersion, kind, name), for
+// tests that only care about identity, not full object bodies.
+func identityObj(apiVersion, kind, name string) unstructured.Unstructured {
+	return unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   map[string]interface{}{"name": name},
+	}}
+}
+
+// TestDiffObjectIdentities covers diffObjectIdentities as a multiset diff:
+// duplicate identities counted correctly on both sides, an unchanged set
+// producing no removed/added entries at all, and pure removal/addition/rename
+// cases.
+func TestDiffObjectIdentities(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		before      []unstructured.Unstructured
+		after       []unstructured.Unstructured
+		wantRemoved []string
+		wantAdded   []string
+	}{
+		{
+			name:        "success: empty before and after",
+			before:      nil,
+			after:       nil,
+			wantRemoved: []string{},
+			wantAdded:   []string{},
+		},
+		{
+			name: "success: unchanged set produces no diff",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "cm-1"),
+				identityObj("v1", "ConfigMap", "cm-2"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "cm-1"),
+				identityObj("v1", "ConfigMap", "cm-2"),
+			},
+			wantRemoved: []string{},
+			wantAdded:   []string{},
+		},
+		{
+			name: "success: pure removal",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "keep"),
+				identityObj("v1", "ConfigMap", "drop"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "keep"),
+			},
+			wantRemoved: []string{`apiVersion="v1" kind="ConfigMap" name="drop"`},
+			wantAdded:   []string{},
+		},
+		{
+			name: "success: pure addition",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "keep"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "keep"),
+				identityObj("v1", "ConfigMap", "new"),
+			},
+			wantRemoved: []string{},
+			wantAdded:   []string{`apiVersion="v1" kind="ConfigMap" name="new"`},
+		},
+		{
+			name: "success: rename reports both a removal and an addition",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "old-name"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "new-name"),
+			},
+			wantRemoved: []string{`apiVersion="v1" kind="ConfigMap" name="old-name"`},
+			wantAdded:   []string{`apiVersion="v1" kind="ConfigMap" name="new-name"`},
+		},
+		{
+			name: "success: duplicate identity in before only reports the unmatched occurrences",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			wantRemoved: []string{
+				`apiVersion="v1" kind="ConfigMap" name="dup"`,
+				`apiVersion="v1" kind="ConfigMap" name="dup"`,
+			},
+			wantAdded: []string{},
+		},
+		{
+			name: "success: duplicate identity added in after only reports the unmatched occurrences",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			wantRemoved: []string{},
+			wantAdded: []string{
+				`apiVersion="v1" kind="ConfigMap" name="dup"`,
+				`apiVersion="v1" kind="ConfigMap" name="dup"`,
+			},
+		},
+		{
+			name: "success: identical duplicate counts on both sides produce no diff",
+			before: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			after: []unstructured.Unstructured{
+				identityObj("v1", "ConfigMap", "dup"),
+				identityObj("v1", "ConfigMap", "dup"),
+			},
+			wantRemoved: []string{},
+			wantAdded:   []string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			beforeCopy := append([]unstructured.Unstructured(nil), tc.before...)
+			afterCopy := append([]unstructured.Unstructured(nil), tc.after...)
+
+			removed, added := diffObjectIdentities(tc.before, tc.after)
+
+			if len(removed) != len(tc.wantRemoved) {
+				t.Fatalf("removed = %v, want %v", removed, tc.wantRemoved)
+			}
+
+			for i, want := range tc.wantRemoved {
+				if removed[i] != want {
+					t.Errorf("removed[%d] = %q, want %q", i, removed[i], want)
+				}
+			}
+
+			if len(added) != len(tc.wantAdded) {
+				t.Fatalf("added = %v, want %v", added, tc.wantAdded)
+			}
+
+			for i, want := range tc.wantAdded {
+				if added[i] != want {
+					t.Errorf("added[%d] = %q, want %q", i, added[i], want)
+				}
+			}
+
+			if !reflect.DeepEqual(beforeCopy, tc.before) {
+				t.Errorf("diffObjectIdentities mutated its before argument")
+			}
+
+			if !reflect.DeepEqual(afterCopy, tc.after) {
+				t.Errorf("diffObjectIdentities mutated its after argument")
 			}
 		})
 	}
@@ -736,5 +964,82 @@ func TestEditManifests_MultipleObjectsEdited(t *testing.T) {
 
 	if result[1].GetName() != "cm-2" {
 		t.Errorf("cm-2 name not preserved: got %q", result[1].GetName())
+	}
+}
+
+// TestEditManifests_CRLFMultiDocPreservesAllObjects guards against the silent-data-loss
+// bug where a "\n---\n" byte split failed to recognize a CRLF ("\r\n---\r\n") separator
+// and the whole file decoded as a single document, dropping every object after the first.
+func TestEditManifests_CRLFMultiDocPreservesAllObjects(t *testing.T) {
+	dir := t.TempDir()
+
+	editedContent := "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: crlf-cm-1\r\n---\r\napiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: crlf-cm-2\r\n"
+	contentFile := writeEditorContent(t, dir, "crlf.yaml", editedContent)
+	editor := fakeEditorScript(t, dir, fmt.Sprintf(`cp '%s' "$1"`, contentFile))
+
+	t.Setenv("EDITOR", editor)
+	t.Setenv("KUBE_EDITOR", "")
+
+	input := []unstructured.Unstructured{
+		{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "original-cm"},
+		}},
+	}
+
+	result, err := editManifests(input)
+	if err != nil {
+		t.Fatalf("editManifests: %v", err)
+	}
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 objects after CRLF multi-doc edit, got %d", len(result))
+	}
+
+	if result[0].GetName() != "crlf-cm-1" {
+		t.Errorf("first object name: got %q, want %q", result[0].GetName(), "crlf-cm-1")
+	}
+
+	if result[1].GetName() != "crlf-cm-2" {
+		t.Errorf("second object name: got %q, want %q", result[1].GetName(), "crlf-cm-2")
+	}
+}
+
+// TestEditManifests_SeparatorWithTrailingSpaceAndCommentPreservesAllObjects guards against
+// the same silent-data-loss bug as TestEditManifests_CRLFMultiDocPreservesAllObjects, but for
+// "---" separators followed by trailing whitespace or a "#" comment, both of which a literal
+// "\n---\n" byte split also failed to recognize.
+func TestEditManifests_SeparatorWithTrailingSpaceAndCommentPreservesAllObjects(t *testing.T) {
+	dir := t.TempDir()
+
+	editedContent := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dirty-cm-1\n---  \napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dirty-cm-2\n--- # trailing comment\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dirty-cm-3\n"
+	contentFile := writeEditorContent(t, dir, "dirty-separators.yaml", editedContent)
+	editor := fakeEditorScript(t, dir, fmt.Sprintf(`cp '%s' "$1"`, contentFile))
+
+	t.Setenv("EDITOR", editor)
+	t.Setenv("KUBE_EDITOR", "")
+
+	input := []unstructured.Unstructured{
+		{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "original-cm"},
+		}},
+	}
+
+	result, err := editManifests(input)
+	if err != nil {
+		t.Fatalf("editManifests: %v", err)
+	}
+
+	if len(result) != 3 {
+		t.Fatalf("expected 3 objects after dirty-separator edit, got %d", len(result))
+	}
+
+	for i, want := range []string{"dirty-cm-1", "dirty-cm-2", "dirty-cm-3"} {
+		if result[i].GetName() != want {
+			t.Errorf("object[%d].name = %q, want %q", i, result[i].GetName(), want)
+		}
 	}
 }

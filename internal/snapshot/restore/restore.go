@@ -70,6 +70,16 @@ const (
 
 	restoreEditRetryHint = "hint: retry with --edit to review and modify the resolved manifests before applying"
 
+	// editSessionManual and editSessionAutomatic label which edit path produced a
+	// restaged manifest set, for the object-count diff diagnostics logged around it.
+	editSessionManual    = "manual"
+	editSessionAutomatic = "automatic"
+
+	// maxLoggedEditedObjectIdentities bounds how many object identities the
+	// edit-diff diagnostics log by name; beyond this the log reports a count of
+	// the remaining, omitted identities instead of listing every one.
+	maxLoggedEditedObjectIdentities = 20
+
 	readyConditionType = "Ready"
 	conditionFalse     = "False"
 	pvcPhaseBound      = "Bound"
@@ -433,7 +443,7 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 	}
 
 	if cfg.Edit {
-		editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages)
+		editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages, editSessionManual)
 		if editErr != nil {
 			return fmt.Errorf("restore edit: %w", editErr)
 		}
@@ -481,7 +491,7 @@ func runWithManifestStages(ctx context.Context, cfg Config, targets []restoreTar
 			automaticEditAttempted = true
 			editorSessionRan = true
 
-			editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages)
+			editedStage, editErr := restageEditedManifests(ctx, cfg, stage, stages, editSessionAutomatic)
 			if editErr != nil {
 				return &automaticEditAbortedError{
 					invalidErr: preflightErr,
@@ -559,6 +569,7 @@ func restageEditedManifests(
 	cfg Config,
 	stage *manifestStage,
 	stages *manifestStages,
+	session string,
 ) (*manifestStage, error) {
 	if stage.bytesWritten > maxEditableManifestBytes {
 		return nil, fmt.Errorf(
@@ -568,12 +579,12 @@ func restageEditedManifests(
 		)
 	}
 
-	objs, err := stage.objects(ctx)
+	before, err := stage.objects(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load staged manifests for editing: %w", err)
 	}
 
-	objs, err = cfg.editManifests(ctx, objs)
+	after, err := cfg.editManifests(ctx, before)
 	if err != nil {
 		return nil, err
 	}
@@ -585,15 +596,67 @@ func restageEditedManifests(
 
 	stages.add(editedStage)
 
-	if err = editedStage.add(ctx, cfg, objs); err != nil {
+	if err = editedStage.add(ctx, cfg, after); err != nil {
 		return nil, fmt.Errorf("preflight edited restore manifests: %w", err)
 	}
+
+	cfg.logEditedObjectDiff(session, before, after)
 
 	if editedStage.objectCount == 0 {
 		return nil, fmt.Errorf("edited restore manifests are empty")
 	}
 
 	return editedStage, nil
+}
+
+// logEditedObjectDiff reports, at WARN for removals and INFO for additions, how
+// an edit session changed the set of restore object identities compared to what
+// was staged before it. Editing away objects is a documented, legitimate way to
+// resolve several restore failures (a cluster-scoped object, an already-Bound
+// PVC, a rejected dry-run object), so this never aborts the restore — it only
+// makes the resulting set change visible before the ordinary dry-run pass
+// evaluates it. Only apiVersion/kind/name are logged, never object bodies.
+func (cfg Config) logEditedObjectDiff(session string, before, after []unstructured.Unstructured) {
+	removed, added := diffObjectIdentities(before, after)
+
+	if len(removed) > 0 {
+		attrs := []any{
+			slog.String("edit_session", session),
+			slog.Int("objects_before", len(before)),
+			slog.Int("objects_after", len(after)),
+			slog.String("removed_objects", joinLoggedIdentities(removed)),
+		}
+		if omitted := len(removed) - maxLoggedEditedObjectIdentities; omitted > 0 {
+			attrs = append(attrs, slog.Int("removed_omitted", omitted))
+		}
+
+		cfg.Log.Warn("edit session removed objects from the restore set", attrs...)
+	}
+
+	if len(added) > 0 {
+		attrs := []any{
+			slog.String("edit_session", session),
+			slog.Int("objects_before", len(before)),
+			slog.Int("objects_after", len(after)),
+			slog.String("added_objects", joinLoggedIdentities(added)),
+		}
+		if omitted := len(added) - maxLoggedEditedObjectIdentities; omitted > 0 {
+			attrs = append(attrs, slog.Int("added_omitted", omitted))
+		}
+
+		cfg.Log.Info("edit session added objects to the restore set", attrs...)
+	}
+}
+
+// joinLoggedIdentities joins identities for a single log attribute, capping the
+// listed count at maxLoggedEditedObjectIdentities; the caller logs the omitted
+// remainder as a separate count attribute.
+func joinLoggedIdentities(identities []string) string {
+	if len(identities) > maxLoggedEditedObjectIdentities {
+		identities = identities[:maxLoggedEditedObjectIdentities]
+	}
+
+	return strings.Join(identities, "; ")
 }
 
 // applyDefaults fills zero-valued optional fields with their defaults.

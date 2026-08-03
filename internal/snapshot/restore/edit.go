@@ -17,14 +17,18 @@ limitations under the License.
 package restore
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
@@ -115,12 +119,32 @@ func marshalMultiDocYAML(objs []unstructured.Unstructured) ([]byte, error) {
 }
 
 // decodeMultiDocYAML parses a YAML multi-document stream into unstructured
-// objects. Empty documents are skipped.
+// objects. Document splitting is delegated to utilyaml.YAMLReader — the same
+// reader kubectl apply -f uses — instead of a literal "\n---\n" byte split, so
+// editor output that doesn't match that exact byte sequence (CRLF line
+// endings, a trailing space after "---", or a "#" comment on the separator
+// line) still splits correctly instead of being decoded as a single document.
+// The trade-off: a line starting with "---" at column zero that continues
+// with something other than whitespace or a "#" comment (e.g. "----" or
+// "---foo") is now a syntax error rather than silently staying part of the
+// document — matching kubectl apply -f's behavior. Empty documents, and
+// documents that decode to an empty map (e.g. a fully commented-out object),
+// are skipped without error so commenting out an object is a valid way to
+// remove it during editing.
 func decodeMultiDocYAML(data []byte) ([]unstructured.Unstructured, error) {
-	docs := splitYAMLDocs(data)
-	result := make([]unstructured.Unstructured, 0, len(docs))
+	reader := utilyaml.NewYAMLReader(bufio.NewReader(bytes.NewReader(data)))
+	result := make([]unstructured.Unstructured, 0, bytes.Count(data, []byte("\n---"))+1)
 
-	for i, doc := range docs {
+	for i := 0; ; i++ {
+		doc, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("split YAML document %d: %w", i, err)
+		}
+
 		if len(bytes.TrimSpace(doc)) == 0 {
 			continue
 		}
@@ -141,30 +165,60 @@ func decodeMultiDocYAML(data []byte) ([]unstructured.Unstructured, error) {
 	return result, nil
 }
 
-// splitYAMLDocs splits a YAML multi-document byte stream on "---" separator
-// lines. Each returned element contains the raw YAML bytes of one document.
-func splitYAMLDocs(data []byte) [][]byte {
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		data = append(data, '\n')
+// objectIdentity formats obj's apiVersion, kind, and name for diagnostic
+// messages, matching the format restore.go already uses for its cluster-scope
+// and duplicate-object errors so log output and error text stay consistent.
+func objectIdentity(obj unstructured.Unstructured) string {
+	return fmt.Sprintf("apiVersion=%q kind=%q name=%q", obj.GetAPIVersion(), obj.GetKind(), obj.GetName())
+}
+
+// diffObjectIdentities compares before and after as multisets of object
+// identities (apiVersion+kind+name) and returns the identities that were
+// removed and added between them. An identity repeated more times in one
+// slice than the other is reported once per unmatched occurrence, since a
+// restore set can legitimately contain duplicate identities. removed follows
+// the order identities first become unmatched while scanning before; added
+// follows the same while scanning after. Neither input slice is mutated.
+func diffObjectIdentities(before, after []unstructured.Unstructured) ([]string, []string) {
+	afterCounts := make(map[string]int, len(after))
+	for i := range after {
+		afterCounts[objectIdentity(after[i])]++
 	}
 
-	// Prepend a sentinel newline so a leading "---\n" at offset 0 is matched by "\n---\n".
-	normalized := append([]byte{'\n'}, data...)
+	beforeCounts := make(map[string]int, len(before))
+	for i := range before {
+		beforeCounts[objectIdentity(before[i])]++
+	}
 
-	parts := bytes.Split(normalized, []byte("\n---\n"))
+	removed := make([]string, 0, len(before))
 
-	docs := make([][]byte, 0, len(parts))
+	for i := range before {
+		identity := objectIdentity(before[i])
 
-	for i, p := range parts {
-		if i == 0 {
-			// Remove the sentinel newline prepended above.
-			p = bytes.TrimPrefix(p, []byte("\n"))
+		if afterCounts[identity] > 0 {
+			afterCounts[identity]--
+
+			continue
 		}
 
-		docs = append(docs, p)
+		removed = append(removed, identity)
 	}
 
-	return docs
+	added := make([]string, 0, len(after))
+
+	for i := range after {
+		identity := objectIdentity(after[i])
+
+		if beforeCounts[identity] > 0 {
+			beforeCounts[identity]--
+
+			continue
+		}
+
+		added = append(added, identity)
+	}
+
+	return removed, added
 }
 
 // runEditor opens path in the user's preferred editor and blocks until the
