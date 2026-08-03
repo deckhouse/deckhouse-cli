@@ -2,6 +2,7 @@ package transformers
 
 import (
 	"encoding/json"
+	"maps"
 
 	"github.com/go-openapi/spec"
 )
@@ -101,13 +102,9 @@ func mergeRequired(s *spec.Schema, parent *spec.Schema) []string {
 func mergeProperties(s *spec.Schema, parent *spec.Schema) map[string]spec.Schema {
 	res := make(map[string]spec.Schema)
 
-	for k, v := range parent.Properties {
-		res[k] = v
-	}
+	maps.Copy(res, parent.Properties)
 
-	for k, v := range s.Properties {
-		res[k] = v
-	}
+	maps.Copy(res, s.Properties)
 
 	return res
 }
@@ -117,13 +114,9 @@ func mergeProperties(s *spec.Schema, parent *spec.Schema) map[string]spec.Schema
 func mergePatternProperties(s *spec.Schema, parent *spec.Schema) map[string]spec.Schema {
 	res := make(map[string]spec.Schema)
 
-	for k, v := range parent.PatternProperties {
-		res[k] = v
-	}
+	maps.Copy(res, parent.PatternProperties)
 
-	for k, v := range s.PatternProperties {
-		res[k] = v
-	}
+	maps.Copy(res, s.PatternProperties)
 
 	return res
 }
@@ -133,13 +126,9 @@ func mergePatternProperties(s *spec.Schema, parent *spec.Schema) map[string]spec
 func mergeDefinitions(s *spec.Schema, parent *spec.Schema) spec.Definitions {
 	res := make(spec.Definitions)
 
-	for k, v := range parent.Definitions {
-		res[k] = v
-	}
+	maps.Copy(res, parent.Definitions)
 
-	for k, v := range s.Definitions {
-		res[k] = v
-	}
+	maps.Copy(res, s.Definitions)
 
 	return res
 }

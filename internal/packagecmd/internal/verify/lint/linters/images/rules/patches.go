@@ -100,6 +100,8 @@ func (r *PatchesRule) Check(_ context.Context) {
 			}
 		}
 	}
+
+	r.collector.Commit()
 }
 
 // collectPatchFiles returns all .patch files below root in stable order.

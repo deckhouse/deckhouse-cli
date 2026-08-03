@@ -36,6 +36,8 @@ func (r *FieldsRule) Check(_ context.Context) {
 		r.checkField(collector, "link", component.Link)
 		r.checkField(collector, "license", component.License)
 	}
+
+	r.collector.Commit()
 }
 
 // checkField emits an error when value is empty after trimming whitespace.

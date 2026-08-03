@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/builder"
-	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/utils/logs"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/logs"
 )
 
 var (
@@ -17,6 +17,12 @@ var (
 	repositoryUser string
 	// repositoryToken stores the registry token used for authentication.
 	repositoryToken string
+	// finalRepository stores the final registry repository for the published artifact.
+	finalRepository string
+	// finalRepositoryUser stores the final registry username used for authentication.
+	finalRepositoryUser string
+	// finalRepositoryToken stores the final registry token used for authentication.
+	finalRepositoryToken string
 	// packageVersion stores the semantic package version to build and publish.
 	packageVersion string
 	// force controls whether an existing version can be overwritten.
@@ -46,9 +52,12 @@ This command:
   • Tags images with semantic version
 
 Environment Variables:
-  PACKAGE_BUILD_REPOSITORY          Registry URL for build command
-  PACKAGE_BUILD_REPOSITORY_USER     Registry username for authentication
-  PACKAGE_BUILD_REPOSITORY_TOKEN    Registry token for authentication
+  PACKAGE_BUILD_REPOSITORY                Registry URL for build command
+  PACKAGE_BUILD_REPOSITORY_USER           Registry username for authentication
+  PACKAGE_BUILD_REPOSITORY_TOKEN          Registry token for authentication
+  PACKAGE_BUILD_FINAL_REPOSITORY          Final registry URL for the published artifact
+  PACKAGE_BUILD_FINAL_REPOSITORY_USER     Final registry username for authentication
+  PACKAGE_BUILD_FINAL_REPOSITORY_TOKEN    Final registry token for authentication
 `,
 		Example: `
   # Build with explicit registry
@@ -74,6 +83,9 @@ Environment Variables:
 	cmd.Flags().StringVarP(&repository, "repo", "r", "", "Repository (env: PACKAGE_BUILD_REPOSITORY)")
 	cmd.Flags().StringVarP(&repositoryUser, "user", "u", "", "Registry user (env: PACKAGE_BUILD_REPOSITORY_USER)")
 	cmd.Flags().StringVarP(&repositoryToken, "token", "t", "", "Registry token (env: PACKAGE_BUILD_REPOSITORY_TOKEN)")
+	cmd.Flags().StringVar(&finalRepository, "final-repo", "", "Final repository (env: PACKAGE_BUILD_FINAL_REPOSITORY)")
+	cmd.Flags().StringVar(&finalRepositoryUser, "final-user", "", "Final registry user (env: PACKAGE_BUILD_FINAL_REPOSITORY_USER)")
+	cmd.Flags().StringVar(&finalRepositoryToken, "final-token", "", "Final registry token (env: PACKAGE_BUILD_FINAL_REPOSITORY_TOKEN)")
 	cmd.Flags().StringVarP(&packageVersion, "version", "v", "", "Package version")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "force update version in registry")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
@@ -106,6 +118,18 @@ func build(cmd *cobra.Command, _ []string) error {
 		repositoryToken = os.Getenv("PACKAGE_BUILD_REPOSITORY_TOKEN")
 	}
 
+	if finalRepository == "" {
+		finalRepository = os.Getenv("PACKAGE_BUILD_FINAL_REPOSITORY")
+	}
+
+	if finalRepositoryUser == "" {
+		finalRepositoryUser = os.Getenv("PACKAGE_BUILD_FINAL_REPOSITORY_USER")
+	}
+
+	if finalRepositoryToken == "" {
+		finalRepositoryToken = os.Getenv("PACKAGE_BUILD_FINAL_REPOSITORY_TOKEN")
+	}
+
 	if signCert == "" {
 		signCert = os.Getenv("PACKAGE_BUILD_SIGN_CERT")
 	}
@@ -127,10 +151,15 @@ func build(cmd *cobra.Command, _ []string) error {
 	opts := builder.Options{
 		Force: force,
 		Debug: debug,
-		Credentials: builder.Credentials{
+		RepositoryCredentials: builder.Credentials{
 			Repository: repository,
 			Username:   repositoryUser,
 			Token:      repositoryToken,
+		},
+		FinalRepositoryCredentials: builder.Credentials{
+			Repository: finalRepository,
+			Username:   finalRepositoryUser,
+			Token:      finalRepositoryToken,
 		},
 		Sign: builder.SignOptions{
 			Enabled: sign,

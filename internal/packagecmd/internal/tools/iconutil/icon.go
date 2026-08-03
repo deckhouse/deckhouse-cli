@@ -57,7 +57,7 @@ var formats = []format{
 // ErrNoIcon is returned by Find when no icon.* file is present at packageDir.
 var ErrNoIcon = errors.New("icon not found")
 
-// Find discovers any icon.* file at packageDir, reads its size, and tries to
+// Find discovers any icon.* file at packageDir/docs, reads its size, and tries to
 // decode its dimensions when the extension is supported.
 //
 // Returned states:
@@ -67,7 +67,7 @@ var ErrNoIcon = errors.New("icon not found")
 //   - (Icon{Path,Ext,Size,Shape}, nil) full success
 //   - (partial Icon, os-level error)   filesystem ops failed
 func Find(packageDir string) (Icon, error) {
-	matches, err := filepath.Glob(filepath.Join(packageDir, "icon.*"))
+	matches, err := filepath.Glob(filepath.Join(packageDir, "docs", "icon.*"))
 	if err != nil {
 		return Icon{}, err
 	}

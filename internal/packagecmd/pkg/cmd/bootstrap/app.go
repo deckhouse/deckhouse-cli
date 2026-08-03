@@ -6,12 +6,13 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/packages"
 )
 
-// NewCmdBootstrapApplication creates a command that generates an application
+// NewCmdBootstrapApp creates a command that generates an application
 // package with application metadata, hooks, and optional Werf or extended files.
-func NewCmdBootstrapApplication() *cobra.Command {
+func NewCmdBootstrapApp() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "application <name>",
-		Short: "Bootstrap a new application package",
+		Use:     "app <name>",
+		Aliases: []string{"application"},
+		Short:   "Bootstrap a new application package",
 		Long: `Bootstrap a new application package from templates.
 
   • Creates a package with type Application in package.yaml
@@ -19,9 +20,9 @@ func NewCmdBootstrapApplication() *cobra.Command {
   • Initializes a git repository with an initial commit
 `,
 		Example: `
-  package bootstrap application my-app
-  package bootstrap application my-app --output /path/to/my-app
-  package bootstrap application my-app --hooks --extended --werf
+  package bootstrap app my-app
+  package bootstrap app my-app --output /path/to/my-app
+  package bootstrap app my-app --hooks --extended --werf
 `,
 		Args: cobra.ExactArgs(1),
 		RunE: runBootstrap(packages.TypeApplication),

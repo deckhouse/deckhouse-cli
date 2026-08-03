@@ -69,6 +69,8 @@ func (r *CyrillicInEnglishRule) Check(_ context.Context) {
 
 		r.checkFile(filePath)
 	}
+
+	r.collector.Commit()
 }
 
 // checkFile reports cyrillic text found in one English documentation file.

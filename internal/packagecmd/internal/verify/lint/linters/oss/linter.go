@@ -21,6 +21,10 @@ const (
 	ossFile = "oss.yaml"
 )
 
+// Scopes lists the verification targets this linter is processed in. oss.yaml is packaged
+// into the bundle image but not into the release image, which carries release metadata only.
+var Scopes = lint.EveryType(lint.ScopeStatic, lint.ScopeBundle)
+
 // Config holds the path and settings required to construct a Linter.
 type Config struct {
 	Path     string
@@ -85,15 +89,21 @@ func (l *Linter) loadComponents() ([]model.Component, bool) {
 		return nil, false
 	}
 
+	parse := l.collector.With(
+		diag.RuleID(rules.ParseRuleID),
+		diag.MaxLevel(l.settings.Parse.Impact))
+
 	var components []model.Component
 	if err := yaml.Unmarshal(raw, &components); err != nil {
-		l.collector.With(diag.MaxLevel(l.settings.Parse.Impact)).Error("failed to parse %s: %v", ossFile, err)
+		parse.Error("failed to parse %s: %v", ossFile, err)
 		return nil, false
 	}
 
 	if components == nil {
 		components = []model.Component{}
 	}
+
+	parse.Commit()
 
 	return components, true
 }

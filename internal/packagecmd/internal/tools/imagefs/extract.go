@@ -9,22 +9,27 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	crv1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/tools/registry"
 )
+
+// Option customizes how an image is pulled. It aliases registry.Option so that pulls
+// and manifest checks are configured with the same registry.WithBasicAuth.
+type Option = registry.Option
 
 // ExtractToTemp downloads srcRef, extracts its filesystem to a temp directory, and returns that path.
 // The caller is responsible for removing the returned directory.
-func ExtractToTemp(ctx context.Context, srcRef string) (string, error) {
+func ExtractToTemp(ctx context.Context, srcRef string, opts ...Option) (string, error) {
 	tmp, err := os.MkdirTemp("", "imagefs-*")
 	if err != nil {
 		return "", fmt.Errorf("create temp directory: %w", err)
 	}
 
-	if err = extractReference(ctx, srcRef, tmp); err != nil {
+	if err = extractReference(ctx, srcRef, tmp, registry.Auth(opts...)); err != nil {
 		if removeErr := os.RemoveAll(tmp); removeErr != nil {
 			return "", fmt.Errorf("%w; remove temp directory: %v", err, removeErr)
 		}
@@ -35,14 +40,14 @@ func ExtractToTemp(ctx context.Context, srcRef string) (string, error) {
 	return tmp, nil
 }
 
-// extractReference resolves srcRef, downloads the image, and extracts it into output.
-func extractReference(ctx context.Context, srcRef, output string) error {
+// extractReference resolves srcRef, downloads the image with auth, and extracts it into output.
+func extractReference(ctx context.Context, srcRef, output string, auth remote.Option) error {
 	ref, err := name.ParseReference(srcRef, name.Insecure)
 	if err != nil {
 		return fmt.Errorf("parse reference: %w", err)
 	}
 
-	img, err := remote.Image(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
+	img, err := remote.Image(ref, auth, remote.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("get image: %w", err)
 	}
