@@ -1,0 +1,34 @@
+name: trdl-build-check
+
+on:
+  pull_request:
+    paths:
+      - trdl.yaml
+      - go.mod
+      - go.sum
+      - Taskfile.yml
+      - .github/workflows/trdl-build-check.yml
+      - .github/scripts/trdl-build-check.sh
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Reproduce trdl release build
+    # Secrets are not available to PRs from forks.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, regular]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reproduce trdl build
+        env:
+          SOURCE_REPO_SSH_KEY: ${{ secrets.SOURCE_REPO_SSH_KEY }}
+          DECKHOUSE_PRIVATE_REPO: ${{ secrets.DECKHOUSE_PRIVATE_REPO }}
+        run: .github/scripts/trdl-build-check.sh
