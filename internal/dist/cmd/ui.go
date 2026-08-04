@@ -27,3 +27,14 @@ var (
 	verCur = color.New(color.FgCyan, color.Bold)
 	verOld = color.New(color.Faint)
 )
+
+// Summary accents, following the semantic palette convention of
+// internal/mirror/summaryui. Apply colours AFTER width padding: the escape
+// codes are zero-width on screen but count toward fmt's field widths.
+var (
+	sumTitle = color.New(color.FgCyan, color.Bold).SprintFunc() // section headers
+	sumLabel = color.New(color.FgCyan).SprintFunc()             // field labels (scan anchors)
+	sumGood  = color.New(color.FgGreen).SprintFunc()            // up to date
+	sumWarn  = color.New(color.FgYellow).SprintFunc()           // attention (outdated, degraded)
+	sumDim   = color.New(color.Faint).SprintFunc()              // secondary text and hints
+)
