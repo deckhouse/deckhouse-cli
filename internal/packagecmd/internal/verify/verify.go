@@ -21,6 +21,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/docs"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/icon"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/images"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/openapi"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/oss"
 	pkglint "github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/package"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/templates"
@@ -341,13 +342,19 @@ func buildLinters(ctx context.Context, root *settings.Root, path string, scope l
 	target := lint.Target{Type: lint.PackageType(def.Type), Scope: scope}
 	collector = collector.With(diag.PackageID(def.Name))
 
-	linters := make([]linter, 0, 6)
+	linters := make([]linter, 0, 7)
 
 	if pkglint.Scopes.Contains(target) {
 		linters = append(linters, pkglint.NewLinter(pkglint.Config{
 			Definition: def,
 			Path:       path,
 			Target:     target,
+		}, collector))
+	}
+
+	if openapi.Scopes.Contains(target) {
+		linters = append(linters, openapi.NewLinter(openapi.Config{
+			Path: path,
 		}, collector))
 	}
 
