@@ -1,0 +1,813 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package restorecmd
+
+import (
+	"bytes"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/spf13/pflag"
+	"k8s.io/client-go/rest"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/restore"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+)
+
+const commandSelectedHost = "https://selected.example.test"
+
+func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
+	helpCmd := NewCommand(slog.Default())
+
+	var help bytes.Buffer
+
+	helpCmd.SetOut(&help)
+	helpCmd.SetErr(&help)
+	helpCmd.SetArgs([]string{"--help"})
+	if err := helpCmd.Execute(); err != nil {
+		t.Fatalf("execute help: %v", err)
+	}
+
+	for _, flag := range []string{"-k, --kubeconfig", "--context"} {
+		if !strings.Contains(help.String(), flag) {
+			t.Fatalf("help does not contain %q:\n%s", flag, help.String())
+		}
+	}
+
+	kubeconfigPath := writeCommandKubeconfig(t)
+	stopAfterConfig := errors.New("stop after REST config")
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		commandRESTConfigLoader = originalLoader
+	})
+
+	var gotHost string
+
+	commandRESTConfigLoader = func(flagSets ...*pflag.FlagSet) (*rest.Config, error) {
+		config, err := transport.NewRESTConfig(flagSets...)
+		if err != nil {
+			return nil, err
+		}
+
+		gotHost = config.Host
+
+		return nil, stopAfterConfig
+	}
+
+	cmd := NewCommand(slog.Default())
+	cmd.SetArgs([]string{
+		"snapshot-a",
+		"--namespace", "snapshot-ns",
+		"--kubeconfig", kubeconfigPath,
+		"--context", "selected",
+	})
+
+	err := cmd.Execute()
+	if !errors.Is(err, stopAfterConfig) {
+		t.Fatalf("execute error = %v, want stop hook", err)
+	}
+
+	if gotHost != commandSelectedHost {
+		t.Fatalf("REST config host = %q, want %q", gotHost, commandSelectedHost)
+	}
+
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("read namespace flag: %v", err)
+	}
+
+	if namespace != "snapshot-ns" {
+		t.Fatalf("snapshot namespace = %q, want %q", namespace, "snapshot-ns")
+	}
+}
+
+func writeCommandKubeconfig(t *testing.T) string {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://default.example.test
+- name: selected
+  cluster:
+    server: ` + commandSelectedHost + `
+contexts:
+- name: default
+  context:
+    cluster: default
+- name: selected
+  context:
+    cluster: selected
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	return kubeconfigPath
+}
+
+func TestNewCommand_Defaults(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	wantUse := cmdUse + " [flags] <snapshot>"
+	if cmd.Use != wantUse {
+		t.Fatalf("unexpected Use: got %q, want %q", cmd.Use, wantUse)
+	}
+
+	if !cmd.SilenceUsage {
+		t.Fatal("SilenceUsage should be true")
+	}
+
+	if !cmd.SilenceErrors {
+		t.Fatal("SilenceErrors should be true")
+	}
+
+	wait, err := cmd.Flags().GetBool(flagWait)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagWait, err)
+	}
+
+	if wait {
+		t.Fatalf("default --%s: got true, want false", flagWait)
+	}
+
+	timeout, err := cmd.Flags().GetDuration(flagTimeout)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagTimeout, err)
+	}
+
+	if timeout != 10*time.Minute {
+		t.Fatalf("default --%s: got %s, want 10m", flagTimeout, timeout)
+	}
+
+	noAutoEdit, err := cmd.Flags().GetBool(flagNoAutoEdit)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNoAutoEdit, err)
+	}
+
+	if noAutoEdit {
+		t.Fatalf("default --%s: got true, want false", flagNoAutoEdit)
+	}
+}
+
+func TestNewCommand_ExplainsAutomaticEditPolicy(t *testing.T) {
+	cmd := NewCommand(slog.Default())
+
+	for _, text := range []string{
+		"one editor session",
+		"Kubernetes Invalid (HTTP 422)",
+		"schema",
+		"webhook",
+		"immutable-field",
+		"Both stdin and stdout must be terminals",
+		"--no-auto-edit",
+		"Conflict (HTTP 409)",
+		"AlreadyExists",
+		"existing Bound PVC never trigger",
+		"does not imply that the object already exists",
+		"retries",
+		"repeated Invalid is returned without reopening",
+		"Explicit --edit",
+		"Explicit\n--dry-run never opens the automatic editor",
+		"non-interactive use",
+		"$KUBE_EDITOR, then $EDITOR",
+		"falling back to vi",
+		"unchanged file, or empty file",
+	} {
+		if !strings.Contains(cmd.Long, text) {
+			t.Errorf("long help does not contain automatic-edit policy %q", text)
+		}
+	}
+
+	noAutoEditFlag := cmd.Flags().Lookup(flagNoAutoEdit)
+	if noAutoEditFlag == nil {
+		t.Fatal("--no-auto-edit flag is missing")
+	}
+
+	for _, text := range []string{"one automatic editor session", "Invalid (HTTP 422)"} {
+		if !strings.Contains(noAutoEditFlag.Usage, text) {
+			t.Errorf("--no-auto-edit usage does not contain %q: %q", text, noAutoEditFlag.Usage)
+		}
+	}
+}
+
+func TestAutomaticEditEnabledRequiresBothTerminals(t *testing.T) {
+	stdin, err := os.Create(filepath.Join(t.TempDir(), "stdin"))
+	if err != nil {
+		t.Fatalf("open stdin fixture: %v", err)
+	}
+	defer func() {
+		if closeErr := stdin.Close(); closeErr != nil {
+			t.Errorf("close stdin fixture: %v", closeErr)
+		}
+	}()
+
+	stdout, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+	if err != nil {
+		t.Fatalf("open stdout fixture: %v", err)
+	}
+	defer func() {
+		if closeErr := stdout.Close(); closeErr != nil {
+			t.Errorf("close stdout fixture: %v", closeErr)
+		}
+	}()
+
+	tests := []struct {
+		name        string
+		disabled    bool
+		stdinTTY    bool
+		stdoutTTY   bool
+		wantEnabled bool
+	}{
+		{
+			name:        "both terminals",
+			stdinTTY:    true,
+			stdoutTTY:   true,
+			wantEnabled: true,
+		},
+		{
+			name:      "stdin is not a terminal",
+			stdoutTTY: true,
+		},
+		{
+			name:     "stdout is not a terminal",
+			stdinTTY: true,
+		},
+		{
+			name:      "opt out",
+			disabled:  true,
+			stdinTTY:  true,
+			stdoutTTY: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := automaticEditEnabled(
+				tc.disabled,
+				stdin,
+				stdout,
+				func(fd int) bool {
+					switch fd {
+					case int(stdin.Fd()):
+						return tc.stdinTTY
+					case int(stdout.Fd()):
+						return tc.stdoutTTY
+					default:
+						return false
+					}
+				},
+			)
+			if got != tc.wantEnabled {
+				t.Errorf("automaticEditEnabled() = %t, want %t", got, tc.wantEnabled)
+			}
+		})
+	}
+}
+
+func TestNewCommand_ExplainsPVCSafetyAndWaitSemantics(t *testing.T) {
+	cmd := NewCommand(slog.Default())
+
+	for _, text := range []string{
+		"same-named claim is already Bound",
+		"refuses to reuse it",
+		"never deletes or replaces the claim",
+		"selected node, live Pod consumer, active provisioning event",
+		"provisioning failure is returned with its cause",
+		"PVC UID",
+		"bound PersistentVolume identity",
+	} {
+		if !strings.Contains(cmd.Long, text) {
+			t.Errorf("long help does not contain PVC safety text %q", text)
+		}
+	}
+
+	waitFlag := cmd.Flags().Lookup(flagWait)
+	if waitFlag == nil {
+		t.Fatal("--wait flag is missing")
+	}
+
+	for _, text := range []string{"manifest PVCs", "dormant WaitForFirstConsumer", "provisioning signal"} {
+		if !strings.Contains(waitFlag.Usage, text) {
+			t.Errorf("--wait usage does not contain %q: %q", text, waitFlag.Usage)
+		}
+	}
+
+	for _, forbiddenFlag := range []string{
+		"replace-existing-pvc",
+		"reuse-existing-pvc",
+		"delete-existing-pvc",
+	} {
+		if flag := cmd.Flags().Lookup(forbiddenFlag); flag != nil {
+			t.Errorf("unsafe bypass flag --%s is exposed", forbiddenFlag)
+		}
+	}
+}
+
+func TestBoundedControlPlaneConfig(t *testing.T) {
+	original := &rest.Config{
+		Host:    "https://cluster.example.test",
+		Timeout: 0,
+	}
+
+	bounded := boundedControlPlaneConfig(original)
+
+	if bounded == original {
+		t.Fatal("boundedControlPlaneConfig returned the input pointer")
+	}
+
+	if bounded.Host != original.Host {
+		t.Fatalf("bounded host = %q, want %q", bounded.Host, original.Host)
+	}
+
+	if bounded.Timeout != restore.DefaultControlPlaneTimeout {
+		t.Fatalf(
+			"bounded timeout = %s, want %s",
+			bounded.Timeout,
+			restore.DefaultControlPlaneTimeout,
+		)
+	}
+
+	if original.Timeout != 0 {
+		t.Fatalf("original timeout = %s, want zero", original.Timeout)
+	}
+
+	transport, ok := bounded.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatalf("bounded transport has type %T, want *http.Transport", transport)
+	}
+
+	if transport.DialContext == nil {
+		t.Fatal("bounded transport has no DialContext")
+	}
+
+	if transport.TLSHandshakeTimeout != restore.DefaultControlPlaneTimeout {
+		t.Errorf(
+			"TLS handshake timeout = %s, want %s",
+			transport.TLSHandshakeTimeout,
+			restore.DefaultControlPlaneTimeout,
+		)
+	}
+
+	if transport.ResponseHeaderTimeout != restore.DefaultControlPlaneTimeout {
+		t.Errorf(
+			"response header timeout = %s, want %s",
+			transport.ResponseHeaderTimeout,
+			restore.DefaultControlPlaneTimeout,
+		)
+	}
+}
+
+func TestNewCommandRESTConfig_ParsesOnceAndBoundsSharedConfig(t *testing.T) {
+	t.Helper()
+
+	calls := 0
+	source := &rest.Config{Host: "https://cluster.example.test"}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		calls++
+
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("REST config parse calls = %d, want 1", calls)
+	}
+
+	if got.Timeout != restore.DefaultControlPlaneTimeout {
+		t.Fatalf("shared timeout = %s, want %s", got.Timeout, restore.DefaultControlPlaneTimeout)
+	}
+
+	if source.Timeout != 0 {
+		t.Fatalf("source timeout = %s, want zero after bounded copy", source.Timeout)
+	}
+}
+
+func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	ns, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNamespace, err)
+	}
+
+	if ns != "" {
+		t.Fatalf("default namespace: got %q, want empty string (namespace is required)", ns)
+	}
+}
+
+func TestNewCommand_DryRunFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	dryRun, err := cmd.Flags().GetBool(flagDryRun)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagDryRun, err)
+	}
+
+	if dryRun {
+		t.Fatalf("default --%s: got true, want false", flagDryRun)
+	}
+}
+
+func TestRun_RequiresNamespace(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error when namespace is empty, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNamespace) {
+		t.Fatalf("expected error to mention %q, got: %v", flagNamespace, err)
+	}
+}
+
+func TestNewCommand_RequiresExactlyOneArg(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Fatal("expected error with zero positional args, got nil")
+	}
+
+	if err := cmd.Args(cmd, []string{"my-snap"}); err != nil {
+		t.Fatalf("expected no error with one positional arg, got: %v", err)
+	}
+
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
+		t.Fatal("expected error with two positional args, got nil")
+	}
+}
+
+func TestNewCommand_NodeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	node, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNode, err)
+	}
+
+	if node != "" {
+		t.Fatalf("default --node: got %q, want empty string (full-tree restore by default)", node)
+	}
+
+	apiVersion, err := cmd.Flags().GetString(flagNodeAPIVersion)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNodeAPIVersion, err)
+	}
+
+	if apiVersion != "" {
+		t.Fatalf("default --%s: got %q, want empty string", flagNodeAPIVersion, apiVersion)
+	}
+}
+
+func TestNewCommand_NodeHelpExplainsMissingChildProof(t *testing.T) {
+	t.Parallel()
+
+	longHelp := NewCommand(slog.Default()).Long
+	for _, text := range []string{
+		"identity remains restorable",
+		"belongs to the tree but is",
+		"Original-source selection fails closed",
+		"--node-api-version",
+	} {
+		if !strings.Contains(longHelp, text) {
+			t.Errorf("long help does not contain %q", text)
+		}
+	}
+}
+
+func TestParseNodeFlag(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		input    string
+		wantKind string
+		wantName string
+		wantErr  bool
+	}{
+		// empty → full tree
+		{"", "", "", false},
+		// valid simple kind/name
+		{"Snapshot/my-snap", "Snapshot", "my-snap", false},
+		// domain kind with UUID-style name
+		{"DemoVirtualDiskSnapshot/nss-child-abc123", "DemoVirtualDiskSnapshot", "nss-child-abc123", false},
+		// VolumeSnapshot leaf
+		{"VolumeSnapshot/demo-pvc", "VolumeSnapshot", "demo-pvc", false},
+		// no slash → error
+		{"NoSlashHere", "", "", true},
+		// leading slash (empty kind) → error
+		{"/name", "", "", true},
+		// trailing slash (empty name) → error
+		{"Kind/", "", "", true},
+		// two slashes → error
+		{"Kind/a/b", "", "", true},
+		// just a slash → error (empty kind)
+		{"/", "", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			gotKind, gotName, err := parseNodeFlag(tc.input)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("input %q: expected error, got nil (kind=%q name=%q)", tc.input, gotKind, gotName)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("input %q: unexpected error: %v", tc.input, err)
+			}
+
+			if gotKind != tc.wantKind {
+				t.Fatalf("input %q: got kind=%q, want %q", tc.input, gotKind, tc.wantKind)
+			}
+
+			if gotName != tc.wantName {
+				t.Fatalf("input %q: got name=%q, want %q", tc.input, gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	err := Run(slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error for invalid --node format, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNode) {
+		t.Fatalf("error should mention %q, got: %v", flagNode, err)
+	}
+}
+
+func TestRun_NodeAPIVersionFlagValidation(t *testing.T) {
+	tests := []struct {
+		name              string
+		node              string
+		apiVersion        string
+		wantValidationErr string
+	}{
+		{
+			name:              "api version without node",
+			apiVersion:        "apps/v1",
+			wantValidationErr: "--node-api-version requires --node",
+		},
+		{
+			name:              "empty named group",
+			node:              "Deployment/demo",
+			apiVersion:        "/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "missing named version",
+			node:              "Deployment/demo",
+			apiVersion:        "apps/",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "too many separators",
+			node:              "Deployment/demo",
+			apiVersion:        "apps/example/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:              "invalid group",
+			node:              "Deployment/demo",
+			apiVersion:        "Apps/v1",
+			wantValidationErr: "invalid --node-api-version",
+		},
+		{
+			name:       "core version",
+			node:       "PersistentVolumeClaim/demo",
+			apiVersion: "v1",
+		},
+		{
+			name:       "named group version",
+			node:       "Deployment/demo",
+			apiVersion: "apps/v1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := NewCommand(slog.Default())
+
+			if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+				t.Fatalf("setting namespace flag: %v", err)
+			}
+
+			if tc.node != "" {
+				if err := cmd.Flags().Set(flagNode, tc.node); err != nil {
+					t.Fatalf("setting node flag: %v", err)
+				}
+			}
+
+			if err := cmd.Flags().Set(flagNodeAPIVersion, tc.apiVersion); err != nil {
+				t.Fatalf("setting node API version flag: %v", err)
+			}
+
+			err := Run(slog.Default(), cmd, []string{"my-snap"})
+			if err == nil {
+				t.Fatal("Run unexpectedly succeeded without a configured cluster")
+			}
+
+			if tc.wantValidationErr != "" {
+				if !strings.Contains(err.Error(), tc.wantValidationErr) {
+					t.Fatalf("Run error = %q, want validation text %q", err, tc.wantValidationErr)
+				}
+
+				return
+			}
+
+			if strings.Contains(err.Error(), "--"+flagNodeAPIVersion) {
+				t.Fatalf("valid API version unexpectedly rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewCommand_ScopeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	scope, err := cmd.Flags().GetString(flagScope)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagScope, err)
+	}
+
+	if scope != "subtree" {
+		t.Fatalf("default --%s: got %q, want %q", flagScope, scope, "subtree")
+	}
+}
+
+func TestNewCommand_ObjectFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	object, err := cmd.Flags().GetString(flagObject)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagObject, err)
+	}
+
+	if object != "" {
+		t.Fatalf("default --%s: got %q, want empty string (no object filter)", flagObject, object)
+	}
+}
+
+// TestRun_ScopeObjectFlags_ValidAndInvalidCombinations exercises the client-side validation
+// of --scope/--object before Run reaches the network: an unknown --scope value, --object
+// used without --scope node, and every valid combination (default, --scope node alone,
+// --scope node with --object).
+func TestRun_ScopeObjectFlags_ValidAndInvalidCombinations(t *testing.T) {
+	t.Helper()
+
+	tests := []struct {
+		name        string
+		scope       string
+		object      string
+		wantErr     bool
+		wantErrText string
+	}{
+		{
+			name:  "neither flag set: default scope=subtree, no object filter",
+			scope: "", object: "",
+		},
+		{
+			name:  "scope=node, no object filter (whole node, no children)",
+			scope: "node", object: "",
+		},
+		{
+			name:  "scope=node with object filter",
+			scope: "node", object: "PersistentVolumeClaim/bk-disk-a",
+		},
+		{
+			name:        "unknown scope value rejected client-side",
+			scope:       "bogus",
+			wantErr:     true,
+			wantErrText: flagScope,
+		},
+		{
+			name:        "object without scope=node rejected client-side",
+			scope:       "subtree",
+			object:      "PersistentVolumeClaim/bk-disk-a",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+		{
+			name:        "object with default (unset) scope rejected client-side",
+			object:      "PersistentVolumeClaim/bk-disk-a",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+		{
+			name:        "malformed object flag rejected client-side",
+			scope:       "node",
+			object:      "NoSlashHere",
+			wantErr:     true,
+			wantErrText: flagObject,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+
+			cmd := NewCommand(slog.Default())
+
+			if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+				t.Fatalf("setting namespace flag: %v", err)
+			}
+
+			if tc.scope != "" {
+				if err := cmd.Flags().Set(flagScope, tc.scope); err != nil {
+					t.Fatalf("setting scope flag: %v", err)
+				}
+			}
+
+			if tc.object != "" {
+				if err := cmd.Flags().Set(flagObject, tc.object); err != nil {
+					t.Fatalf("setting object flag: %v", err)
+				}
+			}
+
+			// Run always fails past validation in this unit test (no live cluster to build
+			// clients against); assert on the validation-stage error only by requiring the
+			// invalid cases to fail with a specific message and the valid cases to get past
+			// flag validation (i.e. not fail with a --scope/--object-shaped message).
+			err := Run(slog.Default(), cmd, []string{"my-snap"})
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected a validation error, got nil")
+				}
+
+				if !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("error should mention %q, got: %v", tc.wantErrText, err)
+				}
+
+				return
+			}
+
+			if err != nil && (strings.Contains(err.Error(), "invalid --"+flagScope) || strings.Contains(err.Error(), "--"+flagObject+" requires")) {
+				t.Fatalf("valid combination unexpectedly rejected by flag validation: %v", err)
+			}
+		})
+	}
+}

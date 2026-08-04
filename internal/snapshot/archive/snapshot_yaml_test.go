@@ -1,0 +1,1253 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package archive_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	sigsyaml "sigs.k8s.io/yaml"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+)
+
+func TestWriteSnapshotYAMLContextCancellationBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		ctx       func(error) context.Context
+		wantState archive.PublicationState
+		wantCause func(error) bool
+		wantOld   bool
+	}{
+		{
+			name: "BeforePublication",
+			ctx: func(error) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+
+				return ctx
+			},
+			wantState: archive.PublicationUnpublished,
+			wantCause: func(err error) bool {
+				return errors.Is(err, context.Canceled)
+			},
+			wantOld: true,
+		},
+		{
+			name: "AfterPublication",
+			ctx: func(sentinel error) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+
+				return archive.WithDirectorySyncHook(ctx, func(string, func() error) error {
+					cancel()
+
+					return sentinel
+				})
+			},
+			wantState: archive.PublicationPublished,
+			wantCause: func(err error) bool {
+				return !errors.Is(err, context.Canceled)
+			},
+			wantOld: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			path := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			old := []byte("old snapshot metadata")
+			sentinel := errors.New("snapshot parent sync sentinel")
+
+			if err := os.WriteFile(path, old, 0o644); err != nil {
+				t.Fatalf("write old snapshot.yaml: %v", err)
+			}
+
+			err := archive.WriteSnapshotYAMLContext(tt.ctx(sentinel), nodeDir, archive.SnapshotYAML{
+				APIVersion: "storage.example.io/v1",
+				Kind:       "Snapshot",
+				Name:       "new",
+			})
+			if err == nil {
+				t.Fatal("WriteSnapshotYAMLContext error = nil")
+			}
+
+			if tt.name == "AfterPublication" && !errors.Is(err, sentinel) {
+				t.Fatalf("WriteSnapshotYAMLContext error = %v, want parent sync sentinel", err)
+			}
+
+			if !tt.wantCause(err) {
+				t.Fatalf("WriteSnapshotYAMLContext error has wrong cause: %v", err)
+			}
+
+			if got := archive.CommitPublicationState(err); got != tt.wantState {
+				t.Fatalf("publication state = %v, want %v", got, tt.wantState)
+			}
+
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("read snapshot.yaml: %v", readErr)
+			}
+
+			if tt.wantOld && string(got) != string(old) {
+				t.Fatalf("snapshot.yaml = %q, want old bytes %q", got, old)
+			}
+
+			if !tt.wantOld && string(got) == string(old) {
+				t.Fatal("published snapshot.yaml still contains old bytes")
+			}
+
+			if _, statErr := os.Stat(path + ".tmp"); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("temporary snapshot.yaml must be absent, Stat error: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestReadSnapshotYAMLRejectsSymlinkBeforeReadingTarget(t *testing.T) {
+	nodeDir := t.TempDir()
+	outsidePath := filepath.Join(t.TempDir(), "outside.yaml")
+	if err := os.WriteFile(outsidePath, []byte("apiVersion: escaped/v1\nkind: Escaped\nname: escaped\n"), 0o600); err != nil {
+		t.Fatalf("write outside snapshot: %v", err)
+	}
+
+	snapshotPath := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+	if err := os.Symlink(outsidePath, snapshotPath); err != nil {
+		t.Fatalf("symlink snapshot.yaml: %v", err)
+	}
+
+	_, err := archive.ReadSnapshotYAML(nodeDir)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("ReadSnapshotYAML error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if !strings.Contains(err.Error(), snapshotPath) {
+		t.Errorf("error %q does not contain offending path %q", err, snapshotPath)
+	}
+}
+
+func TestReadSnapshotYAMLEnvelopeCompatibility(t *testing.T) {
+	tests := []struct {
+		name                 string
+		write                func(t *testing.T, nodeDir string)
+		wantVersion          int
+		wantMetadataChecksum bool
+		wantErr              error
+		allowLegacy          bool
+	}{
+		{
+			name: "current version round trip",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				err := archive.WriteSnapshotYAML(nodeDir, archive.SnapshotYAML{
+					FormatVersion: archive.SnapshotFormatVersionCurrent,
+					APIVersion:    "snapshot.example.io/v1",
+					Kind:          "Snapshot",
+					Name:          "current",
+					Checksum:      validChecksum(),
+				})
+				if err != nil {
+					t.Fatalf("WriteSnapshotYAML: %v", err)
+				}
+			},
+			wantVersion:          archive.SnapshotFormatVersionCurrent,
+			wantMetadataChecksum: true,
+		},
+		{
+			name: "unknown future major",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := fmt.Appendf(nil, "formatVersion: %d\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: future\n",
+					archive.SnapshotFormatVersionCurrent+1)
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write future snapshot.yaml: %v", err)
+				}
+			},
+			wantErr: archive.ErrUnsupportedSnapshotFormat,
+		},
+		{
+			name: "legacy unversioned archive requires explicit compatibility",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := fmt.Appendf(nil,
+					"apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n"+
+						"childrenChecksum: {algorithm: %s, hex: %q, short: %q}\n",
+					archive.EmptyChildrenChecksum().Algorithm,
+					archive.EmptyChildrenChecksum().Hex,
+					archive.EmptyChildrenChecksum().Short)
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write legacy snapshot.yaml: %v", err)
+				}
+			},
+			wantVersion: archive.SnapshotFormatVersionLegacy,
+			wantErr:     archive.ErrLegacySnapshotFormat,
+			allowLegacy: true,
+		},
+		{
+			name: "explicit zero version requires explicit compatibility",
+			write: func(t *testing.T, nodeDir string) {
+				t.Helper()
+
+				data := fmt.Appendf(nil,
+					"{name: legacy, kind: Snapshot, formatVersion: 0, apiVersion: snapshot.example.io/v1, "+
+						"childrenChecksum: {algorithm: %s, hex: %q, short: %q}}\n",
+					archive.EmptyChildrenChecksum().Algorithm,
+					archive.EmptyChildrenChecksum().Hex,
+					archive.EmptyChildrenChecksum().Short)
+				if err := os.WriteFile(filepath.Join(nodeDir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+					t.Fatalf("write legacy snapshot.yaml: %v", err)
+				}
+			},
+			wantVersion: archive.SnapshotFormatVersionLegacy,
+			wantErr:     archive.ErrLegacySnapshotFormat,
+			allowLegacy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			tt.write(t, nodeDir)
+
+			got, err := archive.ReadSnapshotYAML(nodeDir)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ReadSnapshotYAML error = %v, want %v", err, tt.wantErr)
+				}
+
+				if !tt.allowLegacy {
+					return
+				}
+
+				got, err = archive.ReadSnapshotYAMLWithOptions(nodeDir, archive.SnapshotYAMLReadOptions{
+					AllowUnauthenticatedLegacy: true,
+				})
+			}
+
+			if err != nil {
+				t.Fatalf("ReadSnapshotYAML: %v", err)
+			}
+
+			if got.FormatVersion != tt.wantVersion {
+				t.Errorf("FormatVersion = %d, want %d", got.FormatVersion, tt.wantVersion)
+			}
+
+			if (got.MetadataChecksum != nil) != tt.wantMetadataChecksum {
+				t.Errorf("MetadataChecksum presence = %t, want %t",
+					got.MetadataChecksum != nil, tt.wantMetadataChecksum)
+			}
+		})
+	}
+}
+
+// TestReadSnapshotYAML_ChildrenChecksumMissingIsAlwaysFailClosed proves AC-3's compatibility
+// policy: an archive missing its authenticated direct-child commitment is rejected by default,
+// AND that AllowUnauthenticatedLegacy — the existing, narrower opt-in for a pre-formatVersion
+// archive envelope — does not silently resurrect acceptance of a missing commitment. There is
+// deliberately no opt-in for a missing childrenChecksum: the whole point of the commitment is
+// to make a hybrid tree detectable, so an "unauthenticated child set" mode would defeat AC-1/
+// AC-2 for exactly the archives most likely to need it. This holds for both a current-format
+// envelope (formatVersion present) and a legacy one (formatVersion absent).
+func TestReadSnapshotYAML_ChildrenChecksumMissingIsAlwaysFailClosed(t *testing.T) {
+	tests := []struct {
+		name           string
+		yaml           string
+		wantDefaultErr error
+	}{
+		{
+			name: "current format version, no childrenChecksum",
+			yaml: fmt.Sprintf("formatVersion: %d\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: current\n",
+				archive.SnapshotFormatVersionCurrent),
+			wantDefaultErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "legacy unversioned archive, no childrenChecksum",
+			yaml: "apiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: legacy\n",
+			// The legacy-envelope check runs first and rejects before the commitment check is
+			// even reached; either way the archive is rejected by default (fail-closed).
+			wantDefaultErr: archive.ErrLegacySnapshotFormat,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			if err := os.WriteFile(
+				filepath.Join(nodeDir, archive.SnapshotYAMLName), []byte(tt.yaml), 0o600,
+			); err != nil {
+				t.Fatalf("write snapshot.yaml: %v", err)
+			}
+
+			if _, err := archive.ReadSnapshotYAML(nodeDir); !errors.Is(err, tt.wantDefaultErr) {
+				t.Errorf("ReadSnapshotYAML (default options) error = %v, want %v", err, tt.wantDefaultErr)
+			}
+
+			_, err := archive.ReadSnapshotYAMLWithOptions(nodeDir, archive.SnapshotYAMLReadOptions{
+				AllowUnauthenticatedLegacy: true,
+			})
+			if !errors.Is(err, archive.ErrInvalidSnapshotYAML) {
+				t.Errorf("ReadSnapshotYAMLWithOptions(AllowUnauthenticatedLegacy) error = %v, want ErrInvalidSnapshotYAML"+
+					" (a missing commitment must never be waived, unlike the legacy envelope format itself)", err)
+			}
+		})
+	}
+}
+
+func TestReadSnapshotYAMLRejectsDowngradeVariants(t *testing.T) {
+	tests := []struct {
+		name    string
+		rewrite func(t *testing.T, current []byte) []byte
+		wantErr error
+	}{
+		{
+			name: "omit formatVersion and metadataChecksum after semantic mutation",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					delete(fields, "formatVersion")
+					delete(fields, "metadataChecksum")
+					fields["name"] = "tampered"
+				})
+			},
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name: "set version zero and omit metadataChecksum",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					fields["formatVersion"] = float64(0)
+					delete(fields, "metadataChecksum")
+				})
+			},
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name: "current version without metadataChecksum",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					delete(fields, "metadataChecksum")
+				})
+			},
+			wantErr: archive.ErrInvalidSnapshotYAML,
+		},
+		{
+			name: "current version with stale checksum after semantic mutation",
+			rewrite: func(t *testing.T, current []byte) []byte {
+				t.Helper()
+
+				return rewriteSnapshotYAMLMap(t, current, func(fields map[string]interface{}) {
+					fields["name"] = "tampered"
+				})
+			},
+			wantErr: archive.ErrSnapshotMetadataChecksumMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeDir := t.TempDir()
+			if err := archive.WriteSnapshotYAML(nodeDir, archive.SnapshotYAML{
+				APIVersion: "snapshot.example.io/v1",
+				Kind:       "Snapshot",
+				Name:       "original",
+				Checksum:   validChecksum(),
+			}); err != nil {
+				t.Fatalf("WriteSnapshotYAML: %v", err)
+			}
+
+			path := filepath.Join(nodeDir, archive.SnapshotYAMLName)
+			current, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read current snapshot.yaml: %v", err)
+			}
+
+			if err := os.WriteFile(path, tt.rewrite(t, current), 0o600); err != nil {
+				t.Fatalf("write downgraded snapshot.yaml: %v", err)
+			}
+
+			_, err = archive.ReadSnapshotYAML(nodeDir)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("ReadSnapshotYAML error = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func rewriteSnapshotYAMLMap(
+	t *testing.T,
+	data []byte,
+	rewrite func(map[string]interface{}),
+) []byte {
+	t.Helper()
+
+	var fields map[string]interface{}
+	if err := sigsyaml.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("unmarshal snapshot.yaml map: %v", err)
+	}
+
+	rewrite(fields)
+
+	rewritten, err := sigsyaml.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal snapshot.yaml map: %v", err)
+	}
+
+	return rewritten
+}
+
+func TestOpenRegularFileRejectsSpecialFilesWithoutBlocking(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T) string
+	}{
+		{
+			name: "directory",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				return t.TempDir()
+			},
+		},
+		{
+			name: "symlink",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+					t.Fatalf("write target: %v", err)
+				}
+
+				path := filepath.Join(t.TempDir(), "artifact")
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink artifact: %v", err)
+				}
+
+				return path
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tc.build(t)
+
+			file, err := archive.OpenRegularFile(path)
+			if file != nil {
+				_ = file.Close()
+			}
+
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("OpenRegularFile error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+		})
+	}
+}
+
+func TestOpenRegularFileAcceptsOrdinaryHardLink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("hard-linked bytes"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	link := filepath.Join(dir, "artifact")
+	if err := os.Link(target, link); err != nil {
+		t.Skipf("hard links are unavailable: %v", err)
+	}
+
+	file, err := archive.OpenRegularFile(link)
+	if err != nil {
+		t.Fatalf("OpenRegularFile: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("read hard link: %v", err)
+	}
+
+	if string(data) != "hard-linked bytes" {
+		t.Fatalf("hard-link content = %q, want hard-linked bytes", data)
+	}
+}
+
+// validChecksum returns a well-formed NodeChecksum (sha256, 64 lowercase hex, consistent short).
+func validChecksum() archive.NodeChecksum {
+	hex := strings.Repeat("a", 64)
+
+	return archive.NodeChecksum{
+		Algorithm: archive.ChecksumAlgorithmSHA256,
+		Hex:       hex,
+		Short:     archive.ShortChecksum(hex),
+	}
+}
+
+// validChildrenChecksum returns a pointer to the canonical empty-child-set commitment, for
+// tests that only need a structurally valid ChildrenChecksum (every snapshot.yaml requires one,
+// even legacy/AllowUnauthenticatedLegacy metadata; see validateChildrenChecksumPresent).
+func validChildrenChecksum() *archive.NodeChecksum {
+	checksum := archive.EmptyChildrenChecksum()
+
+	return &checksum
+}
+
+// validVolume returns a complete data VolumeInfo whose volumeMode is mode.
+func validVolume(mode string) archive.VolumeInfo {
+	return archive.VolumeInfo{
+		Target:           archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-1"},
+		Artifact:         archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "content-1"},
+		VolumeMode:       mode,
+		StorageClassName: "sc",
+		Size:             "1Gi",
+	}
+}
+
+// TestValidateSnapshotYAML exercises the strict metadata invariants ValidateSnapshotYAML
+// enforces over the fields the integrity checksum does NOT cover.
+func TestValidateSnapshotYAML(t *testing.T) {
+	t.Parallel()
+
+	base := func() archive.SnapshotYAML {
+		return archive.SnapshotYAML{
+			APIVersion:       "g/v1",
+			Kind:             "Snapshot",
+			Name:             "root",
+			Checksum:         validChecksum(),
+			ChildrenChecksum: validChildrenChecksum(),
+		}
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(sy *archive.SnapshotYAML)
+		hasBlock bool
+		hasFS    bool
+		wantErr  bool
+	}{
+		{name: "valid: non-data structural node", mutate: func(*archive.SnapshotYAML) {}},
+		{
+			name: "valid: block data node",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			hasBlock: true,
+		},
+		{
+			name: "valid: filesystem data node",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeFilesystem)}
+			},
+			hasFS: true,
+		},
+		{
+			name: "valid: complete sourceObjectRef",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.SourceObjectRef = &archive.SourceObjectRef{APIVersion: "demo/v1", Kind: "Disk", Name: "d1"}
+			},
+		},
+		{name: "error: missing apiVersion", mutate: func(sy *archive.SnapshotYAML) { sy.APIVersion = "" }, wantErr: true},
+		{name: "error: missing kind", mutate: func(sy *archive.SnapshotYAML) { sy.Kind = "" }, wantErr: true},
+		{name: "error: missing name", mutate: func(sy *archive.SnapshotYAML) { sy.Name = "" }, wantErr: true},
+		{name: "error: bad checksum algorithm", mutate: func(sy *archive.SnapshotYAML) { sy.Checksum.Algorithm = "md5" }, wantErr: true},
+		{
+			name:    "error: short hex",
+			mutate:  func(sy *archive.SnapshotYAML) { sy.Checksum.Hex = "abcd"; sy.Checksum.Short = "abcd" },
+			wantErr: true,
+		},
+		{
+			name: "error: uppercase hex",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Checksum.Hex = strings.Repeat("A", 64)
+				sy.Checksum.Short = strings.Repeat("A", 8)
+			},
+			wantErr: true,
+		},
+		{name: "error: inconsistent short", mutate: func(sy *archive.SnapshotYAML) { sy.Checksum.Short = "deadbeef" }, wantErr: true},
+		{
+			name: "error: partial sourceObjectRef",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.SourceObjectRef = &archive.SourceObjectRef{APIVersion: "demo/v1", Name: "d1"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "error: two volumes",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock), validVolume(archive.VolumeModeBlock)}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: non-data node carries a volume",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			wantErr: true,
+		},
+		{name: "error: data node with zero volumes", mutate: func(*archive.SnapshotYAML) {}, hasBlock: true, wantErr: true},
+		{
+			name: "error: data volume missing target identity",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Target.Name = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume missing artifact identity",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Artifact.APIVersion = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume missing storageClassName",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.StorageClassName = ""
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume unparseable size",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Size = "not-a-quantity"
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: data volume zero size",
+			mutate: func(sy *archive.SnapshotYAML) {
+				v := validVolume(archive.VolumeModeBlock)
+				v.Size = "0"
+				sy.Volumes = []archive.VolumeInfo{v}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: block payload with Filesystem volumeMode",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeFilesystem)}
+			},
+			hasBlock: true,
+			wantErr:  true,
+		},
+		{
+			name: "error: filesystem payload with Block volumeMode",
+			mutate: func(sy *archive.SnapshotYAML) {
+				sy.Volumes = []archive.VolumeInfo{validVolume(archive.VolumeModeBlock)}
+			},
+			hasFS:   true,
+			wantErr: true,
+		},
+		{
+			name:     "error: block payload with empty volumeMode",
+			mutate:   func(sy *archive.SnapshotYAML) { sy.Volumes = []archive.VolumeInfo{validVolume("")} },
+			hasBlock: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sy := base()
+			tc.mutate(&sy)
+
+			err := archive.ValidateSnapshotYAMLWithOptions(
+				sy,
+				tc.hasBlock,
+				tc.hasFS,
+				archive.SnapshotYAMLReadOptions{AllowUnauthenticatedLegacy: true},
+			)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				if !errors.Is(err, archive.ErrInvalidSnapshotYAML) {
+					t.Errorf("expected ErrInvalidSnapshotYAML, got: %v", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// makeSnapshotNodeDir creates a temp dir with a manifests/ subdir and one manifest file.
+func makeSnapshotNodeDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(dir, archive.ManifestsDirName), 0o755); err != nil {
+		t.Fatalf("mkdir manifests: %v", err)
+	}
+
+	// One manifest so the checksum is non-trivial.
+	manifest := filepath.Join(dir, archive.ManifestsDirName, "configmap_test.yaml")
+	if err := os.WriteFile(manifest, []byte("apiVersion: v1\nkind: ConfigMap\n"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	return dir
+}
+
+func TestSnapshotYAML_RoundTrip_WithoutVolume(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-1",
+		Namespace:  "ns-a",
+		UID:        "vm/my-vm",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.APIVersion != want.APIVersion {
+		t.Errorf("APIVersion: got %q, want %q", got.APIVersion, want.APIVersion)
+	}
+
+	if got.Kind != want.Kind {
+		t.Errorf("Kind: got %q, want %q", got.Kind, want.Kind)
+	}
+
+	if got.Name != want.Name {
+		t.Errorf("Name: got %q, want %q", got.Name, want.Name)
+	}
+
+	if got.Namespace != want.Namespace {
+		t.Errorf("Namespace: got %q, want %q", got.Namespace, want.Namespace)
+	}
+
+	if got.UID != want.UID {
+		t.Errorf("UID: got %q, want %q", got.UID, want.UID)
+	}
+
+	if got.Checksum.Hex != want.Checksum.Hex {
+		t.Errorf("Checksum.Hex: got %q, want %q", got.Checksum.Hex, want.Checksum.Hex)
+	}
+
+	if len(got.Volumes) != 0 {
+		t.Errorf("Volumes must be empty for a snapshot node without OwnDataRefs, got %+v", got.Volumes)
+	}
+}
+
+func TestSnapshotYAML_RoundTrip_WithVolume(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	wantVol := archive.VolumeInfo{
+		Target: archive.VolumeObjectRef{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "my-pvc",
+			Namespace:  "ns-a",
+			UID:        "abc-123",
+		},
+		Artifact: archive.VolumeObjectRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "snapcontent-xyz",
+		},
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-aabbccdd",
+		Namespace:  "ns-a",
+		Checksum:   checksum,
+		Volumes:    []archive.VolumeInfo{wantVol},
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(got.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(got.Volumes))
+	}
+
+	gotVol := got.Volumes[0]
+
+	if gotVol.Target.Name != wantVol.Target.Name {
+		t.Errorf("Volumes[0].Target.Name: got %q, want %q", gotVol.Target.Name, wantVol.Target.Name)
+	}
+
+	if gotVol.Target.UID != wantVol.Target.UID {
+		t.Errorf("Volumes[0].Target.UID: got %q, want %q", gotVol.Target.UID, wantVol.Target.UID)
+	}
+
+	if gotVol.Artifact.Name != wantVol.Artifact.Name {
+		t.Errorf("Volumes[0].Artifact.Name: got %q, want %q", gotVol.Artifact.Name, wantVol.Artifact.Name)
+	}
+
+	if gotVol.Artifact.APIVersion != wantVol.Artifact.APIVersion {
+		t.Errorf("Volumes[0].Artifact.APIVersion: got %q, want %q", gotVol.Artifact.APIVersion, wantVol.Artifact.APIVersion)
+	}
+}
+
+// TestSnapshotYAML_RoundTrip_MultiVolume verifies that N>1 volumes are correctly
+// serialised and deserialised.
+func TestSnapshotYAML_RoundTrip_MultiVolume(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	vols := []archive.VolumeInfo{
+		{
+			Target:   archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", UID: "uid-a"},
+			Artifact: archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-a"},
+		},
+		{
+			Target:   archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-b", UID: "uid-b"},
+			Artifact: archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-b"},
+		},
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "VirtualDiskSnapshot",
+		Name:       "multi-snap",
+		Checksum:   checksum,
+		Volumes:    vols,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(got.Volumes) != len(vols) {
+		t.Fatalf("Volumes length: got %d, want %d", len(got.Volumes), len(vols))
+	}
+
+	for i, wv := range vols {
+		gv := got.Volumes[i]
+
+		if gv.Target.Name != wv.Target.Name {
+			t.Errorf("Volumes[%d].Target.Name: got %q, want %q", i, gv.Target.Name, wv.Target.Name)
+		}
+
+		if gv.Artifact.Name != wv.Artifact.Name {
+			t.Errorf("Volumes[%d].Artifact.Name: got %q, want %q", i, gv.Artifact.Name, wv.Artifact.Name)
+		}
+	}
+}
+
+func TestSnapshotYAML_OmitemptyVolume(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	// Snapshot node: Volume is nil → must be omitted from YAML output.
+	sy := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-omit",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, archive.SnapshotYAMLName))
+	if err != nil {
+		t.Fatalf("ReadFile snapshot.yaml: %v", err)
+	}
+
+	if strings.Contains(string(raw), "volumes:") {
+		t.Errorf("snapshot.yaml must not contain 'volumes:' key when Volumes is nil; got:\n%s", raw)
+	}
+}
+
+func TestSnapshotYAML_RoundTrip_WithSourceName(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-2",
+		Namespace:  "ns-b",
+		UID:        `{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns-b","name":"my-pvc","uid":"uid-xyz"}`,
+		SourceName: "my-pvc",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.SourceName != want.SourceName {
+		t.Errorf("SourceName: got %q, want %q", got.SourceName, want.SourceName)
+	}
+}
+
+func TestSnapshotYAML_OmitemptySourceName(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	// SourceName empty → must be absent from YAML output.
+	sy := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-omit-sn",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, archive.SnapshotYAMLName))
+	if err != nil {
+		t.Fatalf("ReadFile snapshot.yaml: %v", err)
+	}
+
+	if strings.Contains(string(raw), "sourceName:") {
+		t.Errorf("snapshot.yaml must not contain 'sourceName:' key when SourceName is empty; got:\n%s", raw)
+	}
+}
+
+// TestSnapshotYAML_ChecksumUnaffectedBySourceNameField is a regression test that
+// confirms adding the SourceName field to snapshot.yaml does NOT change the node
+// checksum (because snapshot.yaml is excluded from ComputeNodeChecksum).
+func TestSnapshotYAML_ChecksumUnaffectedBySourceNameField(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum1, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum before write: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-sn-regression",
+		SourceName: "some-vm",
+		Checksum:   checksum1,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	checksum2, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum after write: %v", err)
+	}
+
+	if checksum1.Hex != checksum2.Hex {
+		t.Errorf("checksum changed after writing snapshot.yaml with SourceName (snapshot.yaml must be excluded):\nbefore %q\nafter  %q",
+			checksum1.Hex, checksum2.Hex)
+	}
+
+	if err := archive.VerifyNode(dir); err != nil {
+		t.Errorf("VerifyNode must pass after adding SourceName field: %v", err)
+	}
+}
+
+// TestSnapshotYAML_RoundTrip_WithSourceObjectRef verifies that SourceObjectRef is correctly
+// serialised and deserialised.
+func TestSnapshotYAML_RoundTrip_WithSourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	wantSOR := &archive.SourceObjectRef{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDisk",
+		Name:       "my-disk",
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion:      "demo.deckhouse.io/v1alpha1",
+		Kind:            "DemoVirtualDiskSnapshot",
+		Name:            "snap-1",
+		Namespace:       "ns-a",
+		SourceObjectRef: wantSOR,
+		Checksum:        checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.SourceObjectRef == nil {
+		t.Fatal("SourceObjectRef: got nil, want non-nil")
+	}
+
+	if got.SourceObjectRef.APIVersion != wantSOR.APIVersion {
+		t.Errorf("SourceObjectRef.APIVersion: got %q, want %q", got.SourceObjectRef.APIVersion, wantSOR.APIVersion)
+	}
+
+	if got.SourceObjectRef.Kind != wantSOR.Kind {
+		t.Errorf("SourceObjectRef.Kind: got %q, want %q", got.SourceObjectRef.Kind, wantSOR.Kind)
+	}
+
+	if got.SourceObjectRef.Name != wantSOR.Name {
+		t.Errorf("SourceObjectRef.Name: got %q, want %q", got.SourceObjectRef.Name, wantSOR.Name)
+	}
+}
+
+// TestSnapshotYAML_OmitemptySourceObjectRef verifies that when SourceObjectRef is nil
+// the field is absent from the serialised YAML output.
+func TestSnapshotYAML_OmitemptySourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "snap-omit-sor",
+		Checksum:   checksum,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, archive.SnapshotYAMLName))
+	if err != nil {
+		t.Fatalf("ReadFile snapshot.yaml: %v", err)
+	}
+
+	if strings.Contains(string(raw), "sourceObjectRef:") {
+		t.Errorf("snapshot.yaml must not contain 'sourceObjectRef:' when nil; got:\n%s", raw)
+	}
+}
+
+// TestSnapshotYAML_ChecksumUnaffectedBySourceObjectRef is a regression test confirming
+// that adding SourceObjectRef to snapshot.yaml does NOT change the node checksum
+// (because snapshot.yaml is excluded from ComputeNodeChecksum).
+func TestSnapshotYAML_ChecksumUnaffectedBySourceObjectRef(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum1, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum before write: %v", err)
+	}
+
+	sy := archive.SnapshotYAML{
+		APIVersion: "demo.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "snap-sor-regression",
+		SourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "my-disk",
+		},
+		Checksum: checksum1,
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	checksum2, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum after write: %v", err)
+	}
+
+	if checksum1.Hex != checksum2.Hex {
+		t.Errorf("checksum changed after writing snapshot.yaml with SourceObjectRef (snapshot.yaml must be excluded):\nbefore %q\nafter  %q",
+			checksum1.Hex, checksum2.Hex)
+	}
+
+	if err := archive.VerifyNode(dir); err != nil {
+		t.Errorf("VerifyNode must pass after adding SourceObjectRef field: %v", err)
+	}
+}
+
+// TestSnapshotYAML_ChecksumUnaffectedByVolumeField is a regression test that
+// confirms adding the Volume field to snapshot.yaml does NOT change the node
+// checksum (because snapshot.yaml is excluded from ComputeNodeChecksum).
+func TestSnapshotYAML_ChecksumUnaffectedByVolumeField(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	// Compute checksum without any snapshot.yaml.
+	checksum1, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum before write: %v", err)
+	}
+
+	// Write snapshot.yaml with a Volumes block.
+	sy := archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "vol-node",
+		Checksum:   checksum1,
+		Volumes: []archive.VolumeInfo{
+			{
+				Target: archive.VolumeObjectRef{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Name:       "pvc-a",
+					Namespace:  "ns",
+					UID:        "uid-111",
+				},
+				Artifact: archive.VolumeObjectRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "vsc-aaa",
+				},
+			},
+		},
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, sy); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	// Recompute checksum after snapshot.yaml is present.
+	checksum2, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum after write: %v", err)
+	}
+
+	if checksum1.Hex != checksum2.Hex {
+		t.Errorf("checksum changed after writing snapshot.yaml (snapshot.yaml must be excluded from the digest):\nbefore %q\nafter  %q",
+			checksum1.Hex, checksum2.Hex)
+	}
+
+	// VerifyNode must also pass.
+	if err := archive.VerifyNode(dir); err != nil {
+		t.Errorf("VerifyNode must pass after adding Volume field: %v", err)
+	}
+}

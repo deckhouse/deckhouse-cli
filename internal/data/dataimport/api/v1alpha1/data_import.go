@@ -40,17 +40,37 @@ type DataImportList struct {
 	Items []DataImport `json:"items"`
 }
 
+// DataImportMode is spec.mode — the explicit discriminator that selects what a DataImport does
+// with the imported bytes. It replaced the former polymorphic targetRef.kind discrimination; the
+// current CRD has no spec.targetRef at all (it is pruned by the structural schema).
+// See storage-foundation/api/v1alpha1/data_import.go for the SSOT.
+type DataImportMode string
+
+// DataImportModeCreatePVC is the standalone PVC-import mode: data bytes are streamed straight
+// into a preserved PVC built from spec.pvcTemplate, with no snapshot capture and no
+// VolumeSnapshotContent artifact. `d8 data import` only ever creates CreatePVC DataImports; the
+// snapshot-leaf mode (PopulateData) is driven by `d8 snapshot upload`, which builds its own
+// unstructured spec.
+const DataImportModeCreatePVC DataImportMode = "CreatePVC"
+
+// DataImportSpec mirrors the CreatePVC subset of the unified DataImport CRD spec that the CLI
+// produces. The CRD CEL rules require pvcTemplate and forbid snapshotRef/storageParams when
+// mode == CreatePVC, so those PopulateData-only fields are deliberately absent here.
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
-	TTL                  string                  `json:"ttl"`
-	Publish              bool                    `json:"publish,omitempty"`
-	WaitForFirstConsumer bool                    `json:"waitForFirstConsumer,omitempty"`
-	TargetRef            DataImportTargetRefSpec `json:"targetRef"`
-}
+	TTL     string `json:"ttl"`
+	Publish bool   `json:"publish,omitempty"`
 
-// +k8s:deepcopy-gen=true
-type DataImportTargetRefSpec struct {
-	Kind        string                             `json:"kind"`
+	// WaitForFirstConsumer must not carry omitempty, unlike the other bool in this spec: the CRD
+	// defaults this field to true, so an absent key means true on the server. omitempty drops
+	// the zero value, which for a bool is exactly the false the caller asked for — making
+	// `--wffc=false` (and hence the flag's own default) impossible to express.
+	WaitForFirstConsumer bool `json:"waitForFirstConsumer"`
+
+	Mode DataImportMode `json:"mode,omitempty"`
+
+	// PvcTemplate fully describes the destination PVC. Its metadata.name is mandatory — the
+	// controller names the imported PVC after it and the server CEL rejects an empty name.
 	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
 }
 
