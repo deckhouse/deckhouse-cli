@@ -81,31 +81,37 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		}
 
 		for _, condition := range deObj.Status.Conditions {
-			// restart DataExport if Expired
-			if condition.Type == "Expired" {
-				if condition.Status == "True" {
-					if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
-						return nil, err
-					}
-
-					if err := CreateDataExport(
-						ctx,
-						deName, namespace, "",
-						deObj.Spec.TargetRef.Kind,
-						deObj.Spec.TargetRef.Name,
-						deObj.Spec.Publish, rtClient,
-					); err != nil {
-						return nil, err
-					}
-				}
+			// The DataExport catalog no longer carries a standalone "Expired" condition; expiry is now the
+			// Ready condition with Status=False and Reason="Expired" (plus status.phase=Expired). Detect it
+			// on the Ready condition and auto-restart the export, rather than waiting for the producer's GC
+			// (which only deletes an expired DataExport after its retention TTL).
+			if condition.Type != "Ready" {
+				continue
 			}
-			// check DataExport is Ready
-			if condition.Type == "Ready" {
-				if condition.Status != "True" {
-					returnErr = fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
-						deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
-						condition.Message, condition.Reason)
+
+			switch {
+			case condition.Status == "False" && condition.Reason == "Expired":
+				if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+					return nil, err
 				}
+
+				if err := CreateDataExport(
+					ctx,
+					deName, namespace, "",
+					deObj.Spec.TargetRef.Group,
+					deObj.Spec.TargetRef.Kind,
+					deObj.Spec.TargetRef.Name,
+					deObj.Spec.Publish, rtClient,
+				); err != nil {
+					return nil, err
+				}
+				// Recreated: keep retrying until the fresh export becomes Ready.
+				returnErr = fmt.Errorf("DataExport %s/%s expired; recreated, waiting for the new export to become Ready",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+			case condition.Status != "True":
+				returnErr = fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
+					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
+					condition.Message, condition.Reason)
 			}
 		}
 		// check DataExport Url
@@ -194,7 +200,12 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 		return deName, nil
 	}
 
-	err := CreateDataExport(ctx, deName, namespace, ttl, volumeKind, volumeName, publish, rtClient)
+	group, err := dataio.KindToGroup(volumeKind)
+	if err != nil {
+		return deName, err
+	}
+
+	err = CreateDataExport(ctx, deName, namespace, ttl, group, volumeKind, volumeName, publish, rtClient)
 	if err != nil {
 		return deName, err
 	}
@@ -204,7 +215,10 @@ func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, n
 	return deName, nil
 }
 
-func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
+// CreateDataExport creates a DataExport CR targeting the object identified by group, kind, and volumeName.
+// group is the API group ("" for core, e.g. "snapshot.storage.k8s.io" for VolumeSnapshot).
+// kind is the target object kind (e.g. "VolumeSnapshot", "PersistentVolumeClaim").
+func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, kind, volumeName string, publish bool, rtClient ctrlrtclient.Client) error {
 	if ttl == "" {
 		ttl = dataio.DefaultTTL
 	}
@@ -222,8 +236,9 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, volumeKind, v
 		Spec: v1alpha1.DataexportSpec{
 			TTL: ttl,
 			TargetRef: v1alpha1.TargetRefSpec{
-				Kind: volumeKind,
-				Name: volumeName,
+				Group: group,
+				Kind:  kind,
+				Name:  volumeName,
 			},
 			Publish: publish,
 		},
@@ -291,9 +306,13 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 		return "", "", "", fmt.Errorf("invalid URL")
 	}
 
-	volumeKind := deObj.Spec.TargetRef.Kind
-	if !slices.Contains([]string{dataio.PersistentVolumeClaimKind, dataio.VolumeSnapshotKind, dataio.VirtualDiskKind, dataio.VirtualDiskSnapshotKind}, volumeKind) {
-		return "", "", "", fmt.Errorf("invalid volume kind: %s", volumeKind)
+	if !slices.Contains([]string{
+		dataio.PersistentVolumeClaimKind,
+		dataio.VolumeSnapshotKind,
+		dataio.VirtualDiskKind,
+		dataio.VirtualDiskSnapshotKind,
+	}, deObj.Spec.TargetRef.Kind) {
+		return "", "", "", fmt.Errorf("invalid volume kind: %s", deObj.Spec.TargetRef.Kind)
 	}
 
 	volumeMode = deObj.Status.VolumeMode

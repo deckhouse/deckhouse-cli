@@ -13,7 +13,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 )
 
@@ -38,6 +37,7 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 		name          string
 		input         string
 		expectName    string
+		expectGroup   string
 		expectKind    string
 		expectCreated bool
 	}{
@@ -45,28 +45,32 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			name:          "PVC short alias",
 			input:         "pvc/myvol",
 			expectName:    "de-pvc-myvol",
-			expectKind:    dataio.PersistentVolumeClaimKind,
+			expectGroup:   "",
+			expectKind:    "PersistentVolumeClaim",
 			expectCreated: true,
 		},
 		{
 			name:          "PVC long alias",
 			input:         "persistentvolumeclaim/myvol",
 			expectName:    "de-pvc-myvol",
-			expectKind:    dataio.PersistentVolumeClaimKind,
+			expectGroup:   "",
+			expectKind:    "PersistentVolumeClaim",
 			expectCreated: true,
 		},
 		{
 			name:          "VolumeSnapshot short alias",
 			input:         "vs/snap1",
 			expectName:    "de-vs-snap1",
-			expectKind:    dataio.VolumeSnapshotKind,
+			expectGroup:   "snapshot.storage.k8s.io",
+			expectKind:    "VolumeSnapshot",
 			expectCreated: true,
 		},
 		{
 			name:          "VolumeSnapshot long alias",
 			input:         "volumesnapshot/snap1",
 			expectName:    "de-vs-snap1",
-			expectKind:    dataio.VolumeSnapshotKind,
+			expectGroup:   "snapshot.storage.k8s.io",
+			expectKind:    "VolumeSnapshot",
 			expectCreated: true,
 		},
 		{
@@ -79,28 +83,32 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			name:          "VirtualDisk short alias",
 			input:         "vd/mydisk",
 			expectName:    "de-vd-mydisk",
-			expectKind:    dataio.VirtualDiskKind,
+			expectGroup:   "virtualization.deckhouse.io",
+			expectKind:    "VirtualDisk",
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDisk long alias",
 			input:         "virtualdisk/mydisk",
 			expectName:    "de-vd-mydisk",
-			expectKind:    dataio.VirtualDiskKind,
+			expectGroup:   "virtualization.deckhouse.io",
+			expectKind:    "VirtualDisk",
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDiskSnapshot short alias",
 			input:         "vds/snap2",
 			expectName:    "de-vds-snap2",
-			expectKind:    dataio.VirtualDiskSnapshotKind,
+			expectGroup:   "virtualization.deckhouse.io",
+			expectKind:    "VirtualDiskSnapshot",
 			expectCreated: true,
 		},
 		{
 			name:          "VirtualDiskSnapshot long alias",
 			input:         "virtualdisksnapshot/snap2",
 			expectName:    "de-vds-snap2",
-			expectKind:    dataio.VirtualDiskSnapshotKind,
+			expectGroup:   "virtualization.deckhouse.io",
+			expectKind:    "VirtualDiskSnapshot",
 			expectCreated: true,
 		},
 	}
@@ -117,6 +125,7 @@ func TestCreateDataExporterIfNeeded(t *testing.T) {
 			getErr := c.Get(ctx, ctrlclient.ObjectKey{Name: tt.expectName, Namespace: "test-ns"}, &de)
 			if tt.expectCreated {
 				require.NoError(t, getErr)
+				require.Equal(t, tt.expectGroup, de.Spec.TargetRef.Group)
 				require.Equal(t, tt.expectKind, de.Spec.TargetRef.Kind)
 				require.Equal(t, "2m", de.Spec.TTL)
 			} else {
@@ -282,6 +291,55 @@ func TestGetDataExportWithRestart_ErrorMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetDataExportWithRestart_ExpiredRecreates covers the auto-restart branch: a stale export whose
+// Ready condition is False with Reason=Expired (the new expiry model — the producer's GC only deletes it
+// after its retention TTL, so within that window it lingers) must be deleted and recreated, and the call
+// must return an error asking the caller to keep polling for the fresh export.
+func TestGetDataExportWithRestart_ExpiredRecreates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	// Return after the first iteration instead of looping 60+ times.
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	expired := &v1alpha1.DataExport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
+		Spec: v1alpha1.DataexportSpec{
+			Publish: true,
+			TargetRef: v1alpha1.TargetRefSpec{
+				Group: "",
+				Kind:  "PersistentVolumeClaim",
+				Name:  "myvol",
+			},
+		},
+		Status: v1alpha1.DataExportStatus{
+			URL: "https://10.0.0.1:8085/",
+			Conditions: []metav1.Condition{
+				readyCond(metav1.ConditionFalse, "Expired", "export idle timeout reached"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataExportWithRestart(ctx, "test-de", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
+
+	// The stale object must have been replaced by a fresh one: same name, but the Expired
+	// condition (and all status) is gone because CreateDataExport writes a spec-only object.
+	var recreated v1alpha1.DataExport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-de", Namespace: "test-ns"}, &recreated))
+	assert.Empty(t, recreated.Status.Conditions, "expired condition must be cleared after recreate")
+	assert.Equal(t, "PersistentVolumeClaim", recreated.Spec.TargetRef.Kind, "TargetRef must be carried over to the fresh export")
+	assert.True(t, recreated.Spec.Publish, "Publish must be carried over to the fresh export")
 }
 
 func TestEnsureDataExportPublish(t *testing.T) {
