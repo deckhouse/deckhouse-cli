@@ -38,7 +38,7 @@ func (m *Manager) UpdateAll(ctx context.Context) error {
 
 	// A non-root install lives in the home fallback (~/.deckhouse-cli), so this
 	// update must look there too when the configured root has nothing - otherwise
-	// `d8 plugins update all` would be a silent no-op for that install.
+	// `d8 dist plugins update all` would be a silent no-op for that install.
 	if len(plugins) == 0 && m.switchToFallbackRoot() {
 		if plugins, err = m.InstalledPluginNames(); err != nil {
 			return fmt.Errorf("failed to read plugins directory: %w", err)

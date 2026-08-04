@@ -31,7 +31,7 @@ func newListCommand(manager *plugins.Manager) *cobra.Command {
 		Long: "Show installed plugins.\n\n" +
 			"The registry-packages-proxy serves only allow-listed images by name and exposes no\n" +
 			"catalog, so the set of available plugins cannot be listed - inspect a plugin by name\n" +
-			"with 'd8 plugins versions <name>'.",
+			"with 'd8 dist plugins versions <name>'.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			printInstalledPlugins(manager.List())
@@ -58,5 +58,5 @@ func printInstalledPlugins(installed []plugins.PluginInfo) {
 
 	fmt.Println()
 	fmt.Printf("Total: %d plugin(s) installed\n", len(installed))
-	fmt.Println("\nThe registry serves no catalog; install a plugin by name with 'd8 plugins install <name>'.")
+	fmt.Println("\nThe registry serves no catalog; install a plugin by name with 'd8 dist plugins install <name>'.")
 }

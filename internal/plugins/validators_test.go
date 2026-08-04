@@ -61,7 +61,7 @@ func TestFailedConstraintsHelpfulError(t *testing.T) {
 		"a version mismatch suggests installing a matching version")
 
 	assert.Equal(t, "zeta is not installed", he.Suggestions[1].Cause)
-	assert.Contains(t, strings.Join(he.Suggestions[1].Solutions, " "), "d8 plugins install zeta",
+	assert.Contains(t, strings.Join(he.Suggestions[1].Solutions, " "), "d8 dist plugins install zeta",
 		"a missing dep points at how to install it")
 }
 

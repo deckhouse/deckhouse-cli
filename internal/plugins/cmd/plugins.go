@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pluginscmd implements the `d8 plugins` command tree and the
-// per-plugin wrapper command on top of the internal/plugins machinery.
 package pluginscmd
 
 import (
@@ -31,7 +29,7 @@ import (
 	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 )
 
-// NewCommand returns the `d8 plugins` command tree for managing plugins.
+// NewCommand returns the `d8 dist plugins` command tree for managing plugins.
 // builtinCommands are built-in command names that satisfy a plugin dependency of
 // the same name (e.g. delivery-kit) until such capabilities ship as standalone
 // plugins.
@@ -45,7 +43,7 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 		Long: "Manage Deckhouse CLI plugins.\n\n" +
 			"Plugins are pulled from the in-cluster registry-packages-proxy, authenticated by the\n" +
 			"current kubeconfig identity.\n\n" +
-			"Update on demand with 'd8 plugins update <name>' or 'd8 plugins update all'.\n\n" +
+			"Update on demand with 'd8 dist plugins update <name>' or 'd8 dist plugins update all'.\n\n" +
 			"Environment variables:\n" +
 			"  " + flags.EnvSkipClusterChecks + "=1  skip cluster-side plugin requirement checks\n" +
 			"  " + flags.EnvPluginsDir + "                plugins directory (same as --plugins-dir)\n" +
