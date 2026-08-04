@@ -1,4 +1,4 @@
-# d8 Self-Update (`d8 cli`)
+# d8 Self-Update (`d8 dist`)
 
 `d8` updates itself **through the cluster**. No registry credentials needed:
 
@@ -15,8 +15,8 @@
 [Flags & env](#flags-and-environment-variables) ·
 [Troubleshooting](#troubleshooting)
 
-> Plugin management (`d8 plugins`) uses the same access model and is covered
-> in [plugins.md](plugins.md).
+> Plugin management (`d8 dist plugins`) uses the same access model and is
+> covered in [plugins.md](plugins.md).
 
 ## Getting started
 
@@ -50,7 +50,7 @@ context with `--context`.
 ## How access works
 
 ```
-d8 cli update
+d8 dist update
         │  Bearer token from your kubeconfig
         ▼
 registry-packages-proxy.<publicDomain>     (found automatically via Ingress)
@@ -97,24 +97,34 @@ for the commands.
 
 | Command | What it does |
 |---|---|
-| `d8 cli check` | reports whether a newer version is available |
-| `d8 cli versions` (alias: `list`) | lists published versions, newest first |
-| `d8 cli update [--version X]` | installs a version and switches to it |
-| `d8 cli use <version>` | switches to a version; instant if it is already installed |
+| `d8 dist` | prints a distribution summary: the d8 version, installed plugins, what is outdated (local data only when the cluster is unreachable) |
+| `d8 dist check` | reports whether a newer version is available |
+| `d8 dist versions` (alias: `list`) | lists published versions, newest first |
+| `d8 dist update [--version X]` | installs a version and switches to it |
+| `d8 dist use <version>` | switches to a version; instant if it is already installed |
 
 ```console
-$ d8 cli check
-A newer deckhouse-cli is available: v0.14.0 (current: v0.13.1). Run 'd8 cli update' to upgrade.
+$ d8 dist
+deckhouse-cli (d8)
+  Version:  v0.13.1
+  Latest:   v0.14.0  update available - run 'd8 dist update'
 
-$ d8 cli versions
+Plugins (1 installed):
+  NAME    VERSION  LATEST  STATUS
+  system  1.2.0    1.2.0   up to date
+
+$ d8 dist check
+A newer deckhouse-cli is available: v0.14.0 (current: v0.13.1). Run 'd8 dist update' to upgrade.
+
+$ d8 dist versions
   v0.14.0  newer
 * v0.13.1  current  installed
   v0.13.0  installed
 
-$ d8 cli update
+$ d8 dist update
 Updating deckhouse-cli to v0.14.0...
 deckhouse-cli updated to v0.14.0.
-Previous version v0.13.1 remains installed - switch back with 'd8 cli use v0.13.1'.
+Previous version v0.13.1 remains installed - switch back with 'd8 dist use v0.13.1'.
 ```
 
 ## How versions are stored
@@ -142,17 +152,17 @@ What this gives you:
 ## Switching and rollback
 
 ```console
-$ d8 cli use v0.13.1            # already installed: instant, no cluster access
+$ d8 dist use v0.13.1            # already installed: instant, no cluster access
 Switched deckhouse-cli to v0.13.1 (installed locally).
-Previous version v0.14.0 remains installed - switch back with 'd8 cli use v0.14.0'.
+Previous version v0.14.0 remains installed - switch back with 'd8 dist use v0.14.0'.
 
-$ d8 cli use 0.13.0             # the "v" prefix is optional
-$ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0."
+$ d8 dist use 0.13.0             # the "v" prefix is optional
+$ d8 dist use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0."
 ```
 
-- Rollback after an update: `d8 cli use <previous>` - the previous version
+- Rollback after an update: `d8 dist use <previous>` - the previous version
   stays installed.
-- `d8 cli use <TAB>` completes the locally installed versions (enable shell
+- `d8 dist use <TAB>` completes the locally installed versions (enable shell
   completion with `d8 completion`).
 
 ## Flags and environment variables
@@ -179,4 +189,4 @@ Kubernetes API server to find the proxy, one to the proxy to download.
 | `endpoint discovery ... x509:` naming the API server host | the API server certificate is untrusted, expired or replaced by the ingress fallback | fix the cluster certificate, or pass `--insecure-skip-tls-verify` to get through meanwhile |
 | `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
-| `d8 cli use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |
+| `d8 dist use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |

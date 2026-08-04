@@ -1,4 +1,4 @@
-# d8 Plugins (`d8 plugins`)
+# d8 Plugins (`d8 dist plugins`)
 
 Plugins are versioned binaries distributed through the cluster registry.
 `d8` installs, updates, and removes them for you.
@@ -10,14 +10,15 @@ Plugins are versioned binaries distributed through the cluster registry.
 [Troubleshooting](#troubleshooting) · [Advanced](#advanced-hidden-flags)
 
 > [!NOTE]
-> The `d8 plugins` command group is hidden from the root `--help` while the
-> plugin ecosystem rolls out. The commands below are fully functional.
+> The `d8 dist plugins` command group is hidden from `d8 dist --help` while
+> the plugin ecosystem rolls out. The commands below are fully functional.
 
 ## Plugin source
 
 Plugins are pulled from the in-cluster **registry-packages-proxy**, the same
-channel as d8 self-update. This is the only supported path: every `d8 plugins`
-command reaches the registry through the proxy, so a reachable cluster is
+channel as d8 self-update. This is the only supported path: every
+`d8 dist plugins` command reaches the registry through the proxy, so a
+reachable cluster is
 required. (A hidden, temporary `--source` flag pulls straight from a registry
 repo instead - see [Advanced](#advanced-hidden-flags) - but it bypasses the
 cluster and is not the intended flow.) The access model:
@@ -49,22 +50,22 @@ as described in
 
 | Command | What it does |
 |---|---|
-| `d8 plugins versions <name>` | lists all published versions of one plugin |
-| `d8 plugins install <name>` | installs the newest version compatible with your cluster |
-| `d8 plugins install <name> --version X` | installs an exact version |
-| `d8 plugins install <name> --use-major N` | switches majors explicitly |
-| `d8 plugins update <name>` / `update all` | updates within the current major |
-| `d8 plugins list` | shows installed plugins (the proxy serves no catalog, so available plugins are not listed) |
-| `d8 plugins contract <name>` | shows a plugin's contract: version, description, requirements |
-| `d8 plugins remove <name>` / `remove all` | removes plugins |
+| `d8 dist plugins versions <name>` | lists all published versions of one plugin |
+| `d8 dist plugins install <name>` | installs the newest version compatible with your cluster |
+| `d8 dist plugins install <name> --version X` | installs an exact version |
+| `d8 dist plugins install <name> --use-major N` | switches majors explicitly |
+| `d8 dist plugins update <name>` / `update all` | updates within the current major |
+| `d8 dist plugins list` | shows installed plugins (the proxy serves no catalog, so available plugins are not listed) |
+| `d8 dist plugins contract <name>` | shows a plugin's contract: version, description, requirements |
+| `d8 dist plugins remove <name>` / `remove all` | removes plugins |
 
 ```console
-$ d8 plugins versions package
+$ d8 dist plugins versions package
   v0.1.2   newer
 * v0.0.21  current
   v0.0.20
 
-$ d8 plugins install package
+$ d8 dist plugins install package
 Installing plugin: package
 Tag: v0.0.21
 ...
@@ -82,7 +83,7 @@ active one:
 
 Rules that follow from this layout:
 
-- `d8 plugins update` stays **within the installed major**. Crossing majors is
+- `d8 dist plugins update` stays **within the installed major**. Crossing majors is
   always an explicit decision: `--use-major N` or `--version X`.
 - Installing a version that is already on disk just repoints the symlink - no
   download.
@@ -106,7 +107,7 @@ is downloaded or switched:
   enforced only if that plugin is already installed.
 
 ```console
-$ d8 plugins install package
+$ d8 dist plugins install package
 ...
 Error: plugin requirements not satisfied      # e.g. requires plugin delivery-kit
 ```
@@ -133,17 +134,19 @@ modules) are only *verified* - d8 never changes the cluster for you.
 | `--use-major N` *(install, update)* | - | cross to major `N`; by default operations stay within the installed major |
 | `--force` *(install only)* | - | reinstall even if already current (re-pull and re-verify) |
 
-The persistent flags above are shared by every `d8 plugins` subcommand; the
-`--source*` family is hidden - see [Advanced](#advanced-hidden-flags).
+The persistent flags above are shared by every `d8 dist plugins` subcommand
+(the kubeconfig and `--rpp-*` flags live on the parent `d8 dist` group and are
+inherited); the `--source*` family is hidden - see
+[Advanced](#advanced-hidden-flags).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `image or tag not found` (404) | that plugin - or that specific version - is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
+| `image or tag not found` (404) | that plugin - or that specific version - is not published in this cluster's registry | check with `d8 dist plugins versions <name>`; publishing is the plugin CI's job |
 | `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Deckhouse console or `d8 login`) |
 | `... forbidden (403)` | your identity may not download plugins | ask an admin to bind the ClusterRole `d8:registry-packages-proxy:cli-download`; a denial is cached for 30 seconds, so retry in half a minute |
-| `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 plugins install <dep>`) |
+| `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 dist plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 dist plugins install <dep>`) |
 | `... requires Kubernetes/Deckhouse/module ...` | a **cluster-side** requirement is unmet (a different message from the row above) | upgrade the cluster/module, or pass `--skip-cluster-checks` to bypass verification |
 | `... upstream error (5xx)` | the proxy could not reach the backing registry | retry shortly, or check the `registry-packages-proxy` pods in `d8-cloud-instance-manager` |
 | `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert. To get through meanwhile: `--insecure-skip-tls-verify` for a bad certificate, or `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) to skip discovery altogether |

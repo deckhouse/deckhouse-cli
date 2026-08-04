@@ -1,4 +1,4 @@
-# d8 self-update (`d8 cli`)
+# d8 self-update (`d8 dist`)
 
 The `internal/selfupdate` package updates the `d8` binary itself through the
 cluster.
@@ -15,10 +15,10 @@ cluster.
 
 | Command | What it does |
 |---|---|
-| `d8 cli check` | reports whether a version newer than the current one is available |
-| `d8 cli update [--version X]` | installs the version into the store and repoints `current` at it |
-| `d8 cli use <version>` | switches to a version: an installed one is a pure symlink repoint (instant, offline), a missing one is downloaded first |
-| `d8 cli versions` *(alias `list`)* | lists published versions newest-first; the current one is starred, locally installed ones are marked `installed` |
+| `d8 dist check` | reports whether a version newer than the current one is available |
+| `d8 dist update [--version X]` | installs the version into the store and repoints `current` at it |
+| `d8 dist use <version>` | switches to a version: an installed one is a pure symlink repoint (instant, offline), a missing one is downloaded first |
+| `d8 dist versions` *(alias `list`)* | lists published versions newest-first; the current one is starred, locally installed ones are marked `installed` |
 
 ## The version store and the `current` symlink (`store.go`)
 
@@ -46,7 +46,7 @@ layout the plugin installer uses:
   backs it up as `<exe>.old` and replaces the PATH entry with a symlink to
   `current`. If external tooling later overwrites the symlink with a real file,
   the next update/use simply migrates again - self-healing.
-- `d8 cli use <version>` resolves the request against the store by **semver
+- `d8 dist use <version>` resolves the request against the store by **semver
   value** (`0.13.1` finds `v0.13.1`); a hit needs no network and no kubeconfig,
   a miss falls back to the regular download path and stays installed afterwards.
 - Store entries are immutable (re-installing an existing tag is a no-op) and are
@@ -56,7 +56,7 @@ layout the plugin installer uses:
 - The store is per-user (`~/.deckhouse-cli/cli`): after migration the PATH entry
   points into the home of the user who ran it. On shared machines each user who
   manages d8 gets their own store; on cluster masters that user is root.
-- `d8 cli use <TAB>` shell-completes from the store (newest-first, prefix
+- `d8 dist use <TAB>` shell-completes from the store (newest-first, prefix
   filtered). Completion never touches the network - the offline-switchable
   versions are exactly the ones worth suggesting.
 
@@ -98,7 +98,7 @@ platform's container registry (module `registry-packages-proxy`, ns
    and the PATH entry becomes a symlink to `current` (rolled back if the link
    cannot be created). Store-managed installs skip this step entirely.
 
-Rollback is `d8 cli use <previous>` - the previous version remains installed
+Rollback is `d8 dist use <previous>` - the previous version remains installed
 (the command prints it). The `.old` file exists only as the migration backup.
 
 Version selection:
@@ -136,14 +136,14 @@ Platforms (`rpp_source.go`):
 
 | File | Responsibility |
 |---|---|
-| `cmd/command.go` | the `d8 cli ...` cobra commands; building the `Updater` |
-| `cmd/list.go` | `d8 cli versions`: rendering the version list |
-| `cmd/use.go` | `d8 cli use`: switching versions, store-first; shell completion |
 | `update.go` | `Updater` and `SwitchTo`: version selection, store install, repoint, migration |
 | `store.go` | the version store + `current` symlink (`~/.deckhouse-cli/cli`) |
 | `source.go` / `rpp_source.go` | the `Source` interface and its RPP implementation |
 
 Related:
 
+- `internal/dist/cmd` (package `distcmd`) - the `d8 dist ...` cobra commands on
+  top of this machinery: one file per command, the distribution summary, and
+  the `Updater` builder;
 - `internal/rpp` - the HTTP client for the proxy (transport, discovery, tar extraction);
 - `internal/lockfile` - the file lock (shared with plugin installs).
