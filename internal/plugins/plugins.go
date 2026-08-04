@@ -30,7 +30,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 )
 
-// Manager is the plugin machinery shared by every `d8 plugins ...` subcommand
+// Manager is the plugin machinery shared by every `d8 dist plugins ...` subcommand
 // and the per-plugin wrapper command (see internal/plugins/cmd): it installs,
 // updates, removes, lists and runs plugins from the configured source.
 type Manager struct {

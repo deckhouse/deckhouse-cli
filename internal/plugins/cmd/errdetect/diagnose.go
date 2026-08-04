@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package errdetect maps registry-packages-proxy failures from `d8 plugins` to
+// Package errdetect maps registry-packages-proxy failures from `d8 dist plugins` to
 // HelpfulErrors with plugin-specific guidance.
 package errdetect
 
@@ -46,7 +46,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	case errors.Is(err, rpp.ErrNotFound):
 		return help(err, "registry-packages-proxy: plugin or version not found (404)",
 			"this plugin or version is not published",
-			"check the name and version with 'd8 plugins versions <name>'",
+			"check the name and version with 'd8 dist plugins versions <name>'",
 			"confirm it is published under 'deckhouse-cli/plugins/<name>'")
 	case errors.Is(err, rpp.ErrUpstream):
 		return help(err, "registry-packages-proxy: upstream error (5xx)",

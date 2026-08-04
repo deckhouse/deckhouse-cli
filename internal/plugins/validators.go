@@ -126,12 +126,12 @@ func (fc failedConstraints) helpfulError(category string) *diagnostic.HelpfulErr
 		if constraint := fc[name]; constraint == nil {
 			suggestions = append(suggestions, diagnostic.Suggestion{
 				Cause:     fmt.Sprintf("%s is not installed", safe),
-				Solutions: []string{fmt.Sprintf("install it: d8 plugins install %s", safe)},
+				Solutions: []string{fmt.Sprintf("install it: d8 dist plugins install %s", safe)},
 			})
 		} else {
 			suggestions = append(suggestions, diagnostic.Suggestion{
 				Cause:     fmt.Sprintf("%s must satisfy %s", safe, constraint),
-				Solutions: []string{fmt.Sprintf("install a matching version: d8 plugins install %s --version <version>", safe)},
+				Solutions: []string{fmt.Sprintf("install a matching version: d8 dist plugins install %s --version <version>", safe)},
 			})
 		}
 	}
@@ -401,7 +401,7 @@ func (m *Manager) validateClusterRequirements(ctx context.Context, plugin *inter
 	state, err := m.clusterState(ctx)
 	if err != nil {
 		return fmt.Errorf("cannot reach the cluster to verify %q requirements "+
-			"(set "+d8flags.EnvSkipClusterChecks+"=1, or pass --skip-cluster-checks to 'd8 plugins ...', to skip verification): %w",
+			"(set "+d8flags.EnvSkipClusterChecks+"=1, or pass --skip-cluster-checks to 'd8 dist plugins ...', to skip verification): %w",
 			plugin.Name, err)
 	}
 

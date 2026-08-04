@@ -92,7 +92,7 @@ func (m *Manager) RunInstalled(ctx context.Context, pluginName string, args []st
 
 		contract = nil
 	default:
-		return fmt.Errorf("read %q contract (reinstall with 'd8 plugins install %s --force'): %w",
+		return fmt.Errorf("read %q contract (reinstall with 'd8 dist plugins install %s --force'): %w",
 			pluginName, pluginName, err)
 	}
 
