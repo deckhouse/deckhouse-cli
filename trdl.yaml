@@ -1,14 +1,11 @@
-dockerImage: registry.deckhouse.io/container-factory@sha256:defea98fa609f7770e4bced6c31be9a8bf4aaed8194331bdd65aaad4699f4405 # builder/golang-alt
+dockerImage: registry.deckhouse.io/container-factory@sha256:de392f69bba4396458a861286f7726b3928ed8d1d2f70b616c9ecd6a17e42458 # builder/golang-debian-1.26 from base-images v1.3.24 (debian:13.1, root, GOST go1.26.5)
 commands:
-  - export TASK_VERSION=v3.41.0
-  - export TASK_SHA256=0a2595f7fa3c15a62f8d0c244121a4977018b3bfdec7c1542ac2a8cf079978b8
-  - apt-get update && apt-get install -y libbtrfs-dev apt-utils libelf-dev libssl-dev libuv1-dev libzstd-dev file git gcc dnsutils
-  - ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
-  - curl -LO https://github.com/go-task/task/releases/download/$TASK_VERSION/task_linux_amd64.tar.gz
-  - echo "$TASK_SHA256  task_linux_amd64.tar.gz" | sha256sum -c
-  - tar -xf task_linux_amd64.tar.gz
-  - rm -rf task_linux_amd64.tar.gz
-  - mv task /usr/local/bin/
+  # debian 13 ships the static lib as libuv.a in the default linker path,
+  # so the bookworm-era libuv_a.a symlink workaround is gone
+  - apt-get update && apt-get install -y libbtrfs-dev apt-utils libelf-dev libssl-dev libuv1-dev libzstd-dev zlib1g-dev file git gcc dnsutils
+  # The builder image ships no curl/wget. task is a Go program, so
+  # install it with the in-image toolchain: /go/bin is already on PATH.
+  - go install github.com/go-task/task/v3/cmd/task@v3.41.0
   - eval "$(ssh-agent -s)" && base64 -d /run/secrets/stronghold-ssh > /dev/shm/stronghold-ssh && chmod 400 /dev/shm/stronghold-ssh && ssh-add /dev/shm/stronghold-ssh
   - rm /dev/shm/stronghold-ssh
   - export PRIVATE_REPO=$(cat /run/secrets/deckhouse-private-repo)
@@ -16,6 +13,9 @@ commands:
   - ssh-keyscan -H ${PRIVATE_REPO} >> ~/.ssh/known_hosts
   - git config --global url."ssh://git@${PRIVATE_REPO}/".insteadOf "https://flant.internal/"
   - git config --global --add safe.directory '*'
+  # debian 13 builds libcrypto.a with zlib, so the static link needs -lz
+  # appended after -lcrypto; CGO_LDFLAGS lands at the end of the link line
+  - export CGO_LDFLAGS=-lz
   - task -o group -p build:dist:all version={{ .Tag }}
   - mkdir -p /result
   - cp -a ./dist/{{ .Tag }}/* /result
