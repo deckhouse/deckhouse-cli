@@ -86,6 +86,8 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 	cmd.AddCommand(newRemoveCommand(manager))
 
 	flags.AddFlags(cmd.PersistentFlags())
+	flags.AddKubeFlags(cmd.PersistentFlags())
+	rppflags.AddFlags(cmd.PersistentFlags())
 
 	// legacy --source bypass (temporary, hidden): direct registry access, see
 	// internal/plugins/flags/source_legacy.go.
