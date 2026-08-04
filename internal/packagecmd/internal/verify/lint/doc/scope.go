@@ -9,6 +9,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/docs"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/icon"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/images"
+	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/openapi"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/oss"
 	pkglint "github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/package"
 	"github.com/deckhouse/deckhouse-cli/internal/packagecmd/internal/verify/lint/linters/templates"
@@ -20,6 +21,7 @@ import (
 // documented targets are read from the same declarations verify enforces.
 var linterScopes = map[string]lint.TypeScopes{
 	pkglint.LinterID:   pkglint.Scopes,
+	openapi.LinterID:   openapi.Scopes,
 	templates.LinterID: templates.Scopes,
 	docs.LinterID:      docs.Scopes,
 	images.LinterID:    images.Scopes,

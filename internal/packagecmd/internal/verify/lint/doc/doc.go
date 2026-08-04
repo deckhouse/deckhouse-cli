@@ -72,6 +72,7 @@ type Example struct {
 // catalog is every documented linter, in the order verify runs them.
 var catalog = []Linter{
 	packageDoc,
+	openapiDoc,
 	templatesDoc,
 	docsDoc,
 	imagesDoc,
