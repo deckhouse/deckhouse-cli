@@ -4086,21 +4086,19 @@ func TestDownloadFilesystemVolume_AcceptsRelativeAndSameOriginURIs(t *testing.T)
 func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
 	// deltaLimit bounds how much more live heap 10x the entries may cost. The
 	// staging path retains at most fsInventorySortBatchSize items plus fixed
-	// buffers, so the measured delta is sampling jitter: well under a MiB across
-	// repeated runs, with tens of MiB of unrelated live heap in the binary and
-	// with every core busy.
+	// buffers, so the measured delta is only the handful of kilobytes by which
+	// those fixed structures differ between the two runs: measured at 26 KiB or
+	// less across GOMAXPROCS 1, 2, 4 and 12, with and without 60 MiB of unrelated
+	// live heap held in the binary, and with every core busy.
 	// Retaining the listing itself would instead cost roughly 200 bytes per item,
-	// about 6 MiB at largeEntries, so 2 MiB still fails loudly on any linear
-	// retention while absorbing the jitter.
-	//
-	// smallEntries stays large enough for its run to outlive a handful of sampler
-	// ticks. A run that finishes in a few milliseconds is sampled a handful of
-	// times and reports a peak well below its real one, which shows up as a
-	// count-dependent delta that says nothing about retention.
+	// about 6 MiB at largeEntries; appending every item to a slice on the run
+	// builder moves the delta to 4.9 MiB. deltaLimit therefore sits about 20x
+	// above the noise the measurement carries and about 10x below the signal it
+	// must catch.
 	const (
 		smallEntries = 3_000
 		largeEntries = 30_000
-		deltaLimit   = 2 << 20
+		deltaLimit   = 512 << 10
 	)
 
 	smallPeak := measureLargeFlatInventoryHeap(t, smallEntries)
@@ -4121,79 +4119,69 @@ func TestDownloadFilesystemVolume_LargeFlatInventoryBoundedHeap(t *testing.T) {
 // measureLargeFlatInventoryHeap returns the peak live heap that downloading an
 // inventory of entries link items adds on top of the binary's resting heap.
 //
-// It samples /gc/heap/live:bytes — bytes the previous collection marked as live —
-// rather than MemStats.HeapAlloc, which also counts garbage that has not been
-// collected yet. That garbage term is not a property of the code under test: it
-// is GOGC pacing headroom, proportional to the whole test binary's live heap and
-// to how long the run keeps allocating. Streaming largeEntries churns hundreds
-// of megabytes, so with HeapAlloc the same bounded-memory path reads tens of MiB
-// larger for the big inventory once the binary's resting heap is tens of MiB, as
-// it is in a full-package run, and larger still when a loaded CI runner starves
-// the collector. The marked-live series carries none of that.
+// The heap is read only at the barriers listed below, where the download path is
+// single-threaded and parked, never on a ticker while the path runs. Sampling a
+// running download does not measure retention at all: every liveness series the
+// runtime publishes is produced by a collection, and a collection that overlaps
+// an allocating mutator marks whatever that mutator allocates during the mark
+// phase, live or not. /gc/heap/live:bytes therefore carries an
+// (allocation rate x mark duration) term. Streaming largeEntries churns ~345 MB
+// in a couple of seconds, so wherever a mark phase stretches — few cores, a CPU
+// quota, a large resting heap to scan — that term alone reads megabytes, and the
+// long run is sampled ~10x more often than the short one, so its peak draws from
+// that tail far more often. Measured at GOMAXPROCS=1 with 60 MiB of unrelated
+// live heap held in the binary, the ticker-sampled count-dependent delta ranged
+// 2.3 MiB to 9.0 MiB — more than the ~6 MiB a full-listing regression costs, so
+// the noise exceeded the signal. Equalizing the churn between the two runs
+// removed the bias but not the tail. A barrier reading costs two collections
+// instead: the first marks what the path retains, the second drops whatever the
+// first marked black.
+//
+// The barriers, in order: the request for the listing's trailing directory (the
+// whole flat listing has been ingested and the walk is parked on that round
+// trip), setTotal (the inventory is merged and published, no worker started
+// yet), each durability confirmation (the published inventory, then the
+// published tar, so the merge and the assembly are covered too), and the return
+// of the call itself.
 func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 	t.Helper()
 
-	// A forced collection every forceGCEvery ticks keeps the marked-live series
-	// advancing: it is only republished at mark termination, so a run that
-	// triggers few collections of its own would otherwise go unsampled.
-	const (
-		sampleInterval = 2 * time.Millisecond
-		forceGCEvery   = 5
-	)
+	var ingestBarriers atomic.Int64
 
-	srv := newLargeLinkInventoryServer(t, entries, false)
 	nodeDir := t.TempDir()
 	tarPath := filepath.Join(nodeDir, archive.FsTarName)
 	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+	probe := newFSInventoryHeapProbe()
+	srv := newBarrierLinkInventoryServer(t, entries, func() {
+		ingestBarriers.Add(1)
+		probe.observe()
+	})
+	ctx := archive.WithDirectorySyncHook(
+		context.Background(),
+		func(_ string, next func() error) error {
+			probe.observe()
 
-	runtime.GC()
-
-	baseline := markedLiveHeapBytes()
-
-	stop := make(chan struct{})
-	peak := make(chan uint64, 1)
-
-	go func() {
-		ticker := time.NewTicker(sampleInterval)
-		defer ticker.Stop()
-
-		maxLive := baseline
-		ticks := 0
-
-		for {
-			select {
-			case <-ticker.C:
-				ticks++
-				if ticks%forceGCEvery == 0 {
-					runtime.GC()
-				}
-
-				if live := markedLiveHeapBytes(); live > maxLive {
-					maxLive = live
-				}
-			case <-stop:
-				peak <- maxLive
-
-				return
-			}
-		}
-	}()
+			return next()
+		},
+	)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	err := volume.DownloadFilesystemVolume(
-		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
-		3, 0, newFSFetcher(srv), mustCodec(t, "none"), nil, nil,
+		ctx, log, tarPath, stagingDir, srv.URL+"/files/",
+		3, 0, newFSFetcher(srv), mustCodec(t, "none"),
+		func(int64) { probe.observe() }, nil,
 	)
-	close(stop)
-
-	maxLive := <-peak
 	if err != nil {
 		t.Fatalf("DownloadFilesystemVolume: %v", err)
 	}
 
-	additional := uint64(0)
-	if maxLive > baseline {
-		additional = maxLive - baseline
+	probe.observe()
+
+	// The reading taken while the whole listing is ingested is the one that would
+	// catch a full-listing regression; a barrier directory that silently stopped
+	// being listed would leave the bound guarding nothing.
+	if got := ingestBarriers.Load(); got != 1 {
+		t.Fatalf("barrier directory listed %d times, want 1", got)
 	}
 
 	f, err := os.Open(tarPath)
@@ -4216,11 +4204,57 @@ func measureLargeFlatInventoryHeap(t *testing.T, entries int) uint64 {
 		count++
 	}
 
-	if count != entries {
-		t.Fatalf("tar entries = %d, want %d", count, entries)
+	// The barrier directory is archived like any other listing item, so the tar
+	// holds one entry more than the link count.
+	if count != entries+1 {
+		t.Fatalf("tar entries = %d, want %d", count, entries+1)
 	}
 
-	return additional
+	return probe.additional()
+}
+
+// fsInventoryHeapProbe records the highest live heap observed at any barrier it
+// is called from, relative to the resting heap at construction time.
+type fsInventoryHeapProbe struct {
+	mu       sync.Mutex
+	baseline uint64
+	peak     uint64
+}
+
+func newFSInventoryHeapProbe() *fsInventoryHeapProbe {
+	runtime.GC()
+
+	resting := markedLiveHeapBytes()
+
+	return &fsInventoryHeapProbe{baseline: resting, peak: resting}
+}
+
+// observe is called from the download goroutine and from the listing handler
+// goroutine, never from both at once — a barrier is by definition a point where
+// only one of them runs — but the mutex keeps that assumption from becoming a
+// data race if a future barrier breaks it.
+func (p *fsInventoryHeapProbe) observe() {
+	// The second collection is what turns the reading into a retention number:
+	// the first one may have marked bytes the runtime allocated black while it
+	// ran, and only a later cycle can drop them again.
+	runtime.GC()
+	runtime.GC()
+
+	live := markedLiveHeapBytes()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if live > p.peak {
+		p.peak = live
+	}
+}
+
+func (p *fsInventoryHeapProbe) additional() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.peak - p.baseline
 }
 
 // markedLiveHeapBytes reports the heap bytes the previous collection marked as
@@ -5040,33 +5074,84 @@ func newLargeLinkInventoryServer(t *testing.T, entries int, reverse bool) *httpt
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
-
-		encoder := json.NewEncoder(w)
-		for index := range entries {
-			if index > 0 {
-				_, _ = io.WriteString(w, ",")
-			}
-
-			itemIndex := index
-			if reverse {
-				itemIndex = entries - index - 1
-			}
-
-			if err := encoder.Encode(exporter.Item{
-				Name:       fmt.Sprintf("link-%08d", itemIndex),
-				Type:       "link",
-				TargetPath: "target",
-				Attributes: map[string]any{},
-			}); err != nil {
-				return
-			}
-		}
-
+		writeLinkInventoryItems(w, entries, reverse)
 		_, _ = io.WriteString(w, `]}`)
 	}))
 	t.Cleanup(srv.Close)
 
 	return srv
+}
+
+// newBarrierLinkInventoryServer serves entries link items followed by one
+// directory item, and calls onListed when that directory is listed.
+//
+// walkFSInventory drives the whole listing from one goroutine over an on-disk
+// directory queue, so it can only ask for the trailing directory once it has
+// consumed every item of the root listing, and it stays parked in that round
+// trip until the handler answers. That makes the handler the one place where a
+// test can read the heap with the ingest side both complete and stopped.
+func newBarrierLinkInventoryServer(t *testing.T, entries int, onListed func()) *httptest.Server {
+	t.Helper()
+
+	const barrierDir = "barrier"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/files/":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[`)
+			writeLinkInventoryItems(w, entries, false)
+
+			if entries > 0 {
+				_, _ = io.WriteString(w, ",")
+			}
+
+			_, _ = fmt.Fprintf(
+				w,
+				`{"name":%q,"type":"dir","uri":%q,"attributes":{}}]}`,
+				barrierDir,
+				barrierDir+"/",
+			)
+
+		case "/files/" + barrierDir + "/":
+			onListed()
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"apiVersion":"v1","items":[]}`)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// writeLinkInventoryItems streams entries link items into an already-open JSON
+// listing array, leaving it open so the caller can append trailing items.
+func writeLinkInventoryItems(w io.Writer, entries int, reverse bool) {
+	encoder := json.NewEncoder(w)
+
+	for index := range entries {
+		if index > 0 {
+			_, _ = io.WriteString(w, ",")
+		}
+
+		itemIndex := index
+		if reverse {
+			itemIndex = entries - index - 1
+		}
+
+		if err := encoder.Encode(exporter.Item{
+			Name:       fmt.Sprintf("link-%08d", itemIndex),
+			Type:       "link",
+			TargetPath: "target",
+			Attributes: map[string]any{},
+		}); err != nil {
+			return
+		}
+	}
 }
 
 type repeatedByteReader byte
