@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package errdetect maps registry-packages-proxy failures from `d8 cli` to
+// Package errdetect maps registry-packages-proxy failures from `d8 dist` to
 // HelpfulErrors with CLI-specific guidance.
 package errdetect
 
@@ -46,7 +46,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	case errors.Is(err, rpp.ErrNotFound):
 		return help(err, "registry-packages-proxy: version not found (404)",
 			"this deckhouse-cli version is not published",
-			"list available versions with 'd8 cli versions'")
+			"list available versions with 'd8 dist versions'")
 	case errors.Is(err, rpp.ErrUpstream):
 		return help(err, "registry-packages-proxy: upstream error (5xx)",
 			"the proxy could not reach the backing registry",

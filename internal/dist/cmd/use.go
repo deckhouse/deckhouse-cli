@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package selfupdatecmd
+package distcmd
 
 import (
 	"fmt"
@@ -29,7 +29,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
-// newUseCommand returns `d8 cli use <version>` - switch the d8 binary to a
+// newUseCommand returns `d8 dist use <version>` - switch the d8 binary to a
 // specific version by repointing the version store's `current` symlink,
 // preferring locally installed versions over a download.
 func newUseCommand(logger *dkplog.Logger) *cobra.Command {
@@ -130,11 +130,11 @@ func printSwitchNotes(res selfupdate.SwitchResult) {
 	}
 
 	if res.PrevTag != "" {
-		fmt.Printf("Previous version %s remains installed - switch back with 'd8 cli use %s'.\n", verOld.Sprint(res.PrevTag), res.PrevTag)
+		fmt.Printf("Previous version %s remains installed - switch back with 'd8 dist use %s'.\n", verOld.Sprint(res.PrevTag), res.PrevTag)
 	}
 }
 
-// completeStoredVersions offers the locally installed versions for `d8 cli use
+// completeStoredVersions offers the locally installed versions for `d8 dist use
 // <TAB>`. Completion must stay instant and side-effect-free (the same contract
 // root.go enforces for __complete), so it reads only the store.
 // Versions that switch offline are exactly the ones worth suggesting.

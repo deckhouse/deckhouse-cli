@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package selfupdatecmd
+package distcmd
 
 import (
 	"fmt"
@@ -76,7 +76,7 @@ func newVersionsCommand(logger *dkplog.Logger) *cobra.Command {
 			}
 
 			if extra := storedOnly(installed, versions); len(extra) > 0 {
-				fmt.Println("\nInstalled locally (switch with 'd8 cli use'), not published in the registry:")
+				fmt.Println("\nInstalled locally (switch with 'd8 dist use'), not published in the registry:")
 
 				for _, v := range extra {
 					fmt.Printf("  %s\n", v.Original())
@@ -94,7 +94,7 @@ func newVersionsCommand(logger *dkplog.Logger) *cobra.Command {
 
 // formatVersionList renders the version list newest-first: versions newer than
 // current are green, the current one is starred and cyan, older ones are dimmed.
-// Versions present in the local store carry an "installed" marker - `d8 cli use`
+// Versions present in the local store carry an "installed" marker - `d8 dist use`
 // switches to them without a download. A non-semver current (dev build) produces
 // a plain uncolored list. Reports whether the current version appeared in the list.
 func formatVersionList(versions []*semver.Version, current string, installed []*semver.Version) ([]string, bool) {
@@ -156,7 +156,7 @@ func formatVersionList(versions []*semver.Version, current string, installed []*
 }
 
 // storedOnly returns stored versions absent from the published list (the registry
-// was re-pointed or pruned); they remain switchable via `d8 cli use`.
+// was re-pointed or pruned); they remain switchable via `d8 dist use`.
 func storedOnly(installed, published []*semver.Version) []*semver.Version {
 	extra := make([]*semver.Version, 0, len(installed))
 
