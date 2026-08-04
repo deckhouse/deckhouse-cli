@@ -3,9 +3,10 @@
 The `internal/plugins` package manages d8 plugins: standalone binaries
 published to an OCI registry that d8 installs, updates, and runs as if
 they were native subcommands. The machinery lives in this package (the
-`Manager`); the `d8 plugins` cobra commands are a thin layer on top of it in
-`internal/plugins/cmd` (package `pluginscmd`), one file per command - the same
-split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
+`Manager`); the `d8 dist plugins` cobra commands are a thin layer on top of it
+in `internal/plugins/cmd` (package `pluginscmd`), one file per command,
+mounted as a subtree of `d8 dist` (`internal/dist/cmd`) - the same
+machinery/commands split `internal/selfupdate` / `internal/dist/cmd` uses.
 
 ## Why
 
@@ -19,13 +20,13 @@ split `internal/selfupdate` / `internal/selfupdate/cmd` uses.
 
 | Command | What it does |
 |---|---|
-| `d8 plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
-| `d8 plugins update <name> [--use-major N]` | update to the newest cluster-compatible version within the current major |
-| `d8 plugins update all` | the same for every installed plugin |
-| `d8 plugins list` | list installed plugins (the proxy serves no catalog, so available plugins cannot be listed) |
-| `d8 plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 cli versions`) |
-| `d8 plugins contract <name>` | show a plugin's contract |
-| `d8 plugins remove <name>` | remove an installed plugin |
+| `d8 dist plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
+| `d8 dist plugins update <name> [--use-major N]` | update to the newest cluster-compatible version within the current major |
+| `d8 dist plugins update all` | the same for every installed plugin |
+| `d8 dist plugins list` | list installed plugins (the proxy serves no catalog, so available plugins cannot be listed) |
+| `d8 dist plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 dist versions`) |
+| `d8 dist plugins contract <name>` | show a plugin's contract |
+| `d8 dist plugins remove <name>` | remove an installed plugin |
 | `d8 <plugin> ...` *(wrapper, with `DECKHOUSE_PLUGINS_ENABLED=true`)* | run an installed plugin; auto-installs it on first use |
 
 ## Plugin source
@@ -184,8 +185,8 @@ A failure at any step leaves the previous version installed and working.
 | `source_legacy.go` | the hidden `--source` direct-registry bypass (temporary, pre-#386; force-enables `--skip-cluster-checks`) |
 | `builtins.go` | built-in command names (`delivery-kit`, `package`) that satisfy a same-named plugin dependency by presence - no version check, no registry lookup |
 | `layout/` | on-disk path layout |
-| `flags/` | the `d8 plugins` flag set |
-| `cmd/` | the `d8 plugins ...` command tree and the per-plugin wrapper command, one file per command |
+| `flags/` | the plugin-specific flag set (`--plugins-dir`, `--skip-cluster-checks`); the kubeconfig and `rpp-*` flags live on the `d8 dist` root and are inherited |
+| `cmd/` | the `d8 dist plugins ...` command tree and the per-plugin wrapper command, one file per command |
 | `cmd/errdetect/` | maps registry-packages-proxy errors (401/403/404/5xx/endpoint-discovery) to actionable hints |
 
 Related: `internal/rpp` (proxy HTTP client), `internal/lockfile` (install lock),
