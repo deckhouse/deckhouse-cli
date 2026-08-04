@@ -28,7 +28,24 @@ import (
 	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/selfupdate"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
+	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
+
+// activeVersionTag reports the running deckhouse-cli version. For a
+// store-managed install the store's `current` symlink names the active version
+// reliably even when the binary was built without version ldflags; trust it
+// only when this invocation runs through the store.
+func activeVersionTag(store *selfupdate.Store) string {
+	current := version.Version
+
+	if exePath, err := selfupdate.CurrentExecutable(); err == nil && store.Contains(exePath) {
+		if tag := store.CurrentTag(); tag != "" {
+			current = tag
+		}
+	}
+
+	return current
+}
 
 // newUpdater builds an Updater backed by the registry-packages-proxy, reached
 // with the kubeconfig identity from the command's flags.

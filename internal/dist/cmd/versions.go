@@ -27,7 +27,6 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal/selfupdate"
-	"github.com/deckhouse/deckhouse-cli/internal/version"
 )
 
 func newVersionsCommand(logger *dkplog.Logger) *cobra.Command {
@@ -59,16 +58,7 @@ func newVersionsCommand(logger *dkplog.Logger) *cobra.Command {
 
 			installed := store.List()
 
-			// For a store-managed install the `current` symlink names the active
-			// version reliably even when the binary was built without version
-			// ldflags; trust it only when this invocation runs through the store.
-			current := version.Version
-
-			if exePath, err := selfupdate.CurrentExecutable(); err == nil && store.Contains(exePath) {
-				if tag := store.CurrentTag(); tag != "" {
-					current = tag
-				}
-			}
+			current := activeVersionTag(store)
 
 			lines, currentListed := formatVersionList(versions, current, installed)
 			for _, line := range lines {

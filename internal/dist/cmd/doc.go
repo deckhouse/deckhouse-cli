@@ -17,6 +17,7 @@ limitations under the License.
 // Package distcmd implements the `d8 dist` command tree - management of the
 // d8 distribution: the deckhouse-cli binary itself and its plugins.
 //
+//	d8 dist            summary: the d8 version, plugins, what is outdated
 //	d8 dist check      report whether a newer deckhouse-cli is available
 //	d8 dist update     update the deckhouse-cli binary
 //	d8 dist use        switch the deckhouse-cli binary to a specific version
@@ -28,6 +29,6 @@ limitations under the License.
 // internal/plugins.
 //
 // File layout: dist.go assembles the tree, one command per file (check.go,
-// update.go, use.go, versions.go), updater.go builds the shared Updater,
-// ui.go holds the output palette.
+// update.go, use.go, versions.go), summary.go is the root action, updater.go
+// builds the shared Updater, ui.go holds the output palette.
 package distcmd
