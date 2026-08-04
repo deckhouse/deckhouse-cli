@@ -85,9 +85,9 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 	cmd.AddCommand(newUpdateCommand(manager))
 	cmd.AddCommand(newRemoveCommand(manager))
 
+	// Only the plugin-specific flags: the cluster access flags (kubeconfig/
+	// context, rpp-*) are owned by the parent `d8 dist` command.
 	flags.AddFlags(cmd.PersistentFlags())
-	flags.AddKubeFlags(cmd.PersistentFlags())
-	rppflags.AddFlags(cmd.PersistentFlags())
 
 	// legacy --source bypass (temporary, hidden): direct registry access, see
 	// internal/plugins/flags/source_legacy.go.

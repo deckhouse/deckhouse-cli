@@ -22,12 +22,12 @@ trap cleanup_on_error EXIT ERR
 
 # tests
 echo "--- TEST LIST PLUGINS ---"
-$(PWD)/bin/d8 plugins list # run task build before required 
+$(PWD)/bin/d8 dist plugins list # run task build before required
 
 echo ""
 echo "--- TEST CLEAN INSTALL PLUGIN ---"
-$(PWD)/bin/d8 plugins install package
+$(PWD)/bin/d8 dist plugins install package
 
 echo ""
 echo "--- TEST INSTALL SECOND PLUGIN ---"
-$(PWD)/bin/d8 plugins install system
+$(PWD)/bin/d8 dist plugins install system

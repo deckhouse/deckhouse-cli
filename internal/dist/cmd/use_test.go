@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package selfupdatecmd
+package distcmd
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/selfupdate"
 )
 
-// TestStoredVersionCompletions checks the `d8 cli use <TAB>` source: stored
+// TestStoredVersionCompletions checks the `d8 dist use <TAB>` source: stored
 // versions newest-first, filtered by the typed prefix, with a description.
 func TestStoredVersionCompletions(t *testing.T) {
 	dir := t.TempDir()
