@@ -38,10 +38,8 @@ vars:
       version="$(go list -m -f '{{"{{"}}.Replace.Version{{"}}"}}' github.com/werf/werf/v2)"
       echo "-X 'github.com/werf/werf/v2/pkg/werf.Version=${version}'"
 
-  cgoTags: "gost clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
-  goTags: "gost clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
-  cgoDevTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
-  goDevTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
+  cgoTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp osusergo exclude_graphdriver_devicemapper netgo no_devmapper static_build cni"
+  goTags: "clionly dfrunsecurity dfrunnetwork dfrunmount dfssh containers_image_openpgp"
   testsumFormat: '{{if eq .GITHUB_ACTIONS "true"}}github-actions{{else}}pkgname-and-test-fails{{end}}'
 
   cgoDevLDFlags: "-linkmode external -extldflags=-static -s -w -X 'github.com/deckhouse/deckhouse-cli/internal/version.Version=local-dev' {{ .werfLDFlags }}"
@@ -68,7 +66,7 @@ tasks:
     internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/bin/d8"
-        -compiler gc -ldflags="{{ .cgoDevLDFlags }}" -tags="{{ .cgoDevTags }}" {{ .CLI_ARGS }} ./cmd/d8/
+        -compiler gc -ldflags="{{ .cgoDevLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} ./cmd/d8/
     env:
       CGO_ENABLED: "1"
       GOOS: "{{ .targetOS }}"
@@ -88,7 +86,7 @@ tasks:
     internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./build/%s-%s" .targetOS .targetArch) }}/bin/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
-        -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goDevTags }}" {{ .CLI_ARGS }} ./cmd/d8/
+        -ldflags="{{ .goDevLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} ./cmd/d8/
     env:
       CGO_ENABLED: "0"
       GOOS: "{{ .targetOS }}"
@@ -293,16 +291,6 @@ tasks:
     desc: Run golangci-lint without fixes (CI mode)
     cmds:
       - golangci-lint run ./... --build-tags="{{ .goTags }}"
-
-  lint:dev:
-    desc: Run golangci-lint with auto-fix
-    cmds:
-      - golangci-lint run ./... --fix --build-tags="{{ .goDevTags }}"
-
-  lint:dev:check:
-    desc: Run golangci-lint without fixes (CI mode)
-    cmds:
-      - golangci-lint run ./... --build-tags="{{ .goDevTags }}"
 
   check:kubectl:
     desc: Check kubectlVersion matches k8s.io/kubectl in go.mod

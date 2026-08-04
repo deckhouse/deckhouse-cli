@@ -12,7 +12,6 @@ env:
   GOPRIVATE: "flant.internal"
   PRIVATE_REPO: "${{secrets.DECKHOUSE_PRIVATE_REPO}}"
   GOLANGCI_LINT_VERSION: 'v2.11.4'
-  GO_IMAGE: registry.deckhouse.io/container-factory@sha256:ce80d4ec2053430e81b1a07492a403c4fb5382a27570984318ea75b87bbe5109
 
 permissions:
   contents: write
@@ -40,7 +39,7 @@ jobs:
             libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils curl
+            file git gcc dnsutils
           # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
           ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
@@ -49,14 +48,11 @@ jobs:
         with:
           fetch-depth: 0 # To use `git describe --tags`
 
-      - name: Install Crane
-        uses: imjasonh/setup-crane@v0.7
-
       - name: Setup Go
-        run: |
-          crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          /usr/local/go/bin/go version
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # Cache download takes longer that a build from scratch
 
       - name: Setup Task
         uses: arduino/setup-task@v2
@@ -117,7 +113,7 @@ jobs:
             libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils curl
+            file git gcc dnsutils
           # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
           ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
@@ -126,14 +122,11 @@ jobs:
         with:
           fetch-depth: 0 # To use `git describe --tags`
 
-      - name: Install Crane
-        uses: imjasonh/setup-crane@v0.7
-
       - name: Setup Go
-        run: |
-          crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          /usr/local/go/bin/go version
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # Cache download takes longer that a build from scratch
 
       - name: Setup Task
         uses: arduino/setup-task@v2
@@ -190,7 +183,7 @@ jobs:
             libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils curl
+            file git gcc dnsutils
           # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
           ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
@@ -199,14 +192,11 @@ jobs:
         with:
           fetch-depth: 0 # To use `git describe --tags`
 
-      - name: Install Crane
-        uses: imjasonh/setup-crane@v0.7
-
       - name: Setup Go
-        run: |
-          crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          /usr/local/go/bin/go version
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # Cache download takes longer that a build from scratch
 
       - name: Setup GolangCI-Lint
         uses: golangci/golangci-lint-action@v9
@@ -268,7 +258,7 @@ jobs:
             libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
             libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
             libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-            file git gcc dnsutils curl
+            file git gcc dnsutils
           # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
           ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
 
@@ -277,14 +267,11 @@ jobs:
         with:
           fetch-depth: 0 # To use `git describe --tags`
 
-      - name: Install Crane
-        uses: imjasonh/setup-crane@v0.7
-
       - name: Setup Go
-        run: |
-          crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
-          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
-          /usr/local/go/bin/go version
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false # Cache download takes longer that a build from scratch
 
       - name: Setup Task
         uses: arduino/setup-task@v2
