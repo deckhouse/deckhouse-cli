@@ -63,14 +63,14 @@ kubectl create clusterrolebinding d8-cli-download \
 
 | Command | What it does |
 |---|---|
-| `d8 dist` | prints a distribution summary: the d8 version, installed plugins, what is outdated (local data only when the cluster is unreachable) |
+| `d8 dist status` | prints a distribution summary: the d8 version, installed plugins, what is outdated (local data only when the cluster is unreachable) |
 | `d8 dist check` | reports whether a newer version is available |
 | `d8 dist versions` (alias: `list`) | lists published versions, newest first |
 | `d8 dist update [--version X]` | installs a version and switches to it |
 | `d8 dist use <version>` | switches to a version; instant if it is already installed |
 
 ```console
-$ d8 dist
+$ d8 dist status
 deckhouse-cli (d8)
   Version:  v0.13.1
   Latest:   v0.14.0  update available - run 'd8 dist update'
