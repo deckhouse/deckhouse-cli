@@ -409,7 +409,7 @@ func TestValidateInstalledRequirementsNamesMissingDep(t *testing.T) {
 
 	missing, ok := findSuggestion(he, "dep is not installed")
 	require.True(t, ok, "the diagnostic names the missing dependency")
-	assert.Contains(t, strings.Join(missing.Solutions, " "), "d8 plugins install dep",
+	assert.Contains(t, strings.Join(missing.Solutions, " "), "d8 dist plugins install dep",
 		"it points at how to install the dependency")
 }
 

@@ -34,7 +34,7 @@ func newUpdateCommand(manager *plugins.Manager) *cobra.Command {
 			"within its current major version. Plugins it depends on are installed/upgraded\n" +
 			"automatically.\n\n" +
 			"To cross majors use --use-major N (dependencies may then cross their major too)\n" +
-			"or pick an exact version with 'd8 plugins install <name> --version X'.",
+			"or pick an exact version with 'd8 dist plugins install <name> --version X'.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pluginName := args[0]

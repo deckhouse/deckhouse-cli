@@ -66,7 +66,7 @@ func TestInstalledPluginNames(t *testing.T) {
 
 func TestUpdateAllFallsBackToHomeInstallRoot(t *testing.T) {
 	// A non-root install lives in ~/.deckhouse-cli while the configured root is
-	// empty; `d8 plugins update all` runs against the configured root and must
+	// empty; `d8 dist plugins update all` runs against the configured root and must
 	// still find (and update) the fallback install.
 	t.Setenv("HOME", t.TempDir())
 

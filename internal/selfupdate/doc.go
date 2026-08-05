@@ -17,7 +17,7 @@ limitations under the License.
 // Package selfupdate lets the d8 binary update itself through the cluster
 // (registry-packages-proxy, kubeconfig identity - no registry credentials).
 //
-// It implements the `d8 cli` command tree:
+// It backs the `d8 dist` command tree:
 //
 //   - check    - is a newer version available
 //   - versions - list published versions (alias: list)
@@ -34,7 +34,7 @@ limitations under the License.
 //   - Every downloaded binary is smoke-tested (`--version`) before it becomes
 //     active; a corrupt or wrong-platform artifact never replaces a working d8.
 //
-// Wiring: the cobra commands live in the cmd subpackage; this package holds
+// Wiring: the cobra commands live in internal/dist/cmd; this package holds
 // the update flow (update.go) and the store (store.go). Downloads go through
 // the Source interface (source.go) backed by internal/rpp.
 // Details, trade-offs, and the full file map are in README.md next to this file.

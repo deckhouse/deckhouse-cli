@@ -21,7 +21,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -65,6 +64,9 @@ func defaultKubeconfigPath() string {
 	return utilk8s.DefaultKubeconfigPath()
 }
 
+// AddFlags registers the plugin-specific flags: the plugins directory and the
+// cluster-checks toggle. Cluster access flags (kubeconfig/context, rpp-*) are
+// registered separately, so a parent command can own them for a whole tree.
 func AddFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVar(
 		&DeckhousePluginsDir,
@@ -72,6 +74,18 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		DeckhousePluginsDir,
 		"Path to the d8 plugins directory. Defaults to $"+EnvPluginsDir+".",
 	)
+	flagSet.BoolVar(
+		&SkipClusterChecks,
+		"skip-cluster-checks",
+		SkipClusterChecks,
+		"Skip enforcement of cluster-side plugin requirements (Kubernetes/Deckhouse/module versions) when the cluster is unreachable. Defaults to $"+EnvSkipClusterChecks+".",
+	)
+}
+
+// AddKubeFlags registers the kubeconfig/context pair that locates the cluster.
+// The flags are bound to Kubeconfig/KubeContext, so reading them by flag name
+// and through the package variables gives the same value.
+func AddKubeFlags(flagSet *pflag.FlagSet) {
 	flagSet.StringVarP(
 		&Kubeconfig,
 		"kubeconfig",
@@ -85,12 +99,4 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		KubeContext,
 		"Kubeconfig context to use. Used to reach registry-packages-proxy and to enforce cluster-side plugin requirements.",
 	)
-	flagSet.BoolVar(
-		&SkipClusterChecks,
-		"skip-cluster-checks",
-		SkipClusterChecks,
-		"Skip enforcement of cluster-side plugin requirements (Kubernetes/Deckhouse/module versions) when the cluster is unreachable. Defaults to $"+EnvSkipClusterChecks+".",
-	)
-
-	rppflags.AddFlags(flagSet)
 }
