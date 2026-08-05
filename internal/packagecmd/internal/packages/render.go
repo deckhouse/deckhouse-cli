@@ -138,7 +138,7 @@ func buildPlatformValues() any {
 				"mode":              "CertManager",
 			},
 			"ingressClass":         "nginx",
-			"publicDomainTemplate": "%s.%s.%s.domain.io",
+			"publicDomainTemplate": "%s.%s.domain.io",
 		},
 	}
 }

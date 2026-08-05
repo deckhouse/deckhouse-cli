@@ -1,6 +1,7 @@
-// Package openapi validates the OpenAPI schemas a package ships under openapi/. Its
-// rules encode hard schema contracts rather than preferences, so the linter carries no
-// .pkglint.yaml settings and its rules always report at their built-in severity.
+// Package openapi validates the OpenAPI schemas a package ships under openapi/. Only the
+// top level of the directory is read, because that is where the runtime looks a package's
+// schemas up. Its rules encode schema contracts rather than preferences, so the linter
+// carries no .pkglint.yaml settings and its rules always report at their built-in severity.
 package openapi
 
 import (
@@ -41,4 +42,6 @@ type Linter struct {
 // Lint executes the openapi rules against the configured package path.
 func (l *Linter) Lint(ctx context.Context) {
 	rules.NewAdvancedRule(l.config.Path, l.collector).Check(ctx)
+	rules.NewEnumRule(l.config.Path, l.collector).Check(ctx)
+	rules.NewBilingualRule(l.config.Path, l.collector).Check(ctx)
 }

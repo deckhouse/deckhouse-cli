@@ -4,5 +4,7 @@ properties:
   replicas:
     type: integer
     default: 1
+    description: Number of server replicas to run.
   msg:
     type: string
+    description: Text the server answers every request with.
