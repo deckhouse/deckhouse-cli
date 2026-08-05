@@ -328,6 +328,7 @@ func (d *RootedDestination) recordBindingLoss(err error) error {
 	}
 
 	d.mu.Lock()
+
 	if d.lost == nil {
 		d.lost = err
 	}
@@ -1249,6 +1250,7 @@ func (d *RootedDestination) Close() error {
 	}
 
 	d.mu.Lock()
+
 	if d.closed {
 		d.mu.Unlock()
 
