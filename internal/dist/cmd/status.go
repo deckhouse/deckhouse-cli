@@ -58,15 +58,23 @@ type summaryData struct {
 	offlineReason string
 }
 
-// newSummaryRunE returns the `d8 dist` root action: a summary of the
-// distribution - the running d8 version and installed plugins, with update
-// status from the registry-packages-proxy. A cluster/proxy failure degrades
-// the summary to local data instead of failing the command.
-func newSummaryRunE(logger *dkplog.Logger) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		fmt.Print(renderSummary(collectSummary(cmd.Context(), cmd, logger)))
+// newStatusCommand returns `d8 dist status` - a summary of the distribution:
+// the running d8 version and installed plugins, with update status from the
+// registry-packages-proxy. A cluster/proxy failure degrades the summary to
+// local data instead of failing the command.
+func newStatusCommand(logger *dkplog.Logger) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show the distribution status: the d8 version, plugins, what is outdated",
+		Long: "Show the state of the d8 distribution: the running deckhouse-cli version and the\n" +
+			"installed plugins, with update status from the registry-packages-proxy.\n\n" +
+			"When the cluster is unreachable, prints the local data and a warning instead of failing.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Print(renderSummary(collectSummary(cmd.Context(), cmd, logger)))
 
-		return nil
+			return nil
+		},
 	}
 }
 

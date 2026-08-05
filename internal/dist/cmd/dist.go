@@ -37,8 +37,8 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 		Use:   "dist",
 		Short: "Manage the d8 distribution: the deckhouse-cli binary and its plugins",
 		Long: "Manage the d8 distribution - the deckhouse-cli binary and its plugins.\n\n" +
-			"Without a subcommand, prints a distribution summary: the d8 version, installed\n" +
-			"plugins, and what is outdated (local data only when the cluster is unreachable).\n\n" +
+			"See the state of the distribution with 'd8 dist status': the d8 version, installed\n" +
+			"plugins, and what is outdated.\n\n" +
 			"Versions are served by the in-cluster registry-packages-proxy, authenticated by the\n" +
 			"current kubeconfig identity.\n\n" +
 			"Update the binary with 'd8 dist update'; manage plugins under 'd8 dist plugins'.\n\n" +
@@ -46,10 +46,16 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 			"  " + rppflags.EnvEndpoint + "  registry-packages-proxy base URL (otherwise discovered from the cluster)\n" +
 			"  " + rppflags.EnvCAFile + "   PEM CA bundle to verify the proxy TLS certificate\n" +
 			"  KUBECONFIG       path to the kubeconfig file",
+		// Print help when called bare, like the d8 root. The explicit Run makes
+		// Args effective: without it cobra shows help before validating args,
+		// and a stray argument ('d8 dist junk') would pass silently.
 		Args: cobra.NoArgs,
-		RunE: newSummaryRunE(logger),
+		Run: func(cmd *cobra.Command, _ []string) {
+			_ = cmd.Help()
+		},
 	}
 
+	cmd.AddCommand(newStatusCommand(logger))
 	cmd.AddCommand(newCheckCommand(logger))
 	cmd.AddCommand(newUpdateCommand(logger))
 	cmd.AddCommand(newUseCommand(logger))
