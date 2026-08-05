@@ -20,8 +20,6 @@ import (
 const AdvancedRuleID = "advanced"
 
 const (
-	// openAPIDir is the package subdirectory holding the OpenAPI schemas.
-	openAPIDir = "openapi"
 	// settingsFile is the OpenAPI schema describing user-configurable settings.
 	settingsFile = "settings.yaml"
 	// advancedKey is the vendor extension that marks a setting as advanced in the UI.

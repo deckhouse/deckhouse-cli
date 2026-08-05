@@ -181,6 +181,7 @@ func (l *ownedTransportLifecycle) trackConnection(conn net.Conn) net.Conn {
 	}
 
 	l.mu.Lock()
+
 	if l.closing {
 		l.mu.Unlock()
 
@@ -239,6 +240,7 @@ func (l *ownedTransportLifecycle) closeConnections() {
 	for conn := range l.connections {
 		connections = append(connections, conn)
 	}
+
 	l.mu.Unlock()
 
 	for _, conn := range connections {

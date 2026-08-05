@@ -1,0 +1,5 @@
+properties:
+  replicas:
+    description: Количество запускаемых реплик сервера.
+  msg:
+    description: Текст, которым сервер отвечает на каждый запрос.

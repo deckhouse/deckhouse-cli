@@ -227,11 +227,12 @@ func mergedProperties(s *spec.Schema) map[string]spec.Schema {
 // the example is layered on top — this lets schema authors write a partial
 // `x-example` and have unset fields filled from per-property defaults.
 //
-// For non-object schemas, the example is returned as a deep clone.
+// For non-object schemas, the example is returned as a deep clone, shaped as a
+// list when the schema declares an array.
 func overlayExample(s *spec.Schema, example any) (any, error) {
 	exMap, ok := example.(map[string]any)
 	if !ok || !isObject(s) {
-		return deepCopyJSON(example), nil
+		return arrayShaped(s, deepCopyJSON(example)), nil
 	}
 
 	base, err := synthesizeObject(s)
@@ -242,6 +243,21 @@ func overlayExample(s *spec.Schema, example any) (any, error) {
 	deepMergeOverride(base, exMap)
 
 	return base, nil
+}
+
+// arrayShaped keeps the shape the schema declares. An array property is often
+// illustrated with a single element rather than a one-element list; a chart that
+// renders such a value with toYaml or ranges over it needs the list.
+func arrayShaped(s *spec.Schema, v any) any {
+	if !s.Type.Contains(typeArray) {
+		return v
+	}
+
+	if _, isList := v.([]any); isList {
+		return v
+	}
+
+	return []any{v}
 }
 
 // firstExample picks a representative value out of an x-examples block.
