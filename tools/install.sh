@@ -383,13 +383,21 @@ install_binary() {
     esac
   fi
   
+  # Install via temp file + rename: the binary must land under the final name
+  # with a fresh inode, or macOS SIGKILLs it on exec (stale kernel
+  # code-signing cache after an in-place overwrite). rm guards against a
+  # leftover temp file: cp over it would keep its inode.
+  tmp_path="${target_path}.tmp.$$"
+
   # Check if we need sudo to install
   if [ ! -w "$INSTALL_DIR" ]; then
     if user_can_sudo; then
       fmt_info "Installing ${BINARY_NAME} to ${target_path} (requires sudo)..."
       sudo mkdir -p "$INSTALL_DIR"
-      sudo cp "$binary_path" "$target_path"
-      sudo chmod +x "$target_path"
+      sudo rm -f "$tmp_path"
+      sudo cp "$binary_path" "$tmp_path"
+      sudo chmod +x "$tmp_path"
+      sudo mv -f "$tmp_path" "$target_path"
     else
       fmt_error "Cannot write to ${INSTALL_DIR} and sudo is not available"
       fmt_error "Please run with sudo or choose a different installation directory"
@@ -398,8 +406,10 @@ install_binary() {
   else
     fmt_info "Installing ${BINARY_NAME} to ${target_path}..."
     mkdir -p "$INSTALL_DIR"
-    cp "$binary_path" "$target_path"
-    chmod +x "$target_path"
+    rm -f "$tmp_path"
+    cp "$binary_path" "$tmp_path"
+    chmod +x "$tmp_path"
+    mv -f "$tmp_path" "$target_path"
   fi
   
   fmt_success "${BINARY_NAME} installed successfully!"
