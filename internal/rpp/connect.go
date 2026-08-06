@@ -46,6 +46,13 @@ func NewClusterClient(
 		return New(endpoint, restConfig, logger, flagOptions(caFile, insecure)...)
 	}
 
+	// Judge the flags once. Left to the loop below, a contradictory pair would be
+	// reported as one rejected candidate per endpoint, hiding both the real cause
+	// and the ErrUnsupportedConfig the caller matches on.
+	if err := collectOptions(flagOptions(caFile, insecure)).validate(); err != nil {
+		return nil, err
+	}
+
 	candidates, err := discoverCandidates(ctx, kube)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)

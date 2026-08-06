@@ -104,6 +104,16 @@ func WithInsecureSkipTLSVerify() Option {
 	}
 }
 
+// collectOptions applies the options and returns the resulting settings.
+func collectOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return o
+}
+
 // validate rejects contradictory TLS options instead of silently resolving them.
 func (o options) validate() error {
 	if o.insecure && (o.caFile != "" || len(o.caData) > 0) {
@@ -129,10 +139,7 @@ type Client struct {
 // restConfig. baseURL is the proxy endpoint root, for example
 // "https://10.0.0.1:4219".
 func New(baseURL string, restConfig *rest.Config, logger *dkplog.Logger, opts ...Option) (*Client, error) {
-	var o options
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := collectOptions(opts)
 
 	if err := o.validate(); err != nil {
 		return nil, err

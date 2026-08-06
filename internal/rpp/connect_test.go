@@ -169,6 +169,21 @@ func TestNewClusterClientInsecureAcceptsAnyCandidate(t *testing.T) {
 	assert.Equal(t, []string{"v0.13.1"}, tags)
 }
 
+func TestNewClusterClientRejectsContradictoryFlags(t *testing.T) {
+	kube := fake.NewSimpleClientset(proxyConfigMap(map[string]string{
+		"endpoints": `["10.0.0.1:4219","10.0.0.2:4219"]`,
+		"ca.crt":    "CA-PEM",
+	}))
+
+	_, err := NewClusterClient(context.Background(), kube, &rest.Config{}, dkplog.NewNop(),
+		"", writeTempCA(t, []byte("CA-PEM")), true)
+	require.Error(t, err)
+
+	assert.ErrorIs(t, err, ErrUnsupportedConfig, "the caller matches on this")
+	assert.NotErrorIs(t, err, ErrEndpointDiscovery, "the endpoints are fine, the flags are not")
+	assert.NotContains(t, err.Error(), "10.0.0.2", "the flags are judged once, not per candidate")
+}
+
 func TestNewClusterClientUsesExplicitEndpointWithoutDiscovery(t *testing.T) {
 	host, ca := tlsEndpoint(t, `{"name":"deckhouse-cli","tags":[]}`)
 
