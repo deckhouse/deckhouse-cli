@@ -23,7 +23,7 @@
 d8 cli update
         │  Bearer token from your kubeconfig
         ▼
-registry-packages-proxy.<publicDomain>     (found automatically via Ingress)
+registry-packages-proxy                    (address taken from the cluster)
         │  TokenReview + SubjectAccessReview (kube-rbac-proxy)
         ▼
 cluster registry (credentials live only inside the cluster)
@@ -137,7 +137,7 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 | `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Kubeconfig Generator |
 | `... forbidden` (403) | the `cli-download` role is not bound to you | ask the administrator for the ClusterRoleBinding |
 | 403 right after the role was bound | the proxy caches authorization for ~5 min per token | retry with a fresh token or wait 5 minutes |
-| `x509: certificate signed by unknown authority` | the proxy endpoint uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>` |
-| `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
+| `x509: certificate signed by unknown authority` | the endpoint you named with `--rpp-endpoint` uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>`; discovered endpoints already use the CA the cluster publishes |
+| `no endpoint answered` | every endpoint the cluster offered was rejected, and the message names each one with its reason | master addresses need network access to port 4219, the public host needs a valid certificate; or name an endpoint yourself with `--rpp-endpoint` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
 | `d8 cli use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |

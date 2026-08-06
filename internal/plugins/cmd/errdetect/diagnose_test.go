@@ -37,10 +37,10 @@ func TestDiagnose(t *testing.T) {
 		wantSol  string
 	}{
 		{"401", rpp.ErrUnauthorized, "unauthorized (401)", "OIDC"},
-		{"403", rpp.ErrForbidden, "forbidden (403)", "packages-download"},
+		{"403", rpp.ErrForbidden, "forbidden (403)", "cli-download"},
 		{"404", rpp.ErrNotFound, "plugin or version not found (404)", "deckhouse-cli/plugins"},
 		{"5xx", rpp.ErrUpstream, "upstream error (5xx)", "registry-packages-proxy pods"},
-		{"discovery", rpp.ErrEndpointDiscovery, "endpoint discovery via the Kubernetes API failed", "--rpp-endpoint"},
+		{"discovery", rpp.ErrEndpointDiscovery, "no usable endpoint found", "--rpp-endpoint"},
 	}
 
 	for _, tc := range cases {

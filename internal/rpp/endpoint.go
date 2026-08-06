@@ -137,6 +137,13 @@ func publicEndpoint(ctx context.Context, kube kubernetes.Interface, config clust
 // discoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
 // from the registry-packages-proxy Ingress.
 //
+// The scheme is always https and is deliberately not taken from the Ingress TLS
+// block. Every request carries the kubeconfig bearer token, so a plain http
+// endpoint would put it on the wire in the clear. The TLS block also says nothing
+// about a TLS terminator standing in front of the cluster, where https is the
+// right choice even though the Ingress itself serves http. An endpoint that cannot
+// complete a handshake is simply skipped, see discoverCandidates.
+//
 // An absent Ingress or one with no host yields errIngressUnusable. Any other error
 // is returned raw so the caller can surface the API-leg failure.
 func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
