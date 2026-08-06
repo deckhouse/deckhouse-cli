@@ -48,45 +48,97 @@ const (
 	proxyScheme = "https"
 )
 
+// Candidate sources, as reported in logs and in the failure message.
+const (
+	sourceMaster = "master"
+	sourcePublic = "public"
+	sourcePod    = "pod"
+)
+
 // errIngressUnusable marks the Ingress lookup as "the API answered, but the
-// Ingress is absent or has no host" - the only case where the in-cluster pod
-// fallback is worth trying. A transport/TLS/auth failure reaching the API is NOT
-// this: it would fail pod listing identically, so it is surfaced as-is.
+// Ingress is absent or has no host". The public candidate is then simply absent.
 var errIngressUnusable = errors.New("registry-packages-proxy ingress unusable")
 
-// chooseDiscoveredEndpoint resolves the proxy endpoint when none was given
-// explicitly. It PREFERS the public Ingress (a valid TLS certificate, reachable
-// from a workstation) and falls back to in-cluster pod IPs (which need
-// --rpp-insecure-skip-tls-verify and cluster-network reachability). The second
-// return value names the source ("ingress" / "pod") for logging.
+// candidate is one way to reach the proxy: an endpoint plus the trust anchor that
+// verifies it. An empty caPEM means "verify against the system roots".
+type candidate struct {
+	endpoint string
+	source   string
+	caPEM    []byte
+}
+
+// discoverCandidates returns the ways to reach the proxy, best first:
 //
-// Only an unusable Ingress (see errIngressUnusable) triggers the pod fallback.
-// Any other error is an API-leg failure, surfaced as ErrEndpointDiscovery.
-func chooseDiscoveredEndpoint(ctx context.Context, kube kubernetes.Interface) (string, string, error) {
-	endpoint, err := discoverIngressEndpoint(ctx, kube)
-	if err == nil {
-		return endpoint, "ingress", nil
-	}
-
-	if !errors.Is(err, errIngressUnusable) {
-		return "", "", fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)
-	}
-
-	endpoint, err = discoverEndpoint(ctx, kube)
+//  1. master addresses published by the module, verifiable with the published CA:
+//     they need no public domain, no DNS record and no external certificate authority
+//  2. the public endpoint, verifiable with the system roots: the only way in for a
+//     client with no network path to the master nodes
+//  3. pod IPs, kept for clusters that publish no configuration yet; their
+//     certificate carries no verifiable CA, so this one needs insecure TLS
+//
+// A denied read is not a failure: it drops the candidates it would have produced
+// and leaves the rest, so a narrowly permitted identity still gets a usable path.
+func discoverCandidates(ctx context.Context, kube kubernetes.Interface) ([]candidate, error) {
+	config, err := readClusterConfig(ctx, kube)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)
+		return nil, err
 	}
 
-	return endpoint, "pod", nil
+	candidates := make([]candidate, 0, len(config.endpoints)+2)
+
+	for _, endpoint := range config.endpoints {
+		candidates = append(candidates, candidate{endpoint: endpoint, source: sourceMaster, caPEM: config.caPEM})
+	}
+
+	public, err := publicEndpoint(ctx, kube, config)
+	if err != nil {
+		return nil, err
+	}
+
+	if public != "" {
+		candidates = append(candidates, candidate{endpoint: public, source: sourcePublic})
+	}
+
+	pods, err := discoverPodEndpoints(ctx, kube)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, endpoint := range pods {
+		candidates = append(candidates, candidate{endpoint: endpoint, source: sourcePod})
+	}
+
+	if len(candidates) == 0 {
+		return nil, errors.New("no registry-packages-proxy endpoint found in the cluster")
+	}
+
+	return candidates, nil
+}
+
+// publicEndpoint prefers the endpoint the module published and reads the Ingress
+// only when there is none, so a cluster with the published config needs no
+// permission on Ingresses at all.
+func publicEndpoint(ctx context.Context, kube kubernetes.Interface, config clusterConfig) (string, error) {
+	if config.publicEndpoint != "" {
+		return config.publicEndpoint, nil
+	}
+
+	endpoint, err := discoverIngressEndpoint(ctx, kube)
+	switch {
+	case err == nil:
+		return endpoint, nil
+	case errors.Is(err, errIngressUnusable), isReadDenied(err):
+		return "", nil
+	default:
+		return "", err
+	}
 }
 
 // discoverIngressEndpoint returns the public proxy endpoint (https://<host>) taken
-// from the registry-packages-proxy Ingress. This path has a valid TLS certificate
-// and is reachable from outside the cluster - the right default for a workstation.
+// from the registry-packages-proxy Ingress.
 //
-// An absent Ingress or one with no host yields errIngressUnusable, signalling the
-// caller to try the in-cluster pod fallback. Any other error is returned raw so
-// the caller can surface the API-leg failure instead of falling back.
+// An absent Ingress or one with no host yields errIngressUnusable. Any other error
+// is returned raw so the caller can surface the API-leg failure.
 func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
 	ingress, err := kube.NetworkingV1().Ingresses(proxyNamespace).Get(ctx, proxyIngressName, metav1.GetOptions{})
 	if err != nil {
@@ -106,19 +158,22 @@ func discoverIngressEndpoint(ctx context.Context, kube kubernetes.Interface) (st
 	return "", fmt.Errorf("%w: ingress %q has no host", errIngressUnusable, proxyIngressName)
 }
 
-// discoverEndpoint returns a proxy endpoint base URL from the first serving
-// registry-packages-proxy pod (running, ready, with an IP), joined to the proxy
-// port. Terminating and not-yet-ready pods are skipped. No failover: one serving
-// pod is enough.
+// discoverPodEndpoints returns an endpoint per serving proxy pod. Terminating and
+// not-yet-ready pods are skipped.
 //
-// This is a master-node pod IP, reachable from inside the cluster network. A
-// workstation outside the cluster usually cannot reach it and should pass an
-// explicit endpoint (for example the public Ingress) instead.
-func discoverEndpoint(ctx context.Context, kube kubernetes.Interface) (string, error) {
+// These are master-node pod IPs, reachable from inside the cluster network. A
+// workstation outside the cluster usually cannot reach them.
+func discoverPodEndpoints(ctx context.Context, kube kubernetes.Interface) ([]string, error) {
 	pods, err := kube.CoreV1().Pods(proxyNamespace).List(ctx, metav1.ListOptions{LabelSelector: proxyPodSelector})
 	if err != nil {
-		return "", fmt.Errorf("list registry-packages-proxy pods: %w", err)
+		if isReadDenied(err) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("list registry-packages-proxy pods: %w", err)
 	}
+
+	endpoints := make([]string, 0, len(pods.Items))
 
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -127,11 +182,10 @@ func discoverEndpoint(ctx context.Context, kube kubernetes.Interface) (string, e
 		}
 
 		base := url.URL{Scheme: proxyScheme, Host: net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(proxyPort))}
-
-		return base.String(), nil
+		endpoints = append(endpoints, base.String())
 	}
 
-	return "", fmt.Errorf("no ready registry-packages-proxy pods found in namespace %q", proxyNamespace)
+	return endpoints, nil
 }
 
 // podIsServing reports whether the pod is a usable proxy endpoint: running, not
@@ -148,4 +202,10 @@ func podIsServing(pod *corev1.Pod) bool {
 	}
 
 	return false
+}
+
+// isReadDenied reports whether the API rejected the identity rather than failed.
+// Such a read yields no candidates, while the rest of discovery carries on.
+func isReadDenied(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err)
 }
