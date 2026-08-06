@@ -1,0 +1,1129 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package aggapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	restfake "k8s.io/client-go/rest/fake"
+)
+
+// testMapper resolves the kinds used in the path-building tests to their plurals.
+func testMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Group: StorageGroup, Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "demo.deckhouse.io", Version: "v1alpha1", Kind: "VirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	// Real producer group for demo domain snapshot kinds (sds-unified-snapshots-poc.deckhouse.io/v1alpha1).
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+
+	return m
+}
+
+func TestIsVolumeSnapshotLeaf(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  NodeRef
+		want bool
+	}{
+		{
+			name: "csi volume snapshot leaf",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
+			want: true,
+		},
+		{
+			name: "core snapshot",
+			ref:  NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot"},
+			want: false,
+		},
+		{
+			name: "domain snapshot",
+			ref:  NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot"},
+			want: false,
+		},
+		{
+			name: "wrong kind in vs group",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent"},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.ref.IsVolumeSnapshotLeaf(); got != tc.want {
+				t.Errorf("IsVolumeSnapshotLeaf() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDownloadPath verifies that manifests-download is addressed through the node's OWN
+// aggregated subresource group (symmetric to restore): the core group for the core Snapshot,
+// the domain-prefixed group for domain snapshot CRs (the domain apiserver proxies to the core
+// content layer), and the VS-connector group for CSI VolumeSnapshot leaves.
+func TestDownloadPath(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	cases := []struct {
+		name string
+		ref  NodeRef
+		want string
+	}{
+		{
+			name: "core snapshot",
+			ref:  NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"},
+			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-download",
+		},
+		{
+			name: "domain snapshot uses its own domain group",
+			ref:  NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
+			want: "/apis/subresources.demo.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-download",
+		},
+		{
+			name: "csi volume snapshot leaf uses vs-connector group",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
+			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.downloadPath(tc.ref)
+			if err != nil {
+				t.Fatalf("downloadPath: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("downloadPath:\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubresourcePath verifies that the manifests-with-data-restoration subresource
+// is served by the node's OWN subresource group (core group for core Snapshot,
+// domain-prefixed group for domain CRs, VS-connector group for CSI leaves).
+func TestSubresourcePath(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	cases := []struct {
+		name string
+		ref  NodeRef
+		sub  string
+		want string
+	}{
+		{
+			name: "core snapshot restore",
+			ref:  NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"},
+			sub:  SubManifestsRestore,
+			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-with-data-restoration",
+		},
+		{
+			name: "domain snapshot restore uses domain-prefixed group",
+			ref:  NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
+			sub:  SubManifestsRestore,
+			want: "/apis/subresources.demo.deckhouse.io/v1alpha1/namespaces/ns/virtualdisksnapshots/vds-1/manifests-with-data-restoration",
+		},
+		{
+			name: "csi volume snapshot leaf restore uses vs-connector group",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
+			sub:  SubManifestsRestore,
+			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.subresourcePath(tc.ref, tc.sub)
+			if err != nil {
+				t.Fatalf("subresourcePath: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("subresourcePath:\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUploadPath verifies that manifests-and-children-refs-upload is served by the node's OWN
+// aggregated subresource group — the core group for the core Snapshot, the domain-prefixed group
+// for domain snapshot CRs (served by the domain apiserver's bind-first upload facade, which records
+// the node's own childrenSnapshotRefs and forwards the manifests to the core content layer), and
+// the VS-connector group for CSI VolumeSnapshot leaves. Routing is now identical to download/restore;
+// the former asymmetry (upload always to the core group) is gone. Case (a) locks in the domain
+// routing so a regression back to the core group fails fast here.
+func TestUploadPath(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	cases := []struct {
+		name string
+		ref  NodeRef
+		want string
+	}{
+		{
+			name: "domain DemoVirtualDiskSnapshot upload uses its own domain group",
+			ref:  NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"},
+			want: "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+		},
+		{
+			name: "core Snapshot upload uses core group",
+			ref:  NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"},
+			want: "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/my-snap/manifests-and-children-refs-upload",
+		},
+		{
+			name: "csi volume snapshot leaf upload uses vs-connector group",
+			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
+			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.uploadPath(tc.ref)
+			if err != nil {
+				t.Fatalf("uploadPath: %v", err)
+			}
+
+			if got != tc.want {
+				t.Errorf("uploadPath:\n got  %q\n want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubresourceGroupVersion verifies the group/version selection for restore/upload.
+func TestSubresourceGroupVersion(t *testing.T) {
+	cases := []struct {
+		name        string
+		ref         NodeRef
+		wantGroup   string
+		wantVersion string
+	}{
+		{
+			name:        "core snapshot",
+			ref:         NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot"},
+			wantGroup:   CoreSubresourcesGroup,
+			wantVersion: CoreSubresourcesVersion,
+		},
+		{
+			name:        "domain snapshot",
+			ref:         NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot"},
+			wantGroup:   "subresources.demo.deckhouse.io",
+			wantVersion: "v1alpha1",
+		},
+		{
+			name:        "csi volume snapshot leaf",
+			ref:         NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"},
+			wantGroup:   VSConnectorGroup,
+			wantVersion: VSConnectorVersion,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			group, version, err := subresourceGroupVersion(tc.ref)
+			if err != nil {
+				t.Fatalf("subresourceGroupVersion: %v", err)
+			}
+
+			if group != tc.wantGroup {
+				t.Errorf("group: got %q, want %q", group, tc.wantGroup)
+			}
+
+			if version != tc.wantVersion {
+				t.Errorf("version: got %q, want %q", version, tc.wantVersion)
+			}
+		})
+	}
+}
+
+// TestResourceFor_NoMapper verifies a clear error when a non-leaf ref must be resolved
+// without a configured RESTMapper.
+func TestResourceFor_NoMapper(t *testing.T) {
+	c := NewClient(nil, nil)
+
+	if _, err := c.resourceFor(NodeRef{APIVersion: "demo.deckhouse.io/v1alpha1", Kind: "VirtualDiskSnapshot"}); err == nil {
+		t.Fatal("expected error when no RESTMapper is configured, got nil")
+	}
+
+	// CSI VolumeSnapshot leaves use a fixed plural and need no mapper.
+	res, err := c.resourceFor(NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"})
+	if err != nil {
+		t.Fatalf("resourceFor(VolumeSnapshot leaf): %v", err)
+	}
+
+	if res != VolumeSnapshotResource {
+		t.Errorf("resourceFor(VolumeSnapshot leaf): got %q, want %q", res, VolumeSnapshotResource)
+	}
+}
+
+// TestAggregatedAPIContract pins every aggregated-API path the CLI builds against the
+// verified server contract. Each row specifies the subresource, the node kind, the
+// exact absolute path, and the HTTP method the server requires. Inline comments
+// reference the producer handler that serves each combination so any future drift
+// (e.g. regressing domain upload back to the core group, or the reverse of the earlier
+// domain-download proxy work) fails fast here.
+//
+// Server contract summary (verified against state-snapshotter source):
+//   - manifests-download (GET): core group for Snapshot; domain-prefixed group for domain CRs
+//     (domainapi proxies to the core content layer); VS-connector for VS leaf. Every path is
+//     addressed by the node's own namespaced CR — the CLI never reads cluster-scoped
+//     snapshotcontents; restore_handler.go SetupRoutes + domainapi/handler.go.
+//   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
+//     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
+//   - manifests-and-children-refs-upload (POST): core group for Snapshot; domain-prefixed group
+//     for domain CRs (domainapi upload facade — bind-first, forwards manifests to the core content
+//     layer); VS-connector for VS leaf. Routed by the node's own group, symmetric to download/restore.
+func TestAggregatedAPIContract(t *testing.T) {
+	c := NewClient(nil, testMapper())
+
+	coreRef := NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "snap-1", Namespace: "ns"}
+	domainRef := NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+	vsRef := NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"}
+
+	cases := []struct {
+		name       string
+		pathFn     func(*Client) (string, error)
+		wantPath   string
+		wantMethod string // HTTP method the server contract requires for this subresource
+	}{
+		// ── manifests-download (GET) ──────────────────────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleCoreSnapshotManifestsDownload
+		{
+			name:       "core Snapshot: manifests-download -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(coreRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+		// domainapi/handler.go NodeManifestsDownload (proxy to core content layer), GET-only
+		{
+			name:       "domain CR: manifests-download -> domain group (proxy)",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(domainRef) },
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload
+		{
+			name:       "VS leaf: manifests-download -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.downloadPath(vsRef) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
+			wantMethod: http.MethodGet,
+		},
+
+		// ── manifests-with-data-restoration (GET) ─────────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleGetSnapshotManifestsWithDataRestoration
+		{
+			name:       "core Snapshot: manifests-with-data-restoration -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(coreRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+		// domainapi/handler.go handleSubtree: GET-only; "manifests-with-data-restoration" -> ManifestsWithDataRestoration
+		// Served by the domain-prefixed group (subresources.sds-unified-snapshots-poc.deckhouse.io).
+		{
+			name:       "domain CR: manifests-with-data-restoration -> domain-prefixed group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(domainRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsWithDataRestoration
+		{
+			name:       "VS leaf: manifests-with-data-restoration -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(vsRef, SubManifestsRestore) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
+			wantMethod: http.MethodGet,
+		},
+
+		// ── manifests-and-children-refs-upload (POST) ─────────────────────────────────
+		// restore_handler.go routeCoreSnapshotSubresource -> HandleSnapshotManifestsAndChildrenUpload
+		{
+			name:       "core Snapshot: manifests-and-children-refs-upload -> core group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(coreRef) },
+			wantPath:   "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/snapshots/snap-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+		// domainapi/handler.go upload facade (verb: create/POST): bind-first, records the node's own
+		// childrenSnapshotRefs and forwards the manifests to the core content layer. Served by the
+		// domain-prefixed group (subresources.sds-unified-snapshots-poc.deckhouse.io).
+		{
+			name:       "domain CR: manifests-and-children-refs-upload -> domain-prefixed group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(domainRef) },
+			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
+		{
+			name:       "VS leaf: manifests-and-children-refs-upload -> VS-connector group",
+			pathFn:     func(c *Client) (string, error) { return c.uploadPath(vsRef) },
+			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+			wantMethod: http.MethodPost,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantMethod != http.MethodGet && tc.wantMethod != http.MethodPost {
+				t.Errorf("contract table error: wantMethod=%q must be GET or POST", tc.wantMethod)
+			}
+
+			got, err := tc.pathFn(c)
+			if err != nil {
+				t.Fatalf("path build: %v", err)
+			}
+
+			if got != tc.wantPath {
+				t.Errorf("path mismatch:\n got  %q\n want %q", got, tc.wantPath)
+			}
+		})
+	}
+}
+
+// ── manifests-download transient-error retry ────────────────────────────────────────
+//
+// These tests exercise getManifestsDownload (used by NodeManifestsDownload) against a
+// stubbed rest.Interface. They deliberately do NOT use t.Parallel(): withFastBackoff
+// mutates the package-level manifestsDownloadBackoff var for the duration of the test,
+// which would race under parallel execution.
+
+// coreSnapshotRef returns a core Snapshot node ref for the retry tests below.
+func coreSnapshotRef() NodeRef {
+	return NodeRef{APIVersion: StorageGroup + "/v1alpha1", Kind: "Snapshot", Name: "my-snap", Namespace: "ns"}
+}
+
+// withFastBackoff overrides manifestsDownloadBackoff for the duration of the test with
+// a small, deterministic backoff so retry tests exercise real (non-mocked) sleeps
+// without slowing down the suite. Restored via t.Cleanup.
+func withFastBackoff(t *testing.T, b wait.Backoff) {
+	t.Helper()
+
+	orig := manifestsDownloadBackoff
+	manifestsDownloadBackoff = b
+	t.Cleanup(func() { manifestsDownloadBackoff = orig })
+}
+
+// statusResponse builds an HTTP response factory returning a well-formed
+// metav1.Status body, matching what the real kube-apiserver aggregation layer sends
+// for a non-2xx response (this is what apierrors.FromObject/IsServiceUnavailable etc.
+// classify against).
+func statusResponse(t *testing.T, code int32, reason metav1.StatusReason, message string) func() *http.Response {
+	t.Helper()
+
+	raw, err := json.Marshal(metav1.Status{
+		TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"},
+		Status:   metav1.StatusFailure,
+		Message:  message,
+		Reason:   reason,
+		Code:     code,
+	})
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+
+	return func() *http.Response {
+		return &http.Response{
+			StatusCode: int(code),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(string(raw))),
+		}
+	}
+}
+
+// okResponse builds an HTTP 200 response factory returning body.
+func okResponse(body string) func() *http.Response {
+	return func() *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+}
+
+// countingRESTClient returns a fake rest.Interface serving respFns in order. A call
+// beyond len(respFns) fails the test immediately, so a test can assert "no further
+// attempt was made" simply by supplying exactly the expected number of responses.
+func countingRESTClient(t *testing.T, respFns ...func() *http.Response) (*restfake.RESTClient, *int) {
+	t.Helper()
+
+	calls := 0
+	rc := &restfake.RESTClient{
+		NegotiatedSerializer: scheme.Codecs,
+		GroupVersion:         schema.GroupVersion{Group: StorageGroup, Version: "v1alpha1"},
+		VersionedAPIPath:     "/",
+		Client: restfake.CreateHTTPClient(func(_ *http.Request) (*http.Response, error) {
+			if calls >= len(respFns) {
+				t.Fatalf("unexpected extra HTTP call #%d (want at most %d)", calls+1, len(respFns))
+			}
+
+			resp := respFns[calls]()
+			calls++
+
+			return resp, nil
+		}),
+	}
+
+	return rc, &calls
+}
+
+// TestNodeManifestsDownload_RetriesTransientThenSucceeds verifies that a 503
+// ServiceUnavailable ("the server is currently unable to handle the request" -- the
+// exact message an aggregated APIService backend returns while briefly restarting) is
+// retried and the call ultimately succeeds once the backend recovers.
+func TestNodeManifestsDownload_RetriesTransientThenSucceeds(t *testing.T) {
+	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
+		statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request"),
+		okResponse(`[]`),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	body, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err != nil {
+		t.Fatalf("NodeManifestsDownload: %v", err)
+	}
+
+	if string(body) != `[]` {
+		t.Errorf("body: got %q, want %q", body, `[]`)
+	}
+
+	if *calls != 3 {
+		t.Errorf("calls: got %d, want 3", *calls)
+	}
+}
+
+// TestNodeManifestsDownload_NonTransientErrorNotRetried verifies that a genuine client
+// error (Forbidden) surfaces on the first attempt with no retry.
+func TestNodeManifestsDownload_NonTransientErrorNotRetried(t *testing.T) {
+	withFastBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusForbidden, metav1.StatusReasonForbidden, "not allowed"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("expected a Forbidden error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no retry expected)", *calls)
+	}
+}
+
+// TestNodeManifestsDownload_ExhaustsRetriesOnPersistentTransientError verifies that a
+// backend that never recovers fails after the bounded attempt count instead of hanging,
+// and that the returned error still classifies as the transient reason it saw.
+func TestNodeManifestsDownload_ExhaustsRetriesOnPersistentTransientError(t *testing.T) {
+	backoff := wait.Backoff{Steps: 3, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond}
+	withFastBackoff(t, backoff)
+
+	respFn := statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request")
+	rc, calls := countingRESTClient(t, respFn, respFn, respFn)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(context.Background(), coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Errorf("expected the exhausted error to still classify as ServiceUnavailable, got: %v", err)
+	}
+
+	if *calls != backoff.Steps {
+		t.Errorf("calls: got %d, want exactly %d (bounded attempts)", *calls, backoff.Steps)
+	}
+}
+
+// TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly verifies that
+// cancelling ctx during the retry loop's backoff wait aborts immediately and returns
+// ctx.Err(), instead of waiting out the remaining attempt budget.
+func TestNodeManifestsDownload_ContextCancelledAbortsRetryPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rc, calls := countingRESTClient(t, func() *http.Response {
+		// Cancel before returning control to the retry loop: by the time
+		// ExponentialBackoffWithContext reaches its post-attempt select, ctx.Done()
+		// is already closed, so it returns ctx.Err() without ever sleeping out the
+		// (unmodified, multi-second) production backoff -- keeping this test fast
+		// without needing to fake the clock.
+		defer cancel()
+
+		return statusResponse(t, http.StatusServiceUnavailable, metav1.StatusReasonServiceUnavailable, "the server is currently unable to handle the request")()
+	})
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.NodeManifestsDownload(ctx, coreSnapshotRef())
+	if err == nil {
+		t.Fatal("expected error after ctx cancellation, got nil")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
+	}
+}
+
+// ── manifests-and-children-refs-upload bind-first 409 retry ──────────────────────────
+//
+// These tests exercise postManifestsUpload (used by UploadManifests) against a stubbed
+// rest.Interface. Like the manifests-download retry tests they do NOT use t.Parallel():
+// withFastUploadBackoff mutates the package-level manifestsUploadBackoff var, which would
+// race under parallel execution.
+
+// withFastUploadBackoff overrides manifestsUploadBackoff for the duration of the test with a
+// small, deterministic backoff so retry tests exercise real sleeps without slowing the suite.
+// Restored via t.Cleanup.
+func withFastUploadBackoff(t *testing.T, b wait.Backoff) {
+	t.Helper()
+
+	orig := manifestsUploadBackoff
+	manifestsUploadBackoff = b
+	t.Cleanup(func() { manifestsUploadBackoff = orig })
+}
+
+// domainSnapshotRef returns a domain snapshot node ref for the upload retry tests below (a domain
+// node also proves the upload routes to its own domain-prefixed group, not the core group).
+func domainSnapshotRef() NodeRef {
+	return NodeRef{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "vds-1", Namespace: "ns"}
+}
+
+// TestUploadManifests_RetriesImportContentNotBoundThenSucceeds verifies that the bind-first 409
+// (status.reason=ImportContentNotBound), returned while the binder has not yet stamped
+// status.boundSnapshotContentName, is retried and the upload ultimately succeeds once bound.
+func TestUploadManifests_RetriesImportContentNotBoundThenSucceeds(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty"),
+		statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty"),
+		okResponse(`{"status":"Success"}`),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	body, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err != nil {
+		t.Fatalf("UploadManifests: %v", err)
+	}
+
+	if string(body) != `{"status":"Success"}` {
+		t.Errorf("body: got %q, want %q", body, `{"status":"Success"}`)
+	}
+
+	if *calls != 3 {
+		t.Errorf("calls: got %d, want 3", *calls)
+	}
+}
+
+// TestUploadManifests_ForbiddenNotRetried verifies that a genuine back-ref anti-spoofing 403
+// surfaces on the first attempt with no retry — only the bind-first reason is transient.
+func TestUploadManifests_ForbiddenNotRetried(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusForbidden, metav1.StatusReasonForbidden, "snapshotRef does not point back at the subject"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsForbidden(err) {
+		t.Errorf("expected a Forbidden error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (no retry expected)", *calls)
+	}
+}
+
+// TestUploadManifests_GenericConflictNotRetried verifies that a 409 whose body reason is NOT
+// ImportContentNotBound (e.g. an update Conflict) is NOT retried: the retry keys on the
+// bind-first status.reason in the body, not on the 409 status code alone. (DoRaw surfaces a
+// POST 409 as an AlreadyExists error — the reason it derives from code+verb — so the returned
+// error type is unrelated to the body reason; the retry decision reads the body directly.)
+func TestUploadManifests_GenericConflictNotRetried(t *testing.T) {
+	withFastUploadBackoff(t, wait.Backoff{Steps: 5, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond})
+
+	rc, calls := countingRESTClient(t,
+		statusResponse(t, http.StatusConflict, metav1.StatusReasonConflict, "the object has been modified"),
+	)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		t.Errorf("expected a 409 (AlreadyExists) error, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (a non-bind 409 must not be retried)", *calls)
+	}
+}
+
+// TestUploadManifests_ExhaustsRetriesOnPersistentImportContentNotBound verifies that a node that
+// never binds fails after the bounded attempt count instead of hanging, and that the returned
+// error still classifies as ImportContentNotBound.
+func TestUploadManifests_ExhaustsRetriesOnPersistentImportContentNotBound(t *testing.T) {
+	backoff := wait.Backoff{Steps: 3, Duration: time.Millisecond, Factor: 1.0, Cap: 5 * time.Millisecond}
+	withFastUploadBackoff(t, backoff)
+
+	respFn := statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty")
+	rc, calls := countingRESTClient(t, respFn, respFn, respFn)
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(context.Background(), domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+
+	// DoRaw surfaces a POST 409 as a generic AlreadyExists error (the custom ImportContentNotBound
+	// reason lives only in the body); the exhausted error wraps that last 409 and names the cause.
+	if !apierrors.IsAlreadyExists(err) {
+		t.Errorf("expected the exhausted error to wrap the last 409, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "exhausted retries on bind-first 409 (ImportContentNotBound)") {
+		t.Errorf("expected the exhausted error to name the bind-first cause, got: %v", err)
+	}
+
+	if *calls != backoff.Steps {
+		t.Errorf("calls: got %d, want exactly %d (bounded attempts)", *calls, backoff.Steps)
+	}
+}
+
+// TestUploadManifests_ContextCancelledAbortsRetryPromptly verifies that cancelling ctx during the
+// retry loop's backoff aborts immediately and returns ctx.Err() instead of waiting out the budget.
+func TestUploadManifests_ContextCancelledAbortsRetryPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rc, calls := countingRESTClient(t, func() *http.Response {
+		defer cancel()
+
+		return statusResponse(t, http.StatusConflict, metav1.StatusReason(ReasonImportContentNotBound), "boundSnapshotContentName is empty")()
+	})
+
+	c := NewClient(rc, testMapper())
+
+	_, err := c.UploadManifests(ctx, domainSnapshotRef(), []byte(`{"manifests":[]}`))
+	if err == nil {
+		t.Fatal("expected error after ctx cancellation, got nil")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("calls: got %d, want 1 (aborted before a second attempt)", *calls)
+	}
+}
+
+// ── manifests-with-data-restoration scope/object-filter query params ─────────────────
+
+// capturingRESTClient returns a fake rest.Interface that records the URL of every request it
+// serves (in order) and always responds with resp. Used by the RestoreManifestsScoped
+// query-parameter tests to assert against the exact recorded request.
+func capturingRESTClient(t *testing.T, resp func() *http.Response) (*restfake.RESTClient, *[]*url.URL) {
+	t.Helper()
+
+	var urls []*url.URL
+	rc := &restfake.RESTClient{
+		NegotiatedSerializer: scheme.Codecs,
+		GroupVersion:         schema.GroupVersion{Group: StorageGroup, Version: "v1alpha1"},
+		VersionedAPIPath:     "/",
+		Client: restfake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+			urls = append(urls, req.URL)
+
+			return resp(), nil
+		}),
+	}
+
+	return rc, &urls
+}
+
+// TestRestoreManifestsScoped_ZeroValueMatchesRestoreManifests verifies that
+// RestoreManifestsScoped with a zero-value RestoreScopeOptions sends the identical request
+// RestoreManifests sends today (same path, same query — only targetNamespace, no
+// scope/kind/name/apiVersion), so RestoreManifests's existing caller/behavior is unaffected.
+func TestRestoreManifestsScoped_ZeroValueMatchesRestoreManifests(t *testing.T) {
+	scopedRC, scopedURLs := capturingRESTClient(t, okResponse(`[]`))
+	scopedClient := NewClient(scopedRC, testMapper())
+
+	if _, err := scopedClient.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{}); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	defaultRC, defaultURLs := capturingRESTClient(t, okResponse(`[]`))
+	defaultClient := NewClient(defaultRC, testMapper())
+
+	if _, err := defaultClient.RestoreManifests(context.Background(), coreSnapshotRef(), "target-ns"); err != nil {
+		t.Fatalf("RestoreManifests: %v", err)
+	}
+
+	if len(*scopedURLs) != 1 || len(*defaultURLs) != 1 {
+		t.Fatalf("expected exactly one recorded request per client, got %d and %d", len(*scopedURLs), len(*defaultURLs))
+	}
+
+	got, want := (*scopedURLs)[0], (*defaultURLs)[0]
+	if got.Path != want.Path || got.RawQuery != want.RawQuery {
+		t.Errorf("RestoreManifestsScoped(zero-value) request differs from RestoreManifests:\n got  %s?%s\n want %s?%s",
+			got.Path, got.RawQuery, want.Path, want.RawQuery)
+	}
+
+	q := got.Query()
+	if q.Get("targetNamespace") != "target-ns" {
+		t.Errorf("targetNamespace: got %q, want %q", q.Get("targetNamespace"), "target-ns")
+	}
+
+	for _, key := range []string{"scope", "kind", "name", "apiVersion"} {
+		if q.Has(key) {
+			t.Errorf("zero-value opts must omit query param %q, got %q", key, q.Get(key))
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_ScopeNodeOnly verifies that Scope=RestoreScopeNode with no object
+// filter sends scope=node and no kind/name/apiVersion params.
+func TestRestoreManifestsScoped_ScopeNodeOnly(t *testing.T) {
+	rc, urls := capturingRESTClient(t, okResponse(`[]`))
+	c := NewClient(rc, testMapper())
+
+	if _, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{Scope: RestoreScopeNode}); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	q := (*urls)[0].Query()
+	if q.Get("scope") != "node" {
+		t.Errorf("scope: got %q, want %q", q.Get("scope"), "node")
+	}
+
+	for _, key := range []string{"kind", "name", "apiVersion"} {
+		if q.Has(key) {
+			t.Errorf("scope=node with no filter must omit query param %q, got %q", key, q.Get(key))
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_ScopeNodeWithObjectFilter verifies that Scope=RestoreScopeNode with
+// FilterKind/FilterName/FilterAPIVersion sends all four params with the exact literal values
+// passed in — values containing characters that require URL-encoding are used deliberately so a
+// double-encoding or dropping bug would surface as a mismatch after the round trip.
+func TestRestoreManifestsScoped_ScopeNodeWithObjectFilter(t *testing.T) {
+	rc, urls := capturingRESTClient(t, okResponse(`[]`))
+	c := NewClient(rc, testMapper())
+
+	opts := RestoreScopeOptions{
+		Scope:            RestoreScopeNode,
+		FilterKind:       "PersistentVolumeClaim",
+		FilterName:       "pvc with spaces & stuff",
+		FilterAPIVersion: "v1",
+	}
+
+	if _, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", opts); err != nil {
+		t.Fatalf("RestoreManifestsScoped: %v", err)
+	}
+
+	q := (*urls)[0].Query()
+	want := map[string]string{
+		"scope":      "node",
+		"kind":       opts.FilterKind,
+		"name":       opts.FilterName,
+		"apiVersion": opts.FilterAPIVersion,
+	}
+
+	for key, wantVal := range want {
+		if got := q.Get(key); got != wantVal {
+			t.Errorf("%s: got %q, want %q", key, got, wantVal)
+		}
+	}
+}
+
+// TestRestoreManifestsScoped_BadRequestWrapped verifies that a 400-equivalent server response
+// (the same JSON Status body shape writeRestoreError produces for restore.ErrBadRequest) is
+// surfaced as an error distinguishable via errors.Is(err, ErrRestoreBadRequest), still classifies
+// as apierrors.IsBadRequest, carries the server's message, and is NOT also ErrRestoreNotFound.
+func TestRestoreManifestsScoped_BadRequestWrapped(t *testing.T) {
+	message := "object filter (kind/name/apiVersion) is only allowed with scope=node"
+	rc, _ := countingRESTClient(t, statusResponse(t, http.StatusBadRequest, metav1.StatusReasonBadRequest, message))
+	c := NewClient(rc, testMapper())
+
+	_, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns",
+		RestoreScopeOptions{Scope: RestoreScopeSubtree, FilterKind: "Foo", FilterName: "bar"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !errors.Is(err, ErrRestoreBadRequest) {
+		t.Errorf("expected errors.Is(err, ErrRestoreBadRequest), got: %v", err)
+	}
+
+	if errors.Is(err, ErrRestoreNotFound) {
+		t.Errorf("must not also classify as ErrRestoreNotFound: %v", err)
+	}
+
+	if !apierrors.IsBadRequest(err) {
+		t.Errorf("expected the underlying k8s error to still classify as BadRequest, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), message) {
+		t.Errorf("expected error to carry the server's message %q, got: %v", message, err)
+	}
+}
+
+// TestRestoreManifestsScoped_NotFoundWrapped verifies that a 404-equivalent server response is
+// surfaced as an error distinguishable via errors.Is(err, ErrRestoreNotFound), still classifies as
+// apierrors.IsNotFound, carries the server's message, and is NOT also ErrRestoreBadRequest.
+func TestRestoreManifestsScoped_NotFoundWrapped(t *testing.T) {
+	message := `Snapshot "missing" not found`
+	rc, _ := countingRESTClient(t, statusResponse(t, http.StatusNotFound, metav1.StatusReasonNotFound, message))
+	c := NewClient(rc, testMapper())
+
+	_, err := c.RestoreManifestsScoped(context.Background(), coreSnapshotRef(), "target-ns", RestoreScopeOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if !errors.Is(err, ErrRestoreNotFound) {
+		t.Errorf("expected errors.Is(err, ErrRestoreNotFound), got: %v", err)
+	}
+
+	if errors.Is(err, ErrRestoreBadRequest) {
+		t.Errorf("must not also classify as ErrRestoreBadRequest: %v", err)
+	}
+
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("expected the underlying k8s error to still classify as NotFound, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), message) {
+		t.Errorf("expected error to carry the server's message %q, got: %v", message, err)
+	}
+}
+
+type aggregatedAPICall struct {
+	name string
+	call func(context.Context, *Client) error
+}
+
+func aggregatedAPICallCases() []aggregatedAPICall {
+	return []aggregatedAPICall{
+		{
+			name: "manifests download",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.NodeManifestsDownload(ctx, coreSnapshotRef())
+
+				return err
+			},
+		},
+		{
+			name: "restore manifests",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.RestoreManifests(ctx, coreSnapshotRef(), "target-ns")
+
+				return err
+			},
+		},
+		{
+			name: "upload manifests",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.UploadManifests(ctx, coreSnapshotRef(), []byte(`{"manifests":[]}`))
+
+				return err
+			},
+		},
+	}
+}
+
+func newBoundedTestClient(
+	t *testing.T,
+	handler http.Handler,
+	timeout time.Duration,
+	maxResponseBytes int64,
+) *Client {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	t.Cleanup(server.CloseClientConnections)
+
+	client, err := newClientForConfig(&rest.Config{
+		Host:    server.URL,
+		Timeout: timeout,
+	}, testMapper(), maxResponseBytes)
+	if err != nil {
+		t.Fatalf("newClientForConfig: %v", err)
+	}
+
+	return client
+}
+
+func TestAggregatedAPICalls_RejectOversizedChunkedResponses(t *testing.T) {
+	const maxResponseBytes int64 = 32
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		_, _ = io.WriteString(w, strings.Repeat("x", int(maxResponseBytes+1)))
+	})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newBoundedTestClient(t, handler, 5*time.Second, maxResponseBytes)
+
+			err := tc.call(context.Background(), client)
+			if !errors.Is(err, ErrResponseTooLarge) {
+				t.Fatalf("call error = %v, want ErrResponseTooLarge", err)
+			}
+
+			if !strings.Contains(err.Error(), "32 bytes") {
+				t.Fatalf("call error does not state the response limit: %v", err)
+			}
+		})
+	}
+}
+
+func TestAggregatedAPICalls_TimeoutWhileWaitingForHeaders(t *testing.T) {
+	const requestTimeout = time.Second
+
+	withFastBackoff(t, wait.Backoff{Steps: 1})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseHandler := make(chan struct{})
+			defer close(releaseHandler)
+
+			handler := http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				select {
+				case <-request.Context().Done():
+				case <-releaseHandler:
+				}
+			})
+
+			client := newBoundedTestClient(t, handler, requestTimeout, 1024)
+			started := time.Now()
+
+			err := tc.call(context.Background(), client)
+			if err == nil {
+				t.Fatal("call unexpectedly succeeded while response headers were stalled")
+			}
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if elapsed := time.Since(started); elapsed > 5*requestTimeout {
+				t.Fatalf("header-stalled call took %v, want at most %v", elapsed, 5*requestTimeout)
+			}
+		})
+	}
+}
+
+func TestAggregatedAPICalls_TimeoutEndlessPositiveByteTrickle(t *testing.T) {
+	const requestTimeout = time.Second
+
+	withFastBackoff(t, wait.Backoff{Steps: 1})
+
+	for _, tc := range aggregatedAPICallCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			releaseHandler := make(chan struct{})
+			defer close(releaseHandler)
+
+			handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+
+				flusher := w.(http.Flusher)
+				ticker := time.NewTicker(50 * time.Millisecond)
+				defer ticker.Stop()
+
+				for {
+					if _, err := io.WriteString(w, "x"); err != nil {
+						return
+					}
+
+					flusher.Flush()
+
+					select {
+					case <-request.Context().Done():
+						return
+					case <-releaseHandler:
+						return
+					case <-ticker.C:
+					}
+				}
+			})
+
+			client := newBoundedTestClient(t, handler, requestTimeout, 1024)
+			started := time.Now()
+
+			err := tc.call(context.Background(), client)
+			if err == nil {
+				t.Fatal("call unexpectedly succeeded while response body trickled forever")
+			}
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("call error = %v, want context.DeadlineExceeded", err)
+			}
+
+			if elapsed := time.Since(started); elapsed > 5*requestTimeout {
+				t.Fatalf("trickling call took %v, want at most %v", elapsed, 5*requestTimeout)
+			}
+		})
+	}
+}

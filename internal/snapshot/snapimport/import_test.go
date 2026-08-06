@@ -1,0 +1,3134 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package snapimport
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	goruntime "runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+)
+
+const targetNS = "dst"
+
+var (
+	snapshotGVR        = schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots"}
+	volumeSnapshotGVRt = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
+	demoDiskSnapGVR    = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	demoVMSnapGVR      = schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
+)
+
+func TestUploadNodeManifests_ControlRequestDeadline(t *testing.T) {
+	t.Parallel()
+
+	deadline := make(chan context.CancelCauseFunc, 1)
+	uploader := &blockingManifestUploader{started: make(chan struct{})}
+	cfg := applyDefaults(Config{
+		Namespace: "target",
+		Uploader:  uploader,
+		newRequestContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			requestCtx, cancel := context.WithCancelCause(parent)
+			deadline <- cancel
+
+			return requestCtx, func() { cancel(nil) }
+		},
+	})
+	node := PlannedNode{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       "root",
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- uploadNodeManifests(context.Background(), cfg, node)
+	}()
+
+	<-uploader.started
+	cancel := <-deadline
+	cancel(context.DeadlineExceeded)
+
+	err := <-result
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("uploadNodeManifests error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+type blockingManifestUploader struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (u *blockingManifestUploader) UploadManifests(
+	ctx context.Context,
+	_ aggapi.NodeRef,
+	_ []byte,
+) ([]byte, error) {
+	u.once.Do(func() { close(u.started) })
+	<-ctx.Done()
+
+	return nil, ctx.Err()
+}
+
+type uploadCall struct {
+	ref  aggapi.NodeRef
+	body uploadPayload
+}
+
+type stubUploader struct {
+	calls []uploadCall
+}
+
+func (s *stubUploader) UploadManifests(_ context.Context, ref aggapi.NodeRef, body []byte) ([]byte, error) {
+	var p uploadPayload
+	_ = json.Unmarshal(body, &p)
+
+	s.calls = append(s.calls, uploadCall{ref: ref, body: p})
+
+	return []byte(`{"status":"Success"}`), nil
+}
+
+type stubVolumes struct {
+	mu     sync.Mutex
+	ensure []string
+	upload []string
+	// uploader, when set, lets EnsureDataImport snapshot how many manifest uploads had
+	// completed at the moment the first data import started — used to assert the
+	// manifests-before-data ordering that prevents the leaf-DataImport deadlock.
+	uploader               *stubUploader
+	manifestsAtFirstEnsure int
+}
+
+func (s *stubVolumes) DataImportName(leaf PlannedNode) string {
+	return leaf.Name
+}
+
+func (s *stubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.ensure) == 0 && s.uploader != nil {
+		s.manifestsAtFirstEnsure = len(s.uploader.calls)
+	}
+
+	s.ensure = append(s.ensure, leaf.Name)
+
+	return leaf.Name, nil
+}
+
+func (s *stubVolumes) UploadVolumeData(_ context.Context, leaf PlannedNode, _, _ string, _ func(int64), _ func(int), _ func()) error {
+	s.mu.Lock()
+	s.upload = append(s.upload, leaf.Name)
+	s.mu.Unlock()
+
+	return nil
+}
+
+type countingRESTMapper struct {
+	meta.RESTMapper
+	calls atomic.Int32
+}
+
+func (m *countingRESTMapper) RESTMapping(
+	gk schema.GroupKind,
+	versions ...string,
+) (*meta.RESTMapping, error) {
+	m.calls.Add(1)
+
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+func testMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
+
+	return m
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func readyConditions(types ...string) []interface{} {
+	conds := make([]interface{}, 0, len(types))
+	for _, t := range types {
+		conds = append(conds, map[string]interface{}{"type": t, "status": "True"})
+	}
+
+	return conds
+}
+
+// newFakeDynamicRaw builds a fake dynamic client with no reactors: stored objects are returned
+// verbatim, so a node without status.boundSnapshotContentName stays unbound. Used by the bind-gate
+// tests that must observe an unbound node (timeout / partial-bind).
+func newFakeDynamicRaw(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		snapshotGVR:        "SnapshotList",
+		volumeSnapshotGVRt: "VolumeSnapshotList",
+		demoDiskSnapGVR:    "DemoVirtualDiskSnapshotList",
+		demoVMSnapGVR:      "DemoVirtualMachineSnapshotList",
+	}
+
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, objs...)
+}
+
+// newFakeDynamic builds a fake dynamic client that simulates the state-snapshotter binder:
+// every Get stamps a non-empty status.boundSnapshotContentName on any node that lacks one, so
+// Run's waitForBinds gate observes each planned node as bound — as it would in a real cluster
+// once the binder cascades SnapshotContents from the import-mode markers. Tests that need a node
+// to stay unbound use newFakeDynamicRaw instead.
+func newFakeDynamic(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	dyn := newFakeDynamicRaw(objs...)
+	stampBoundContentOnGet(dyn)
+
+	return dyn
+}
+
+// stampBoundContentOnGet installs a get reactor returning a copy of the stored object with a
+// non-empty status.boundSnapshotContentName when it is missing, mirroring the binder having bound
+// the node's SnapshotContent. It is purely additive (never touches spec, conditions, or ownerRefs)
+// and does not persist to the tracker, so it is invisible to every assertion except the bind gate.
+func stampBoundContentOnGet(dyn *dynamicfake.FakeDynamicClient) {
+	dyn.PrependReactor("get", "*", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		ga, ok := action.(clienttesting.GetAction)
+		if !ok {
+			return false, nil, nil
+		}
+
+		obj, err := dyn.Tracker().Get(ga.GetResource(), ga.GetNamespace(), ga.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return false, nil, nil
+		}
+
+		out := u.DeepCopy()
+		if boundContentName(out) == "" {
+			_ = unstructured.SetNestedField(out.Object, out.GetName()+"-content", "status", "boundSnapshotContentName")
+		}
+
+		return true, out, nil
+	})
+}
+
+// testDomainMapper extends testMapper with the DemoVirtualDiskSnapshot GVK so tests that
+// drive domain data leaves can resolve their resource plural via the RESTMapper.
+func testDomainMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, meta.RESTScopeNamespace)
+
+	return m
+}
+
+const rootSnapshotUID = "root-uid"
+
+func readyRootSnapshot() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
+		"kind":       "Snapshot",
+		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": rootSnapshotUID},
+		// An import-mode root that the controller has already materialized to Ready: it keeps
+		// its spec.mode: Import marker, so ensureMarker reconciles (not rejects) it on re-run.
+		"spec": map[string]interface{}{
+			"mode": "Import",
+		},
+		"status": map[string]interface{}{
+			"conditions": readyConditions("Ready"),
+		},
+	}}
+}
+
+func baseConfig(input string, up *stubUploader, vol VolumeImporter, dyn *dynamicfake.FakeDynamicClient) Config {
+	return Config{
+		Namespace:    targetNS,
+		InputDir:     input,
+		TTL:          "1h",
+		Uploader:     up,
+		Volumes:      vol,
+		Dynamic:      dyn,
+		Mapper:       testMapper(),
+		Log:          discardLogger(),
+		PollInterval: time.Millisecond,
+		Timeout:      2 * time.Second,
+	}
+}
+
+func TestRun_ImportsBottomUp(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 manifest uploads, got %d", len(up.calls))
+	}
+
+	// Leaf uploaded before root.
+	if up.calls[0].ref.Kind != "VolumeSnapshot" || up.calls[0].ref.Name != "pvc-1" {
+		t.Errorf("first upload = %s/%s, want VolumeSnapshot/pvc-1", up.calls[0].ref.Kind, up.calls[0].ref.Name)
+	}
+
+	if up.calls[1].ref.Kind != "Snapshot" || up.calls[1].ref.Name != "root" {
+		t.Errorf("second upload = %s/%s, want Snapshot/root", up.calls[1].ref.Kind, up.calls[1].ref.Name)
+	}
+
+	// Uploads target the import namespace.
+	if up.calls[0].ref.Namespace != targetNS {
+		t.Errorf("upload namespace = %q, want %q", up.calls[0].ref.Namespace, targetNS)
+	}
+
+	// Leaf has no childRefs; root references the leaf.
+	if len(up.calls[0].body.ChildRefs) != 0 {
+		t.Errorf("leaf childRefs = %v, want empty", up.calls[0].body.ChildRefs)
+	}
+
+	if len(up.calls[1].body.ChildRefs) != 1 || up.calls[1].body.ChildRefs[0].Name != "pvc-1" {
+		t.Errorf("root childRefs = %v, want [pvc-1]", up.calls[1].body.ChildRefs)
+	}
+
+	// Volume data imported for the leaf.
+	if len(vol.ensure) != 1 || vol.ensure[0] != "pvc-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [pvc-1]", vol.ensure)
+	}
+
+	if len(vol.upload) != 1 || vol.upload[0] != "pvc-1" {
+		t.Errorf("UploadVolumeData calls = %v, want [pvc-1]", vol.upload)
+	}
+
+	// The leaf import-mode VolumeSnapshot CR was created.
+	if _, err := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); err != nil {
+		t.Errorf("VolumeSnapshot import CR not created: %v", err)
+	}
+}
+
+func TestRunRequiresExplicitLegacyCompatibilityBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowLegacy bool
+		wantErr     error
+	}{
+		{
+			name:    "default rejects",
+			wantErr: archive.ErrLegacySnapshotFormat,
+		},
+		{
+			name:        "explicit compatibility accepts",
+			allowLegacy: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := buildTwoLevelArchive(t)
+			rewriteArchiveNodeAsLegacy(t, root, nil)
+			rewriteArchiveNodeAsLegacy(t, childDir(root, "VolumeSnapshot", "pvc-1"), nil)
+
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.AllowUnauthenticatedLegacy = tt.allowLegacy
+
+			err := Run(context.Background(), cfg)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Run error = %v, want %v", err, tt.wantErr)
+				}
+
+				if len(dyn.Actions()) != 0 || len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 {
+					t.Fatalf(
+						"legacy rejection occurred after side effects: dynamic=%d uploads=%d ensures=%d volume_uploads=%d",
+						len(dyn.Actions()),
+						len(up.calls),
+						len(vol.ensure),
+						len(vol.upload),
+					)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Run with explicit legacy compatibility: %v", err)
+			}
+
+			if len(up.calls) != 2 || len(vol.upload) != 1 {
+				t.Fatalf("explicit legacy upload effects = manifests %d volumes %d, want 2 and 1",
+					len(up.calls), len(vol.upload))
+			}
+		})
+	}
+}
+
+// TestRun_UploadsAllManifestsBeforeData locks in the manifests-before-data ordering: a data
+// leaf's SVDM DataImport stays Pending until the leaf VolumeSnapshot has a bound
+// SnapshotContent (which needs the parent content -> the parent's manifests upload), so
+// importing leaf data before all ancestor manifests are uploaded would deadlock.
+func TestRun_UploadsAllManifestsBeforeData(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{uploader: up, manifestsAtFirstEnsure: -1}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if vol.manifestsAtFirstEnsure != len(up.calls) {
+		t.Errorf("first data import started after %d/%d manifest uploads; all manifests must be uploaded before any volume data import",
+			vol.manifestsAtFirstEnsure, len(up.calls))
+	}
+}
+
+func TestRun_LeafCarriesParentOwnerRef(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	if err := Run(context.Background(), baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	leaf, err := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get leaf VolumeSnapshot: %v", err)
+	}
+
+	refs := leaf.GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("leaf ownerReferences = %d, want 1 (parent Snapshot)", len(refs))
+	}
+
+	ref := refs[0]
+	if ref.Kind != "Snapshot" || ref.Name != "root" || ref.APIVersion != "state-snapshotter.deckhouse.io/v1alpha1" {
+		t.Errorf("leaf parent ownerRef = %s/%s (%s), want Snapshot/root (state-snapshotter.deckhouse.io/v1alpha1)", ref.Kind, ref.Name, ref.APIVersion)
+	}
+
+	if ref.UID != rootSnapshotUID {
+		t.Errorf("leaf parent ownerRef uid = %q, want %q (server-assigned parent UID)", ref.UID, rootSnapshotUID)
+	}
+
+	// A CSI VolumeSnapshot leaf is a visibility leaf, not a controller-owned child.
+	if ref.Controller != nil && *ref.Controller {
+		t.Errorf("leaf parent ownerRef should not be controller-owned")
+	}
+}
+
+// TestPreflight_FilesystemDataPasses verifies that a VolumeSnapshot data leaf carrying
+// filesystem-volume data (data.tar) now passes preflight and allows Run to succeed.
+// The companion TestRun_LeafWithoutBlockDataFailsFast covers the case where a leaf has
+// neither block nor filesystem data (that must still be rejected).
+func TestPreflight_FilesystemDataPasses(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    make([]byte, 1024),
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	if err := Run(context.Background(), baseConfig(root, up, vol, dyn)); err != nil {
+		t.Fatalf("filesystem-data leaf must pass preflight and allow Run to succeed, got: %v", err)
+	}
+
+	// Manifests uploaded and volume import triggered for the FS leaf.
+	if len(up.calls) == 0 {
+		t.Error("expected manifest uploads, got none")
+	}
+
+	if len(vol.ensure) == 0 || vol.ensure[0] != "pvc-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [pvc-1]", vol.ensure)
+	}
+
+	// The leaf import-mode VolumeSnapshot CR must have been created.
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr != nil {
+		t.Errorf("VolumeSnapshot import CR not created: %v", gErr)
+	}
+}
+
+func TestRun_UnsafeFilesystemPAXFailsBeforeClusterMutation(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryRawPAX(t, tw, "C:/escape.txt", "C:/escape.txt", "none", 1, []byte("x"))
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    tarBuf.Bytes(),
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+		t.Fatalf("Run error = %v, want ErrInvalidFSMetadata", err)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(actions), actions)
+	}
+}
+
+func TestRun_UnsupportedFilesystemEntriesFailBeforeClusterMutation(t *testing.T) {
+	t.Parallel()
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryRawPAX(t, tw, "regular.txt", "regular.txt", "none", 1, []byte("x"))
+
+	for _, hdr := range []tar.Header{
+		{Typeflag: tar.TypeDir, Name: "empty/"},
+		{Typeflag: tar.TypeSymlink, Name: "late-link", Linkname: "regular.txt"},
+	} {
+		if err := tw.WriteHeader(&hdr); err != nil {
+			t.Fatalf("write unsupported tar header %q: %v", hdr.Name, err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		tarData:    tarBuf.Bytes(),
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("Run error = nil, want unsupported filesystem entry failure")
+	}
+
+	for _, fragment := range []string{
+		`entry "empty" (directory)`,
+		`entry "late-link" (symlink)`,
+		"unsupported filesystem tar entries (2)",
+	} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Run error %q does not contain %q", err, fragment)
+		}
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(actions), actions)
+	}
+}
+
+func TestRun_LeafWithoutBlockDataFailsFast(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		// no blockData, no data.tar: an invalid data leaf.
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+
+	err := Run(context.Background(), baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot())))
+	if err == nil {
+		t.Fatal("expected missing-block-data error, got nil")
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should happen on missing-block-data preflight failure: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+}
+
+// corruptFirstByte flips every bit of the first byte of the file at path, in place, without
+// touching any recorded checksum — simulating on-disk rot of an already-committed payload.
+func corruptFirstByte(t *testing.T, path string) {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	if len(data) == 0 {
+		t.Fatalf("payload %s is empty; nothing to corrupt", path)
+	}
+
+	data[0] ^= 0xff
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestRun_CorruptSkippedBlockPayload_NoMutation proves the archive integrity preflight
+// (verifyArchiveIntegrity) catches a corrupted block payload BEFORE any cluster mutation —
+// even a payload the upload-side resume would SKIP (offset==totalSize) and therefore never
+// re-read. The leaf's snapshot.yaml records the checksum of the ORIGINAL bytes, so flipping a
+// byte in the already-committed data.bin.zst makes VerifyNode's recomputed digest diverge.
+// Run must abort with ErrChecksumMismatch and leave EVERY mutation surface untouched: zero
+// manifest uploads, zero DataImport ensures, zero volume uploads (PUT/finished POST), and zero
+// dynamic-client actions at all (the preflight precedes even the read-only namespace check).
+func TestRun_CorruptSkippedBlockPayload_NoMutation(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("original-compressed-zstd-frame-bytes"),
+		blockExt:   ".zst",
+	})
+
+	corruptFirstByte(t, filepath.Join(leaf, archive.DataBlockName(".zst")))
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("expected archive integrity preflight to reject the corrupt payload, got nil")
+	}
+
+	if !errors.Is(err, archive.ErrChecksumMismatch) {
+		t.Errorf("expected ErrChecksumMismatch, got: %v", err)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 {
+		t.Errorf("DataImport ensures = %v, want none", vol.ensure)
+	}
+
+	if len(vol.upload) != 0 {
+		t.Errorf("volume uploads (PUT/finished POST) = %v, want none", vol.upload)
+	}
+
+	if acts := dyn.Actions(); len(acts) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0 (no cluster reads or writes before preflight): %v", len(acts), acts)
+	}
+}
+
+// assertNoClusterMutations fails t if Run produced any manifest upload, DataImport ensure,
+// volume upload, or dynamic-client action — the exact zero-cluster-write guarantee AC-2
+// requires for every rejected hybrid tree.
+func assertNoClusterMutations(t *testing.T, up *stubUploader, vol *stubVolumes, dyn *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 {
+		t.Errorf("DataImport ensures = %v, want none", vol.ensure)
+	}
+
+	if len(vol.upload) != 0 {
+		t.Errorf("volume uploads = %v, want none", vol.upload)
+	}
+
+	if acts := dyn.Actions(); len(acts) != 0 {
+		t.Errorf("dynamic-client actions = %d, want 0: %v", len(acts), acts)
+	}
+}
+
+// TestRun_RejectsHybridTree_NoMutation proves Run — the real production upload/import entry
+// point — enters the archive integrity preflight (verifyArchiveIntegrity, which recomputes
+// every selected node's ChildrenChecksum) and rejects every hybrid-tree shape AC-2 lists
+// (added, removed, replaced, and duplicate children) with zero cluster writes, for both a
+// single-level (root + one child) and a multi-level (root + domain aggregator + leaf) tree.
+func TestRun_RejectsHybridTree_NoMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		// build materializes the hybrid tree and returns its root dir.
+		build func(t *testing.T) string
+		// wantErr, when non-nil, is the exact sentinel Run's error must wrap.
+		wantErr error
+		// wantErrContains, used when wantErr is nil, matches a substring of Run's error: the
+		// duplicate-identity case is rejected by BuildPlan's own topology validation (a plain,
+		// unwrapped error) before verifyArchiveIntegrity's ChildrenChecksum check ever runs.
+		wantErrContains string
+		selectedKind    string
+		selectedName    string
+	}{
+		{
+			name: "single-level: added child not in the commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1"), archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root's commitment is authenticated over {pvc-1} only, here.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// pvc-2 is added AFTER root's commitment was written: an unauthenticated addition.
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-2"), archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-2", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: removed child still referenced by the commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				pvc1 := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, pvc1, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				pvc2 := childDir(root, "VolumeSnapshot", "pvc-2")
+				writeArchiveNode(t, pvc2, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-2", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root commits to {pvc-1, pvc-2}.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				if err := os.RemoveAll(pvc2); err != nil {
+					t.Fatalf("remove pvc-2: %v", err)
+				}
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: replaced child identity without re-finalizing the parent",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// Root's commitment authenticates the pvc-1 identity/digest at this path.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// The same path is now a different, internally self-consistent leaf (own
+				// NodeChecksum/ChildrenChecksum both valid), but root's stale commitment still
+				// names the old identity/digest — a classic hybrid-tree substitution.
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-bytes-entirely"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "single-level: duplicate direct child identity",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				dup := archiveNode{apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src"}
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1-a"), dup)
+				writeArchiveNode(t, childDir(root, "VolumeSnapshot", "pvc-1-b"), dup)
+
+				// Root can never legitimately finalize over two same-identity children (their
+				// shared identity makes ComputeNodeChildrenChecksum itself fail), so borrow an
+				// unrelated, valid commitment: any stored value is equally unable to
+				// authenticate this on-disk duplicate.
+				other := t.TempDir()
+				writeArchiveNode(t, other, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "solo-root"})
+				borrowed, err := archive.ComputeNodeChildrenChecksum(other)
+				if err != nil {
+					t.Fatalf("compute unrelated children checksum: %v", err)
+				}
+
+				rootChecksum, err := archive.ComputeNodeChecksum(root)
+				if err != nil {
+					t.Fatalf("compute root checksum: %v", err)
+				}
+
+				if err := archive.WriteSnapshotYAML(root, archive.SnapshotYAML{
+					APIVersion: snapshotAPIVersion, Kind: snapshotKind, Name: "root", Namespace: "src",
+					Checksum: rootChecksum, ChildrenChecksum: &borrowed,
+				}); err != nil {
+					t.Fatalf("rewrite root snapshot.yaml: %v", err)
+				}
+
+				return root
+			},
+			wantErrContains: "references child",
+		},
+		{
+			name: "multi-level: leaf swap invalidates the domain aggregator's commitment",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src"})
+				domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", kind: "DemoVirtualMachineSnapshot",
+					name: "vm-1", namespace: "src",
+				})
+				leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				// domain's commitment authenticates {pvc-1}; root's authenticates {vm-1}.
+				finalizeArchiveChildrenChecksums(t, root)
+
+				// The leaf is swapped without re-finalizing its parent (the domain
+				// aggregator): domain's stored commitment now diverges from the actual
+				// on-disk leaf, even though root's own commitment (over {vm-1}) still holds.
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-bytes-entirely"),
+				})
+
+				return root
+			},
+			wantErr: archive.ErrChildrenChecksumMismatch,
+		},
+		{
+			name: "selected leaf: immediate external parent rejects republished child",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src",
+				})
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				finalizeArchiveChildrenChecksums(t, root)
+
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("different-self-consistent-bytes"),
+				})
+
+				return root
+			},
+			wantErr:      archive.ErrChildrenChecksumMismatch,
+			selectedKind: "VolumeSnapshot",
+			selectedName: "pvc-1",
+		},
+		{
+			name: "selected leaf: higher external ancestor rejects republished parent",
+			build: func(t *testing.T) string {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion, kind: snapshotKind, name: "root", namespace: "src",
+				})
+				domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+					kind:       "DemoVirtualMachineSnapshot", name: "vm-1", namespace: "src",
+				})
+				leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1", kind: "VolumeSnapshot", name: "pvc-1", namespace: "src",
+					blockData: []byte("rawbytes"),
+				})
+				finalizeArchiveChildrenChecksums(t, root)
+
+				writeArchiveNode(t, domain, archiveNode{
+					apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+					kind:       "DemoVirtualMachineSnapshot", name: "vm-1", namespace: "src",
+					manifests: []map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "changed"}}},
+				})
+				finalizeArchiveChildrenChecksums(t, domain)
+
+				return root
+			},
+			wantErr:      archive.ErrChildrenChecksumMismatch,
+			selectedKind: "VolumeSnapshot",
+			selectedName: "pvc-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := tt.build(t)
+
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.Mapper = testDomainMapper()
+			cfg.SelectedNodeKind = tt.selectedKind
+			cfg.SelectedNodeName = tt.selectedName
+
+			err := Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run error = nil, want a rejected hybrid tree")
+			}
+
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("Run error = %v, want %v", err, tt.wantErr)
+				}
+			case tt.wantErrContains != "":
+				if !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("Run error = %q, want substring %q", err, tt.wantErrContains)
+				}
+			}
+
+			assertNoClusterMutations(t, up, vol, dyn)
+		})
+	}
+}
+
+func TestRun_ArchiveWriterLockFailsBeforeParsingOrMutation(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	writer, err := archive.AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("acquire archive writer lock: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	err = Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if !errors.Is(err, archive.ErrArchiveLocked) {
+		t.Fatalf("Run error = %v, want ErrArchiveLocked", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("lock contention reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_CancellationReleasesArchiveReadLock(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic(readyRootSnapshot()))
+	if err := Run(ctx, cfg); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+
+	writer, err := archive.AcquireWriteLock(root)
+	if err != nil {
+		t.Fatalf("archive read lock leaked after cancellation: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+}
+
+func TestRun_ArchiveRootReplacementFailsBeforeParsingOrMutation(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows denies root replacement while the rooted lock is held")
+	}
+
+	root := buildTwoLevelArchive(t)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterLock: func() {
+			displaced := root + ".locked-original"
+			if err := os.Rename(root, displaced); err != nil {
+				t.Fatalf("rename locked archive root: %v", err)
+			}
+
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatalf("create replacement archive root: %v", err)
+			}
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("root replacement reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_ArchiveLockEntryReplacementFailsBeforeParsingOrMutation(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows denies lock-entry replacement while its handle is held")
+	}
+
+	root := buildTwoLevelArchive(t)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterLock: func() {
+			lockPath := filepath.Join(root, ".d8-snapshot-download.lock")
+			if err := os.Rename(lockPath, lockPath+".locked-original"); err != nil {
+				t.Fatalf("rename held archive lock entry: %v", err)
+			}
+
+			if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+				t.Fatalf("create replacement archive lock entry: %v", err)
+			}
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrArchiveLockChanged) {
+		t.Fatalf("Run error = %v, want ErrArchiveLockChanged", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("lock replacement reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_ManifestChangedAfterPlanningFailsBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, archive.ManifestsDirName, archive.ManifestFileName("obj", "a", ""))
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		manifests: []map[string]interface{}{{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "before"},
+		}},
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.testHooks = &archiveRaceHooks{
+		afterPlan: func() {
+			if err := os.WriteFile(manifestPath,
+				[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: after\n"), 0o600); err != nil {
+				t.Fatalf("replace planned manifest: %v", err)
+			}
+
+			rewriteNodeChecksum(t, root)
+		},
+	}
+
+	err := Run(context.Background(), cfg)
+	if !errors.Is(err, archive.ErrVerifiedArchiveChanged) {
+		t.Fatalf("Run error = %v, want ErrVerifiedArchiveChanged", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 || len(dyn.Actions()) != 0 {
+		t.Fatalf("planning race reached external state: uploads=%d ensure=%v data=%v actions=%v",
+			len(up.calls), vol.ensure, vol.upload, dyn.Actions())
+	}
+}
+
+func TestRun_ManifestReplacementAfterVerificationUploadsPinnedBytes(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, archive.ManifestsDirName, archive.ManifestFileName("obj", "a", ""))
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		manifests: []map[string]interface{}{{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]interface{}{"name": "verified"},
+		}},
+	})
+
+	up := &stubUploader{}
+	cfg := baseConfig(root, up, &stubVolumes{}, newFakeDynamic(readyRootSnapshot()))
+	cfg.testHooks = &archiveRaceHooks{
+		afterVerify: func() {
+			if err := os.WriteFile(manifestPath,
+				[]byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: replacement\n"), 0o600); err != nil {
+				t.Fatalf("replace verified manifest: %v", err)
+			}
+		},
+	}
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(up.calls) != 1 {
+		t.Fatalf("manifest uploads = %d, want 1", len(up.calls))
+	}
+
+	body := string(up.calls[0].body.Manifests)
+	if !strings.Contains(body, `"name":"verified"`) || strings.Contains(body, `"name":"replacement"`) {
+		t.Fatalf("uploaded manifests = %s, want only verified bytes", body)
+	}
+}
+
+func rewriteNodeChecksum(t *testing.T, nodeDir string) {
+	t.Helper()
+
+	checksum, err := archive.ComputeNodeChecksum(nodeDir)
+	if err != nil {
+		t.Fatalf("recompute node checksum: %v", err)
+	}
+
+	metadata, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("read snapshot metadata: %v", err)
+	}
+
+	metadata.Checksum = checksum
+	if err := archive.WriteSnapshotYAML(nodeDir, metadata); err != nil {
+		t.Fatalf("rewrite snapshot metadata: %v", err)
+	}
+}
+
+func TestRunRejectsNonRegularArchiveArtifactsBeforeExternalCalls(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(t *testing.T) (string, string)
+	}{
+		{
+			name: "snapshot yaml symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotYAMLName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifests directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.ManifestsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "manifest symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				entries, err := os.ReadDir(filepath.Join(root, archive.ManifestsDirName))
+				if err != nil {
+					t.Fatalf("read manifests: %v", err)
+				}
+
+				path := filepath.Join(root, archive.ManifestsDirName, entries[0].Name())
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "snapshots directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.SnapshotsDirName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "block payload symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(childDir(root, "VolumeSnapshot", "pvc-1"), archive.DataBlockName(""))
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "filesystem payload symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := t.TempDir()
+				writeArchiveNode(t, root, archiveNode{
+					apiVersion: snapshotAPIVersion,
+					kind:       snapshotKind,
+					name:       "root",
+				})
+
+				leaf := childDir(root, "VolumeSnapshot", "pvc-1")
+				writeArchiveNode(t, leaf, archiveNode{
+					apiVersion: "snapshot.storage.k8s.io/v1",
+					kind:       "VolumeSnapshot",
+					name:       "pvc-1",
+					tarData:    []byte("tar bytes are never read"),
+				})
+
+				path := filepath.Join(leaf, archive.FsTarName)
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+		{
+			name: "legacy data directory symlink",
+			build: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				root := buildTwoLevelArchive(t)
+				path := filepath.Join(root, archive.DataDirName)
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("mkdir legacy data: %v", err)
+				}
+				moveOutsideAndSymlink(t, path)
+
+				return root, path
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path := tc.build(t)
+			up := &stubUploader{}
+			vol := &stubVolumes{}
+			dyn := newFakeDynamic(readyRootSnapshot())
+			mapper := &countingRESTMapper{RESTMapper: testMapper()}
+			cfg := baseConfig(root, up, vol, dyn)
+			cfg.Mapper = mapper
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			err := Run(ctx, cfg)
+			if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+				t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+			}
+
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("error %q does not contain offending path %q", err, path)
+			}
+
+			if calls := mapper.calls.Load(); calls != 0 {
+				t.Errorf("RESTMapper calls = %d, want 0", calls)
+			}
+
+			if actions := dyn.Actions(); len(actions) != 0 {
+				t.Errorf("dynamic client actions = %v, want none", actions)
+			}
+
+			if len(up.calls) != 0 {
+				t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+			}
+
+			if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+				t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+			}
+		})
+	}
+}
+
+func TestRunRejectsMountedArchiveDescendantsBeforeExternalCalls(t *testing.T) {
+	for _, scenario := range []string{"run-directory", "run-regular-file"} {
+		t.Run(scenario, func(t *testing.T) {
+			runSnapimportMountHelper(t, "^TestLinuxMountedRunEscapeHelper$", scenario)
+		})
+	}
+}
+
+func TestLinuxMountedRunEscapeHelper(t *testing.T) {
+	scenario := os.Getenv(snapimportMountHelperScenario)
+	if scenario == "" {
+		return
+	}
+
+	root := buildTwoLevelArchive(t)
+	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
+
+	if err := bindMountForTest(sourcePath, targetPath); err != nil {
+		fmt.Printf("mount namespace unavailable: %v\n", err)
+
+		return
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	mapper := &countingRESTMapper{RESTMapper: testMapper()}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = mapper
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := Run(ctx, cfg)
+	if !errors.Is(err, archive.ErrNonRegularArchiveArtifact) {
+		t.Fatalf("Run error = %v, want ErrNonRegularArchiveArtifact", err)
+	}
+
+	if calls := mapper.calls.Load(); calls != 0 {
+		t.Errorf("RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic client actions = %v, want none", actions)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume mutations = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+}
+
+func TestRun_LeafManifestsArrayShape(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	if err := Run(context.Background(), baseConfig(root, up, &stubVolumes{}, dyn)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var items []map[string]interface{}
+	if err := json.Unmarshal(up.calls[0].body.Manifests, &items); err != nil {
+		t.Fatalf("manifests is not a JSON array: %v", err)
+	}
+
+	if len(items) != 1 || items[0]["kind"] != "PersistentVolumeClaim" {
+		t.Errorf("leaf manifests = %v, want one PersistentVolumeClaim", items)
+	}
+}
+
+// TestNodeDisplayLabel verifies nodeDisplayLabel's fallback contract: it prefers the
+// original captured source object's identity (SourceObjectRef.Kind/Name) when the
+// archive recorded one, and falls back to the snapshot CR's own Kind/Name otherwise
+// (core Snapshot nodes and CSI VolumeSnapshot data leaves never carry a
+// SourceObjectRef — see archive.SnapshotYAML.SourceObjectRef's doc comment).
+func TestNodeDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		node PlannedNode
+		want string
+	}{
+		{
+			name: "prefers_source_object_ref",
+			node: PlannedNode{
+				Kind: "DemoVirtualDiskSnapshot", Name: "dvd-snap-1",
+				SourceObjectRef: &archive.SourceObjectRef{Kind: "DemoVirtualDisk", Name: "disk-a"},
+			},
+			want: "DemoVirtualDisk/disk-a",
+		},
+		{
+			name: "falls_back_when_nil_source_object_ref",
+			node: PlannedNode{Kind: "VolumeSnapshot", Name: "nss-vs-agg-pvc"},
+			want: "VolumeSnapshot/nss-vs-agg-pvc",
+		},
+		{
+			name: "falls_back_when_source_object_ref_name_empty",
+			node: PlannedNode{
+				Kind: "Snapshot", Name: "root",
+				SourceObjectRef: &archive.SourceObjectRef{Kind: "Namespace"},
+			},
+			want: "Snapshot/root",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nodeDisplayLabel(tc.node); got != tc.want {
+				t.Errorf("nodeDisplayLabel(%+v) = %q, want %q", tc.node, got, tc.want)
+			}
+		})
+	}
+}
+
+// buildDomainDataLeafArchive creates: root Snapshot → DemoVirtualDiskSnapshot with block
+// data and a SourceObjectRef. Returns the root dir.
+func buildDomainDataLeafArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	leafDir := childDir(root, "DemoVirtualDiskSnapshot", "dvd-snap-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "dvd-snap-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+		sourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "disk-a",
+		},
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	return root
+}
+
+// TestRun_DomainDataLeaf_EndToEnd verifies that a root Snapshot → domain data leaf
+// (DemoVirtualDiskSnapshot with block data + SourceObjectRef) flows through the full
+// import pipeline: markers are created top-down (root first, then the domain leaf),
+// manifests are uploaded for both nodes, and the domain leaf's volume data is imported.
+func TestRun_DomainDataLeaf_EndToEnd(t *testing.T) {
+	root := buildDomainDataLeafArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Two manifest uploads: domain leaf (post-order = leaf first) then root.
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 manifest uploads, got %d", len(up.calls))
+	}
+
+	if up.calls[0].ref.Kind != "DemoVirtualDiskSnapshot" || up.calls[0].ref.Name != "dvd-snap-1" {
+		t.Errorf("first upload = %s/%s, want DemoVirtualDiskSnapshot/dvd-snap-1", up.calls[0].ref.Kind, up.calls[0].ref.Name)
+	}
+
+	if up.calls[1].ref.Kind != "Snapshot" || up.calls[1].ref.Name != "root" {
+		t.Errorf("second upload = %s/%s, want Snapshot/root", up.calls[1].ref.Kind, up.calls[1].ref.Name)
+	}
+
+	// Volume data imported for the domain leaf (importNodeData handles isDomainDataLeaf).
+	if len(vol.ensure) != 1 || vol.ensure[0] != "dvd-snap-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [dvd-snap-1]", vol.ensure)
+	}
+
+	if len(vol.upload) != 1 || vol.upload[0] != "dvd-snap-1" {
+		t.Errorf("UploadVolumeData calls = %v, want [dvd-snap-1]", vol.upload)
+	}
+
+	// The domain leaf import-mode CR must have been created with the unified import marker.
+	leafObj, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).Get(context.Background(), "dvd-snap-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("DemoVirtualDiskSnapshot import CR not created: %v", err)
+	}
+
+	if mode, _, _ := unstructured.NestedString(leafObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("domain leaf marker must set spec.mode: Import, got %q", mode)
+	}
+
+	if got := leafObj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got !=
+		`{"apiVersion":"demo.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"disk-a"}` {
+		t.Errorf("%s = %q, want archive sourceObjectRef", snapshotapi.AnnotationImportSourceRef, got)
+	}
+
+	if _, found, nestedErr := unstructured.NestedFieldNoCopy(leafObj.Object, "spec", "sourceRef"); nestedErr != nil || found {
+		t.Errorf("import marker must not write forbidden spec.sourceRef: found=%t err=%v", found, nestedErr)
+	}
+
+	// The domain leaf carries a child->parent ownerRef pointing to the root Snapshot.
+	refs := leafObj.GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("domain leaf ownerReferences = %d, want 1 (parent Snapshot)", len(refs))
+	}
+
+	ref := refs[0]
+	if ref.Kind != "Snapshot" || ref.Name != "root" {
+		t.Errorf("domain leaf parent ownerRef = %s/%s, want Snapshot/root", ref.Kind, ref.Name)
+	}
+
+	// A domain data leaf is a controller-owned child (unlike CSI VS leaves which are not).
+	if ref.Controller == nil || !*ref.Controller {
+		t.Errorf("domain data leaf parent ownerRef should be controller-owned")
+	}
+}
+
+// TestRun_ManifestOnlyDomainNode_Imports verifies that a manifest-only domain node — a
+// domain snapshot with neither volume data nor child snapshots (e.g. a disk-less
+// DemoVirtualMachineSnapshot) — is client-importable: it gets the unified
+// spec.mode: Import marker, its manifests are uploaded, it carries a controller-owned
+// child->parent ownerRef, and no DataImport is created (it has no data leg). It is
+// import-equivalent to a structural Snapshot child.
+func TestRun_ManifestOnlyDomainNode_Imports(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	demo := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, demo, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("manifest-only domain node should import, got: %v", err)
+	}
+
+	// Two manifest uploads: the manifest-only domain node (post-order = leaf first), then root.
+	if len(up.calls) != 2 {
+		t.Fatalf("expected 2 manifest uploads, got %d", len(up.calls))
+	}
+
+	if up.calls[0].ref.Kind != "DemoVirtualMachineSnapshot" || up.calls[0].ref.Name != "vm-1" {
+		t.Errorf("first upload = %s/%s, want DemoVirtualMachineSnapshot/vm-1", up.calls[0].ref.Kind, up.calls[0].ref.Name)
+	}
+
+	// A manifest-only domain node has no data leg: no DataImport is ensured/uploaded.
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("manifest-only domain node must not import volume data: ensure=%v upload=%v", vol.ensure, vol.upload)
+	}
+
+	// The domain node import-mode CR was created with the unified import marker.
+	vmObj, err := dyn.Resource(demoVMSnapGVR).Namespace(targetNS).Get(context.Background(), "vm-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("DemoVirtualMachineSnapshot import CR not created: %v", err)
+	}
+
+	if mode, _, _ := unstructured.NestedString(vmObj.Object, "spec", "mode"); mode != "Import" {
+		t.Errorf("manifest-only domain node marker must set spec.mode: Import, got %q", mode)
+	}
+
+	// It carries a controller-owned child->parent ownerRef pointing to the root Snapshot.
+	refs := vmObj.GetOwnerReferences()
+	if len(refs) != 1 || refs[0].Kind != "Snapshot" || refs[0].Name != "root" {
+		t.Fatalf("manifest-only domain node must carry a parent Snapshot ownerRef, got %+v", refs)
+	}
+
+	if refs[0].Controller == nil || !*refs[0].Controller {
+		t.Errorf("manifest-only domain node parent ownerRef should be controller-owned")
+	}
+}
+
+// TestRun_SelectedNode_ManifestOnlyDomainNodeFails verifies that selecting a manifest-only
+// domain node as a standalone --node root fails fast (it has no parent SnapshotContent to
+// attach to), with a clear message, before any cluster mutation.
+func TestRun_SelectedNode_ManifestOnlyDomainNodeFails(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	demo := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, demo, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
+	cfg.SelectedNodeName = "vm-1"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error selecting a manifest-only domain node as standalone root, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "manifest-only domain node") {
+		t.Errorf("expected manifest-only-domain-node error, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should occur on selection error: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+}
+
+func TestRun_RootMustBeSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		blockData:  []byte("x"),
+	})
+
+	up := &stubUploader{}
+	dyn := newFakeDynamic()
+
+	if err := Run(context.Background(), baseConfig(root, up, &stubVolumes{}, dyn)); err == nil {
+		t.Fatal("expected error when archive root is not a Snapshot, got nil")
+	}
+}
+
+func captureModeRootSnapshot() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
+		"kind":       "Snapshot",
+		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "root", "uid": "capture-uid"},
+		// A live capture-mode Snapshot (no import marker) that merely shares the import name.
+		"spec": map[string]interface{}{
+			"source": map[string]interface{}{"namespaceName": targetNS},
+		},
+	}}
+}
+
+func TestRun_RefusesNonImportModeExisting(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Pre-seed a capture-mode Snapshot/root: the importer must refuse to mutate it.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("expected refusal to mutate a non-import-mode object, got nil")
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no manifests/data mutations should happen when an existing object is not import-mode: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+
+	// The leaf import-mode CR must not have been created.
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr == nil {
+		t.Error("leaf VolumeSnapshot import CR should not be created when the run aborts")
+	}
+}
+
+func TestRun_Validation(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"no namespace", func(c *Config) { c.Namespace = "" }},
+		{"no input", func(c *Config) { c.InputDir = "" }},
+		{"no uploader", func(c *Config) { c.Uploader = nil }},
+		{"no volumes", func(c *Config) { c.Volumes = nil }},
+		{"no dynamic", func(c *Config) { c.Dynamic = nil }},
+		{"no mapper", func(c *Config) { c.Mapper = nil }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic())
+			tc.mutate(&cfg)
+
+			if err := Run(context.Background(), cfg); err == nil {
+				t.Fatal("expected validation error, got nil")
+			}
+		})
+	}
+}
+
+func ownerRef(name, uid string) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		Kind:       "Snapshot",
+		Name:       name,
+		UID:        types.UID(uid),
+	}
+}
+
+func TestAddOwnerRefs_RefreshesStaleParentUID(t *testing.T) {
+	obj := &unstructured.Unstructured{}
+	obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef("root", "old-uid")})
+
+	changed := addOwnerRefs(obj, []metav1.OwnerReference{ownerRef("root", "new-uid")})
+	if !changed {
+		t.Fatal("addOwnerRefs should report a change when the parent UID drifted")
+	}
+
+	refs := obj.GetOwnerReferences()
+	if len(refs) != 1 {
+		t.Fatalf("ownerReferences = %d, want 1 (UID refreshed in place, not duplicated)", len(refs))
+	}
+
+	if refs[0].UID != "new-uid" {
+		t.Errorf("ownerRef UID = %q, want new-uid (refreshed for retried import)", refs[0].UID)
+	}
+}
+
+func TestAddOwnerRefs_NoOpWhenUnchanged(t *testing.T) {
+	obj := &unstructured.Unstructured{}
+	obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef("root", "uid-1")})
+
+	if addOwnerRefs(obj, []metav1.OwnerReference{ownerRef("root", "uid-1")}) {
+		t.Error("addOwnerRefs should be a no-op when the desired ref already matches")
+	}
+}
+
+func domainImportMarker(sourceAnnotation *string) *unstructured.Unstructured {
+	annotations := map[string]interface{}{"unrelated.example.io/keep": "yes"}
+	if sourceAnnotation != nil {
+		annotations[snapshotapi.AnnotationImportSourceRef] = *sourceAnnotation
+	}
+
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		"kind":       "DemoVirtualDiskSnapshot",
+		"metadata": map[string]interface{}{
+			"namespace":   targetNS,
+			"name":        "dvd-snap-1",
+			"uid":         "live-marker-uid",
+			"annotations": annotations,
+			"ownerReferences": []interface{}{
+				map[string]interface{}{
+					"apiVersion": "example.io/v1",
+					"kind":       "OtherOwner",
+					"name":       "keep-owner",
+					"uid":        "keep-owner-uid",
+				},
+			},
+		},
+		"spec": map[string]interface{}{
+			"mode":        "Import",
+			"producerKey": "preserved",
+		},
+		"status": map[string]interface{}{
+			"phase": "Ready",
+		},
+	}}
+}
+
+func desiredDomainImportMarker(t *testing.T, sourceRef *archive.SourceObjectRef) *unstructured.Unstructured {
+	t.Helper()
+
+	marker, err := importMarkerCR(PlannedNode{
+		APIVersion:      "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		Kind:            "DemoVirtualDiskSnapshot",
+		Name:            "dvd-snap-1",
+		SourceObjectRef: sourceRef,
+	}, targetNS)
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	marker.SetOwnerReferences([]metav1.OwnerReference{ownerRef("root", "new-root-uid")})
+
+	return marker
+}
+
+func markerUpdateCount(dyn *dynamicfake.FakeDynamicClient) int {
+	count := 0
+
+	for _, action := range dyn.Actions() {
+		if action.GetVerb() == "update" {
+			count++
+		}
+	}
+
+	return count
+}
+
+func TestEnsureMarker_ReconcilesLegacySourceAnnotationIdempotently(t *testing.T) {
+	existing := domainImportMarker(nil)
+	dyn := newFakeDynamicRaw(existing)
+	cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+	sourceRef := &archive.SourceObjectRef{
+		APIVersion: "virtualization.deckhouse.io/v1alpha2",
+		Kind:       "VirtualDisk",
+		Name:       "disk-a",
+	}
+	desired := desiredDomainImportMarker(t, sourceRef)
+
+	uid, err := cfg.ensureMarker(context.Background(), desired)
+	if err != nil {
+		t.Fatalf("ensureMarker: %v", err)
+	}
+
+	if uid != "live-marker-uid" {
+		t.Errorf("ensureMarker UID = %q, want live-marker-uid", uid)
+	}
+
+	live, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+		Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reconciled marker: %v", err)
+	}
+
+	wantAnnotation := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+	if got := live.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got != wantAnnotation {
+		t.Errorf("%s = %q, want %q", snapshotapi.AnnotationImportSourceRef, got, wantAnnotation)
+	}
+
+	if got := live.GetAnnotations()["unrelated.example.io/keep"]; got != "yes" {
+		t.Errorf("unrelated annotation = %q, want preserved value", got)
+	}
+
+	if value, _, _ := unstructured.NestedString(live.Object, "spec", "producerKey"); value != "preserved" {
+		t.Errorf("spec.producerKey = %q, want preserved", value)
+	}
+
+	if value, _, _ := unstructured.NestedString(live.Object, "status", "phase"); value != "Ready" {
+		t.Errorf("status.phase = %q, want preserved", value)
+	}
+
+	refs := live.GetOwnerReferences()
+	if len(refs) != 2 {
+		t.Fatalf("ownerReferences = %+v, want unrelated and desired refs", refs)
+	}
+
+	if updates := markerUpdateCount(dyn); updates != 1 {
+		t.Fatalf("marker updates = %d, want 1", updates)
+	}
+
+	if _, err := cfg.ensureMarker(context.Background(), desired); err != nil {
+		t.Fatalf("idempotent ensureMarker: %v", err)
+	}
+
+	if updates := markerUpdateCount(dyn); updates != 1 {
+		t.Errorf("marker updates after idempotent retry = %d, want 1", updates)
+	}
+}
+
+func TestEnsureMarker_RejectsInvalidSourceIdentityBeforeOwnerMutation(t *testing.T) {
+	valid := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+	conflicting := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"other-disk"}`
+	malformed := `{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":`
+	nonCanonical := `{ "apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}`
+
+	tests := []struct {
+		name          string
+		live          *string
+		desired       *archive.SourceObjectRef
+		wantErrorText string
+	}{
+		{
+			name:          "malformed live value",
+			live:          &malformed,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "malformed",
+		},
+		{
+			name:          "non-canonical live value",
+			live:          &nonCanonical,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "non-canonical",
+		},
+		{
+			name:          "different live identity",
+			live:          &conflicting,
+			desired:       &archive.SourceObjectRef{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDisk", Name: "disk-a"},
+			wantErrorText: "conflicting",
+		},
+		{
+			name:          "one-sided live identity",
+			live:          &valid,
+			wantErrorText: "one-sided",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			existing := domainImportMarker(tc.live)
+			dyn := newFakeDynamicRaw(existing)
+			cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+			desired := desiredDomainImportMarker(t, tc.desired)
+
+			_, err := cfg.ensureMarker(context.Background(), desired)
+			if err == nil {
+				t.Fatal("expected source identity validation error")
+			}
+
+			if !strings.Contains(err.Error(), tc.wantErrorText) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrorText)
+			}
+
+			if updates := markerUpdateCount(dyn); updates != 0 {
+				t.Errorf("marker updates = %d, want 0", updates)
+			}
+
+			live, getErr := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+				Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+			if getErr != nil {
+				t.Fatalf("get unchanged marker: %v", getErr)
+			}
+
+			refs := live.GetOwnerReferences()
+			if len(refs) != 1 || refs[0].Name != "keep-owner" {
+				t.Errorf("ownerReferences mutated before identity validation: %+v", refs)
+			}
+		})
+	}
+}
+
+func TestEnsureMarker_RetriesConflictWithFreshIdentityValidation(t *testing.T) {
+	existing := domainImportMarker(nil)
+	dyn := newFakeDynamicRaw(existing)
+	cfg := applyDefaults(Config{Dynamic: dyn, Mapper: testDomainMapper()})
+	desired := desiredDomainImportMarker(t, &archive.SourceObjectRef{
+		APIVersion: "virtualization.deckhouse.io/v1alpha2",
+		Kind:       "VirtualDisk",
+		Name:       "disk-a",
+	})
+
+	updateCalls := 0
+	dyn.PrependReactor("update", "demovirtualdisksnapshots", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		updateCalls++
+		if updateCalls == 1 {
+			return true, nil, kubeerrors.NewConflict(
+				schema.GroupResource{
+					Group:    demoDiskSnapGVR.Group,
+					Resource: demoDiskSnapGVR.Resource,
+				},
+				desired.GetName(),
+				errors.New("concurrent marker update"),
+			)
+		}
+
+		return false, nil, nil
+	})
+
+	if _, err := cfg.ensureMarker(context.Background(), desired); err != nil {
+		t.Fatalf("ensureMarker after conflict: %v", err)
+	}
+
+	if updateCalls != 2 {
+		t.Fatalf("update calls = %d, want 2", updateCalls)
+	}
+
+	live, err := dyn.Resource(demoDiskSnapGVR).Namespace(targetNS).
+		Get(context.Background(), desired.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get reconciled marker: %v", err)
+	}
+
+	if _, exists := live.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; !exists {
+		t.Errorf("reconciled marker is missing %s", snapshotapi.AnnotationImportSourceRef)
+	}
+}
+
+func TestRun_InvalidExistingSourceAnnotationCausesNoPartialMutation(t *testing.T) {
+	root := buildDomainDataLeafArchive(t)
+	malformed := `{"apiVersion":`
+	existingLeaf := domainImportMarker(&malformed)
+	dyn := newFakeDynamic(readyRootSnapshot(), existingLeaf)
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected invalid existing source annotation to fail")
+	}
+
+	if !strings.Contains(err.Error(), snapshotapi.AnnotationImportSourceRef) {
+		t.Errorf("error %q does not name source annotation", err.Error())
+	}
+
+	for _, action := range dyn.Actions() {
+		switch action.GetVerb() {
+		case "create", "update", "patch", "delete", "delete-collection":
+			t.Errorf("cluster mutation %s %s occurred before source identity validation", action.GetVerb(), action.GetResource().Resource)
+		}
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("external mutations occurred: uploads=%d ensure=%d volume_uploads=%d",
+			len(up.calls), len(vol.ensure), len(vol.upload))
+	}
+}
+
+// buildThreeLevelArchive writes: root Snapshot -> domain child -> VS leaf with block data.
+// Returns the root dir.
+func buildThreeLevelArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	domain := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, domain, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+		namespace:  "src",
+	})
+
+	leaf := childDir(domain, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leaf, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	return root
+}
+
+// readyImportLeafVS returns a CSI VolumeSnapshot in import mode that the controller has
+// already materialized to Ready, so waitLeafReady observes its own namespaced Ready
+// condition (no cluster-scoped SnapshotContent read).
+func readyImportLeafVS() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshot",
+		"metadata":   map[string]interface{}{"namespace": targetNS, "name": "pvc-1", "uid": "vs-uid"},
+		"spec": map[string]interface{}{
+			"mode": "Import",
+		},
+		"status": map[string]interface{}{
+			"conditions": readyConditions("Ready"),
+		},
+	}}
+}
+
+// TestFilterPlanToSubtree_SelectLeaf verifies that filtering to a VolumeSnapshot leaf
+// returns only that leaf in post-order.
+func TestFilterPlanToSubtree_SelectLeaf(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "VolumeSnapshot", "pvc-1")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 node in subtree, got %d", len(filtered))
+	}
+
+	if filtered[0].Kind != "VolumeSnapshot" || filtered[0].Name != "pvc-1" {
+		t.Errorf("subtree node = %s/%s, want VolumeSnapshot/pvc-1", filtered[0].Kind, filtered[0].Name)
+	}
+}
+
+// TestFilterPlanToSubtree_SelectDomainSubtree verifies that filtering to the domain node
+// returns [VS leaf, domain node] in post-order (leaf first, domain last).
+func TestFilterPlanToSubtree_SelectDomainSubtree(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "DemoVirtualMachineSnapshot", "vm-1")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 nodes in subtree (leaf + domain), got %d", len(filtered))
+	}
+
+	// Post-order: leaf first, domain last.
+	if filtered[0].Kind != "VolumeSnapshot" || filtered[0].Name != "pvc-1" {
+		t.Errorf("first node = %s/%s, want VolumeSnapshot/pvc-1", filtered[0].Kind, filtered[0].Name)
+	}
+
+	if filtered[1].Kind != "DemoVirtualMachineSnapshot" || filtered[1].Name != "vm-1" {
+		t.Errorf("last node = %s/%s, want DemoVirtualMachineSnapshot/vm-1", filtered[1].Kind, filtered[1].Name)
+	}
+}
+
+// TestFilterPlanToSubtree_SelectRoot verifies that filtering to the root returns the
+// entire plan unchanged.
+func TestFilterPlanToSubtree_SelectRoot(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	filtered, err := filterPlanToSubtree(plan, "Snapshot", "root")
+	if err != nil {
+		t.Fatalf("filterPlanToSubtree: %v", err)
+	}
+
+	if len(filtered) != len(plan) {
+		t.Errorf("selecting root should return full plan (%d nodes), got %d", len(plan), len(filtered))
+	}
+}
+
+// TestFilterPlanToSubtree_NotFound verifies that a missing kind/name returns an error.
+func TestFilterPlanToSubtree_NotFound(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if _, err := filterPlanToSubtree(plan, "Snapshot", "nonexistent"); err == nil {
+		t.Fatal("expected error for missing node, got nil")
+	}
+}
+
+func TestRun_RejectsDuplicateIdentityBeforeExternalCalls(t *testing.T) {
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	for _, physicalName := range []string{"first", "second"} {
+		writeArchiveNode(t, filepath.Join(root, archive.SnapshotsDirName, physicalName), archiveNode{
+			apiVersion: "domain.example.io/v1",
+			kind:       "DemoSnapshot",
+			name:       "duplicate",
+		})
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+	mapper := &countingRESTMapper{RESTMapper: testMapper()}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Mapper = mapper
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() error = nil, want duplicate identity rejection")
+	}
+
+	if !strings.Contains(err.Error(), "canonical identity domain.example.io/v1 DemoSnapshot/duplicate") {
+		t.Fatalf("Run() error = %q, want duplicate canonical identity", err)
+	}
+
+	if calls := mapper.calls.Load(); calls != 0 {
+		t.Errorf("RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := dyn.Actions(); len(actions) != 0 {
+		t.Errorf("dynamic client actions = %v, want none", actions)
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("manifest uploads = %d, want 0", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("volume calls = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+}
+
+func TestRun_SameKindNameAcrossAPIVersions(t *testing.T) {
+	const (
+		firstAPIVersion  = "alpha.example.io/v1"
+		secondAPIVersion = "beta.example.io/v1"
+		domainKind       = "DemoSnapshot"
+		domainName       = "shared"
+	)
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: snapshotAPIVersion,
+		kind:       snapshotKind,
+		name:       "root",
+	})
+
+	firstPath := filepath.Join(root, archive.SnapshotsDirName, "z-physical")
+	writeArchiveNode(t, firstPath, archiveNode{
+		apiVersion: firstAPIVersion,
+		kind:       domainKind,
+		name:       domainName,
+	})
+
+	secondPath := filepath.Join(root, archive.SnapshotsDirName, "a-physical")
+	writeArchiveNode(t, secondPath, archiveNode{
+		apiVersion: secondAPIVersion,
+		kind:       domainKind,
+		name:       domainName,
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	newMapper := func() meta.RESTMapper {
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: snapshotKind},
+			meta.RESTScopeNamespace)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "alpha.example.io", Version: "v1", Kind: domainKind},
+			meta.RESTScopeNamespace)
+		mapper.Add(
+			schema.GroupVersionKind{Group: "beta.example.io", Version: "v1", Kind: domainKind},
+			meta.RESTScopeNamespace)
+
+		return mapper
+	}
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	fullCfg := baseConfig(root, up, vol, newFakeDynamic(readyRootSnapshot()))
+	fullCfg.Mapper = newMapper()
+
+	if err := Run(context.Background(), fullCfg); err != nil {
+		t.Fatalf("full-tree Run() error = %v", err)
+	}
+
+	if len(up.calls) != 3 {
+		t.Fatalf("full-tree manifest uploads = %d, want 3", len(up.calls))
+	}
+
+	if len(vol.ensure) != 0 || len(vol.upload) != 0 {
+		t.Errorf("full-tree volume calls = ensure %v upload %v, want none", vol.ensure, vol.upload)
+	}
+
+	selectedUp := &stubUploader{}
+	selectedVol := &stubVolumes{}
+	selectedDyn := newFakeDynamic(readyRootSnapshot())
+	selectedMapper := &countingRESTMapper{RESTMapper: newMapper()}
+	selectedCfg := baseConfig(root, selectedUp, selectedVol, selectedDyn)
+	selectedCfg.Mapper = selectedMapper
+	selectedCfg.SelectedNodeKind = domainKind
+	selectedCfg.SelectedNodeName = domainName
+
+	err := Run(context.Background(), selectedCfg)
+	if err == nil {
+		t.Fatal("selected Run() error = nil, want ambiguity rejection")
+	}
+
+	firstCandidate := firstAPIVersion + " at " + firstPath
+	secondCandidate := secondAPIVersion + " at " + secondPath
+	errorText := err.Error()
+
+	for _, want := range []string{"is ambiguous across apiVersions", firstCandidate, secondCandidate} {
+		if !strings.Contains(errorText, want) {
+			t.Errorf("selected Run() error = %q, want substring %q", errorText, want)
+		}
+	}
+
+	if strings.Index(errorText, firstCandidate) > strings.Index(errorText, secondCandidate) {
+		t.Errorf("ambiguity candidates are not deterministic: %q", errorText)
+	}
+
+	if calls := selectedMapper.calls.Load(); calls != 0 {
+		t.Errorf("selected RESTMapper calls = %d, want 0", calls)
+	}
+
+	if actions := selectedDyn.Actions(); len(actions) != 0 {
+		t.Errorf("selected dynamic client actions = %v, want none", actions)
+	}
+
+	if len(selectedUp.calls) != 0 ||
+		len(selectedVol.ensure) != 0 ||
+		len(selectedVol.upload) != 0 {
+		t.Errorf(
+			"selected external calls = manifests %d ensure %v upload %v, want none",
+			len(selectedUp.calls), selectedVol.ensure, selectedVol.upload)
+	}
+}
+
+// TestRun_SelectedNode_AggregatorFails verifies that selecting a domain aggregator node
+// as the import root fails fast before any cluster mutation.
+func TestRun_SelectedNode_AggregatorFails(t *testing.T) {
+	root := buildThreeLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.SelectedNodeKind = "DemoVirtualMachineSnapshot"
+	cfg.SelectedNodeName = "vm-1"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error selecting a domain aggregator, got nil")
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should occur on aggregator-selection error: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+}
+
+// TestRun_SelectedNode_SingleLeafWorks verifies that importing a single VolumeSnapshot
+// leaf subtree succeeds: only that leaf is processed and waitLeafReady resolves the
+// bound SnapshotContent to completion.
+func TestRun_SelectedNode_SingleLeafWorks(t *testing.T) {
+	// Single-node archive: the root directory IS the VS leaf.
+	leafDir := t.TempDir()
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+	})
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyImportLeafVS())
+
+	cfg := baseConfig(leafDir, up, vol, dyn)
+	cfg.SelectedNodeKind = "VolumeSnapshot"
+	cfg.SelectedNodeName = "pvc-1"
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run with single leaf selected: %v", err)
+	}
+
+	// One manifest upload for the leaf.
+	if len(up.calls) != 1 {
+		t.Errorf("expected 1 manifest upload for single-leaf import, got %d", len(up.calls))
+	}
+
+	// Volume data imported for the leaf.
+	if len(vol.ensure) != 1 || vol.ensure[0] != "pvc-1" {
+		t.Errorf("EnsureDataImport calls = %v, want [pvc-1]", vol.ensure)
+	}
+}
+
+// TestRun_SelectedNode_UnknownNodeFails verifies that selecting a node that does not
+// exist in the archive returns an error.
+func TestRun_SelectedNode_UnknownNodeFails(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, &stubVolumes{}, dyn)
+	cfg.SelectedNodeKind = "Snapshot"
+	cfg.SelectedNodeName = "no-such-snapshot"
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error for missing selected node, got nil")
+	}
+
+	if len(up.calls) != 0 {
+		t.Errorf("no uploads should happen when selected node is not found, got %d", len(up.calls))
+	}
+}
+
+// buildMultiLeafArchive creates a root Snapshot with n CSI VolumeSnapshot leaves, each
+// carrying block data. Returns the root dir and the leaf names (leaf-0 … leaf-(n-1)).
+func buildMultiLeafArchive(t *testing.T, n int) (string, []string) {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	names := make([]string, 0, n)
+
+	for i := range n {
+		name := fmt.Sprintf("leaf-%d", i)
+		names = append(names, name)
+
+		leaf := childDir(root, "VolumeSnapshot", name)
+		writeArchiveNode(t, leaf, archiveNode{
+			apiVersion: "snapshot.storage.k8s.io/v1",
+			kind:       "VolumeSnapshot",
+			name:       name,
+			namespace:  "src",
+			blockData:  []byte("rawbytes"),
+		})
+	}
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	return root, names
+}
+
+// concStubVolumes tracks the peak concurrency of UploadVolumeData calls so tests can
+// assert that errgroup.SetLimit(Workers) is honoured.
+type concStubVolumes struct {
+	inflight atomic.Int64
+	maxSeen  atomic.Int64
+	mu       sync.Mutex
+	imported []string
+}
+
+func (s *concStubVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (s *concStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (s *concStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string, _ func(int64), _ func(int), _ func()) error {
+	cur := s.inflight.Add(1)
+	defer s.inflight.Add(-1)
+
+	// CAS loop to update max (race-safe without locking).
+	for {
+		prev := s.maxSeen.Load()
+		if cur <= prev {
+			break
+		}
+
+		if s.maxSeen.CompareAndSwap(prev, cur) {
+			break
+		}
+	}
+
+	// Brief pause so goroutines overlap and the peak is observable.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	s.mu.Lock()
+	s.imported = append(s.imported, leaf.Name)
+	s.mu.Unlock()
+
+	return nil
+}
+
+// TestRun_Pass2b_ConcurrencyBounded verifies that pass 2b runs data-leaf volume uploads
+// with at most cfg.Workers goroutines in flight at once.
+func TestRun_Pass2b_ConcurrencyBounded(t *testing.T) {
+	const numLeaves = 6
+	const workers = 2
+
+	root, _ := buildMultiLeafArchive(t, numLeaves)
+
+	vol := &concStubVolumes{}
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Workers = workers
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	vol.mu.Lock()
+	imported := len(vol.imported)
+	vol.mu.Unlock()
+
+	if imported != numLeaves {
+		t.Errorf("expected %d leaves imported, got %d", numLeaves, imported)
+	}
+
+	max := vol.maxSeen.Load()
+	if max > workers {
+		t.Errorf("peak concurrency = %d, want <= %d (Workers limit not honoured)", max, workers)
+	}
+}
+
+// errorOnceStubVolumes causes one named leaf to fail immediately; all other leaves block
+// until ctx is cancelled, recording that they were properly cancelled by the errgroup.
+type errorOnceStubVolumes struct {
+	errorLeaf string
+	mu        sync.Mutex
+	cancelled []string
+}
+
+func (s *errorOnceStubVolumes) DataImportName(leaf PlannedNode) string { return leaf.Name }
+
+func (s *errorOnceStubVolumes) EnsureDataImport(_ context.Context, leaf PlannedNode, _ string) (string, error) {
+	return leaf.Name, nil
+}
+
+func (s *errorOnceStubVolumes) UploadVolumeData(ctx context.Context, leaf PlannedNode, _, _ string, _ func(int64), _ func(int), _ func()) error {
+	if leaf.Name == s.errorLeaf {
+		return fmt.Errorf("injected upload error for %s", leaf.Name)
+	}
+
+	// Block until errgroup cancels ctx when the failing leaf returns its error.
+	<-ctx.Done()
+
+	s.mu.Lock()
+	s.cancelled = append(s.cancelled, leaf.Name)
+	s.mu.Unlock()
+
+	return ctx.Err()
+}
+
+// TestRun_Pass2b_ErrorCancelsSiblings verifies that when one data-leaf upload fails
+// the errgroup cancels the derived ctx, unblocking sibling goroutines that are waiting.
+func TestRun_Pass2b_ErrorCancelsSiblings(t *testing.T) {
+	// Two leaves: leaf-0 errors immediately; leaf-1 blocks until ctx is cancelled.
+	root, _ := buildMultiLeafArchive(t, 2)
+
+	vol := &errorOnceStubVolumes{errorLeaf: "leaf-0"}
+	up := &stubUploader{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Workers = 2 // both leaves start simultaneously
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected error from failing leaf, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "injected upload error") {
+		t.Errorf("expected injected error message, got: %v", err)
+	}
+
+	// The sibling leaf must have been cancelled (not leaked or hung).
+	vol.mu.Lock()
+	numCancelled := len(vol.cancelled)
+	vol.mu.Unlock()
+
+	if numCancelled == 0 {
+		t.Error("expected sibling leaf to be cancelled via errgroup context, got 0 cancelled")
+	}
+}
+
+// warnCapture is a slog.Handler that collects Warn-or-above log messages for assertions.
+type warnCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *warnCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *warnCapture) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		h.mu.Lock()
+		h.msgs = append(h.msgs, r.Message)
+		h.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (h *warnCapture) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *warnCapture) WithGroup(_ string) slog.Handler { return h }
+
+func (h *warnCapture) warnMessages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	out := make([]string, len(h.msgs))
+	copy(out, h.msgs)
+
+	return out
+}
+
+// TestPreflightNamespace_CleanNamespace_Passes verifies that an empty target namespace
+// produces no conflicts.
+func TestPreflightNamespace_CleanNamespace_Passes(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, newFakeDynamic())
+
+	if err := preflightNamespace(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("preflightNamespace on clean namespace: %v", err)
+	}
+}
+
+// TestPreflightNamespace_ImportModeMarker_NotConflict verifies that pre-existing
+// import-mode markers from a prior run of the same import are never treated as conflicts.
+func TestPreflightNamespace_ImportModeMarker_NotConflict(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Both planned nodes pre-exist as import-mode markers (a prior partial run).
+	dyn := newFakeDynamic(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	if err := preflightNamespace(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("preflightNamespace with import-mode markers: %v", err)
+	}
+}
+
+// TestPreflightNamespace_CaptureMode_Conflict verifies that a capture-mode object
+// sharing a planned node's name is reported as a conflict.
+func TestPreflightNamespace_CaptureMode_Conflict(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// A live capture-mode Snapshot "root" exists in the target namespace.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	err = preflightNamespace(context.Background(), cfg, plan)
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "root") {
+		t.Errorf("expected conflict error to name the object %q, got: %v", "root", err)
+	}
+
+	if !strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("expected conflict error to mention --allow-existing, got: %v", err)
+	}
+}
+
+// TestRun_NsPreflightAbortsBeforeMarkers verifies that a capture-mode conflict detected
+// by preflightNamespace aborts the run before any cluster mutation (createMarkers).
+func TestRun_NsPreflightAbortsBeforeMarkers(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Capture-mode Snapshot "root" pre-exists; preflightNamespace must abort before markers.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+
+	err := Run(context.Background(), baseConfig(root, up, vol, dyn))
+	if err == nil {
+		t.Fatal("expected conflict error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("expected preflight error to mention --allow-existing, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no cluster mutations should happen before preflight: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+
+	// The leaf VolumeSnapshot marker must not have been created (createMarkers never called).
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr == nil {
+		t.Error("VolumeSnapshot import CR should not be created when namespace preflight fails")
+	}
+}
+
+// TestRun_AllowExisting_ProceedsWithWarning verifies that --allow-existing downgrades
+// the preflight conflict check to a warning; the run proceeds past preflightNamespace.
+// The per-object reconcileExistingMarker protection is unaffected, so the run may still
+// fail at createMarkers — confirming that preflightNamespace did NOT abort it.
+func TestRun_AllowExisting_ProceedsWithWarning(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Capture-mode Snapshot "root" pre-exists. AllowExisting=true → preflight warns, not errors.
+	// createMarkers subsequently hits reconcileExistingMarker which still refuses non-import-mode.
+	dyn := newFakeDynamic(captureModeRootSnapshot())
+
+	lh := &warnCapture{}
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.AllowExisting = true
+	cfg.Log = slog.New(lh)
+
+	err := Run(context.Background(), cfg)
+
+	// Error must come from createMarkers (not from preflightNamespace).
+	if err == nil {
+		t.Fatal("expected error from createMarkers, got nil")
+	}
+
+	if strings.Contains(err.Error(), "allow-existing") {
+		t.Errorf("error should NOT be the preflight conflict error (run should have passed preflight): %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "refusing to mutate") {
+		t.Errorf("expected 'refusing to mutate' error from reconcileExistingMarker, got: %v", err)
+	}
+
+	// A warning must have been emitted by preflightNamespace.
+	warns := lh.warnMessages()
+	if len(warns) == 0 {
+		t.Error("expected at least one warning log from preflightNamespace, got none")
+	}
+}
+
+// buildAggregatorWithDomainLeafArchive creates a three-level archive:
+//
+//	root Snapshot → DemoVirtualMachineSnapshot/vm-1 (aggregator, no volume data)
+//	             → DemoVirtualDiskSnapshot/dvd-1 (domain data leaf, block data + SourceObjectRef)
+func buildAggregatorWithDomainLeafArchive(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+		namespace:  "src",
+	})
+
+	aggDir := childDir(root, "DemoVirtualMachineSnapshot", "vm-1")
+	writeArchiveNode(t, aggDir, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualMachineSnapshot",
+		name:       "vm-1",
+		namespace:  "src",
+	})
+
+	leafDir := childDir(aggDir, "DemoVirtualDiskSnapshot", "dvd-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		kind:       "DemoVirtualDiskSnapshot",
+		name:       "dvd-1",
+		namespace:  "src",
+		blockData:  []byte("rawbytes"),
+		sourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "demo.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDisk",
+			Name:       "disk-a",
+		},
+	})
+
+	finalizeArchiveChildrenChecksums(t, root)
+
+	return root
+}
+
+// TestPreflight_AggregatorTreePasses verifies that a full archive containing a domain
+// aggregator (DemoVirtualMachineSnapshot) and its data-leaf child passes preflight: the
+// aggregator is reconstructed server-side as a non-root node, so a full-tree import is allowed.
+func TestPreflight_AggregatorTreePasses(t *testing.T) {
+	archiveRoot := buildAggregatorWithDomainLeafArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for a full aggregator tree, got: %v", err)
+	}
+}
+
+// TestRun_FullAggregatorImport verifies that a full-archive import of a tree containing a
+// domain aggregator (DemoVirtualMachineSnapshot) succeeds end-to-end:
+//   - import-mode markers are created for the root, the aggregator, and the data leaf
+//   - manifests are uploaded for every node; the aggregator's upload carries its child ref
+//   - a DataImport is created ONLY for the data leaf (the aggregator carries no own data)
+func TestRun_FullAggregatorImport(t *testing.T) {
+	archiveRoot := buildAggregatorWithDomainLeafArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	dyn := newFakeDynamic(readyRootSnapshot())
+
+	cfg := baseConfig(archiveRoot, up, vol, dyn)
+	cfg.Mapper = testDomainMapper()
+
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("full aggregator import: %v", err)
+	}
+
+	// A DataImport is created only for the data leaf, never for the aggregator.
+	if len(vol.ensure) != 1 || vol.ensure[0] != "dvd-1" {
+		t.Errorf("expected exactly one DataImport for the data leaf dvd-1, got: %v", vol.ensure)
+	}
+
+	// The aggregator marker must have been created in the target namespace.
+	if _, err := dyn.Resource(demoVMSnapGVR).Namespace(targetNS).Get(context.Background(), "vm-1", metav1.GetOptions{}); err != nil {
+		t.Errorf("aggregator import CR DemoVirtualMachineSnapshot/vm-1 should have been created: %v", err)
+	}
+
+	// The aggregator's upload must carry its data-leaf child ref so the server can aggregate it.
+	var aggUpload *uploadCall
+	for i := range up.calls {
+		if up.calls[i].ref.Kind == "DemoVirtualMachineSnapshot" && up.calls[i].ref.Name == "vm-1" {
+			aggUpload = &up.calls[i]
+
+			break
+		}
+	}
+
+	if aggUpload == nil {
+		t.Fatalf("expected a manifests upload for the aggregator DemoVirtualMachineSnapshot/vm-1; got calls: %+v", up.calls)
+	}
+
+	if len(aggUpload.body.ChildRefs) != 1 || aggUpload.body.ChildRefs[0].Name != "dvd-1" {
+		t.Errorf("aggregator upload should carry child ref DemoVirtualDiskSnapshot/dvd-1, got: %+v", aggUpload.body.ChildRefs)
+	}
+}
+
+// TestPreflight_DomainDataLeafDirectlyUnderRootPasses verifies that a plan with a domain data
+// leaf directly under the root Snapshot (no aggregator ancestor) passes preflight.
+func TestPreflight_DomainDataLeafDirectlyUnderRootPasses(t *testing.T) {
+	archiveRoot := buildDomainDataLeafArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for domain data leaf under root, got: %v", err)
+	}
+}
+
+// TestPreflight_VSLeafPasses verifies that a plan with a CSI VolumeSnapshot data leaf
+// directly under the root Snapshot passes preflight.
+func TestPreflight_VSLeafPasses(t *testing.T) {
+	archiveRoot := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(archiveRoot)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	if err := preflight(plan); err != nil {
+		t.Errorf("expected preflight to pass for VS leaf under root, got: %v", err)
+	}
+}
+
+// TestApplyDefaults_Workers asserts that a zero Workers field is filled to 5 (the default).
+func TestApplyDefaults_Workers(t *testing.T) {
+	cases := []struct {
+		name    string
+		workers int
+		want    int
+	}{
+		{name: "zero filled to default", workers: 0, want: defaultWorkers},
+		{name: "positive kept", workers: 3, want: 3},
+		{name: "negative filled to default", workers: -1, want: defaultWorkers},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := applyDefaults(Config{Workers: tc.workers})
+
+			if cfg.Workers != tc.want {
+				t.Errorf("Workers: got %d, want %d", cfg.Workers, tc.want)
+			}
+		})
+	}
+}
+
+// TestWaitForBinds_AllBoundReturnsNil verifies the happy path: when every planned node reports a
+// non-empty status.boundSnapshotContentName (here via the binder-simulating reactor), the bind
+// gate returns nil without waiting out the timeout.
+func TestWaitForBinds_AllBoundReturnsNil(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Both nodes exist as import markers; newFakeDynamic's binder reactor stamps them bound.
+	dyn := newFakeDynamic(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+	cfg.Timeout = 10 * time.Second // generous: success must NOT depend on the timeout elapsing.
+
+	start := time.Now()
+	if err := waitForBinds(context.Background(), cfg, plan); err != nil {
+		t.Fatalf("waitForBinds with all nodes bound: %v", err)
+	}
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("waitForBinds returned after %v; a fully-bound plan must return promptly", elapsed)
+	}
+}
+
+// TestWaitForBinds_TimesOutWhenUnbound verifies that nodes which never bind (raw client, no binder
+// reactor) drive the gate to a timeout error that surfaces status.boundSnapshotContentName and
+// names every still-unbound node.
+func TestWaitForBinds_TimesOutWhenUnbound(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// Raw client: the nodes exist but never gain status.boundSnapshotContentName.
+	dyn := newFakeDynamicRaw(readyRootSnapshot(), readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+
+	timeout := 40 * time.Millisecond
+	cfg.Timeout = timeout
+
+	start := time.Now()
+	err = waitForBinds(context.Background(), cfg, plan)
+
+	if err == nil {
+		t.Fatal("expected a bind timeout for never-bound nodes, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "timeout") || !strings.Contains(err.Error(), "boundSnapshotContentName") {
+		t.Errorf("timeout error should mention timeout and boundSnapshotContentName, got: %v", err)
+	}
+
+	for _, want := range []string{"Snapshot/root", "VolumeSnapshot/pvc-1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("timeout error should name the unbound node %q, got: %v", want, err)
+		}
+	}
+
+	if elapsed := time.Since(start); elapsed < timeout {
+		t.Errorf("must wait at least the timeout (%v) before giving up, waited %v", timeout, elapsed)
+	}
+}
+
+// TestWaitForBinds_OnlyUnboundNodesReported verifies the still-pending filtering: an already-bound
+// node is dropped from the wait set, so the timeout error reports only the node that never binds.
+func TestWaitForBinds_OnlyUnboundNodesReported(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	// root is pre-bound; the leaf never binds (raw client, no binder reactor).
+	boundRoot := readyRootSnapshot()
+	if err := unstructured.SetNestedField(boundRoot.Object, "root-content", "status", "boundSnapshotContentName"); err != nil {
+		t.Fatalf("seed bound root: %v", err)
+	}
+
+	dyn := newFakeDynamicRaw(boundRoot, readyImportLeafVS())
+	cfg := baseConfig(root, &stubUploader{}, &stubVolumes{}, dyn)
+	cfg.Timeout = 40 * time.Millisecond
+
+	err = waitForBinds(context.Background(), cfg, plan)
+	if err == nil {
+		t.Fatal("expected a bind timeout for the unbound leaf, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "VolumeSnapshot/pvc-1") {
+		t.Errorf("timeout error should name the unbound leaf, got: %v", err)
+	}
+
+	if strings.Contains(err.Error(), "Snapshot/root") {
+		t.Errorf("an already-bound node must NOT be reported as still pending, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "1 import node(s)") {
+		t.Errorf("timeout error should report exactly one still-pending node, got: %v", err)
+	}
+}
+
+// TestRun_BlocksOnUnboundNodes verifies the gate ordering end-to-end: with nodes that never bind,
+// Run creates the markers (pass 1) but fails at the bind gate BEFORE any manifests upload (pass 2a)
+// or volume data import (pass 2b) — no upload/data mutation may precede the bind.
+func TestRun_BlocksOnUnboundNodes(t *testing.T) {
+	root := buildTwoLevelArchive(t)
+
+	up := &stubUploader{}
+	vol := &stubVolumes{}
+	// Raw client, root pre-seeded so createMarkers reconciles it; nodes never bind.
+	dyn := newFakeDynamicRaw(readyRootSnapshot())
+
+	cfg := baseConfig(root, up, vol, dyn)
+	cfg.Timeout = 60 * time.Millisecond
+
+	err := Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("expected Run to fail at the bind gate when nodes never bind, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "bind a SnapshotContent") {
+		t.Errorf("expected a bind-gate timeout error, got: %v", err)
+	}
+
+	if len(up.calls) != 0 || len(vol.ensure) != 0 {
+		t.Errorf("no manifests upload or data import may precede the bind gate: uploads=%d ensures=%d", len(up.calls), len(vol.ensure))
+	}
+
+	// Pass 1 still ran: the leaf import-mode marker was created before the gate blocked.
+	if _, gErr := dyn.Resource(volumeSnapshotGVRt).Namespace(targetNS).Get(context.Background(), "pvc-1", metav1.GetOptions{}); gErr != nil {
+		t.Errorf("expected the leaf import marker to be created in pass 1 before the bind gate: %v", gErr)
+	}
+}

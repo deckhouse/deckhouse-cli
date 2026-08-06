@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	neturl "net/url"
@@ -19,9 +20,15 @@ import (
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
+// var instead of const to allow test override.
+var maxRetryAttempts = 60
+
 const (
-	maxRetryAttempts = 60
-	retryInterval    = 3
+	retryInterval = 3
+
+	// uploadFinishedSubpath is the importer endpoint that finalises an upload. It hangs off the
+	// same base URL as the /api/v1/{files,block} data endpoints (status.url / status.publicURL).
+	uploadFinishedSubpath = "api/v1/finished"
 )
 
 func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataImport, error) {
@@ -70,6 +77,13 @@ func CreateDataImport(
 		ttl = dataio.DefaultTTL
 	}
 
+	// CreatePVC requires a pvcTemplate whose metadata.name is set: the controller names the
+	// imported PVC after it, and the server CEL rejects an empty name. Fail early with a
+	// clear message instead of surfacing an opaque admission error.
+	if pvcTpl == nil || pvcTpl.Name == "" {
+		return fmt.Errorf("DataImport %s/%s requires a PVC template with metadata.name set", namespace, name)
+	}
+
 	obj := &v1alpha1.DataImport{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: v1alpha1.SchemeGroupVersion.String(),
@@ -83,10 +97,11 @@ func CreateDataImport(
 			TTL:                  ttl,
 			Publish:              publish,
 			WaitForFirstConsumer: waitForFirstConsumer,
-			TargetRef: v1alpha1.DataImportTargetRefSpec{
-				Kind:        "PersistentVolumeClaim",
-				PvcTemplate: pvcTpl,
-			},
+			// Sent explicitly even though the CRD defaults it: mode is immutable after creation,
+			// so relying on the server-side default would silently bind the object to whatever
+			// default a future CRD revision ships.
+			Mode:        v1alpha1.DataImportModeCreatePVC,
+			PvcTemplate: pvcTpl,
 		},
 	}
 
@@ -116,14 +131,24 @@ func GetDataImportWithRestart(
 		var notReadyErr error
 
 		for _, condition := range diObj.Status.Conditions {
-			if condition.Type == "Expired" && condition.Status == "True" {
+			// The DataImport controller no longer carries a standalone "Expired" condition; expiry is
+			// now the Ready condition with Status=False and Reason="Expired" (symmetric with
+			// DataExport). Detect it on the Ready condition and auto-restart the import, rather than
+			// waiting for the producer's GC (which only deletes an expired DataImport after its
+			// retention TTL).
+			if condition.Type != "Ready" {
+				continue
+			}
+
+			switch {
+			case condition.Status == "False" && condition.Reason == "Expired":
 				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
 					return nil, err
 				}
 
 				pvcTemplate := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
-				if diObj.Spec.TargetRef.PvcTemplate != nil {
-					pvcTemplate = diObj.Spec.TargetRef.PvcTemplate
+				if diObj.Spec.PvcTemplate != nil {
+					pvcTemplate = diObj.Spec.PvcTemplate
 				}
 
 				if err := CreateDataImport(
@@ -138,14 +163,16 @@ func GetDataImportWithRestart(
 				); err != nil {
 					return nil, err
 				}
-			}
-
-			if condition.Type == "Ready" {
-				if condition.Status != "True" {
-					notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
-						diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
-						condition.Message, condition.Reason)
-				}
+				// Recreated: the stale object's status.url/status.volumeMode still belong to the
+				// dead importer until retention-GC reaps it, so we must not let this object fall
+				// through to the readiness checks below as if it were done. Keep retrying until the
+				// fresh import becomes Ready.
+				notReadyErr = fmt.Errorf("DataImport %s/%s expired; recreated, waiting for the new import to become Ready",
+					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
+			case condition.Status != "True":
+				notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
+					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
+					condition.Message, condition.Reason)
 			}
 		}
 
@@ -188,7 +215,7 @@ func PrepareUpload(
 	publish bool,
 	sClient *safeClient.SafeClient,
 	log *slog.Logger,
-) ( /*url*/ string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
+) ( /*url*/ string /*baseURL*/, string /*volumeMode*/, string /*subClient*/, *safeClient.SafeClient, error) {
 	var (
 		url, volumeMode string
 		subClient       *safeClient.SafeClient
@@ -197,7 +224,7 @@ func PrepareUpload(
 
 	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 
 	// Fetch the current state so we can reconcile Spec.Publish before waiting.
@@ -205,7 +232,7 @@ func PrepareUpload(
 
 	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
+		return "", "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.
@@ -213,27 +240,30 @@ func PrepareUpload(
 	// when publish=true.
 	err = EnsureDataImportPublish(ctx, diObj, publish, rtClient)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 
 	diObj, err = GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 
+	// podURL is the importer base URL; the /api/v1/{files,block} data endpoint and the
+	// /api/v1/finished finalise endpoint both hang off it, so it is returned to the caller
+	// (which needs the base to POST finished after streaming the bytes).
 	var podURL string
 
 	switch {
 	case publish:
 		if diObj.Status.PublicURL == "" {
-			return "", "", nil, fmt.Errorf("empty PublicURL")
+			return "", "", "", nil, fmt.Errorf("empty PublicURL")
 		}
 
 		podURL = diObj.Status.PublicURL
 	case diObj.Status.URL != "":
 		podURL = diObj.Status.URL
 	default:
-		return "", "", nil, fmt.Errorf("invalid URL")
+		return "", "", "", nil, fmt.Errorf("invalid URL")
 	}
 
 	volumeMode = diObj.Status.VolumeMode
@@ -241,21 +271,21 @@ func PrepareUpload(
 	case "Filesystem":
 		url, err = neturl.JoinPath(podURL, "api/v1/files")
 		if err != nil {
-			return "", "", nil, err
+			return "", "", "", nil, err
 		}
 	case "Block":
 		url, err = neturl.JoinPath(podURL, "api/v1/block")
 		if err != nil {
-			return "", "", nil, err
+			return "", "", "", nil, err
 		}
 	default:
-		return "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
+		return "", "", "", nil, fmt.Errorf("%w: '%s'", dataio.ErrUnsupportedVolumeMode, volumeMode)
 	}
 
 	if len(diObj.Status.CA) > 0 {
 		decodedBytes, err = base64.StdEncoding.DecodeString(diObj.Status.CA)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
+			return "", "", "", nil, fmt.Errorf("CA decoding error: %s", err.Error())
 		}
 	}
 
@@ -264,7 +294,41 @@ func PrepareUpload(
 	// Always call SetTLSCAData to build a merged trust pool (system CAs + kubeconfig CA + internal CA if present)
 	subClient.SetTLSCAData(decodedBytes)
 
-	return url, volumeMode, subClient, nil
+	return url, podURL, volumeMode, subClient, nil
+}
+
+// PostFinished signals end-of-upload to the importer (POST <baseURL>/api/v1/finished), which
+// flips the DataImport's serverState to Finished. This is mandatory: the last data chunk (a PUT
+// that fills the device / writes the final file) does NOT finalise on its own, and the controller
+// only sets UploadFinished=True — the gate for rebinding the target and reaching Completed — once
+// serverState is Finished. baseURL is the importer base (status.url / status.publicURL), the same
+// base the /api/v1/{files,block} data endpoint hangs off of.
+func PostFinished(ctx context.Context, httpClient *safeClient.SafeClient, baseURL string) error {
+	finishedURL, err := neturl.JoinPath(baseURL, uploadFinishedSubpath)
+	if err != nil {
+		return fmt.Errorf("build finished URL: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finishedURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := httpClient.HTTPDo(req)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("finished returned status %d (%s)", resp.StatusCode, resp.Status)
+	}
+
+	return nil
 }
 
 // EnsureDataImportPublish patches DataImport.Spec.Publish to match the resolved value.

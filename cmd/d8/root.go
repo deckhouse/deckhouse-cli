@@ -48,6 +48,7 @@ import (
 	pluginscmd "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 	selfupdatecmd "github.com/deckhouse/deckhouse-cli/internal/selfupdate/cmd"
+	snapshot "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/tools"
@@ -104,6 +105,7 @@ func (r *RootCommand) registerCommands() {
 
 	r.cmd.AddCommand(backup.NewCommand())
 	r.cmd.AddCommand(data.NewCommand())
+	r.cmd.AddCommand(snapshot.NewCommand())
 	r.cmd.AddCommand(mirror.NewCommand())
 	r.cmd.AddCommand(cr.NewCommand())
 	r.cmd.AddCommand(status.NewCommand())

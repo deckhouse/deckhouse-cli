@@ -1,0 +1,957 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package download
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/rest"
+
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
+)
+
+const commandSelectedHost = "https://selected.example.test"
+
+func TestNewCommand_ParsesKubeconfigAndContextBeforeRun(t *testing.T) {
+	helpCmd := NewCommand(slog.Default())
+
+	var help bytes.Buffer
+
+	helpCmd.SetOut(&help)
+	helpCmd.SetErr(&help)
+	helpCmd.SetArgs([]string{"--help"})
+	if err := helpCmd.Execute(); err != nil {
+		t.Fatalf("execute help: %v", err)
+	}
+
+	for _, flag := range []string{"-k, --kubeconfig", "--context"} {
+		if !strings.Contains(help.String(), flag) {
+			t.Fatalf("help does not contain %q:\n%s", flag, help.String())
+		}
+	}
+
+	kubeconfigPath := writeCommandKubeconfig(t)
+	stopAfterConfig := errors.New("stop after REST config")
+	originalLoader := commandRESTConfigLoader
+	t.Cleanup(func() {
+		commandRESTConfigLoader = originalLoader
+	})
+
+	var gotHost string
+
+	commandRESTConfigLoader = func(flagSets ...*pflag.FlagSet) (*rest.Config, error) {
+		config, err := transport.NewRESTConfig(flagSets...)
+		if err != nil {
+			return nil, err
+		}
+
+		gotHost = config.Host
+
+		return nil, stopAfterConfig
+	}
+
+	cmd := NewCommand(slog.Default())
+	cmd.SetArgs([]string{
+		"snapshot-a",
+		"--namespace", "snapshot-ns",
+		"--output", t.TempDir(),
+		"--kubeconfig", kubeconfigPath,
+		"--context", "selected",
+	})
+
+	err := cmd.Execute()
+	if !errors.Is(err, stopAfterConfig) {
+		t.Fatalf("execute error = %v, want stop hook", err)
+	}
+
+	if gotHost != commandSelectedHost {
+		t.Fatalf("REST config host = %q, want %q", gotHost, commandSelectedHost)
+	}
+
+	namespace, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("read namespace flag: %v", err)
+	}
+
+	if namespace != "snapshot-ns" {
+		t.Fatalf("snapshot namespace = %q, want %q", namespace, "snapshot-ns")
+	}
+}
+
+func writeCommandKubeconfig(t *testing.T) string {
+	t.Helper()
+
+	kubeconfigPath := filepath.Join(t.TempDir(), "config")
+	kubeconfig := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: default
+  cluster:
+    server: https://default.example.test
+- name: selected
+  cluster:
+    server: ` + commandSelectedHost + `
+contexts:
+- name: default
+  context:
+    cluster: default
+- name: selected
+  context:
+    cluster: selected
+current-context: default
+`)
+	if err := os.WriteFile(kubeconfigPath, kubeconfig, 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	return kubeconfigPath
+}
+
+func TestNewCommand_Defaults(t *testing.T) {
+	t.Helper()
+
+	log := slog.Default()
+	cmd := NewCommand(log)
+
+	wantUse := cmdUse + " [flags] <snapshot>"
+	if cmd.Use != wantUse {
+		t.Fatalf("unexpected Use: got %q, want %q", cmd.Use, wantUse)
+	}
+
+	if !cmd.SilenceUsage {
+		t.Fatal("SilenceUsage should be true")
+	}
+
+	if !cmd.SilenceErrors {
+		t.Fatal("SilenceErrors should be true")
+	}
+
+	// Check default flag values.
+	ttl, err := cmd.Flags().GetString(flagTTL)
+	if err != nil {
+		t.Fatalf("getting ttl flag: %v", err)
+	}
+
+	if ttl != "2h" {
+		t.Fatalf("default ttl: got %q, want %q", ttl, "2h")
+	}
+
+	workers, err := cmd.Flags().GetInt(flagWorkers)
+	if err != nil {
+		t.Fatalf("getting workers flag: %v", err)
+	}
+
+	if workers != 4 {
+		t.Fatalf("default workers: got %d, want 4", workers)
+	}
+
+	perVol, err := cmd.Flags().GetInt(flagPerVolumeConcurrency)
+	if err != nil {
+		t.Fatalf("getting per-volume-concurrency flag: %v", err)
+	}
+
+	if perVol != 4 {
+		t.Fatalf("default per-volume-concurrency: got %d, want 4", perVol)
+	}
+}
+
+func TestNewCommandRESTConfig_ParsesOnceAndTunesSharedConfig(t *testing.T) {
+	t.Helper()
+
+	calls := 0
+	source := &rest.Config{}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		calls++
+
+		return source, nil
+	})
+
+	got, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	if calls != 1 {
+		t.Fatalf("REST config parse calls = %d, want 1", calls)
+	}
+
+	if got != source {
+		t.Fatal("newCommandRESTConfig replaced the parsed config")
+	}
+
+	if got.QPS != snapshotClientQPS || got.Burst != snapshotClientBurst {
+		t.Fatalf("shared tuning = QPS %v, Burst %d; want QPS %v, Burst %d",
+			got.QPS, got.Burst, snapshotClientQPS, snapshotClientBurst)
+	}
+
+	if got.Timeout != defaultControlPlaneTimeout {
+		t.Fatalf("control-plane timeout = %v, want %v", got.Timeout, defaultControlPlaneTimeout)
+	}
+
+	wrapped, ok := got.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("bounded control-plane transport is not an *http.Transport")
+	}
+
+	if wrapped.DialContext == nil {
+		t.Fatal("bounded control-plane transport has no DialContext")
+	}
+
+	if wrapped.TLSHandshakeTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("TLS handshake timeout = %v, want %v",
+			wrapped.TLSHandshakeTimeout, defaultControlPlaneTimeout)
+	}
+
+	if wrapped.ResponseHeaderTimeout != defaultControlPlaneTimeout {
+		t.Fatalf("response header timeout = %v, want %v",
+			wrapped.ResponseHeaderTimeout, defaultControlPlaneTimeout)
+	}
+}
+
+func TestNewDownloadClients_ProgressingDataStreamOutlivesControlTimeout(t *testing.T) {
+	const (
+		controlTimeout  = 400 * time.Millisecond
+		progressEvery   = 150 * time.Millisecond
+		progressChunks  = 6
+		dataIdleTimeout = 2 * time.Second
+		bearerToken     = "download-token"
+	)
+
+	streamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/stream" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		if got := r.Header.Get("Authorization"); got != "Bearer "+bearerToken {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+
+		ticker := time.NewTicker(progressEvery)
+		defer ticker.Stop()
+
+		for range progressChunks {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+			}
+
+			if _, err := w.Write([]byte{'x'}); err != nil {
+				return
+			}
+
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(streamServer.Close)
+
+	source := &rest.Config{
+		Host:        streamServer.URL,
+		APIPath:     "/api",
+		BearerToken: bearerToken,
+		UserAgent:   "download-timeout-test",
+		TLSClientConfig: rest.TLSClientConfig{
+			ServerName: "data-exporter.test",
+		},
+		Impersonate: rest.ImpersonationConfig{
+			UserName: "snapshot-user",
+			Groups:   []string{"snapshot-readers"},
+		},
+	}
+	load := transport.RESTConfigLoader(func(_ ...*pflag.FlagSet) (*rest.Config, error) {
+		return source, nil
+	})
+
+	controlConfig, err := newCommandRESTConfig(NewCommand(slog.Default()), load)
+	if err != nil {
+		t.Fatalf("newCommandRESTConfig: %v", err)
+	}
+
+	controlConfig.Timeout = controlTimeout
+
+	var (
+		aggInput  *rest.Config
+		dataInput *rest.Config
+	)
+
+	newAggClient := aggClientFactory(func(config *rest.Config, mapper meta.RESTMapper) (*aggapi.Client, error) {
+		aggInput = rest.CopyConfig(config)
+
+		return aggapi.NewClient(nil, mapper), nil
+	})
+	newDataPlaneClient := dataPlaneClientFactory(func(config *rest.Config) *transport.Client {
+		dataInput = rest.CopyConfig(config)
+
+		return transport.NewClientForConfig(config)
+	})
+
+	aggClient, dataClient, err := newDownloadClients(
+		controlConfig,
+		nil,
+		newAggClient,
+		newDataPlaneClient,
+	)
+	if err != nil {
+		t.Fatalf("newDownloadClients: %v", err)
+	}
+
+	if aggClient == nil || dataClient == nil {
+		t.Fatal("newDownloadClients returned a nil client")
+	}
+
+	if controlConfig.Timeout != controlTimeout || aggInput.Timeout != controlTimeout {
+		t.Fatalf("control-plane timeouts = source %v, consumer %v; want %v",
+			controlConfig.Timeout, aggInput.Timeout, controlTimeout)
+	}
+
+	if dataInput.Timeout != 0 {
+		t.Fatalf("data-plane total timeout = %v, want zero", dataInput.Timeout)
+	}
+
+	if dataInput.Host != aggInput.Host ||
+		dataInput.APIPath != aggInput.APIPath ||
+		dataInput.BearerToken != aggInput.BearerToken ||
+		dataInput.UserAgent != aggInput.UserAgent ||
+		dataInput.TLSClientConfig.ServerName != aggInput.TLSClientConfig.ServerName ||
+		dataInput.Impersonate.UserName != aggInput.Impersonate.UserName ||
+		!slices.Equal(dataInput.Impersonate.Groups, aggInput.Impersonate.Groups) ||
+		dataInput.QPS != aggInput.QPS ||
+		dataInput.Burst != aggInput.Burst {
+		t.Fatal("data-plane config lost non-timeout control-plane settings")
+	}
+
+	controlTransport, ok := aggInput.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("control-plane WrapTransport did not return an *http.Transport")
+	}
+
+	dataTransport, ok := dataInput.WrapTransport(&http.Transport{}).(*http.Transport)
+	if !ok {
+		t.Fatal("data-plane WrapTransport did not return an *http.Transport")
+	}
+
+	if controlTransport.DialContext == nil || dataTransport.DialContext == nil ||
+		dataTransport.TLSHandshakeTimeout != controlTransport.TLSHandshakeTimeout ||
+		dataTransport.ResponseHeaderTimeout != controlTransport.ResponseHeaderTimeout {
+		t.Fatal("data-plane config lost connection, TLS, or response-header guards")
+	}
+
+	persistentClient, err := dataClient.NewPersistentHTTPClientForOrigin(streamServer.URL)
+	if err != nil {
+		t.Fatalf("build persistent data-plane client: %v", err)
+	}
+
+	fetcher := exporter.NewFetcher(
+		persistentClient,
+		exporter.WithIdleReadTimeout(dataIdleTimeout),
+	)
+	start := time.Now()
+
+	body, err := fetcher.GetFile(context.Background(), streamServer.URL+"/stream")
+	if err != nil {
+		persistentClient.CloseIdleConnections()
+
+		t.Fatalf("open progressing data stream: %v", err)
+	}
+
+	got, readErr := io.ReadAll(body)
+	closeErr := body.Close()
+	elapsed := time.Since(start)
+	persistentClient.CloseIdleConnections()
+
+	if readErr != nil {
+		t.Fatalf("read progressing data stream: %v", readErr)
+	}
+
+	if closeErr != nil {
+		t.Fatalf("close progressing data stream: %v", closeErr)
+	}
+
+	if want := strings.Repeat("x", progressChunks); string(got) != want {
+		t.Fatalf("stream body = %q, want %q", got, want)
+	}
+
+	if elapsed <= controlTimeout {
+		t.Fatalf("stream completed in %v, want longer than control timeout %v", elapsed, controlTimeout)
+	}
+}
+
+// TestNewCommand_ChunkSizeFlagRemoved asserts --chunk-size is no longer
+// registered: production block downloads/merges are hardcoded to
+// volume.DefaultChunkSize (see block-chunk-size-hardcode-only).
+func TestNewCommand_ChunkSizeFlagRemoved(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if cmd.Flags().Lookup("chunk-size") != nil {
+		t.Fatal("--chunk-size must not be registered")
+	}
+}
+
+func TestNewCommand_NamespaceFlagDefault(t *testing.T) {
+	t.Helper()
+
+	log := slog.Default()
+	cmd := NewCommand(log)
+
+	ns, err := cmd.Flags().GetString(flagNamespace)
+	if err != nil {
+		t.Fatalf("getting namespace flag: %v", err)
+	}
+
+	if ns != "" {
+		t.Fatalf("default namespace: got %q, want empty string (namespace is required)", ns)
+	}
+}
+
+func TestRun_RequiresNamespace(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	err := Run(context.Background(), slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error when namespace is empty, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNamespace) {
+		t.Fatalf("expected error to mention %q, got: %v", flagNamespace, err)
+	}
+}
+
+func TestNewCommand_RequiresOneArg(t *testing.T) {
+	t.Helper()
+
+	log := slog.Default()
+	cmd := NewCommand(log)
+
+	// Zero args: must error.
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Fatal("expected error with zero positional args, got nil")
+	}
+
+	// One arg (snapshot name only): must succeed.
+	if err := cmd.Args(cmd, []string{"my-snap"}); err != nil {
+		t.Fatalf("expected no error with one positional arg, got: %v", err)
+	}
+
+	// Two args: must error (namespace is now a flag, not a positional arg).
+	if err := cmd.Args(cmd, []string{"ns", "snap"}); err == nil {
+		t.Fatal("expected error with two positional args, got nil")
+	}
+}
+
+// TestNewCommand_CompressionFlagsVisible asserts that --volume-compression and
+// --volume-compression-level are now part of the user-facing contract: both
+// flags are registered and NOT hidden from `-h`/completion. This replaces the
+// former TestNewCommand_CompressionFlagsHidden, which asserted the (now
+// reversed) hidden state from when compression selection was withdrawn.
+func TestNewCommand_CompressionFlagsVisible(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	compressionFlag := cmd.Flags().Lookup(flagVolumeCompression)
+	if compressionFlag == nil {
+		t.Fatalf("flag %s: not registered", flagVolumeCompression)
+	}
+
+	if compressionFlag.Hidden {
+		t.Fatalf("flag %s: got Hidden=%v, want false", flagVolumeCompression, compressionFlag.Hidden)
+	}
+
+	levelFlag := cmd.Flags().Lookup(flagVolumeCompressionLevel)
+	if levelFlag == nil {
+		t.Fatalf("flag %s: not registered", flagVolumeCompressionLevel)
+	}
+
+	if levelFlag.Hidden {
+		t.Fatalf("flag %s: got Hidden=%v, want false", flagVolumeCompressionLevel, levelFlag.Hidden)
+	}
+}
+
+// TestNewCommand_CompressionFlagUsage_ListsOnlyUserSelectableCodecs asserts the
+// --volume-compression help text advertises exactly the current user-selectable
+// allow-list (compress.UserSelectableNames(): "zstd" and "none") and does NOT
+// mention "gzip"/"lz4" — those codecs stay registered for decoding but are
+// withheld from the user-facing choice (see compress.userSelectableNames' doc
+// comment for why).
+func TestNewCommand_CompressionFlagUsage_ListsOnlyUserSelectableCodecs(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	compressionFlag := cmd.Flags().Lookup(flagVolumeCompression)
+	if compressionFlag == nil {
+		t.Fatalf("flag %s: not registered", flagVolumeCompression)
+	}
+
+	usage := compressionFlag.Usage
+
+	if !strings.Contains(usage, "zstd") {
+		t.Fatalf("usage does not mention %q: %q", "zstd", usage)
+	}
+
+	if !strings.Contains(usage, "none") {
+		t.Fatalf("usage does not mention %q: %q", "none", usage)
+	}
+
+	if strings.Contains(usage, "gzip") {
+		t.Fatalf("usage still mentions withheld codec %q: %q", "gzip", usage)
+	}
+
+	if strings.Contains(usage, "lz4") {
+		t.Fatalf("usage still mentions withheld codec %q: %q", "lz4", usage)
+	}
+}
+
+// TestValidateVolumeCompression asserts that only the user-selectable codec
+// names (zstd, none) are accepted at flag-validation time, while codecs that
+// remain registered for decoding but are withheld from user choice (gzip,
+// lz4) and outright unknown names are rejected with a clear error before any
+// data transfer begins.
+func TestValidateVolumeCompression(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		name    string
+		wantErr bool
+	}{
+		{"zstd", false},
+		{"none", false},
+		{"lz4", true},
+		{"gzip", true},
+		{"bogus-codec", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			codec, err := validateVolumeCompression(tc.name, 0)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateVolumeCompression(%q, 0): expected error, got nil", tc.name)
+				}
+
+				if !strings.Contains(err.Error(), tc.name) {
+					t.Fatalf("validateVolumeCompression(%q, 0): error does not name the rejected codec: %v", tc.name, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("validateVolumeCompression(%q, 0): unexpected error: %v", tc.name, err)
+			}
+
+			if codec == nil {
+				t.Fatalf("validateVolumeCompression(%q, 0): returned nil codec", tc.name)
+			}
+
+			if codec.Name() != tc.name {
+				t.Fatalf("validateVolumeCompression(%q, 0): codec.Name() = %q", tc.name, codec.Name())
+			}
+		})
+	}
+}
+
+// TestNewCommand_NodeExample_ShowsOriginalIdentityForm asserts the --node Example
+// text leads with the ORIGINAL captured object's Kind/Name form (e.g.
+// "DemoVirtualDisk/bk-disk-a") rather than the generated snapshot CR name form,
+// and that the CR-name form is still mentioned as accepted (back-compat) --
+// backlog #20's decision that the original identity is now the preferred,
+// no-less-valid, form.
+func TestNewCommand_NodeExample_ShowsOriginalIdentityForm(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if !strings.Contains(cmd.Example, "--node DemoVirtualDisk/bk-disk-a") {
+		t.Fatalf("Example text does not lead with the original-identity --node form:\n%s", cmd.Example)
+	}
+
+	if !strings.Contains(cmd.Example, "DemoVirtualDiskSnapshot/nss-child-abc123") {
+		t.Fatalf("Example text dropped the back-compat mention of the CR-name --node form:\n%s", cmd.Example)
+	}
+
+	nodeFlag := cmd.Flags().Lookup(flagNode)
+	if nodeFlag == nil {
+		t.Fatal("flag --node: not registered")
+	}
+
+	if !strings.Contains(nodeFlag.Usage, "DemoVirtualDisk/bk-disk-a") {
+		t.Fatalf("--node usage does not lead with the original-identity form: %q", nodeFlag.Usage)
+	}
+
+	if !strings.Contains(nodeFlag.Usage, "still accepted") {
+		t.Fatalf("--node usage does not note the CR-name form is still accepted: %q", nodeFlag.Usage)
+	}
+}
+
+func TestParseCompressionCodec_ValidNames(t *testing.T) {
+	t.Helper()
+
+	for _, name := range []string{"zstd", "lz4", "gzip", "none"} {
+		t.Run(name, func(t *testing.T) {
+			c, err := compress.New(name, 0)
+			if err != nil {
+				t.Fatalf("compress.New(%q, 0) unexpected error: %v", name, err)
+			}
+
+			if c == nil {
+				t.Fatalf("compress.New(%q, 0) returned nil codec", name)
+			}
+		})
+	}
+}
+
+func TestParseCompressionCodec_UnknownName(t *testing.T) {
+	t.Helper()
+
+	_, err := compress.New("bogus-codec", 0)
+	if err == nil {
+		t.Fatal("expected error for unknown codec name, got nil")
+	}
+}
+
+func TestParseNodeFlag(t *testing.T) {
+	t.Helper()
+
+	cases := []struct {
+		input    string
+		wantKind string
+		wantName string
+		wantErr  bool
+	}{
+		// empty → full tree
+		{"", "", "", false},
+		// valid simple kind/name
+		{"Snapshot/my-snap", "Snapshot", "my-snap", false},
+		// domain kind with UUID-style name
+		{"DemoVirtualDiskSnapshot/nss-child-abc123", "DemoVirtualDiskSnapshot", "nss-child-abc123", false},
+		// VolumeSnapshot leaf
+		{"VolumeSnapshot/demo-pvc", "VolumeSnapshot", "demo-pvc", false},
+		// no slash → error
+		{"NoSlashHere", "", "", true},
+		// leading slash (empty kind) → error
+		{"/name", "", "", true},
+		// trailing slash (empty name) → error
+		{"Kind/", "", "", true},
+		// two slashes → error
+		{"Kind/a/b", "", "", true},
+		// just a slash → error (empty kind)
+		{"/", "", "", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			gotKind, gotName, err := parseNodeFlag(tc.input)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("input %q: expected error, got nil (kind=%q name=%q)", tc.input, gotKind, gotName)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("input %q: unexpected error: %v", tc.input, err)
+			}
+
+			if gotKind != tc.wantKind {
+				t.Fatalf("input %q: got kind=%q, want %q", tc.input, gotKind, tc.wantKind)
+			}
+
+			if gotName != tc.wantName {
+				t.Fatalf("input %q: got name=%q, want %q", tc.input, gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestNewCommand_NodeFlagDefault(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	node, err := cmd.Flags().GetString(flagNode)
+	if err != nil {
+		t.Fatalf("getting %s flag: %v", flagNode, err)
+	}
+
+	if node != "" {
+		t.Fatalf("default --node: got %q, want empty string (full-tree download by default)", node)
+	}
+}
+
+func TestRun_NodeFlag_InvalidFormat(t *testing.T) {
+	t.Helper()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagOutput, t.TempDir()); err != nil {
+		t.Fatalf("setting output flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	err := Run(context.Background(), slog.Default(), cmd, []string{"my-snap"})
+	if err == nil {
+		t.Fatal("expected error for invalid --node flag, got nil")
+	}
+
+	if !strings.Contains(err.Error(), flagNode) {
+		t.Fatalf("expected error to mention %q, got: %v", flagNode, err)
+	}
+}
+
+func TestAcquireOutputLock_Contention(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	first, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("first acquire: unexpected error: %v", err)
+	}
+
+	defer func() { _ = first.Unlock() }()
+
+	_, err = acquireOutputLock(dir)
+	if err == nil {
+		t.Fatal("expected contention error on second acquire, got nil")
+	}
+
+	if !errors.Is(err, ErrOutputDirLocked) {
+		t.Fatalf("expected ErrOutputDirLocked, got: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), dir) {
+		t.Fatalf("expected error to name the directory %q, got: %v", dir, err)
+	}
+}
+
+func TestAcquireOutputLock_ReacquireAfterRelease(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	first, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("first acquire: unexpected error: %v", err)
+	}
+
+	if err := first.Unlock(); err != nil {
+		t.Fatalf("unlock: unexpected error: %v", err)
+	}
+
+	second, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("second acquire after release: unexpected error: %v", err)
+	}
+
+	defer func() { _ = second.Unlock() }()
+}
+
+func TestAcquireOutputLock_CreatesMissingOutputRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing", "output")
+
+	lock, err := acquireOutputLock(root)
+	if err != nil {
+		t.Fatalf("acquire missing output root: %v", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatalf("stat created output root: %v", err)
+	}
+
+	if !info.IsDir() {
+		t.Fatalf("created output root mode = %s, want directory", info.Mode())
+	}
+
+	if err := lock.Verify(); err != nil {
+		t.Fatalf("verify lock for created output root: %v", err)
+	}
+}
+
+func TestAcquireOutputLock_CancelledContextDoesNotLeak(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	lock, err := acquireOutputLockContext(ctx, dir)
+	if lock != nil {
+		_ = lock.Unlock()
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquireOutputLockContext error = %v, want context.Canceled", err)
+	}
+
+	lock, err = acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("acquire after cancellation: %v", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+}
+
+func TestAcquireOutputLock_ConflictsWithUploadReader(t *testing.T) {
+	dir := t.TempDir()
+
+	reader, err := archive.AcquireReadLock(dir)
+	if err != nil {
+		t.Fatalf("acquire upload reader lock: %v", err)
+	}
+
+	_, err = acquireOutputLock(dir)
+	if !errors.Is(err, ErrOutputDirLocked) {
+		t.Fatalf("download writer error = %v, want ErrOutputDirLocked", err)
+	}
+
+	if err := reader.Unlock(); err != nil {
+		t.Fatalf("release upload reader lock: %v", err)
+	}
+
+	writer, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("acquire download writer after upload release: %v", err)
+	}
+	defer func() { _ = writer.Unlock() }()
+}
+
+// TestAcquireOutputLock_StaleLockFileIsHarmless documents and locks in the
+// stale-lock policy from acquireOutputLock's doc comment: the lock file is a
+// plain flock(2), which the OS releases automatically when the holding
+// process exits for any reason (including a hard kill). A lock FILE left on
+// disk with no live holder — simulated here by pre-creating the file without
+// ever flock-ing it — must not block a fresh acquire.
+func TestAcquireOutputLock_StaleLockFileIsHarmless(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	lockPath := filepath.Join(dir, downloadLockFileName)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("pre-creating stale lock file: %v", err)
+	}
+
+	fl, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("expected a pre-existing, unheld lock file to be reclaimed, got: %v", err)
+	}
+
+	defer func() { _ = fl.Unlock() }()
+}
+
+// TestRun_ReleasesLockOnCancelledContext verifies the lock acquired near the
+// top of Run is released via defer even when the caller's context is already
+// cancelled by the time Run returns.
+func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cmd := NewCommand(slog.Default())
+
+	if err := cmd.Flags().Set(flagNamespace, "test-ns"); err != nil {
+		t.Fatalf("setting namespace flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagOutput, dir); err != nil {
+		t.Fatalf("setting output flag: %v", err)
+	}
+
+	if err := cmd.Flags().Set(flagNode, "NoSlashHere"); err != nil {
+		t.Fatalf("setting node flag: %v", err)
+	}
+
+	if err := Run(ctx, slog.Default(), cmd, []string{"my-snap"}); err == nil {
+		t.Fatal("expected error from invalid --node flag, got nil")
+	}
+
+	// The lock must have been released on the way out despite the cancelled
+	// context: a fresh acquire on the same directory must succeed.
+	fl, err := acquireOutputLock(dir)
+	if err != nil {
+		t.Fatalf("expected lock to be released after Run returned, got: %v", err)
+	}
+
+	defer func() { _ = fl.Unlock() }()
+}
+
+func TestNewCommand_UsesExecutionContextInstalledAfterConstruction(t *testing.T) {
+	cancelCause := errors.New("cancel download after command construction")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cmd := NewCommand(slog.Default())
+
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{
+		"my-snap",
+		"--namespace", "test-ns",
+		"--output", filepath.Join(t.TempDir(), "output"),
+	})
+	cancel(cancelCause)
+
+	err := cmd.Execute()
+	if !errors.Is(err, cancelCause) {
+		t.Fatalf("execute error = %v, want cancellation cause %v", err, cancelCause)
+	}
+}

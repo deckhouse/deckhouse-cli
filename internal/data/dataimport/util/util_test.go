@@ -18,6 +18,11 @@ package util
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,7 +33,147 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
+
+// readyCond builds a Ready condition with the given status/reason/message.
+func readyCond(status metav1.ConditionStatus, reason, message string) metav1.Condition {
+	return metav1.Condition{
+		Type:    "Ready",
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	}
+}
+
+// TestCreateDataImport_BuildsCreatePVCSpec pins the wire shape the CLI must produce for the current
+// CRD: spec.mode=CreatePVC plus a top-level spec.pvcTemplate. The obsolete spec.targetRef nesting
+// would be pruned by the structural schema and then rejected by the CEL rule
+// "mode CreatePVC requires pvcTemplate".
+func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	pvcTpl := &v1alpha1.PersistentVolumeClaimTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
+	}
+
+	require.NoError(t, CreateDataImport(ctx, "import-into-pvc", "my-ns", "15m", false, true, pvcTpl, c))
+
+	var stored v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "import-into-pvc", Namespace: "my-ns"}, &stored))
+
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, stored.Spec.Mode)
+	assert.Equal(t, "15m", stored.Spec.TTL)
+	assert.True(t, stored.Spec.WaitForFirstConsumer)
+	require.NotNil(t, stored.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", stored.Spec.PvcTemplate.Name)
+
+	// Guard the serialised shape in addition to the Go fields, because a wrong json tag or a
+	// reintroduced nested struct would keep the Go assertions above passing while changing what
+	// the apiserver actually receives. Scope of this check: it exercises this package's own json
+	// tags only. It says nothing about whether the server accepts the object -- the
+	// controller-runtime fake client applies neither structural-schema pruning nor CEL
+	// validation, so only a real cluster (or envtest with the CRD installed) can prove that.
+	raw, marshalErr := json.Marshal(stored.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(raw), `"mode":"CreatePVC"`)
+	assert.Contains(t, string(raw), `"pvcTemplate"`)
+	assert.NotContains(t, string(raw), `"targetRef"`)
+
+	t.Run("waitForFirstConsumer=false reaches the wire", func(t *testing.T) {
+		// The CRD defaults waitForFirstConsumer to true, so a false from the caller has to travel
+		// as an explicit key. If it is ever dropped as a zero value, the server flips it back to
+		// true and `--wffc=false` becomes silently inoperative.
+		cWithoutWFFC := fake.NewClientBuilder().WithScheme(scheme).Build()
+		require.NoError(t, CreateDataImport(ctx, "no-wffc", "my-ns", "15m", false, false, pvcTpl, cWithoutWFFC))
+
+		var withoutWFFC v1alpha1.DataImport
+		require.NoError(t, cWithoutWFFC.Get(ctx, ctrlclient.ObjectKey{Name: "no-wffc", Namespace: "my-ns"}, &withoutWFFC))
+		assert.False(t, withoutWFFC.Spec.WaitForFirstConsumer)
+
+		rawWithoutWFFC, err := json.Marshal(withoutWFFC.Spec)
+		require.NoError(t, err)
+		assert.Contains(t, string(rawWithoutWFFC), `"waitForFirstConsumer":false`)
+	})
+}
+
+func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	cases := map[string]*v1alpha1.PersistentVolumeClaimTemplateSpec{
+		"nil template":      nil,
+		"template w/o name": {},
+	}
+
+	for name, tpl := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := CreateDataImport(ctx, "di", "my-ns", "15m", false, false, tpl, c)
+			require.Error(t, err)
+
+			var stored v1alpha1.DataImport
+			getErr := c.Get(ctx, ctrlclient.ObjectKey{Name: "di", Namespace: "my-ns"}, &stored)
+			require.Error(t, getErr, "no DataImport should be created when the PVC template is invalid")
+		})
+	}
+}
+
+// newNoAuthSafe builds a SafeClient that talks plain HTTP to an httptest server without
+// requiring cluster auth (mirrors the download/list HTTP tests).
+func newNoAuthSafe(t *testing.T) *safeClient.SafeClient {
+	t.Helper()
+
+	// Allow unauthenticated HTTP requests in unit tests, and point KUBECONFIG at /dev/null so
+	// the client does not pick up ambient auth from a real kubeconfig.
+	safeClient.SupportNoAuth = true
+
+	oldKubeconfig := os.Getenv("KUBECONFIG")
+	require.NoError(t, os.Setenv("KUBECONFIG", "/dev/null"))
+
+	defer func() { _ = os.Setenv("KUBECONFIG", oldKubeconfig) }()
+
+	sc, err := safeClient.NewSafeClient()
+	require.NoError(t, err)
+
+	return sc.Copy()
+}
+
+func TestPostFinished(t *testing.T) {
+	t.Run("posts to <base>/api/v1/finished and succeeds on 2xx", func(t *testing.T) {
+		var gotMethod, gotPath string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		// A trailing slash on the base must not produce a "//api/v1/finished" path that the
+		// server's mux would 404: neturl.JoinPath cleans it to a single slash.
+		require.NoError(t, PostFinished(context.Background(), newNoAuthSafe(t), srv.URL+"/"))
+		assert.Equal(t, http.MethodPost, gotMethod)
+		assert.Equal(t, "/api/v1/finished", gotPath)
+	})
+
+	t.Run("returns an error on non-2xx", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		err := PostFinished(context.Background(), newNoAuthSafe(t), srv.URL)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "500")
+	})
+}
 
 func TestEnsureDataImportPublish(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -112,4 +257,252 @@ func TestEnsureDataImportPublish(t *testing.T) {
 			assert.Equal(t, tt.wantPublishIn, stored.Spec.Publish)
 		})
 	}
+}
+
+// TestGetDataImportWithRestart_ExpiredRecreates covers the auto-restart branch: a stale import whose
+// Ready condition is False with Reason=Expired (the current expiry model — the producer's GC only
+// deletes it after its retention TTL, so within that window it lingers with a stale status.url/
+// status.volumeMode) must be deleted and recreated, and the call must return an error asking the
+// caller to keep polling for the fresh import rather than returning the stale object as if it were
+// ready.
+// Deliberately NOT t.Parallel: this test overrides the package-level maxRetryAttempts, which is
+// shared mutable state. Running it concurrently with the other overriding tests is a data race
+// (caught by -race) and lets one test observe another's restored value, turning a one-iteration
+// run into a 60-attempt / ~3-minute wait with the wrong error.
+func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	// Return after the first iteration instead of looping 60+ times.
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	pvcTpl := &v1alpha1.PersistentVolumeClaimTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
+	}
+
+	expired := &v1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-di", Namespace: "test-ns"},
+		Spec: v1alpha1.DataImportSpec{
+			TTL:                  "15m",
+			Publish:              true,
+			WaitForFirstConsumer: true,
+			Mode:                 v1alpha1.DataImportModeCreatePVC,
+			PvcTemplate:          pvcTpl,
+		},
+		Status: v1alpha1.DataExportImportStatus{
+			// Deliberately filled in, as a dying importer's status is until retention-GC reaps it.
+			// Before the fix, GetDataImportWithRestart would fall through the recreate branch,
+			// see these already populated, and hand back the stale object as if it were ready.
+			URL:        "https://10.0.0.1:8085/",
+			VolumeMode: "Filesystem",
+			Conditions: []metav1.Condition{
+				readyCond(metav1.ConditionFalse, "Expired", "import idle timeout reached"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
+
+	// The stale object must have been replaced by a fresh one: same name, but the Expired
+	// condition (and all status) is gone because CreateDataImport writes a spec-only object.
+	var recreated v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &recreated))
+	assert.Empty(t, recreated.Status.Conditions, "expired condition must be cleared after recreate")
+	assert.Empty(t, recreated.Status.URL, "stale URL must be cleared after recreate")
+	assert.Empty(t, recreated.Status.VolumeMode, "stale VolumeMode must be cleared after recreate")
+	assert.Equal(t, "15m", recreated.Spec.TTL, "TTL must be carried over to the fresh import")
+	assert.True(t, recreated.Spec.Publish, "Publish must be carried over to the fresh import")
+	assert.True(t, recreated.Spec.WaitForFirstConsumer, "WaitForFirstConsumer must be carried over to the fresh import")
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, recreated.Spec.Mode, "Mode must be set on the fresh import")
+	require.NotNil(t, recreated.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", recreated.Spec.PvcTemplate.Name, "PvcTemplate must be carried over to the fresh import")
+
+	// The recreate path rebuilds the spec from the stale object's fields rather than copying it,
+	// so it is a second, independent place the shape can regress in. Same scope as the check in
+	// TestCreateDataImport_BuildsCreatePVCSpec: this covers this package's json tags only, not
+	// server-side pruning or CEL.
+	recreatedRaw, marshalErr := json.Marshal(recreated.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(recreatedRaw), `"mode":"CreatePVC"`)
+	assert.Contains(t, string(recreatedRaw), `"pvcTemplate"`)
+	assert.NotContains(t, string(recreatedRaw), `"targetRef"`)
+}
+
+// TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec exercises the recreate path on an
+// object that arrived the way a real one does — decoded from apiserver JSON in the current
+// mode/pvcTemplate shape — instead of one hand-built as Go structs like every other test here.
+// That closes two blind spots at once:
+//
+//   - the read direction: the recreate rebuilds the fresh spec from the decoded object, so if
+//     pvcTemplate failed to decode the recreate would abort with "requires a PVC template with
+//     metadata.name set" rather than carry the template over;
+//   - waitForFirstConsumer=false through the recreate: the sibling test only carries a true over,
+//     which is exactly the value an omitempty regression would leave intact.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
+func TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	// Shaped as the apiserver returns it: mode populated, waitForFirstConsumer explicitly present,
+	// pvcTemplate at the top level of the spec, and a stale Ready=False/Expired status.
+	const serverJSON = `{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind": "DataImport",
+		"metadata": {"name": "test-di", "namespace": "test-ns"},
+		"spec": {
+			"ttl": "42m",
+			"publish": false,
+			"waitForFirstConsumer": false,
+			"mode": "CreatePVC",
+			"pvcTemplate": {
+				"metadata": {"name": "restored-pvc"},
+				"spec": {
+					"accessModes": ["ReadWriteOnce"],
+					"resources": {"requests": {"storage": "10Gi"}},
+					"storageClassName": "linstor-thin-r1",
+					"volumeMode": "Filesystem"
+				}
+			}
+		},
+		"status": {
+			"url": "https://10.0.0.1:8085/",
+			"publicURL": "",
+			"accessTimestamp": null,
+			"volumeMode": "Filesystem",
+			"conditions": [{
+				"type": "Ready",
+				"status": "False",
+				"reason": "Expired",
+				"message": "import idle timeout reached",
+				"lastTransitionTime": "2026-07-30T10:00:00Z"
+			}]
+		}
+	}`
+
+	expired := &v1alpha1.DataImport{}
+	require.NoError(t, json.Unmarshal([]byte(serverJSON), expired))
+	require.NotNil(t, expired.Spec.PvcTemplate, "fixture sanity: the server shape must decode into spec.pvcTemplate")
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
+
+	var recreated v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &recreated))
+
+	assert.Equal(t, "42m", recreated.Spec.TTL, "TTL must survive the decode/recreate round trip")
+	assert.Equal(t, v1alpha1.DataImportModeCreatePVC, recreated.Spec.Mode)
+	assert.False(t, recreated.Spec.WaitForFirstConsumer, "a false waitForFirstConsumer must not be upgraded by the recreate")
+	require.NotNil(t, recreated.Spec.PvcTemplate)
+	assert.Equal(t, "restored-pvc", recreated.Spec.PvcTemplate.Name)
+	require.NotNil(t, recreated.Spec.PvcTemplate.StorageClassName)
+	assert.Equal(t, "linstor-thin-r1", *recreated.Spec.PvcTemplate.StorageClassName,
+		"the whole template, not just its name, must be carried over — a dropped storageClassName would silently reprovision on the default class")
+
+	// The rebuilt spec has to leave for the server with the false intact, which is the property the
+	// Go-level assertion above cannot distinguish from an omitted key.
+	recreatedRaw, marshalErr := json.Marshal(recreated.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(recreatedRaw), `"waitForFirstConsumer":false`)
+}
+
+// TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed asserts the contract change: a
+// legacy standalone Type=="Expired" condition (the old, now version-skewed, detection signal) must
+// not trigger a recreate anymore. Only the current controller's Ready=False/Reason=Expired signal
+// does.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
+func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	di := &v1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-di", Namespace: "test-ns"},
+		Status: v1alpha1.DataExportImportStatus{
+			URL:        "https://10.0.0.1:8085/",
+			VolumeMode: "Filesystem",
+			Conditions: []metav1.Condition{
+				// Legacy signal: a standalone Expired condition, distinct from Ready.
+				{Type: "Expired", Status: metav1.ConditionTrue},
+				readyCond(metav1.ConditionTrue, "PodReady", "Pod is ready and import completed"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(di).Build()
+
+	got, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	require.NoError(t, err)
+	assert.Equal(t, "https://10.0.0.1:8085/", got.Status.URL)
+
+	// Confirm no delete+recreate happened: the object in the store is still the original.
+	var stored v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &stored))
+	assert.Len(t, stored.Status.Conditions, 2, "legacy Expired condition must not trigger a recreate")
+}
+
+// TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired guards against too broad a predicate:
+// a Ready=False/Reason=Completed condition (normal completion signalling, not expiry) must fall into
+// the not-Ready branch, not the recreate branch.
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
+// TestGetDataImportWithRestart_ExpiredRecreates).
+func TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	di := &v1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-di", Namespace: "test-ns"},
+		Status: v1alpha1.DataExportImportStatus{
+			Conditions: []metav1.Condition{
+				readyCond(metav1.ConditionFalse, "Completed", "import finished"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(di).Build()
+
+	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not Ready")
+	assert.Contains(t, err.Error(), "(Completed)")
+
+	// Confirm no delete+recreate happened.
+	var stored v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &stored))
+	assert.Len(t, stored.Status.Conditions, 1, "Completed reason must not trigger a recreate")
 }

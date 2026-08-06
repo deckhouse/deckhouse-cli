@@ -92,6 +92,26 @@ func AskYesNoWithTimeout(prompt string, timeout time.Duration) bool {
 	}
 }
 
+// KindToGroup resolves the API group for a supported DataExport target kind. The kind is
+// sent verbatim as targetRef.kind; only the group needs deriving here (the controller
+// resolves the served version via its RESTMapper). These groups match the producer's
+// DataExportTargetRefSpec contract in storage-volume-data-manager/api/v1alpha1/data_export.go.
+// Returns an error for unrecognised kinds.
+func KindToGroup(kind string) (string, error) {
+	switch kind {
+	case PersistentVolumeClaimKind:
+		return "", nil
+	case VolumeSnapshotKind:
+		return "snapshot.storage.k8s.io", nil
+	case VirtualDiskKind:
+		return "virtualization.deckhouse.io", nil
+	case VirtualDiskSnapshotKind:
+		return "virtualization.deckhouse.io", nil
+	default:
+		return "", fmt.Errorf("unsupported DataExport target kind %q", kind)
+	}
+}
+
 func ParseArgs(args []string) ( /*deName*/ string /*srcPath*/, string, error) {
 	var deName, srcPath string
 

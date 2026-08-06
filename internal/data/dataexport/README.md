@@ -1,6 +1,16 @@
 # DataExport
 Subcommand for the command line client for Deckhouse.
 
+The export target is referenced by **kind** (`targetRef.kind`, the API group is
+derived from it). Supported target kinds and their CLI aliases:
+
+| Kind | Aliases |
+| --- | --- |
+| `PersistentVolumeClaim` | `pvc`, `persistentvolumeclaim` |
+| `VolumeSnapshot` | `vs`, `volumesnapshot` |
+| `VirtualDisk` | `vd`, `virtualdisk` |
+| `VirtualDiskSnapshot` | `vds`, `virtualdisksnapshot` |
+
 ### Available Commands:
 * create      - Create k8s DataExport object.
 
@@ -61,5 +71,5 @@ NAMESPACE       NAME                  READYTOUSE   SOURCEPVC                    
 
 5. Create data export from that snapshot using d8 command as shown in the example below 
 ```shell
-d8 data create export-name snapshot/my-snapshot
+d8 data create export-name vs/my-snapshot
 ```

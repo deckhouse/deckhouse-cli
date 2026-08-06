@@ -41,8 +41,23 @@ type DataExportStatus struct {
 	VolumeMode      string             `json:"volumeMode,omitempty"`
 }
 
+// TargetRefSpec references the export target by GroupKind + name (namespace is
+// implicit = the DataExport's own namespace). The version is intentionally NOT pinned:
+// the controller resolves the served version via the RESTMapper. Mirrors the producer's
+// DataExportTargetRefSpec in storage-volume-data-manager/api/v1alpha1/data_export.go.
+//
 // +k8s:deepcopy-gen=true
 type TargetRefSpec struct {
+	// Group is the API group of the target resource ("" = core group).
+	Group string `json:"group,omitempty"`
+	// Resource is the target resource plural (e.g. "volumesnapshots").
+	// TEMP REVERTME: required by the deployed storage-volume-data-manager (mr135)
+	// GVR-based CRD; the kind-based contract is not yet in SVDM main. Sending both
+	// resource and kind is safe because each CRD prunes the field it doesn't know.
+	Resource string `json:"resource,omitempty"`
+	// Kind is the target object kind (e.g. "VolumeSnapshot", "PersistentVolumeClaim").
+	// Required by the API server.
 	Kind string `json:"kind"`
+	// Name is the target object name.
 	Name string `json:"name"`
 }

@@ -1,0 +1,292 @@
+/*
+Copyright 2026 Flant JSC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package snapimport
+
+import (
+	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
+)
+
+// assertImportMarker verifies the unified spec.mode: Import marker is present.
+func assertImportMarker(t *testing.T, obj *unstructured.Unstructured) {
+	t.Helper()
+
+	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
+	if err != nil {
+		t.Fatalf("read spec.mode: %v", err)
+	}
+
+	if !found {
+		t.Fatalf("expected spec.mode marker to be set")
+	}
+
+	if mode != "Import" {
+		t.Errorf("spec.mode = %q, want Import", mode)
+	}
+}
+
+func TestImportMarkerCR_Snapshot(t *testing.T) {
+	node := PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "root"}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	if obj.GetNamespace() != "ns" || obj.GetName() != "root" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
+	}
+
+	assertImportMarker(t, obj)
+}
+
+func TestImportMarkerCR_VolumeSnapshot(t *testing.T) {
+	node := PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "pvc-1"}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	// CSI VolumeSnapshot leaves use the same unified marker as every other node; the leaf no
+	// longer names its DataImport (matched server-side by a spec.snapshotRef
+	// (apiVersion/kind/name) reverse-lookup instead).
+	assertImportMarker(t, obj)
+}
+
+func TestImportMarkerCR_DomainAggregator(t *testing.T) {
+	// A DemoVirtualMachineSnapshot that references child snapshots but carries no own volume
+	// data is a domain aggregator. It is reconstructed server-side as a NON-ROOT node, so it
+	// gets the same unified spec.mode: Import marker as every other node (no error); the
+	// genericbinder later aggregates its children's contents into the aggregator's content.
+	node := PlannedNode{
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualMachineSnapshot",
+		Name:       "vm-1",
+		Children: []ChildRef{{
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDiskSnapshot",
+			Name:       "dvd-1",
+		}},
+	}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR for domain aggregator: %v", err)
+	}
+
+	if obj.GetNamespace() != "ns" || obj.GetName() != "vm-1" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
+	}
+
+	assertImportMarker(t, obj)
+}
+
+func TestImportMarkerCR_ManifestOnlyDomainNode(t *testing.T) {
+	// A DemoVirtualMachineSnapshot with neither volume data nor child snapshots is a
+	// manifest-only domain node: import-equivalent to a structural Snapshot, so it gets the
+	// unified spec.mode: Import marker (no error).
+	node := PlannedNode{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot", Name: "vm-1"}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR for manifest-only domain node: %v", err)
+	}
+
+	if obj.GetNamespace() != "ns" || obj.GetName() != "vm-1" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
+	}
+
+	assertImportMarker(t, obj)
+}
+
+func TestImportMarkerCR_DomainDataLeaf(t *testing.T) {
+	node := PlannedNode{
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+		Kind:       "DemoVirtualDiskSnapshot",
+		Name:       "dvd-snap-1",
+		DataFile:   "/archive/snapshots/demovirtualdisksnapshot_disk-a/data.bin",
+		SourceObjectRef: &archive.SourceObjectRef{
+			APIVersion: "virtualization.deckhouse.io/v1alpha2",
+			Kind:       "VirtualDisk",
+			Name:       "disk-a",
+		},
+	}
+
+	obj, err := importMarkerCR(node, "ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	if obj.GetNamespace() != "ns" || obj.GetName() != "dvd-snap-1" {
+		t.Errorf("unexpected metadata: ns=%q name=%q", obj.GetNamespace(), obj.GetName())
+	}
+
+	assertImportMarker(t, obj)
+
+	if got := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; got !=
+		`{"apiVersion":"virtualization.deckhouse.io/v1alpha2","kind":"VirtualDisk","name":"disk-a"}` {
+		t.Errorf("%s = %q, want canonical original source reference", snapshotapi.AnnotationImportSourceRef, got)
+	}
+
+	spec, found, err := unstructured.NestedMap(obj.Object, "spec")
+	if err != nil || !found {
+		t.Fatalf("read spec: found=%t err=%v", found, err)
+	}
+
+	if len(spec) != 1 {
+		t.Errorf("marker spec = %#v, want only mode=Import", spec)
+	}
+
+	if _, found, err := unstructured.NestedFieldNoCopy(obj.Object, "status"); err != nil || found {
+		t.Errorf("marker status must remain absent: found=%t err=%v", found, err)
+	}
+}
+
+func TestImportMarkerCR_WithoutSourceObjectRefOmitsAnnotation(t *testing.T) {
+	node := PlannedNode{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "pvc-1",
+	}
+
+	obj, err := importMarkerCR(node, "target-ns")
+	if err != nil {
+		t.Fatalf("importMarkerCR: %v", err)
+	}
+
+	if _, exists := obj.GetAnnotations()[snapshotapi.AnnotationImportSourceRef]; exists {
+		t.Errorf("marker without sourceObjectRef must not carry %s", snapshotapi.AnnotationImportSourceRef)
+	}
+}
+
+func TestPlannedNode_ClassificationRequiresExactGVK(t *testing.T) {
+	tests := []struct {
+		name           string
+		node           PlannedNode
+		wantStructural bool
+		wantCSILeaf    bool
+		wantDomainLeaf bool
+	}{
+		{
+			name:           "exact_core_snapshot",
+			node:           PlannedNode{APIVersion: snapshotAPIVersion, Kind: snapshotKind},
+			wantStructural: true,
+		},
+		{
+			name:        "exact_csi_volume_snapshot",
+			node:        PlannedNode{APIVersion: volumeSnapshotAPIVersion, Kind: volumeSnapshotKind},
+			wantCSILeaf: true,
+		},
+		{
+			name: "same_snapshot_kind_in_domain_api",
+			node: PlannedNode{
+				APIVersion: "domain.example.io/v1",
+				Kind:       snapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "wrong_core_snapshot_version",
+			node: PlannedNode{
+				APIVersion: "state-snapshotter.deckhouse.io/v1beta1",
+				Kind:       snapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "wrong_csi_volume_snapshot_version",
+			node: PlannedNode{
+				APIVersion: "snapshot.storage.k8s.io/v1beta1",
+				Kind:       volumeSnapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+		{
+			name: "same_volume_snapshot_kind_in_domain_api",
+			node: PlannedNode{
+				APIVersion: "domain.example.io/v1",
+				Kind:       volumeSnapshotKind,
+				DataFile:   "/archive/data.bin",
+			},
+			wantDomainLeaf: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.node.isStructural(); got != test.wantStructural {
+				t.Errorf("isStructural() = %v, want %v", got, test.wantStructural)
+			}
+
+			if got := test.node.isVolumeSnapshotLeaf(); got != test.wantCSILeaf {
+				t.Errorf("isVolumeSnapshotLeaf() = %v, want %v", got, test.wantCSILeaf)
+			}
+
+			if got := test.node.isDomainDataLeaf(); got != test.wantDomainLeaf {
+				t.Errorf("isDomainDataLeaf() = %v, want %v", got, test.wantDomainLeaf)
+			}
+		})
+	}
+}
+
+// TestPlannedNode_IsDomainAggregator verifies the classification that gates the standalone
+// --node root restriction: only a domain node with no own volume data but WITH child refs is
+// an aggregator. Aggregators are still importable as non-root nodes within a tree.
+func TestPlannedNode_IsDomainAggregator(t *testing.T) {
+	cases := []struct {
+		name string
+		node PlannedNode
+		want bool
+	}{
+		{"core snapshot", PlannedNode{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot"}, false},
+		{"csi volume snapshot", PlannedNode{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot"}, false},
+		// A domain disk snapshot WITH volume data is a domain data leaf, not an aggregator.
+		{"demo disk snapshot with block data", PlannedNode{
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualDiskSnapshot",
+			DataFile:   "/some/data.bin",
+		}, false},
+		// A domain snapshot with neither volume data nor children is manifest-only, not an aggregator.
+		{"manifest-only demo vm snapshot", PlannedNode{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualMachineSnapshot"}, false},
+		// A domain snapshot with no data but WITH children is a true aggregator.
+		{"demo vm snapshot aggregator (has children)", PlannedNode{
+			APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+			Kind:       "DemoVirtualMachineSnapshot",
+			Children: []ChildRef{{
+				APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
+				Kind:       "DemoVirtualDiskSnapshot",
+				Name:       "dvd-1",
+			}},
+		}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.node.isDomainAggregator(); got != tc.want {
+				t.Errorf("isDomainAggregator() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
