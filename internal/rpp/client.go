@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"k8s.io/client-go/rest"
@@ -46,6 +47,14 @@ const (
 		"application/vnd.docker.distribution.manifest.list.v2+json"
 
 	loggerName = "rpp"
+
+	// healthzPath is served without authentication, which makes it the cheapest
+	// way to learn whether an endpoint answers at all.
+	healthzPath = "/healthz"
+
+	// probeTimeout bounds one reachability check, so walking the candidate list
+	// stays quick when an endpoint is unroutable.
+	probeTimeout = 3 * time.Second
 
 	// maxTagsResponseBytes caps the tags JSON read so a misbehaving endpoint cannot
 	// make the client buffer an unbounded response; real tag lists are a few KiB.
@@ -95,6 +104,16 @@ func WithInsecureSkipTLSVerify() Option {
 	}
 }
 
+// collectOptions applies the options and returns the resulting settings.
+func collectOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	return o
+}
+
 // validate rejects contradictory TLS options instead of silently resolving them.
 func (o options) validate() error {
 	if o.insecure && (o.caFile != "" || len(o.caData) > 0) {
@@ -120,10 +139,7 @@ type Client struct {
 // restConfig. baseURL is the proxy endpoint root, for example
 // "https://10.0.0.1:4219".
 func New(baseURL string, restConfig *rest.Config, logger *dkplog.Logger, opts ...Option) (*Client, error) {
-	var o options
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := collectOptions(opts)
 
 	if err := o.validate(); err != nil {
 		return nil, err
@@ -288,6 +304,29 @@ func (c *Client) GetManifest(ctx context.Context, image ImageRef, ref string) ([
 // do executes the request and, on a non-2xx status, closes the body and maps the
 // status to a sentinel error. On success the response is returned with its body
 // still open for the caller to consume.
+// reachable reports whether the endpoint answers. Any HTTP status counts as an
+// answer: the public host routes only /v1/images/, so its 404 still proves the
+// network path and the TLS handshake. Only a transport failure rules an endpoint
+// out, which is what makes walking a candidate list possible.
+func (c *Client) reachable(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+healthzPath, nil)
+	if err != nil {
+		return fmt.Errorf("build probe request: %w", err)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", healthzPath, err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	return nil
+}
+
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	resp, err := c.http.Do(req)
 	if err != nil {

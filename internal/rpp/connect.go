@@ -18,7 +18,9 @@ package rpp
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -27,10 +29,11 @@ import (
 )
 
 // NewClusterClient builds a Client for the proxy reachable from the given cluster
-// connection. The endpoint is used as-is when set, otherwise discovered (Ingress
-// preferred, pod IPs as fallback; see chooseDiscoveredEndpoint).
+// connection. The endpoint is used as-is when set, otherwise the candidates the
+// cluster offers are tried in order (see discoverCandidates).
 // caFile / insecure select TLS verification (mutually exclusive; New reports the
-// contradiction).
+// contradiction). Either one applies to every candidate and replaces the CA the
+// cluster published.
 func NewClusterClient(
 	ctx context.Context,
 	kube kubernetes.Interface,
@@ -39,26 +42,52 @@ func NewClusterClient(
 	endpoint, caFile string,
 	insecure bool,
 ) (*Client, error) {
-	if endpoint == "" {
-		discovered, source, err := chooseDiscoveredEndpoint(ctx, kube)
+	if endpoint != "" {
+		return New(endpoint, restConfig, logger, flagOptions(caFile, insecure)...)
+	}
+
+	// Judge the flags once. Left to the loop below, a contradictory pair would be
+	// reported as one rejected candidate per endpoint, hiding both the real cause
+	// and the ErrUnsupportedConfig the caller matches on.
+	if err := collectOptions(flagOptions(caFile, insecure)).validate(); err != nil {
+		return nil, err
+	}
+
+	candidates, err := discoverCandidates(ctx, kube)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrEndpointDiscovery, err)
+	}
+
+	rejected := make([]string, 0, len(candidates))
+
+	for _, c := range candidates {
+		client, err := New(c.endpoint, restConfig, logger, candidateOptions(c, caFile, insecure)...)
 		if err != nil {
-			return nil, err
+			rejected = append(rejected, fmt.Sprintf("%s %s: %s", c.source, c.endpoint, err))
+
+			continue
+		}
+
+		if err := client.reachable(ctx); err != nil {
+			logger.Debug("registry-packages-proxy candidate did not answer",
+				slog.String("endpoint", c.endpoint), slog.String("candidate_source", c.source), dkplog.Err(err))
+
+			rejected = append(rejected, fmt.Sprintf("%s %s: %s", c.source, c.endpoint, err))
+
+			continue
 		}
 
 		logger.Debug("discovered registry-packages-proxy endpoint",
-			slog.String("endpoint", discovered), slog.String("discovered_via", source))
+			slog.String("endpoint", c.endpoint), slog.String("discovered_via", c.source))
 
-		if source == "pod" {
-			// The pod fallback is a master-node IP: unreachable from outside the
-			// cluster network, and its certificate carries no IP SANs - say so
-			// before the connection fails with an opaque TLS/timeout error.
-			logger.Debug("no registry-packages-proxy Ingress found; the pod endpoint is reachable " +
-				"only from the cluster network and needs --rpp-insecure-skip-tls-verify (or pass --rpp-endpoint)")
-		}
-
-		endpoint = discovered
+		return client, nil
 	}
 
+	return nil, fmt.Errorf("%w: no endpoint answered: %s", ErrEndpointDiscovery, strings.Join(rejected, "; "))
+}
+
+// flagOptions turns the TLS flags into client options.
+func flagOptions(caFile string, insecure bool) []Option {
 	var opts []Option
 
 	if insecure {
@@ -69,5 +98,20 @@ func NewClusterClient(
 		opts = append(opts, WithCAFile(caFile))
 	}
 
-	return New(endpoint, restConfig, logger, opts...)
+	return opts
+}
+
+// candidateOptions keeps the flags authoritative: a CA file or insecure given by
+// the caller replaces the CA the cluster published, and the two never combine
+// (New rejects that).
+func candidateOptions(c candidate, caFile string, insecure bool) []Option {
+	if insecure || caFile != "" {
+		return flagOptions(caFile, insecure)
+	}
+
+	if len(c.caPEM) > 0 {
+		return []Option{WithCAData(c.caPEM)}
+	}
+
+	return nil
 }
