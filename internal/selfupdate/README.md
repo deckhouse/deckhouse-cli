@@ -122,7 +122,8 @@ Platforms (`rpp_source.go`):
 | Need | How |
 |---|---|
 | explicit RPP endpoint | `--rpp-endpoint` / `D8_RPP_ENDPOINT` |
-| custom CA / skip TLS verification | `--rpp-ca-file` / `--rpp-insecure-skip-tls-verify` |
+| custom CA for the proxy | `--rpp-ca-file` / `D8_RPP_CA_FILE` |
+| skip TLS verification on both legs (API server and proxy) | `--insecure-skip-tls-verify` |
 | identity | `-k/--kubeconfig`, `--context` |
 
 ## Boundaries and deliberate decisions

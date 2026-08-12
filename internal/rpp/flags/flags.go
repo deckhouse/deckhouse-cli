@@ -16,6 +16,11 @@ limitations under the License.
 
 // Package flags declares the CLI flags and environment defaults for reaching the
 // registry-packages-proxy.
+//
+// Reaching the proxy means two separate TLS connections, each with its own trust
+// decision, so each has its own switch:
+//   - the Kubernetes API server, asked where the proxy lives (endpoint discovery);
+//   - the proxy itself, which serves the artifacts.
 package flags
 
 import (
@@ -39,7 +44,8 @@ var (
 	// in addition to the system roots.
 	CAFile = os.Getenv(EnvCAFile)
 
-	// InsecureSkipTLSVerify disables proxy TLS verification (debugging only).
+	// InsecureSkipTLSVerify disables TLS verification on both connections d8 makes:
+	// to the API server and to the proxy (debugging only).
 	InsecureSkipTLSVerify bool
 )
 
@@ -59,8 +65,8 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	)
 	flagSet.BoolVar(
 		&InsecureSkipTLSVerify,
-		"rpp-insecure-skip-tls-verify",
+		"insecure-skip-tls-verify",
 		false,
-		"Skip registry-packages-proxy TLS verification. For debugging only.",
+		"Skip TLS verification of both the Kubernetes API server and registry-packages-proxy certificates. For debugging only.",
 	)
 }

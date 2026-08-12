@@ -177,7 +177,8 @@ func newUpdater(ctx context.Context, cmd *cobra.Command, logger *dkplog.Logger) 
 	kubeconfig, _ := cmd.Flags().GetString("kubeconfig")
 	kubeContext, _ := cmd.Flags().GetString("context")
 
-	restConfig, kube, err := utilk8s.SetupK8sClientSet(kubeconfig, kubeContext)
+	restConfig, kube, err := utilk8s.SetupK8sClientSet(kubeconfig, kubeContext,
+		utilk8s.WithInsecureSkipTLSVerify(rppflags.InsecureSkipTLSVerify))
 	if err != nil {
 		return nil, fmt.Errorf("set up kubernetes client: %w", err)
 	}

@@ -168,7 +168,11 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 | `--kubeconfig`, `-k` / `--context` | `KUBECONFIG` | cluster identity (the Bearer token source) |
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
-| `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
+| `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
+
+`d8 cli` opens two TLS connections, each verified on its own: one to the
+Kubernetes API server to find the proxy, one to the proxy to download.
+`--insecure-skip-tls-verify` covers both.
 
 ## Troubleshooting
 
@@ -178,6 +182,7 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 | `... forbidden` (403) | the `cli-download` role is not bound to you | ask the administrator for the ClusterRoleBinding |
 | 403 right after the role was bound | the proxy caches a denial for 30 seconds | retry in half a minute |
 | `x509: certificate signed by unknown authority` | the proxy endpoint uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>` |
+| `endpoint discovery ... x509:` naming the API server host | the API server certificate is untrusted, expired or replaced by the ingress fallback | fix the cluster certificate, or pass `--insecure-skip-tls-verify` to get through meanwhile |
 | `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
 | `d8 cli use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |

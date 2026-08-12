@@ -24,14 +24,29 @@ func DefaultKubeconfigPath() string {
 	return clientcmd.RecommendedHomeFile
 }
 
+// ClientOption overrides a kubeconfig setting from the command line, the way
+// kubectl's global flags do.
+type ClientOption func(*clientcmd.ConfigOverrides)
+
+// WithInsecureSkipTLSVerify turns off verification of the API server certificate.
+// The kubeconfig CA is dropped along with it: a CA and skipped verification cannot
+// both apply.
+func WithInsecureSkipTLSVerify(insecure bool) ClientOption {
+	return func(overrides *clientcmd.ConfigOverrides) {
+		overrides.ClusterInfo.InsecureSkipTLSVerify = insecure
+	}
+}
+
 // SetupK8sClientSet reads kubeconfig file at kubeconfigPath and constructs a kubernetes clientset from it.
 // If contextName is not empty, context under that name is used instead of default.
-func SetupK8sClientSet(kubeconfigPath, contextName string) (*rest.Config, *kubernetes.Clientset, error) {
-	var configOverrides *clientcmd.ConfigOverrides
+func SetupK8sClientSet(kubeconfigPath, contextName string, opts ...ClientOption) (*rest.Config, *kubernetes.Clientset, error) {
+	configOverrides := &clientcmd.ConfigOverrides{}
 	if contextName != DefaultKubeContext {
-		configOverrides = &clientcmd.ConfigOverrides{
-			CurrentContext: contextName,
-		}
+		configOverrides.CurrentContext = contextName
+	}
+
+	for _, opt := range opts {
+		opt(configOverrides)
 	}
 
 	// use splitlist func to use separator from OS specific

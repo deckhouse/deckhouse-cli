@@ -128,7 +128,7 @@ modules) are only *verified* - d8 never changes the cluster for you.
 | `--skip-cluster-checks` | `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` | skip cluster-side requirement checks |
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
-| `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
+| `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
 | `--version X` *(install only)* | - | install an exact version; may be a pre-release |
 | `--use-major N` *(install, update)* | - | cross to major `N`; by default operations stay within the installed major |
 | `--force` *(install only)* | - | reinstall even if already current (re-pull and re-verify) |
@@ -146,7 +146,7 @@ The persistent flags above are shared by every `d8 plugins` subcommand; the
 | `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 plugins install <dep>`) |
 | `... requires Kubernetes/Deckhouse/module ...` | a **cluster-side** requirement is unmet (a different message from the row above) | upgrade the cluster/module, or pass `--skip-cluster-checks` to bypass verification |
 | `... upstream error (5xx)` | the proxy could not reach the backing registry | retry shortly, or check the `registry-packages-proxy` pods in `d8-cloud-instance-manager` |
-| `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert, or skip discovery with `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) |
+| `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert. To get through meanwhile: `--insecure-skip-tls-verify` for a bad certificate, or `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) to skip discovery altogether |
 | `cannot reach the cluster to ...` | the cluster is needed to verify requirements or select a version, but is unreachable | pass `--skip-cluster-checks` (`D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) |
 
 The access model is shared with d8 self-update; see
@@ -165,5 +165,3 @@ prefer the proxy flow above.
   (a shortcut for `--source-login=license-token`), or your
   `~/.docker/config.json` - in that order. `--tls-skip-verify` and `--insecure`
   relax TLS / allow HTTP for that registry.
-- `--rpp-insecure-skip-tls-verify` skips registry-packages-proxy TLS
-  verification (debugging only).

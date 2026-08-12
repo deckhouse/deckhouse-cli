@@ -153,7 +153,8 @@ A failure at any step leaves the previous version installed and working.
 |---|---|
 | install root | `--plugins-dir` / `DECKHOUSE_CLI_PATH` |
 | identity (rpp + cluster checks) | `-k/--kubeconfig`, `--context` |
-| RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file`, `--rpp-insecure-skip-tls-verify` |
+| RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file` |
+| skip TLS verification on both legs (API server and proxy) | `--insecure-skip-tls-verify` |
 | skip cluster-side requirement checks | `--skip-cluster-checks` / `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` |
 
 ## Boundaries and deliberate decisions
