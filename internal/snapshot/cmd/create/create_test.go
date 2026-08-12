@@ -22,7 +22,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +107,7 @@ func pendingSnapshot(namespace, name, reason, message string) *unstructured.Unst
 }
 
 func TestBuildSnapshot_Default(t *testing.T) {
-	obj := buildSnapshot("ns", "snap", nil)
+	obj := buildSnapshot("ns", "snap")
 
 	if obj.GetKind() != "Snapshot" || obj.GetAPIVersion() != "state-snapshotter.deckhouse.io/v1alpha1" {
 		t.Fatalf("unexpected GVK: %s %s", obj.GetAPIVersion(), obj.GetKind())
@@ -130,108 +129,67 @@ func TestBuildSnapshot_Default(t *testing.T) {
 	}
 }
 
-func TestBuildSnapshot_WithSelector(t *testing.T) {
-	obj := buildSnapshot("ns", "snap", map[string]interface{}{"app": "demo", "tier": "db"})
-
-	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
-	if mode != "Capture" {
-		t.Errorf("spec.mode = %q, want Capture", mode)
-	}
-
-	ml, found, _ := unstructured.NestedStringMap(obj.Object, "spec", "resourceSelector", "matchLabels")
-	if !found {
-		t.Fatalf("spec.resourceSelector.matchLabels not set")
-	}
-
-	if !reflect.DeepEqual(ml, map[string]string{"app": "demo", "tier": "db"}) {
-		t.Errorf("matchLabels = %v, want {app:demo, tier:db}", ml)
-	}
-}
-
-func TestParseMatchLabels(t *testing.T) {
+// TestNewCommand_HasNoSelectorFlag guards the removal of the label-selector input. A Snapshot captures its
+// whole namespace and its spec carries no narrowing field, so a surviving -l/--selector would be silently
+// dropped by the apiserver's schema pruning: the user would get a snapshot of everything while believing
+// they had narrowed it. An unknown-flag error is the only honest outcome.
+func TestNewCommand_HasNoSelectorFlag(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		name    string
-		in      string
-		want    map[string]interface{}
-		wantErr bool
-	}{
-		{"empty", "", nil, false},
-		{"whitespace", "   ", nil, false},
-		{"single", "app=demo", map[string]interface{}{"app": "demo"}, false},
-		{"multi with spaces", " app=demo , tier=db ", map[string]interface{}{"app": "demo", "tier": "db"}, false},
-		{"qualified key", "app.example.com/tier=backend-1", map[string]interface{}{"app.example.com/tier": "backend-1"}, false},
-		{"empty value", "app=demo,tier=", map[string]interface{}{"app": "demo", "tier": ""}, false},
-		{"empty components", ",", nil, true},
-		{"whitespace components", " , ", nil, true},
-		{"trailing component", "app=demo,", nil, true},
-		{"double component", "app=demo,,tier=db", nil, true},
-		{"duplicate key", "env=prod,env=staging", nil, true},
-		{"extra equals", "a==b", nil, true},
-		{"missing eq", "app", nil, true},
-		{"empty key", "=demo", nil, true},
-		{"invalid key", "bad/key/name=demo", nil, true},
-		{"invalid value", "app=bad/value", nil, true},
+	cmd := NewCommand(discardLogger())
+
+	if f := cmd.Flags().Lookup("selector"); f != nil {
+		t.Fatalf("--selector must not be registered: the Snapshot spec has no narrowing field")
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := parseMatchLabels(tc.in)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %q, got nil", tc.in)
-				}
-
-				if !strings.Contains(err.Error(), "--selector") {
-					t.Fatalf("error %q does not identify --selector", err)
-				}
-
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("parseMatchLabels(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	if f := cmd.Flags().ShorthandLookup("l"); f != nil {
+		t.Fatalf("-l must not be registered, found shorthand for --%s", f.Name)
 	}
 }
 
-func TestRun_InvalidSelectorDoesNotCreateSnapshot(t *testing.T) {
+// TestRun_CreatesSnapshotThroughFlagPlumbing covers run/resolveOptions end to end (flags → options →
+// Create), which no other test in this file reaches: the remaining cases call runCreate with a
+// hand-built createOptions and would not notice a broken flag-to-option mapping.
+func TestRun_CreatesSnapshotThroughFlagPlumbing(t *testing.T) {
 	t.Parallel()
 
 	dyn := newFakeDynamic()
 	cmd := NewCommand(discardLogger())
 
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+
 	if err := cmd.Flags().Set(flagNamespace, "ns"); err != nil {
 		t.Fatalf("set --%s: %v", flagNamespace, err)
-	}
-
-	if err := cmd.Flags().Set(flagSelector, "app=demo,"); err != nil {
-		t.Fatalf("set --%s: %v", flagSelector, err)
 	}
 
 	err := run(discardLogger(), cmd, []string{"snap"}, func(*cobra.Command) (dynamic.Interface, error) {
 		return dyn, nil
 	})
-	if err == nil {
-		t.Fatal("expected invalid selector error, got nil")
+	if err != nil {
+		t.Fatalf("run: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "--selector") {
-		t.Fatalf("error %q does not identify --selector", err)
-	}
+	creates := 0
 
 	for _, action := range dyn.Actions() {
-		if action.GetVerb() == "create" {
-			t.Fatalf("invalid selector performed Create action: %#v", action)
+		if action.GetVerb() != "create" {
+			continue
 		}
+
+		creates++
+
+		if got := action.GetNamespace(); got != "ns" {
+			t.Errorf("create namespace = %q, want %q", got, "ns")
+		}
+	}
+
+	if creates != 1 {
+		t.Fatalf("expected exactly one create action, got %d in %#v", creates, dyn.Actions())
+	}
+
+	if !strings.Contains(buf.String(), "snap") {
+		t.Errorf("output %q does not name the created Snapshot", buf.String())
 	}
 }
 

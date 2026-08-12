@@ -15,8 +15,7 @@ limitations under the License.
 */
 
 // Package create implements the `d8 snapshot create` command: it creates a
-// Snapshot object in a namespace, optionally narrowing the captured set with a
-// label selector and waiting until the Snapshot becomes Ready.
+// Snapshot object in a namespace and optionally waits until it becomes Ready.
 package create
 
 import (
@@ -25,7 +24,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -46,7 +43,6 @@ const (
 	cmdUse = "create"
 
 	flagNamespace  = "namespace"
-	flagSelector   = "selector"
 	flagWait       = "wait"
 	flagTimeout    = "timeout"
 	flagOutput     = "output"
@@ -71,13 +67,12 @@ var snapshotGVR = schema.GroupVersionResource{
 // createOptions bundles the resolved inputs for one create run so the cluster
 // logic stays decoupled from cobra flag plumbing (and unit-testable).
 type createOptions struct {
-	namespace   string
-	name        string
-	matchLabels map[string]interface{}
-	wait        bool
-	timeout     time.Duration
-	poll        time.Duration
-	outputFmt   string
+	namespace string
+	name      string
+	wait      bool
+	timeout   time.Duration
+	poll      time.Duration
+	outputFmt string
 }
 
 // NewCommand builds the `d8 snapshot create` cobra command.
@@ -91,16 +86,12 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 		Long: `Create a Snapshot object that captures a namespace's state/configuration.
 
 The Snapshot is created in the target namespace (defaults to the kubeconfig context
-namespace). An empty selector captures the whole namespace; pass --selector to capture
-only the objects matching the given labels (sets spec.resourceSelector.matchLabels).
+namespace) and captures that whole namespace.
 
 The Snapshot is reconciled asynchronously by the state-snapshotter controller. Use --wait
 to block until it reports Ready, after which it can be listed, downloaded, and imported.`,
-		Example: `  # Snapshot the whole "default" namespace and wait until it is Ready
+		Example: `  # Snapshot the "default" namespace and wait until it is Ready
   d8 snapshot create my-snap -n default --wait
-
-  # Snapshot only the objects labeled app=demo
-  d8 snapshot create my-snap -n demo -l app=demo
 
   # Print the created object as YAML
   d8 snapshot create my-snap -n demo -o yaml`,
@@ -114,7 +105,6 @@ to block until it reports Ready, after which it can be listed, downloaded, and i
 	flags.AddPersistentFlags(cmd)
 
 	cmd.Flags().StringP(flagNamespace, "n", "", "namespace to create the Snapshot in (defaults to the kubeconfig context namespace)")
-	cmd.Flags().StringP(flagSelector, "l", "", "capture only objects matching this label selector (e.g. app=demo,tier=db); sets spec.resourceSelector.matchLabels")
 	cmd.Flags().Bool(flagWait, false, "wait until the Snapshot reports Ready")
 	cmd.Flags().Duration(flagTimeout, defaultWaitTimeout, "timeout for --wait")
 	utilk8s.AddOutputFlag(cmd, "name", "name", "json", "yaml")
@@ -179,16 +169,6 @@ func resolveOptions(cmd *cobra.Command, name string) (createOptions, error) {
 		}
 	}
 
-	selector, err := cmd.Flags().GetString(flagSelector)
-	if err != nil {
-		return createOptions{}, fmt.Errorf("reading --%s flag: %w", flagSelector, err)
-	}
-
-	matchLabels, err := parseMatchLabels(selector)
-	if err != nil {
-		return createOptions{}, err
-	}
-
 	wait, err := cmd.Flags().GetBool(flagWait)
 	if err != nil {
 		return createOptions{}, fmt.Errorf("reading --%s flag: %w", flagWait, err)
@@ -200,20 +180,19 @@ func resolveOptions(cmd *cobra.Command, name string) (createOptions, error) {
 	}
 
 	return createOptions{
-		namespace:   namespace,
-		name:        name,
-		matchLabels: matchLabels,
-		wait:        wait,
-		timeout:     timeout,
-		poll:        pollInterval,
-		outputFmt:   outputFmt,
+		namespace: namespace,
+		name:      name,
+		wait:      wait,
+		timeout:   timeout,
+		poll:      pollInterval,
+		outputFmt: outputFmt,
 	}, nil
 }
 
 // runCreate creates the Snapshot via the dynamic client and, when requested,
 // waits for it to become Ready before rendering the result.
 func runCreate(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts createOptions, log *slog.Logger) error {
-	obj := buildSnapshot(opts.namespace, opts.name, opts.matchLabels)
+	obj := buildSnapshot(opts.namespace, opts.name)
 
 	created, err := dyn.Resource(snapshotGVR).Namespace(opts.namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
@@ -240,15 +219,11 @@ func runCreate(ctx context.Context, dyn dynamic.Interface, w io.Writer, opts cre
 }
 
 // buildSnapshot assembles the unstructured Snapshot to create. spec.mode is always set to
-// Capture (the unified contract's create intent); matchLabels narrows the captured set when
-// a selector is given, and an omitted selector captures the whole namespace.
-func buildSnapshot(namespace, name string, matchLabels map[string]interface{}) *unstructured.Unstructured {
+// Capture (the unified contract's create intent) and the capture covers the whole namespace —
+// spec carries no narrowing input.
+func buildSnapshot(namespace, name string) *unstructured.Unstructured {
 	spec := map[string]interface{}{
 		"mode": string(snapshotapi.SnapshotModeCapture),
-	}
-
-	if len(matchLabels) > 0 {
-		spec["resourceSelector"] = map[string]interface{}{"matchLabels": matchLabels}
 	}
 
 	return &unstructured.Unstructured{Object: map[string]interface{}{
@@ -260,66 +235,6 @@ func buildSnapshot(namespace, name string, matchLabels map[string]interface{}) *
 		},
 		"spec": spec,
 	}}
-}
-
-// parseMatchLabels parses a kubectl-style "key=value,key2=value2" selector into
-// a matchLabels map. An empty selector yields a nil map (whole-namespace capture).
-func parseMatchLabels(selector string) (map[string]interface{}, error) {
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return nil, nil
-	}
-
-	parts := strings.Split(selector, ",")
-	labels := make(map[string]interface{}, len(parts))
-
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			return nil, fmt.Errorf("invalid --%s %q: empty selector component", flagSelector, selector)
-		}
-
-		if strings.Count(part, "=") != 1 {
-			return nil, fmt.Errorf(
-				"invalid --%s %q: component %q must contain exactly one '='",
-				flagSelector,
-				selector,
-				part,
-			)
-		}
-
-		key, value, _ := strings.Cut(part, "=")
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-
-		if problems := validation.IsQualifiedName(key); len(problems) > 0 {
-			return nil, fmt.Errorf(
-				"invalid --%s %q: invalid label key %q: %s",
-				flagSelector,
-				selector,
-				key,
-				strings.Join(problems, "; "),
-			)
-		}
-
-		if problems := validation.IsValidLabelValue(value); len(problems) > 0 {
-			return nil, fmt.Errorf(
-				"invalid --%s %q: invalid label value %q: %s",
-				flagSelector,
-				selector,
-				value,
-				strings.Join(problems, "; "),
-			)
-		}
-
-		if _, exists := labels[key]; exists {
-			return nil, fmt.Errorf("invalid --%s %q: duplicate label key %q", flagSelector, selector, key)
-		}
-
-		labels[key] = value
-	}
-
-	return labels, nil
 }
 
 // waitReady polls the Snapshot until its Ready condition is True or the timeout
