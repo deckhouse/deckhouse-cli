@@ -77,8 +77,8 @@ platform's container registry (module `registry-packages-proxy`, ns
   to anyone by default - the cluster administrator decides who may download the CLI.
 - **API used by this package** (the HTTP client lives in `internal/rpp`):
   - `GET /v1/images/deckhouse-cli/tags` -> `{"name": ..., "tags": [...]}` - the version list;
-  - `GET /v1/images/deckhouse-cli/tags/<tag>` -> gzip-tar of the image contents
-    (containing the `d8` file).
+  - `GET /v1/images/deckhouse-cli/images/<version>?platform=<os>-<arch>` -> gzip-tar
+    of the image contents (containing the `d8` file).
 - **Endpoint** is discovered automatically (Ingress -> pod-IP fallback) or set
   explicitly (`--rpp-endpoint` / `D8_RPP_ENDPOINT`).
 

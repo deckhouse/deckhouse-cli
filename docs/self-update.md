@@ -41,15 +41,18 @@ cluster registry (credentials live only inside the cluster)
 
 ### Authorization
 
-Download permission is the ClusterRole
-`d8:registry-packages-proxy:cli-download`. By default it is bound to
-**nobody** - the administrator decides who may download:
+You need two permissions, and by default neither is bound to anyone - the
+administrator grants them:
 
-```bash
-kubectl create clusterrolebinding d8-cli-download \
-  --clusterrole=d8:registry-packages-proxy:cli-download \
-  --group=<your-operators-group>   # or --user=... / --serviceaccount=...
-```
+- Downloading: the ClusterRole `d8:registry-packages-proxy:cli-download`. The
+  same role covers `d8 plugins`.
+- Endpoint discovery: `get` on the `registry-packages-proxy` Ingress in
+  `d8-cloud-instance-manager`. Without it, pass `--rpp-endpoint` by hand.
+
+The proxy caches a denial for 30 seconds, so a `403` caught before the binding
+existed clears in half a minute. See
+[Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads)
+for the commands.
 
 ### Endpoint
 
@@ -136,7 +139,7 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 |---|---|---|
 | `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Kubeconfig Generator |
 | `... forbidden` (403) | the `cli-download` role is not bound to you | ask the administrator for the ClusterRoleBinding |
-| 403 right after the role was bound | the proxy caches authorization for ~5 min per token | retry with a fresh token or wait 5 minutes |
+| 403 right after the role was bound | the proxy caches a denial for 30 seconds | retry in half a minute |
 | `x509: certificate signed by unknown authority` | the proxy endpoint uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>` |
 | `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
