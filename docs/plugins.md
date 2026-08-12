@@ -33,6 +33,10 @@ cluster and is not the intended flow.) The access model:
   with `--rpp-endpoint` / `D8_RPP_ENDPOINT`, pass a private CA with
   `--rpp-ca-file`.
 
+Starting from scratch? Follow
+[self-update.md - Getting started](self-update.md#getting-started): the same
+kubeconfig and the same grant work for plugins.
+
 The access model is the same as for d8 self-update (see
 [self-update.md - How access works](self-update.md#how-access-works) for the
 OIDC-kubeconfig and endpoint-discovery details), down to the ClusterRole:

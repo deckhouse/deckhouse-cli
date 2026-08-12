@@ -8,7 +8,8 @@
 - The cluster administrator grants (and revokes) download permission with a
   regular RBAC binding.
 
-**Contents:** [Access](#how-access-works) · [Commands](#commands) ·
+**Contents:** [Getting started](#getting-started) ·
+[Access](#how-access-works) · [Commands](#commands) ·
 [Version store](#how-versions-are-stored) ·
 [Switching & rollback](#switching-and-rollback) ·
 [Flags & env](#flags-and-environment-variables) ·
@@ -16,6 +17,42 @@
 
 > Plugin management (`d8 plugins`) uses the same access model and is covered
 > in [plugins.md](plugins.md).
+
+## Getting started
+
+You need a kubeconfig with a Bearer token and two permissions on the cluster.
+You do not need access to master nodes.
+
+1. Ask an administrator for access. They bind one ClusterRole and one read
+   permission, both described in
+   [Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads).
+   The same grant also covers `d8 plugins`.
+
+1. Get a personal kubeconfig from the Kubeconfig Generator at
+   `https://kubeconfig.<publicDomain>`. Log in, copy the raw config and save it:
+
+   ```bash
+   KCFG=/tmp/d8-kubeconfig
+   cat > "$KCFG" <<'EOF'
+   <paste the kubeconfig here>
+   EOF
+   ```
+
+1. Check that it works:
+
+   ```bash
+   d8 cli check --kubeconfig "$KCFG"
+   ```
+
+   `up to date` or a newer version means access is fine. On `403`, the role is
+   not bound yet - retry in half a minute, then ask the administrator.
+
+1. Use it. Set `KUBECONFIG` once and drop the flag:
+
+   ```bash
+   export KUBECONFIG="$KCFG"
+   d8 cli update
+   ```
 
 ## How access works
 
