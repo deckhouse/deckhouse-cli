@@ -19,15 +19,24 @@ package pusher
 import (
 	"context"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/name"
+	ggcrregistry "github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
+	regclient "github.com/deckhouse/deckhouse/pkg/registry/client"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -274,4 +283,78 @@ func TestPushLayout_MultipleImages(t *testing.T) {
 		err = destClient.CheckImageExists(context.Background(), tag)
 		assert.NoErrorf(t, err, "tag %q must exist in destination after PushLayout", tag)
 	}
+}
+
+// TestPushLayout_PushesNestedIndexWhole is the multi-platform round-trip: a
+// layout descriptor holding an image index must arrive in the registry as the
+// same index - same digest (byte-exact), both platform children, and the
+// contract annotation in place. The upstream fake registry stubs PushIndex, so
+// this test runs against ggcr's in-memory registry over HTTP with the real
+// client.
+func TestPushLayout_PushesNestedIndexWhole(t *testing.T) {
+	srv := httptest.NewServer(ggcrregistry.New())
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	const (
+		tag      = "v1.0.0"
+		contract = "ZmFrZS1jb250cmFjdA=="
+	)
+
+	linuxImg := upfake.NewImageBuilder().WithFile("plugin", "linux-bin").MustBuild()
+	darwinImg := upfake.NewImageBuilder().WithFile("plugin", "darwin-bin").MustBuild()
+
+	idx := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{
+			Add:        linuxImg,
+			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}},
+		},
+		mutate.IndexAddendum{
+			Add:        darwinImg,
+			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "darwin", Architecture: "arm64"}},
+		},
+	)
+	annotated, ok := mutate.Annotations(idx, map[string]string{"contract": contract}).(v1.ImageIndex)
+	require.True(t, ok, "mutate.Annotations on an index must return an index")
+
+	idxDigest, err := annotated.Digest()
+	require.NoError(t, err)
+
+	imgLayout, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+	repo := host + "/deckhouse-cli/plugins/foo"
+	require.NoError(t, imgLayout.AddIndex(annotated, tag, repo+":"+tag))
+
+	destClient := pkgclient.NewFromOptions(repo, regclient.WithInsecure(true))
+
+	svc := newTestService(t)
+	require.NoError(t, svc.PushLayout(context.Background(), imgLayout.Path(), destClient))
+
+	ref, err := name.ParseReference(repo+":"+tag, name.Insecure)
+	require.NoError(t, err)
+	desc, err := remote.Get(ref)
+	require.NoError(t, err, "the pushed tag must be reachable in the registry")
+
+	require.True(t, desc.MediaType.IsIndex(), "the tag must resolve to an index, not a flattened image")
+	assert.Equal(t, idxDigest, desc.Digest, "the index must survive push byte-exact")
+
+	pushedIdx, err := desc.ImageIndex()
+	require.NoError(t, err)
+	pushedManifest, err := pushedIdx.IndexManifest()
+	require.NoError(t, err)
+
+	require.Len(t, pushedManifest.Manifests, 2, "both platform children must be pushed")
+	platforms := []string{
+		pushedManifest.Manifests[0].Platform.String(),
+		pushedManifest.Manifests[1].Platform.String(),
+	}
+	assert.ElementsMatch(t, []string{"linux/amd64", "darwin/arm64"}, platforms)
+	assert.Equal(t, contract, pushedManifest.Annotations["contract"],
+		"the contract annotation must survive the push")
+
+	// Children must be complete (all blobs uploaded), not bare descriptors.
+	child, err := pushedIdx.Image(pushedManifest.Manifests[0].Digest)
+	require.NoError(t, err)
+	_, err = child.RawConfigFile()
+	assert.NoError(t, err, "child image blobs must be present in the registry")
 }
