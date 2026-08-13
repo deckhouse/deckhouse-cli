@@ -412,6 +412,12 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 		return nil, err
 	}
 
+	// Create plugin filter from CLI flags
+	pluginFilter, err := p.createPluginFilter()
+	if err != nil {
+		return nil, err
+	}
+
 	svc := mirror.NewPullService(
 		registryservice.NewService(c, edition, logger,
 			registryservice.WithModulesPathSuffix(p.params.ModulesPathSuffix),
@@ -431,6 +437,8 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 			PlatformConstraint: pullflags.PlatformConstraint,
 			ModuleFilter:       filter,
 			PackageFilter:      packageFilter,
+			PluginFilter:       pluginFilter,
+			PluginBuiltins:     pluginBuiltinCommands,
 			BundleDir:          pullflags.ImagesBundlePath,
 			BundleChunkSize:    pullflags.ImagesBundleChunkSizeGB * 1000 * 1000 * 1000,
 			Timeout:            pullflags.MirrorTimeout,
@@ -512,6 +520,34 @@ func (p *Puller) createModuleFilter() (*modules.Filter, error) {
 		}
 
 		return nil, fmt.Errorf("Prepare module filter: %w", err)
+	}
+
+	return filter, nil
+}
+
+// pluginBuiltinCommands are built-in d8 commands that satisfy a same-named
+// plugin dependency by presence - such dependencies are never mirrored. The
+// list matches what root.go passes to pluginscmd.NewCommand; kept as literals
+// because importing the command layer would drag werf into this package.
+var pluginBuiltinCommands = []string{"delivery-kit", "package"}
+
+// createPluginFilter builds the whitelist filter from --include-plugin
+// entries. Plugins have no blacklist: the automatic selection is already
+// minimal (only plugins the mirrored modules need), so the only knob is
+// adding more. Returns nil when the flag is unused, which the plugins
+// service reads as "auto-selection only".
+func (p *Puller) createPluginFilter() (*modules.Filter, error) {
+	if pullflags.PluginsWhitelist == nil {
+		return nil, nil
+	}
+
+	filter, err := modules.NewFilter(pullflags.PluginsWhitelist, modules.FilterTypeWhitelist)
+	if err != nil {
+		if diag := errdetect.DiagnoseConstraintParseError(err, "include-plugin", pullflags.PluginsWhitelist...); diag != nil {
+			return nil, diag
+		}
+
+		return nil, fmt.Errorf("Prepare plugin filter: %w", err)
 	}
 
 	return filter, nil

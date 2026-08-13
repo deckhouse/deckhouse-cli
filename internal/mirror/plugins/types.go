@@ -80,6 +80,21 @@ const (
 	ReasonExplicit
 )
 
+// String returns the stable lowercase label of the kind, used by the pull
+// summary ("module", "dependency", "explicit").
+func (k ReasonKind) String() string {
+	switch k {
+	case ReasonModule:
+		return "module"
+	case ReasonDependency:
+		return "dependency"
+	case ReasonExplicit:
+		return "explicit"
+	default:
+		return "unknown"
+	}
+}
+
 // Reason is one provenance edge of a selected plugin version: who needed it
 // and under which constraint. The summary renders these edges as the
 // per-module plugin tree.

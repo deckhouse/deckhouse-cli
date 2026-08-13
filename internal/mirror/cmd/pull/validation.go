@@ -246,6 +246,15 @@ func validateProxyRegistryFlag() error {
 		}
 	}
 
+	// A proxy registry serves no plugins catalog, so version ranges cannot be
+	// resolved; only exact pins address manifests directly by tag.
+	for _, entry := range pullflags.PluginsWhitelist {
+		name, constraint, hasConstraint := strings.Cut(strings.TrimSpace(entry), "@")
+		if !hasConstraint || !strings.HasPrefix(strings.TrimSpace(constraint), "=") {
+			return fmt.Errorf("--proxy-registry requires every --include-plugin entry to pin an exact version (e.g. %q): the registry serves no catalog to resolve version ranges against", strings.TrimSpace(name)+"@=v1.0.0")
+		}
+	}
+
 	return nil
 }
 

@@ -659,6 +659,60 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 	}
 }
 
+// TestValidateProxyRegistryFlag_PluginPins: with --proxy-registry every
+// --include-plugin entry must pin an exact version - the registry serves no
+// catalog, so version ranges have nothing to resolve against.
+func TestValidateProxyRegistryFlag_PluginPins(t *testing.T) {
+	tests := []struct {
+		name             string
+		pluginsWhitelist []string
+		expectError      bool
+	}{
+		{name: "no plugin includes", pluginsWhitelist: nil, expectError: false},
+		{name: "exact pin passes", pluginsWhitelist: []string{"stronghold@=v1.2.3"}, expectError: false},
+		{name: "bare name rejected", pluginsWhitelist: []string{"stronghold"}, expectError: true},
+		{name: "semver range rejected", pluginsWhitelist: []string{"stronghold@^1.0.0"}, expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originals := struct {
+				proxyRegistry            bool
+				platformConstraintString string
+				noModules                bool
+				pluginsWhitelist         []string
+			}{
+				proxyRegistry:            pullflags.ProxyRegistry,
+				platformConstraintString: pullflags.PlatformConstraintString,
+				noModules:                pullflags.NoModules,
+				pluginsWhitelist:         pullflags.PluginsWhitelist,
+			}
+			defer func() {
+				pullflags.ProxyRegistry = originals.proxyRegistry
+				pullflags.PlatformConstraintString = originals.platformConstraintString
+				pullflags.NoModules = originals.noModules
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
+			}()
+
+			// A valid proxy-registry context, so only the plugin rule fires.
+			pullflags.ProxyRegistry = true
+			pullflags.PlatformConstraintString = "^1.64.0"
+			pullflags.NoModules = true
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
+
+			err := validateProxyRegistryFlag()
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "include-plugin")
+				assert.Contains(t, err.Error(), "exact version")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidationResolveModuleFlags(t *testing.T) {
 	tests := []struct {
 		name              string

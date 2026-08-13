@@ -61,6 +61,8 @@ var (
 	PackagesWhitelist []string
 	PackagesBlacklist []string
 
+	PluginsWhitelist []string
+
 	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
 	SourceRegistryPassword string
@@ -212,6 +214,14 @@ Packages live under the packages/ registry segment, with release metadata under 
 		"exclude-package",
 		nil,
 		`Blacklist specific packages from downloading. Format is "package-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each package. Overridden by use of --include-package.`,
+	)
+	flagSet.StringArrayVar(
+		&PluginsWhitelist,
+		"include-plugin",
+		nil,
+		`Mirror a specific d8 CLI plugin in addition to the automatic selection. Format is "plugin-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each plugin.
+
+Plugins live under the deckhouse-cli/plugins registry segment. Without this flag, plugins required by the mirrored modules (and their plugin dependencies) are selected automatically.`,
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,
