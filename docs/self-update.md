@@ -20,39 +20,32 @@
 
 ## Getting started
 
-You need a kubeconfig with a Bearer token and two permissions on the cluster.
-You do not need access to master nodes.
+You need a kubeconfig that authenticates with a **Bearer token**, and an identity
+that holds two permissions on the cluster. Access to master nodes is not needed.
 
-1. Ask an administrator for access. They bind one ClusterRole and one read
-   permission, both described in
+1. Ask an administrator to grant your user or group access. They bind one
+   ClusterRole and one read permission, both described in
    [Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads).
    The same grant also covers `d8 plugins`.
 
-1. Get a personal kubeconfig from the Kubeconfig Generator at
-   `https://kubeconfig.<publicDomain>`. Log in, copy the raw config and save it:
-
-   ```bash
-   KCFG=/tmp/d8-kubeconfig
-   cat > "$KCFG" <<'EOF'
-   <paste the kubeconfig here>
-   EOF
-   ```
+1. Use the kubeconfig you already use for `kubectl`, as long as it carries a
+   token. A client-certificate config - the `kubernetes-admin` one on a master
+   node, for example - is rejected by the proxy. Without a token, get a personal
+   kubeconfig from the Kubeconfig Generator at `https://kubeconfig.<publicDomain>`.
 
 1. Check that it works:
 
    ```bash
-   d8 cli check --kubeconfig "$KCFG"
+   d8 cli check
    ```
 
-   `up to date` or a newer version means access is fine. On `403`, the role is
-   not bound yet - retry in half a minute, then ask the administrator.
+   `up to date`, or a newer version being offered, means access is fine. On
+   `403` the role is not bound yet - retry in half a minute, then ask the
+   administrator.
 
-1. Use it. Set `KUBECONFIG` once and drop the flag:
-
-   ```bash
-   export KUBECONFIG="$KCFG"
-   d8 cli update
-   ```
+`d8` picks up `KUBECONFIG` (or the default `~/.kube/config`) the same way
+`kubectl` does. Point it at another file with `--kubeconfig`, or select a
+context with `--context`.
 
 ## How access works
 
