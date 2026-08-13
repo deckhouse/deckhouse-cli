@@ -31,7 +31,7 @@ that holds two permissions on the cluster. Access to master nodes is not needed.
 1. Use the kubeconfig you already use for `kubectl`, as long as it carries a
    token. A client-certificate config - the `kubernetes-admin` one on a master
    node, for example - is rejected by the proxy. Without a token, get a personal
-   kubeconfig from the Kubeconfig Generator at `https://kubeconfig.<publicDomain>`.
+   kubeconfig from the Deckhouse console at `https://console.<publicDomain>`.
 
 1. Check that it works:
 
@@ -66,8 +66,9 @@ cluster registry (credentials live only inside the cluster)
   `kubernetes-admin` config on master nodes).
 
 > [!TIP]
-> Get a personal OIDC kubeconfig from your cluster's Kubeconfig Generator:
-> `https://kubeconfig.<publicDomain>`.
+> Get a personal OIDC kubeconfig from the Deckhouse console:
+> `https://console.<publicDomain>`. Clusters without the console module serve
+> the standalone generator at `https://kubeconfig.<publicDomain>` instead.
 
 ### Authorization
 
@@ -171,7 +172,7 @@ Kubernetes API server to find the proxy, one to the proxy to download.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Kubeconfig Generator |
+| `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Deckhouse console |
 | `... forbidden` (403) | the `cli-download` role is not bound to you | ask the administrator for the ClusterRoleBinding |
 | 403 right after the role was bound | the proxy caches a denial for 30 seconds | retry in half a minute |
 | `x509: certificate signed by unknown authority` | the proxy endpoint uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>` |

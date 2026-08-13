@@ -141,7 +141,7 @@ The persistent flags above are shared by every `d8 plugins` subcommand; the
 | Symptom | Cause | Fix |
 |---|---|---|
 | `image or tag not found` (404) | that plugin - or that specific version - is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
-| `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Kubeconfig Generator or `d8 login`) |
+| `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Deckhouse console or `d8 login`) |
 | `... forbidden (403)` | your identity may not download plugins | ask an admin to bind the ClusterRole `d8:registry-packages-proxy:cli-download`; a denial is cached for 30 seconds, so retry in half a minute |
 | `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 plugins install <dep>`) |
 | `... requires Kubernetes/Deckhouse/module ...` | a **cluster-side** requirement is unmet (a different message from the row above) | upgrade the cluster/module, or pass `--skip-cluster-checks` to bypass verification |
