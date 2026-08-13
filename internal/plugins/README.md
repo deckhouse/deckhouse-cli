@@ -39,8 +39,9 @@ The `pluginSource` interface (`source.go`) has two implementations, chosen in
   side (ADR #386: deckhouse-cli reaches the registry exclusively through the
   proxy, so every command needs a reachable cluster). See
   `internal/selfupdate/README.md` for what RPP is and how authorization works -
-  plugin download is gated by the `d8:registry-packages-proxy:packages-download`
-  ClusterRole, distinct from self-update's `cli-download`. The plugin routes are
+  plugin download is gated by the same `d8:registry-packages-proxy:cli-download`
+  ClusterRole as self-update, because both travel the `/v1/images/` route. The
+  plugin routes are
   `/v1/images/deckhouse-cli/plugins/<name>/{tags,manifests/<ref>,images/<version>}`.
 - **`registryPluginSource` (`source_legacy.go`) - a temporary, hidden `--source`
   bypass.** It pulls straight from a registry repo with go-containerregistry,
@@ -152,7 +153,8 @@ A failure at any step leaves the previous version installed and working.
 |---|---|
 | install root | `--plugins-dir` / `DECKHOUSE_CLI_PATH` |
 | identity (rpp + cluster checks) | `-k/--kubeconfig`, `--context` |
-| RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file`, `--rpp-insecure-skip-tls-verify` |
+| RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file` |
+| skip TLS verification on both legs (API server and proxy) | `--insecure-skip-tls-verify` |
 | skip cluster-side requirement checks | `--skip-cluster-checks` / `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` |
 
 ## Boundaries and deliberate decisions

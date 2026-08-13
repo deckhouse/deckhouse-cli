@@ -77,8 +77,8 @@ platform's container registry (module `registry-packages-proxy`, ns
   to anyone by default - the cluster administrator decides who may download the CLI.
 - **API used by this package** (the HTTP client lives in `internal/rpp`):
   - `GET /v1/images/deckhouse-cli/tags` -> `{"name": ..., "tags": [...]}` - the version list;
-  - `GET /v1/images/deckhouse-cli/tags/<tag>` -> gzip-tar of the image contents
-    (containing the `d8` file).
+  - `GET /v1/images/deckhouse-cli/images/<version>?platform=<os>-<arch>` -> gzip-tar
+    of the image contents (containing the `d8` file).
 - **Endpoint** is discovered automatically (Ingress -> pod-IP fallback) or set
   explicitly (`--rpp-endpoint` / `D8_RPP_ENDPOINT`).
 
@@ -122,7 +122,8 @@ Platforms (`rpp_source.go`):
 | Need | How |
 |---|---|
 | explicit RPP endpoint | `--rpp-endpoint` / `D8_RPP_ENDPOINT` |
-| custom CA / skip TLS verification | `--rpp-ca-file` / `--rpp-insecure-skip-tls-verify` |
+| custom CA for the proxy | `--rpp-ca-file` / `D8_RPP_CA_FILE` |
+| skip TLS verification on both legs (API server and proxy) | `--insecure-skip-tls-verify` |
 | identity | `-k/--kubeconfig`, `--context` |
 
 ## Boundaries and deliberate decisions

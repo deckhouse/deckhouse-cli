@@ -35,6 +35,7 @@ import (
 	d8flags "github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
+	rppflags "github.com/deckhouse/deckhouse-cli/internal/rpp/flags"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -345,7 +346,8 @@ func (m *Manager) clusterState(ctx context.Context) (*requirements.ClusterState,
 		return m.clusterStateCache, nil
 	}
 
-	restConfig, _, err := utilk8s.SetupK8sClientSet(d8flags.Kubeconfig, d8flags.KubeContext)
+	restConfig, _, err := utilk8s.SetupK8sClientSet(d8flags.Kubeconfig, d8flags.KubeContext,
+		utilk8s.WithInsecureSkipTLSVerify(rppflags.InsecureSkipTLSVerify))
 	if err != nil {
 		return nil, fmt.Errorf("set up kubernetes client: %w", err)
 	}

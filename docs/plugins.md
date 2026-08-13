@@ -25,17 +25,25 @@ cluster and is not the intended flow.) The access model:
 - Authentication: the **Bearer token** from your kubeconfig (client
   certificates do not work).
 - Authorization: the ClusterRole
-  `d8:registry-packages-proxy:packages-download`, bound by the cluster
-  administrator. Authorization is cached for about 5 minutes, so after the
-  binding is created, retry with a fresh token.
-- Endpoint: discovered automatically through your kubeconfig's API server;
-  override with `--rpp-endpoint` / `D8_RPP_ENDPOINT`, pass a private CA with
+  `d8:registry-packages-proxy:cli-download`, bound by the cluster
+  administrator. A denial is cached for 30 seconds, so a `403` caught before
+  the binding existed clears in half a minute.
+- Endpoint: discovered automatically through your kubeconfig's API server,
+  which also needs `get` on the `registry-packages-proxy` Ingress; override
+  with `--rpp-endpoint` / `D8_RPP_ENDPOINT`, pass a private CA with
   `--rpp-ca-file`.
 
-The access model is shared with d8 self-update (see
+Starting from scratch? Follow
+[self-update.md - Getting started](self-update.md#getting-started): the same
+kubeconfig and the same grant work for plugins.
+
+The access model is the same as for d8 self-update (see
 [self-update.md - How access works](self-update.md#how-access-works) for the
-OIDC-kubeconfig and endpoint-discovery details), but the ClusterRole differs:
-plugins need `packages-download`, CLI self-update needs `cli-download`.
+OIDC-kubeconfig and endpoint-discovery details), down to the ClusterRole:
+plugins are published under `deckhouse-cli/plugins/<name>` and travel the same
+`/v1/images/` route, so `cli-download` covers both. The administrator grants it
+as described in
+[Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads).
 
 ## Commands
 
@@ -120,7 +128,7 @@ modules) are only *verified* - d8 never changes the cluster for you.
 | `--skip-cluster-checks` | `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` | skip cluster-side requirement checks |
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
-| `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
+| `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
 | `--version X` *(install only)* | - | install an exact version; may be a pre-release |
 | `--use-major N` *(install, update)* | - | cross to major `N`; by default operations stay within the installed major |
 | `--force` *(install only)* | - | reinstall even if already current (re-pull and re-verify) |
@@ -133,12 +141,12 @@ The persistent flags above are shared by every `d8 plugins` subcommand; the
 | Symptom | Cause | Fix |
 |---|---|---|
 | `image or tag not found` (404) | that plugin - or that specific version - is not published in this cluster's registry | check with `d8 plugins versions <name>`; publishing is the plugin CI's job |
-| `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Kubeconfig Generator or `d8 login`) |
-| `... forbidden (403)` | your identity may not download plugins | ask an admin to bind the ClusterRole `d8:registry-packages-proxy:packages-download`; authorization is cached ~5 min, so retry with a fresh token |
+| `... unauthorized (401)` | no accepted Bearer token (a client-certificate kubeconfig is not enough) | use an OIDC-token kubeconfig (Deckhouse console or `d8 login`) |
+| `... forbidden (403)` | your identity may not download plugins | ask an admin to bind the ClusterRole `d8:registry-packages-proxy:cli-download`; a denial is cached for 30 seconds, so retry in half a minute |
 | `... requirements not satisfied` | mandatory **plugin** dependencies are missing or version-incompatible | run `d8 plugins contract <name>`; on `install` deps auto-install, but at plugin *run* time install them manually as the hint says (`d8 plugins install <dep>`) |
 | `... requires Kubernetes/Deckhouse/module ...` | a **cluster-side** requirement is unmet (a different message from the row above) | upgrade the cluster/module, or pass `--skip-cluster-checks` to bypass verification |
 | `... upstream error (5xx)` | the proxy could not reach the backing registry | retry shortly, or check the `registry-packages-proxy` pods in `d8-cloud-instance-manager` |
-| `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert, or skip discovery with `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) |
+| `endpoint discovery ... failed`, `x509:` to the API server | endpoint discovery goes through your kubeconfig's **API server** (not the proxy), which was unreachable or had an invalid certificate | confirm the API server is reachable with a valid cert. To get through meanwhile: `--insecure-skip-tls-verify` for a bad certificate, or `--rpp-endpoint https://registry-packages-proxy.<domain>` (`D8_RPP_ENDPOINT`) to skip discovery altogether |
 | `cannot reach the cluster to ...` | the cluster is needed to verify requirements or select a version, but is unreachable | pass `--skip-cluster-checks` (`D8_PLUGINS_SKIP_CLUSTER_CHECKS=1`) |
 
 The access model is shared with d8 self-update; see
@@ -157,5 +165,3 @@ prefer the proxy flow above.
   (a shortcut for `--source-login=license-token`), or your
   `~/.docker/config.json` - in that order. `--tls-skip-verify` and `--insecure`
   relax TLS / allow HTTP for that registry.
-- `--rpp-insecure-skip-tls-verify` skips registry-packages-proxy TLS
-  verification (debugging only).

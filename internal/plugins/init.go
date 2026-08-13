@@ -37,7 +37,8 @@ func (m *Manager) InitPluginServices(ctx context.Context) error {
 		return m.initLegacyRegistrySource()
 	}
 
-	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(d8flags.Kubeconfig, d8flags.KubeContext)
+	restConfig, kubeCl, err := utilk8s.SetupK8sClientSet(d8flags.Kubeconfig, d8flags.KubeContext,
+		utilk8s.WithInsecureSkipTLSVerify(rppflags.InsecureSkipTLSVerify))
 	if err != nil {
 		return fmt.Errorf("set up kubernetes client: %w", err)
 	}

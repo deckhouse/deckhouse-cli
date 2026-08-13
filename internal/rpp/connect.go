@@ -53,7 +53,7 @@ func NewClusterClient(
 			// cluster network, and its certificate carries no IP SANs - say so
 			// before the connection fails with an opaque TLS/timeout error.
 			logger.Debug("no registry-packages-proxy Ingress found; the pod endpoint is reachable " +
-				"only from the cluster network and needs --rpp-insecure-skip-tls-verify (or pass --rpp-endpoint)")
+				"only from the cluster network and needs --insecure-skip-tls-verify (or pass --rpp-endpoint)")
 		}
 
 		endpoint = discovered

@@ -57,7 +57,7 @@ var errIngressUnusable = errors.New("registry-packages-proxy ingress unusable")
 // chooseDiscoveredEndpoint resolves the proxy endpoint when none was given
 // explicitly. It PREFERS the public Ingress (a valid TLS certificate, reachable
 // from a workstation) and falls back to in-cluster pod IPs (which need
-// --rpp-insecure-skip-tls-verify and cluster-network reachability). The second
+// --insecure-skip-tls-verify and cluster-network reachability). The second
 // return value names the source ("ingress" / "pod") for logging.
 //
 // Only an unusable Ingress (see errIngressUnusable) triggers the pod fallback.

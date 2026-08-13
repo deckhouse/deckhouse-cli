@@ -8,7 +8,8 @@
 - The cluster administrator grants (and revokes) download permission with a
   regular RBAC binding.
 
-**Contents:** [Access](#how-access-works) · [Commands](#commands) ·
+**Contents:** [Getting started](#getting-started) ·
+[Access](#how-access-works) · [Commands](#commands) ·
 [Version store](#how-versions-are-stored) ·
 [Switching & rollback](#switching-and-rollback) ·
 [Flags & env](#flags-and-environment-variables) ·
@@ -16,6 +17,35 @@
 
 > Plugin management (`d8 plugins`) uses the same access model and is covered
 > in [plugins.md](plugins.md).
+
+## Getting started
+
+You need a kubeconfig that authenticates with a **Bearer token**, and an identity
+that holds two permissions on the cluster. Access to master nodes is not needed.
+
+1. Ask an administrator to grant your user or group access. They bind one
+   ClusterRole and one read permission, both described in
+   [Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads).
+   The same grant also covers `d8 plugins`.
+
+1. Use the kubeconfig you already use for `kubectl`, as long as it carries a
+   token. A client-certificate config - the `kubernetes-admin` one on a master
+   node, for example - is rejected by the proxy. Without a token, get a personal
+   kubeconfig from the Deckhouse console at `https://console.<publicDomain>`.
+
+1. Check that it works:
+
+   ```bash
+   d8 cli check
+   ```
+
+   `up to date`, or a newer version being offered, means access is fine. On
+   `403` the role is not bound yet - retry in half a minute, then ask the
+   administrator.
+
+`d8` picks up `KUBECONFIG` (or the default `~/.kube/config`) the same way
+`kubectl` does. Point it at another file with `--kubeconfig`, or select a
+context with `--context`.
 
 ## How access works
 
@@ -36,20 +66,24 @@ cluster registry (credentials live only inside the cluster)
   `kubernetes-admin` config on master nodes).
 
 > [!TIP]
-> Get a personal OIDC kubeconfig from your cluster's Kubeconfig Generator:
-> `https://kubeconfig.<publicDomain>`.
+> Get a personal OIDC kubeconfig from the Deckhouse console:
+> `https://console.<publicDomain>`. Clusters without the console module serve
+> the standalone generator at `https://kubeconfig.<publicDomain>` instead.
 
 ### Authorization
 
-Download permission is the ClusterRole
-`d8:registry-packages-proxy:cli-download`. By default it is bound to
-**nobody** - the administrator decides who may download:
+You need two permissions, and by default neither is bound to anyone - the
+administrator grants them:
 
-```bash
-kubectl create clusterrolebinding d8-cli-download \
-  --clusterrole=d8:registry-packages-proxy:cli-download \
-  --group=<your-operators-group>   # or --user=... / --serviceaccount=...
-```
+- Downloading: the ClusterRole `d8:registry-packages-proxy:cli-download`. The
+  same role covers `d8 plugins`.
+- Endpoint discovery: `get` on the `registry-packages-proxy` Ingress in
+  `d8-cloud-instance-manager`. Without it, pass `--rpp-endpoint` by hand.
+
+The proxy caches a denial for 30 seconds, so a `403` caught before the binding
+existed clears in half a minute. See
+[Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads)
+for the commands.
 
 ### Endpoint
 
@@ -128,16 +162,21 @@ $ d8 cli use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.0
 | `--kubeconfig`, `-k` / `--context` | `KUBECONFIG` | cluster identity (the Bearer token source) |
 | `--rpp-endpoint` | `D8_RPP_ENDPOINT` | proxy base URL; discovered from the cluster when empty |
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
-| `--rpp-insecure-skip-tls-verify` | - | skip proxy TLS verification (debugging only) |
+| `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
+
+`d8 cli` opens two TLS connections, each verified on its own: one to the
+Kubernetes API server to find the proxy, one to the proxy to download.
+`--insecure-skip-tls-verify` covers both.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Kubeconfig Generator |
+| `... unauthorized` (401) | no token in kubeconfig, or a client-certificate identity | use an OIDC kubeconfig from the Deckhouse console |
 | `... forbidden` (403) | the `cli-download` role is not bound to you | ask the administrator for the ClusterRoleBinding |
-| 403 right after the role was bound | the proxy caches authorization for ~5 min per token | retry with a fresh token or wait 5 minutes |
+| 403 right after the role was bound | the proxy caches a denial for 30 seconds | retry in half a minute |
 | `x509: certificate signed by unknown authority` | the proxy endpoint uses a CA your system does not trust | pass `--rpp-ca-file <ca.pem>` |
+| `endpoint discovery ... x509:` naming the API server host | the API server certificate is untrusted, expired or replaced by the ingress fallback | fix the cluster certificate, or pass `--insecure-skip-tls-verify` to get through meanwhile |
 | `x509: ... doesn't contain any IP SANs` | you are connecting to a pod IP instead of the Ingress host | set `--rpp-endpoint https://registry-packages-proxy.<publicDomain>` |
 | `deckhouse-cli is already up to date` | you run the latest version | use `--version X` to install an exact (older) one |
 | `d8 cli use X` downloads although X was installed before | the local store was cleaned, or X was installed on another machine/user | it will download once and stay installed |
