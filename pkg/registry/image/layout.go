@@ -146,6 +146,52 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	return nil
 }
 
+// AddIndex stores idx in the layout under tag. The index goes in whole:
+// per-platform children, their descriptors, and index annotations stay as
+// published. Use it for multi-platform images (e.g. CLI plugins), where
+// flattening to a single platform would lose the rest. tagReference is the
+// full registry reference for the descriptor annotations, same as AddImage
+// records.
+//
+// Idempotent for the (tag, digest) pair, same guard order as AddImage:
+// metaByTag is written only after AppendIndex succeeds, so a failed write is
+// retried, not skipped.
+func (l *ImageLayout) AddIndex(idx v1.ImageIndex, tag, tagReference string) error {
+	digest, err := idx.Digest()
+	if err != nil {
+		return fmt.Errorf("get index digest: %w", err)
+	}
+
+	if existing, ok := l.metaByTag[tag]; ok {
+		if existingDigest := existing.GetDigest(); existingDigest != nil && *existingDigest == digest {
+			return nil
+		}
+	}
+
+	err = l.wrapped.AppendIndex(idx,
+		layout.WithAnnotations(map[string]string{
+			AnnotationImageReferenceName: tagReference,
+			AnnotationImageShortTag:      tag,
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("append index: %w", err)
+	}
+
+	meta := &ImageMeta{
+		TagReference: tagReference,
+		Digest:       &digest,
+	}
+	if strings.Contains(tagReference, ":") {
+		repo, _ := SplitImageRefByRepoAndTag(tagReference)
+		meta.DigestReference = repo + "@" + digest.String()
+	}
+
+	l.metaByTag[tag] = meta
+
+	return nil
+}
+
 func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
 	index, err := l.wrapped.ImageIndex()
 	if err != nil {
