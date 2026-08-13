@@ -59,7 +59,8 @@ var ErrInvalidContract = errors.New("invalid plugin contract")
 type registryCatalog struct {
 	service *registryservice.PluginsService
 
-	versionsByName map[string][]*semver.Version
+	versionsByName map[pluginName][]*semver.Version
+	// contractsByRef is keyed by "<plugin>@<tag>".
 	contractsByRef map[string]*internal.Plugin
 
 	logger *dkplog.Logger
@@ -70,7 +71,7 @@ func NewCatalog(service *registryservice.PluginsService, logger *dkplog.Logger) 
 	return &registryCatalog{
 		service: service,
 
-		versionsByName: make(map[string][]*semver.Version),
+		versionsByName: make(map[pluginName][]*semver.Version),
 		contractsByRef: make(map[string]*internal.Plugin),
 
 		logger: logger,

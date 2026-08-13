@@ -90,13 +90,13 @@ func HasClusterRequirements(plugin *internal.Plugin) bool {
 		len(requirements.Modules.NoneOf) > 0
 }
 
-// normalizedForConstraint prepares a version for constraint matching.
+// NormalizedForConstraint prepares a version for constraint matching.
 // Build metadata is always dropped. The pre-release segment depends on its kind:
 //   - genuine RC (rc/alpha/beta/etc.): kept, so boundary constraints treat an RC as below its GA;
 //   - CI/build markers ("v1.77.0-main+abc", "v1.28.3-eks-1-30"): stripped, so a plain floor like ">= 1.0" matches them.
 //
 // Trade-off: for genuine RCs, ">= 1.30" excludes 1.30.0-rc.1.
-func normalizedForConstraint(v *semver.Version) *semver.Version {
+func NormalizedForConstraint(v *semver.Version) *semver.Version {
 	pre := v.Prerelease()
 	if pre != "" && IsGenuinePrerelease(pre) {
 		return semver.New(v.Major(), v.Minor(), v.Patch(), pre, "")
@@ -138,7 +138,7 @@ func (c *Checker) validateKubernetesRequirement(plugin *internal.Plugin, state *
 		return fmt.Errorf("parse kubernetes constraint %q: %w", plugin.Requirements.Kubernetes.Constraint, err)
 	}
 
-	if !constraint.Check(normalizedForConstraint(state.Kubernetes)) {
+	if !constraint.Check(NormalizedForConstraint(state.Kubernetes)) {
 		return unmetf("plugin %s requires Kubernetes %s, but the cluster runs %s",
 			plugin.Name, plugin.Requirements.Kubernetes.Constraint, state.Kubernetes.Original())
 	}
@@ -167,7 +167,7 @@ func (c *Checker) validateDeckhouseRequirement(plugin *internal.Plugin, state *C
 		return fmt.Errorf("parse deckhouse constraint %q: %w", plugin.Requirements.Deckhouse.Constraint, err)
 	}
 
-	if !constraint.Check(normalizedForConstraint(state.Deckhouse)) {
+	if !constraint.Check(NormalizedForConstraint(state.Deckhouse)) {
 		return unmetf("plugin %s requires Deckhouse %s, but the cluster runs %s",
 			plugin.Name, plugin.Requirements.Deckhouse.Constraint, state.Deckhouse.Original())
 	}
@@ -244,7 +244,7 @@ func evaluateModuleVersion(requirement internal.ModuleRequirement, module Module
 		return false, false, nil
 	}
 
-	return constraint.Check(normalizedForConstraint(module.Version)), true, nil
+	return constraint.Check(NormalizedForConstraint(module.Version)), true, nil
 }
 
 // checkModuleConstraint verifies a mandatory/conditional module's version. A module

@@ -43,11 +43,11 @@ func enabled(version string) ModuleState {
 
 func TestNormalizedForConstraint(t *testing.T) {
 	// CI / build markers are stripped to the release version.
-	assert.Equal(t, "1.77.0", normalizedForConstraint(semver.MustParse("v1.77.0-main+abc")).String())
-	assert.Equal(t, "1.28.3", normalizedForConstraint(semver.MustParse("v1.28.3-eks-1-30")).String())
+	assert.Equal(t, "1.77.0", NormalizedForConstraint(semver.MustParse("v1.77.0-main+abc")).String())
+	assert.Equal(t, "1.28.3", NormalizedForConstraint(semver.MustParse("v1.28.3-eks-1-30")).String())
 	// Genuine pre-releases are kept (only build metadata is dropped).
-	assert.Equal(t, "1.30.0-rc.1", normalizedForConstraint(semver.MustParse("v1.30.0-rc.1+build")).String())
-	assert.Equal(t, "1.30.0-alpha.2", normalizedForConstraint(semver.MustParse("v1.30.0-alpha.2")).String())
+	assert.Equal(t, "1.30.0-rc.1", NormalizedForConstraint(semver.MustParse("v1.30.0-rc.1+build")).String())
+	assert.Equal(t, "1.30.0-alpha.2", NormalizedForConstraint(semver.MustParse("v1.30.0-alpha.2")).String())
 }
 
 func TestHasClusterRequirements(t *testing.T) {

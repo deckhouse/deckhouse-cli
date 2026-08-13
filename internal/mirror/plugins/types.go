@@ -25,6 +25,19 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
 
+// Key vocabulary of the package's maps. Aliases (not defined types) keep
+// plain strings interoperable without conversions - the same convention as
+// moduleName in the modules package.
+type (
+	// pluginName is a plugin's registry name, e.g. "postgresql-mgr".
+	pluginName = string
+	// moduleName is a Deckhouse module name, e.g. "postgresql".
+	moduleName = string
+	// versionTag is a version tag as published in the registry, e.g.
+	// "v1.2.3" (semver.Version.Original of a parsed tag).
+	versionTag = string
+)
+
 // ModuleInBundle is one mirrored module with the exact versions selected into
 // the bundle. The pull orchestrator builds this list from the modules phase
 // stats and hands it to the plugins phase.
