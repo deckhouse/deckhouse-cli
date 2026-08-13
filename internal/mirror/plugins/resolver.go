@@ -155,6 +155,15 @@ func (w *warningLog) add(msg string) {
 func (st *resolveState) resolveAuto(ctx context.Context) error {
 	names, err := st.catalog.PluginNames(ctx)
 	if err != nil {
+		if isNotPublished(err) {
+			// The source registry has no plugins catalog (older registries,
+			// self-hosted mirrors). Nothing to auto-select; explicit includes
+			// still resolve against their own repositories.
+			st.logger.Debug("The registry has no plugins catalog, skipping plugin auto-selection")
+
+			return nil
+		}
+
 		return fmt.Errorf("list plugins catalog: %w", err)
 	}
 

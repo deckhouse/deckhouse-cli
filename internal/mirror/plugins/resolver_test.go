@@ -36,6 +36,7 @@ import (
 // real catalog holds: every listed tag has a contract behind it.
 type catalogStub struct {
 	names      []string
+	namesErr   error
 	tags       map[string][]string
 	contracts  map[string]*internal.Plugin // "name@tag"
 	invalid    map[string]bool             // "name@tag" -> broken published contract
@@ -88,6 +89,10 @@ func (s *catalogStub) registerName(name string) {
 
 func (s *catalogStub) PluginNames(_ context.Context) ([]string, error) {
 	s.namesCalls++
+
+	if s.namesErr != nil {
+		return nil, s.namesErr
+	}
 
 	return s.names, nil
 }
@@ -739,6 +744,24 @@ func TestResolve_RollbackDiscardsPartialDeps(t *testing.T) {
 		"the failed v2.0.0 candidate must fall back to v1.0.0")
 	assert.Nil(t, selectedVersions(res, "dep-a"),
 		"partially resolved deps of the failed candidate must not leak into the result")
+}
+
+// TestResolve_MissingCatalogSkipsAuto: a registry without a plugins catalog
+// yields an empty auto-selection, not an error - and explicit includes still
+// resolve against their own repositories.
+func TestResolve_MissingCatalogSkipsAuto(t *testing.T) {
+	stub := newStub().
+		add("velero-helper", "v0.3.0", plug("velero-helper", "v0.3.0"))
+	stub.namesErr = fmt.Errorf("list plugins catalog: %w", dkpclient.ErrImageNotFound)
+
+	res := resolve(t, stub, ResolveInput{
+		Modules: []ModuleInBundle{mod("postgresql", "v1.5.0")},
+		Filter:  mustFilter(t, "velero-helper"),
+	})
+
+	assert.Equal(t, []string{"v0.3.0"}, selectedVersions(res, "velero-helper"),
+		"explicit includes must survive a missing catalog")
+	assert.Len(t, res.Plugins, 1, "nothing must be auto-selected without a catalog")
 }
 
 // TestResolve_ConditionalModuleAdvisory: a conditional module constraint the
