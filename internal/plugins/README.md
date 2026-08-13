@@ -155,6 +155,15 @@ A failure at any step leaves the previous version installed and working.
 | RPP endpoint / TLS | `--rpp-endpoint`, `--rpp-ca-file`, `--rpp-insecure-skip-tls-verify` |
 | skip cluster-side requirement checks | `--skip-cluster-checks` / `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` |
 
+## Air-gapped delivery
+
+`d8 mirror pull` mirrors plugins into the images bundle automatically (plugins
+whose contracts name the mirrored modules, plus their mandatory plugin
+dependencies; `--include-plugin` adds more). After `d8 mirror push` the target
+registry holds them at `deckhouse-cli/plugins/<name>`, where the proxy serves
+them - install/update work as usual. See `internal/mirror/README.MD`
+(Plugin Mirroring).
+
 ## Boundaries and deliberate decisions
 
 - Listing the full plugin catalog over RPP is not supported (the proxy has no

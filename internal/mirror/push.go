@@ -83,11 +83,16 @@ type PushServiceOptions struct {
 //	│       ├── index.json
 //	│       ├── release/
 //	│       └── <extra-name>/
-//	└── packages/                      # Packages
-//	    └── <package-name>/
-//	        ├── index.json
-//	        ├── version/
-//	        └── <extra-name>/
+//	├── packages/                      # Packages
+//	│   └── <package-name>/
+//	│       ├── index.json
+//	│       ├── version/
+//	│       └── <extra-name>/
+//	└── deckhouse-cli/                 # d8 CLI plugins
+//	    └── plugins/
+//	        └── <plugin-name>/
+//	            ├── index.json
+//	            └── blobs/
 type PushService struct {
 	client     client.Client
 	options    *PushServiceOptions

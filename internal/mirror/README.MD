@@ -74,6 +74,14 @@ Packages are mirrored with the same `name[@version-constraint]` dialect as modul
 | `--include-package` | Whitelist specific packages. Use one flag per package. Disables `--exclude-package` |
 | `--exclude-package` | Blacklist specific packages. Format: `package-name[@version]`. Use one flag per package. Overridden by `--include-package` |
 
+#### Plugin Selection
+
+d8 CLI plugins that the mirrored modules need are selected **automatically** (see [Plugin Mirroring](#plugin-mirroring)); the flag adds more on top.
+
+| Flag | Description |
+|------|-------------|
+| `--include-plugin` | Mirror a specific plugin in addition to the automatic selection. Format: `plugin-name[@constraint]`, same dialect as `--include-module`. Use one flag per plugin |
+
 #### Component Selection
 
 | Flag | Description |
@@ -386,6 +394,37 @@ If the source registry has no `packages` repository (some public/CE registries),
 
 ---
 
+### Plugin Mirroring
+
+d8 CLI plugins are standalone binaries the CLI installs through the in-cluster registry-packages-proxy. A plugin declares its requirements (Deckhouse modules, other plugins, platform versions) in a contract - a base64-JSON annotation on its image manifest. The plugins phase runs **last**, after modules and packages, because it resolves against what the earlier phases actually put into the bundle.
+
+Selection principle: **nothing extra**. A plugin enters the bundle only when:
+
+- a mirrored module needs it - the plugin's contract names that module in its `mandatory` or `anyOf` requirements. For **each bundled version** of the module, the newest plugin version whose contract the bundle satisfies is picked (so a bundle carrying module v1.0.0 and v1.5.0 may get two plugin versions, deduplicated);
+- it is a mandatory plugin dependency of another selected plugin (resolved recursively; a version already picked is shared when it satisfies the constraint);
+- the user names it with `--include-plugin` (additive; an unmet explicit include fails the pull, unlike the automatic selection which skips with a reason in the summary).
+
+Registry layout (at the **bare root**, outside the edition segment - like the installer):
+
+| Path | Contents |
+|------|----------|
+| `<root>/deckhouse-cli/plugins` | Plugin catalog; its tags are plugin names |
+| `<root>/deckhouse-cli/plugins/<name>:<vX.Y.Z>` | One plugin version - a multi-platform OCI index (linux/darwin/windows) |
+
+**Bundle output:** one `plugin-<name>.tar` per plugin. Multi-platform indexes are stored whole, so every platform binary and the contract annotation reach the target registry exactly as published.
+
+What is checked at mirror time vs install time:
+
+- Mirror verifies that each pulled plugin version's module requirements are satisfiable by **at least one bundled version** of each required module, and its `deckhouse` constraint by a bundled platform version.
+- `kubernetes` and `noneOf` requirements are cluster-side: `d8 plugins install` enforces them on the target cluster as usual.
+- Conditional requirements never gate mirroring; conflicts show up as warnings.
+
+After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <target>/deckhouse-cli/plugins` shows the names).
+
+If the source registry has no `deckhouse-cli/plugins` catalog, the automatic selection is skipped quietly; explicit `--include-plugin` entries still resolve against their own repositories.
+
+---
+
 ### Security Databases
 
 The security phase mirrors four Trivy databases into `security.tar`, each pinned at a fixed schema tag under `<root>/<edition>/security/`:
@@ -430,6 +469,7 @@ The pull command creates a bundle with the following structure:
 ├── module-<name>.tar         # One archive per module (if not --no-modules)
 ├── package-<name>.tar        # One archive per package (if not --no-packages)
 ├── package-versions.tar      # Package release-metadata catalog (always produced)
+├── plugin-<name>.tar         # One archive per d8 CLI plugin the bundle needs (see Plugin Mirroring)
 └── <name>.tar.NNNN.chunk     # Chunk parts, when --images-bundle-chunk-size is set (NNNN = 0000, 0001, …)
 ```
 
