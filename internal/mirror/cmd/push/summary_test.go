@@ -46,6 +46,7 @@ func TestRenderPushSummary(t *testing.T) {
 				SecurityDatabases: 4,
 				Modules:           12,
 				Packages:          3,
+				Plugins:           2,
 				Elapsed:           2*time.Minute + 4*time.Second,
 			},
 			contains: []string{
@@ -54,6 +55,7 @@ func TestRenderPushSummary(t *testing.T) {
 				"Security:", "4 databases",
 				"Modules:", "12",
 				"Packages:", "3",
+				"Plugins:", "2",
 				"Elapsed: 2m4s",
 			},
 			notContains: []string{"Warning", "default:", "failed", "cancelled", "not present"},

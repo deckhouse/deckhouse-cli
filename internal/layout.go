@@ -42,6 +42,10 @@ import "path"
 //	<root>/packages/<package-name>:<version>                    - Package main image
 //	<root>/packages/<package-name>/version:<channel>            - Package version channel metadata
 //	<root>/packages/<package-name>/extra/<extra-name>:<version> - Package extra images
+//
+// Deckhouse CLI plugins (at the bare root, outside the edition segment, like installer):
+//
+//	<root>/deckhouse-cli/plugins/<plugin-name>:<version> - Plugin image (multi-platform OCI index)
 const (
 	InstallSegment           = "install"
 	InstallStandaloneSegment = "install-standalone"
@@ -56,6 +60,9 @@ const (
 	PackagesExtraSegment   = "extra"
 
 	InstallerSegment = "installer"
+
+	D8CLISegment     = "deckhouse-cli"
+	D8PluginsSegment = "plugins"
 
 	SecuritySegment = "security"
 

@@ -42,6 +42,7 @@ import (
 //	║ Security:   4 databases
 //	║ Modules:    12
 //	║ Packages:   3
+//	║ Plugins:    2
 //	║
 //	║ Elapsed: 2m4s
 //	╚═══════════════════════════════════════════════════════
@@ -62,6 +63,7 @@ func renderPushSummary(s *mirror.PushSummary) string {
 	writePushSecurity(&b, s.SecurityDatabases)
 	writePushCount(&b, "Modules", s.Modules)
 	writePushCount(&b, "Packages", s.Packages)
+	writePushCount(&b, "Plugins", s.Plugins)
 
 	b.WriteString(summaryui.Bar() + "\n")
 

@@ -231,6 +231,9 @@ type PushSummary struct {
 	SecurityDatabases int
 	// Modules is the number of module repositories pushed.
 	Modules int
+	// Plugins is the number of CLI plugin repositories pushed, counted from
+	// the plugins index step.
+	Plugins int
 	// Packages is the number of package repositories pushed.
 	Packages int
 }
