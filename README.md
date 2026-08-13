@@ -125,16 +125,6 @@ Validate that the `d8` binary is installed:
 
 If you don't want to call `. $(trdl use d8 0 stable)` every time you need to use `d8`, consider adding `alias d8='trdl exec d8 0 stable -- "$@"'` to your shell RC file.
 
-### Method 4: Go Install
-
-If you have Go installed:
-
-```bash
-go install github.com/deckhouse/deckhouse-cli@main
-```
-
-> **Note**: Ensure `~/go/bin` is in your PATH after installation.
-
 ### Verify Installation
 
 ```bash
