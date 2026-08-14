@@ -141,10 +141,10 @@ func NewRegistryClientStub() localreg.Client {
 	// cert-manager carries one pullable version via its stable channel, so
 	// command-level tests exercise the modules phase and the module-driven
 	// plugin selection.
-	reg.MustAddImage("modules", "cert-manager", moduleImage(stubModuleVersion))
-	reg.MustAddImage("modules/cert-manager", stubModuleVersion, moduleImage(stubModuleVersion))
-	reg.MustAddImage("modules/cert-manager/release", "stable", moduleImage(stubModuleVersion))
-	reg.MustAddImage("modules/cert-manager/release", stubModuleVersion, moduleImage(stubModuleVersion))
+	reg.MustAddImage("modules", "cert-manager", moduleImage())
+	reg.MustAddImage("modules/cert-manager", stubModuleVersion, moduleImage())
+	reg.MustAddImage("modules/cert-manager/release", "stable", moduleImage())
+	reg.MustAddImage("modules/cert-manager/release", stubModuleVersion, moduleImage())
 
 	// ---- plugins catalog ----
 	// The catalog name index is directory-as-tags: a tag per plugin name on
@@ -183,12 +183,13 @@ func securityImage() v1.Image {
 	return upfake.NewImageBuilder().MustBuild()
 }
 
-// moduleImage creates a stub v1.Image for module repositories: version.json
-// (read during module version discovery) plus the OCI version label.
-func moduleImage(version string) v1.Image {
+// moduleImage creates a stub v1.Image for the cert-manager module repos:
+// version.json (read during module version discovery) plus the OCI version
+// label, both carrying stubModuleVersion.
+func moduleImage() v1.Image {
 	return upfake.NewImageBuilder().
-		WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).
-		WithLabel("org.opencontainers.image.version", version).
+		WithFile("version.json", fmt.Sprintf(`{"version":%q}`, stubModuleVersion)).
+		WithLabel("org.opencontainers.image.version", stubModuleVersion).
 		MustBuild()
 }
 
