@@ -54,11 +54,12 @@ func newPullService(
 	)
 }
 
-// fullStub returns a stub that has data in all four service areas:
+// fullStub returns a stub that has data in all five service areas:
 //   - platform (root, release-channel, install, install-standalone)
 //   - installer  ("installer" repo at root, tag "latest")
 //   - security   ("security/trivy-db" repo, tag "2")
-//   - modules    ("modules" repo with two module names as tags)
+//   - modules    (pullable cert-manager, name-tag-only ingress-nginx)
+//   - plugins    (cert-manager-tool, auto-selected for cert-manager)
 func fullStub() localreg.Client {
 	reg := upfake.NewRegistry(pullStubRootURL)
 
@@ -108,13 +109,24 @@ func fullStub() localreg.Client {
 	trivyImg := upfake.NewImageBuilder().MustBuild()
 	reg.MustAddImage("security/trivy-db", "2", trivyImg)
 
-	// ---- modules: two module names as tags ----
-	modImg := upfake.NewImageBuilder().MustBuild()
-	reg.MustAddImage("modules", "cert-manager", modImg)
-	reg.MustAddImage("modules", "ingress-nginx", modImg)
+	// ---- modules: cert-manager is fully pullable (one version via its
+	// stable channel); ingress-nginx is a bare name tag with no versions,
+	// pinning that zero-version modules are dropped from the plugins handoff ----
+	addModule(reg, "cert-manager", map[string]string{"stable": "v0.5.0"})
+	reg.MustAddImage("modules", "ingress-nginx", upfake.NewImageBuilder().MustBuild())
+
+	// ---- plugins: cert-manager-tool rides along with the cert-manager module ----
+	addPluginVersion(reg, "cert-manager-tool", "v1.0.0", certManagerToolContract)
 
 	return pkgclient.Adapt(upfake.NewClient(reg))
 }
+
+// certManagerToolContract auto-selects the fullStub plugin whenever the
+// cert-manager module is mirrored.
+const certManagerToolContract = `{
+	"name": "cert-manager-tool", "version": "v1.0.0",
+	"requirements": {"modules": {"mandatory": [{"name": "cert-manager", "constraint": ">=0.1.0"}]}}
+}`
 
 // ---------------------------------------------------------------------------
 // Error path tests
@@ -413,7 +425,11 @@ func TestPull_SecurityGracefulSkip(t *testing.T) {
 // TestPull_ModulesGracefulSkip verifies that when no modules exist in
 // the registry Pull still succeeds (PullModules logs a warning and returns nil).
 func TestPull_ModulesGracefulSkip(t *testing.T) {
-	svc := newPullService(t, localfake.NewRegistryClientStub(), "v1.69.0", &PullServiceOptions{
+	// An empty registry: the canned stub cannot be used here because it
+	// carries a modules catalog.
+	emptyStub := pkgclient.Adapt(upfake.NewClient(upfake.NewRegistry(pullStubRootURL)))
+
+	svc := newPullService(t, emptyStub, "v1.69.0", &PullServiceOptions{
 		SkipPlatform:  true,
 		SkipSecurity:  true,
 		SkipInstaller: true,
@@ -494,13 +510,27 @@ func TestPull_FullStub_SummaryPopulated(t *testing.T) {
 	assert.Equal(t, 4, summary.Security.AvailableDatabases)
 	assert.Greater(t, summary.Security.Databases, 0)
 
-	// Modules: the stub exposes two module names but no pullable version or
-	// release-channel images for them, so the phase runs (Attempted) yet pulls
-	// nothing - zero-image modules are correctly omitted from the breakdown.
-	// (Real module counting is exercised end-to-end against a live registry; the
-	// stub only carries module names, not their contents.)
+	// Modules: cert-manager is pullable (one version via its stable channel);
+	// ingress-nginx exposes no versions and is omitted from the breakdown.
 	assert.True(t, summary.Modules.Attempted)
 	assert.False(t, summary.Modules.Skipped)
+	require.Len(t, summary.Modules.Modules, 1)
+	assert.Equal(t, "cert-manager", summary.Modules.Modules[0].Name)
+	assert.Equal(t, []string{"v0.5.0"}, summary.Modules.Modules[0].Versions)
+	assert.Greater(t, summary.Modules.TotalImages, 0,
+		"module image count must survive packing")
+
+	// Plugins: cert-manager-tool is auto-selected because the cert-manager
+	// module is in the bundle.
+	assert.True(t, summary.Plugins.Attempted)
+	assert.False(t, summary.Plugins.Skipped)
+	require.Len(t, summary.Plugins.Plugins, 1)
+	assert.Equal(t, "cert-manager-tool", summary.Plugins.Plugins[0].Name)
+	require.Len(t, summary.Plugins.Plugins[0].Versions, 1)
+	assert.Equal(t, "v1.0.0", summary.Plugins.Plugins[0].Versions[0].Version)
+	assert.Equal(t, []PluginReason{{Kind: "module", Subject: "cert-manager", Constraint: ">=0.1.0"}},
+		summary.Plugins.Plugins[0].Versions[0].Reasons)
+	assert.Equal(t, 1, summary.Plugins.TotalImages)
 }
 
 // TestPull_FullStub_FullDiscovery verifies full-discovery mode (empty
