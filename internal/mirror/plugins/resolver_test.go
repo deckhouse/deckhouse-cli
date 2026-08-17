@@ -893,3 +893,23 @@ func TestResolve_NoCatalogDependencyMustBePinned(t *testing.T) {
 		assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "q"))
 	})
 }
+
+// TestResolve_ExplicitIncludeClearsAutoSkip: a plugin the auto path passed
+// over (no version pairs with the bundled module) but --include-plugin then
+// selected is in the bundle - it must not be reported as skipped as well.
+// The explicit path's own warning about the unmet module requirement stays.
+func TestResolve_ExplicitIncludeClearsAutoSkip(t *testing.T) {
+	stub := newStub().
+		add("console-tool", "v1.0.0", needsModule(plug("console-tool", "v1.0.0"), "console", ">=2.0.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		Modules: []ModuleInBundle{mod("console", "v1.40.0")},
+		Filter:  mustFilter(t, "console-tool"),
+	})
+
+	assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "console-tool"))
+	assert.Empty(t, res.Skipped, "a plugin that made it into the bundle is not skipped")
+	require.Len(t, res.Warnings, 1)
+	assert.Contains(t, res.Warnings[0], "console-tool@v1.0.0 (explicitly included)")
+	assert.Contains(t, res.Warnings[0], `requires module "console" >=2.0.0`)
+}

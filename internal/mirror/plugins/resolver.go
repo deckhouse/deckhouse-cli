@@ -845,7 +845,18 @@ func (st *resolveState) findSatisfying(delta *selectionDelta, name pluginName, c
 // result assembles the final Resolution: plugins sorted by name, versions
 // newest first, plus co-installation advisories over the selected set.
 func (st *resolveState) result() *Resolution {
-	res := &Resolution{Skipped: st.skipped}
+	res := &Resolution{}
+
+	// A plugin the auto path passed over but --include-plugin then selected is
+	// in the bundle: reporting it as skipped too would contradict the summary
+	// (the explicit path already warns about the unmet module requirement).
+	for _, skip := range st.skipped {
+		if len(st.selected[skip.Name]) > 0 {
+			continue
+		}
+
+		res.Skipped = append(res.Skipped, skip)
+	}
 
 	names := make([]string, 0, len(st.selected))
 	for name := range st.selected {
