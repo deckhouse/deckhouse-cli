@@ -63,6 +63,10 @@ type ResolveInput struct {
 	// that satisfy a same-named plugin dependency by presence. They are
 	// never pulled.
 	Builtins map[string]struct{}
+	// NoCatalog means the registry serves no plugin version listing
+	// (--proxy-registry). Dependencies then resolve only against versions
+	// the user pinned explicitly; nothing is looked up.
+	NoCatalog bool
 }
 
 // ReasonKind classifies why a plugin version is in the bundle.

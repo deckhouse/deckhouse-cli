@@ -831,3 +831,65 @@ func TestResolve_MalformedNamesRejected(t *testing.T) {
 		assert.Contains(t, res.Skipped[0].Reason, `invalid plugin name "../../outside"`)
 	})
 }
+
+// TestResolve_ExplicitPinsReuseRegardlessOfOrder: every exact pin is
+// committed before any dependency is resolved, so a dependency the user
+// pinned is reused by another explicit plugin whatever the name order - no
+// extra newest version is pulled beside the pinned one.
+func TestResolve_ExplicitPinsReuseRegardlessOfOrder(t *testing.T) {
+	cases := []struct {
+		name      string
+		dependent string
+		dep       string
+	}{
+		{name: "dependency sorts after the dependent", dependent: "alpha", dep: "zeta"},
+		{name: "dependency sorts before the dependent", dependent: "zeta", dep: "alpha"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStub().
+				add(tc.dependent, "v1.0.0", needsPlugin(plug(tc.dependent, "v1.0.0"), tc.dep, ">=1.0.0")).
+				add(tc.dep, "v1.5.0", plug(tc.dep, "v1.5.0")).
+				add(tc.dep, "v1.9.0", plug(tc.dep, "v1.9.0"))
+
+			res := resolve(t, stub, ResolveInput{
+				Filter: mustFilter(t, tc.dependent+"@=v1.0.0", tc.dep+"@=v1.5.0"),
+			})
+
+			assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, tc.dependent))
+			assert.Equal(t, []string{"v1.5.0"}, selectedVersions(res, tc.dep),
+				"the pinned dependency version must be reused, not a newer one pulled beside it")
+		})
+	}
+}
+
+// TestResolve_NoCatalogDependencyMustBePinned: without a catalog
+// (--proxy-registry) a dependency is satisfied only by an explicit pin;
+// nothing is listed, and the error names the pin to add.
+func TestResolve_NoCatalogDependencyMustBePinned(t *testing.T) {
+	stub := newStub().
+		add("p", "v1.2.3", needsPlugin(plug("p", "v1.2.3"), "q", "^1.0.0")).
+		add("q", "v1.0.0", plug("q", "v1.0.0"))
+
+	t.Run("unpinned dependency is an error", func(t *testing.T) {
+		_, err := NewResolver(stub, log.NewNop()).Resolve(context.Background(), ResolveInput{
+			Filter:    mustFilter(t, "p@=v1.2.3"),
+			NoCatalog: true,
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--include-plugin p@=v1.2.3: unresolved dependencies")
+		assert.Contains(t, err.Error(), "--include-plugin q@=<version>")
+	})
+
+	t.Run("pinned dependency resolves", func(t *testing.T) {
+		res := resolve(t, stub, ResolveInput{
+			Filter:    mustFilter(t, "p@=v1.2.3", "q@=v1.0.0"),
+			NoCatalog: true,
+		})
+
+		assert.Equal(t, []string{"v1.2.3"}, selectedVersions(res, "p"))
+		assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "q"))
+	})
+}

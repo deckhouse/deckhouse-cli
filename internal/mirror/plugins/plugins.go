@@ -151,6 +151,7 @@ func (svc *Service) PullPlugins(ctx context.Context, in PullInput) error {
 		PlatformVersions: in.PlatformVersions,
 		Filter:           svc.options.Filter,
 		Builtins:         svc.options.Builtins,
+		NoCatalog:        svc.options.ProxyRegistry,
 	})
 	if err != nil {
 		return err

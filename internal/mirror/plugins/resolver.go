@@ -345,6 +345,10 @@ func (st *resolveState) selectForModuleVersion(ctx context.Context, name string,
 // resolveExplicit applies --include-plugin entries on top of the module-driven
 // selection. Failures here are the user's explicit request going unmet, so
 // they are errors, not skips.
+//
+// Exact pins are all committed before any dependency is resolved: a
+// dependency the user pinned is then reused by every other explicit plugin,
+// whatever the name order.
 func (st *resolveState) resolveExplicit(ctx context.Context) error {
 	// Only a whitelist filter carries --include-plugin names; anything else
 	// (including the empty filter, which is a blacklist) has none.
@@ -352,10 +356,41 @@ func (st *resolveState) resolveExplicit(ctx context.Context) error {
 		return nil
 	}
 
-	for _, name := range st.in.Filter.ModuleNames() {
+	names := st.in.Filter.ModuleNames()
+
+	for _, name := range names {
+		if err := pluginlayout.ValidatePluginName(name); err != nil {
+			return fmt.Errorf("--include-plugin %s: %w", name, err)
+		}
+	}
+
+	var pins []explicitPin
+
+	for _, name := range names {
 		constraint, _ := st.in.Filter.GetConstraint(name)
 
-		if err := st.resolveExplicitPlugin(ctx, name, constraint); err != nil {
+		// Exact tag pins bypass the stable-version list, so pre-releases stay
+		// reachable - the mirror analog of `d8 plugins install --version`.
+		for _, exact := range modules.ExactConstraintsOf(constraint) {
+			pin, err := st.pinExplicitExact(ctx, name, exact.Tag())
+			if err != nil {
+				return err
+			}
+
+			pins = append(pins, pin)
+		}
+	}
+
+	for _, pin := range pins {
+		if err := st.resolvePinDeps(ctx, pin); err != nil {
+			return err
+		}
+	}
+
+	for _, name := range names {
+		constraint, _ := st.in.Filter.GetConstraint(name)
+
+		if err := st.resolveExplicitRanges(ctx, name, constraint); err != nil {
 			return err
 		}
 	}
@@ -363,21 +398,18 @@ func (st *resolveState) resolveExplicit(ctx context.Context) error {
 	return nil
 }
 
-func (st *resolveState) resolveExplicitPlugin(ctx context.Context, name string, constraint modules.VersionConstraint) error {
+// explicitPin is an exactly pinned --include-plugin entry, committed to the
+// selection with its dependencies still to be resolved.
+type explicitPin struct {
+	name     pluginName
+	tag      versionTag
+	contract *internal.Plugin
+}
+
+// resolveExplicitRanges resolves the semver ranges of one --include-plugin
+// entry (or "newest stable" for a bare name).
+func (st *resolveState) resolveExplicitRanges(ctx context.Context, name string, constraint modules.VersionConstraint) error {
 	subject := "--include-plugin " + name
-
-	if err := pluginlayout.ValidatePluginName(name); err != nil {
-		return fmt.Errorf("%s: %w", subject, err)
-	}
-
-	// Exact tag pins bypass the stable-version list, so pre-releases stay
-	// reachable - the mirror analog of `d8 plugins install --version`.
-	exacts := modules.ExactConstraintsOf(constraint)
-	for _, exact := range exacts {
-		if err := st.selectExplicitExact(ctx, name, exact.Tag(), subject); err != nil {
-			return err
-		}
-	}
 
 	// Nothing ranged left when the pin was exact-only.
 	ranges := modules.SemverConstraintsOf(constraint)
@@ -463,39 +495,49 @@ func (st *resolveState) selectExplicitRanged(ctx context.Context, name pluginNam
 	return fmt.Errorf("--include-plugin %s: no suitable version: %s", name, strings.Join(rejections, "; "))
 }
 
-func (st *resolveState) selectExplicitExact(ctx context.Context, name, tag, subject string) error {
+// pinExplicitExact reads the contract of an exactly pinned version and
+// commits the version to the selection. Dependencies are resolved later by
+// resolvePinDeps, once every pin is in.
+func (st *resolveState) pinExplicitExact(ctx context.Context, name, tag string) (explicitPin, error) {
 	version, err := semver.NewVersion(tag)
 	if err != nil {
-		return fmt.Errorf("--include-plugin %s: %q is not a semver version tag", name, tag)
+		return explicitPin{}, fmt.Errorf("--include-plugin %s: %q is not a semver version tag", name, tag)
 	}
 
 	contract, err := st.catalog.Contract(ctx, name, version)
 	if err != nil {
 		if isNotPublished(err) {
-			return fmt.Errorf("--include-plugin %s: version %s is not published", name, tag)
+			return explicitPin{}, fmt.Errorf("--include-plugin %s: version %s is not published", name, tag)
 		}
 
 		// Shipping an exactly pinned image whose requirements cannot be read
 		// would break air-gapped installs silently, so this is fatal.
-		return fmt.Errorf("--include-plugin %s: %w", name, err)
+		return explicitPin{}, fmt.Errorf("--include-plugin %s: %w", name, err)
 	}
 
+	st.selected.commit(name, version, contract, Reason{Kind: ReasonExplicit, Subject: "--include-plugin " + name, Constraint: "=" + tag})
+
+	return explicitPin{name: name, tag: tag, contract: contract}, nil
+}
+
+// resolvePinDeps resolves the mandatory plugin dependencies of one exact pin.
+// Unmet dependencies are the user's explicit request going unmet: an error.
+func (st *resolveState) resolvePinDeps(ctx context.Context, pin explicitPin) error {
 	delta := &selectionDelta{}
 
-	why, err := st.resolveDeps(ctx, contract, delta, map[pluginName]bool{name: true}, []string{name + "@" + tag}, 0, false)
+	why, err := st.resolveDeps(ctx, pin.contract, delta, map[pluginName]bool{pin.name: true}, []string{pin.name + "@" + pin.tag}, 0, false)
 	if err != nil {
 		return err
 	}
 
 	if why != "" {
-		return fmt.Errorf("--include-plugin %s@=%s: unresolved dependencies: %s", name, tag, why)
+		return fmt.Errorf("--include-plugin %s@=%s: unresolved dependencies: %s", pin.name, pin.tag, why)
 	}
 
-	st.selected.commit(name, version, contract, Reason{Kind: ReasonExplicit, Subject: subject, Constraint: "=" + tag})
 	st.applyDelta(delta)
 
-	if gateWarn := st.bundleGate(contract, ""); gateWarn != "" {
-		st.warnings.add(fmt.Sprintf("plugin %s@%s (explicitly included): %s; the target cluster must provide it", name, tag, gateWarn))
+	if gateWarn := st.bundleGate(pin.contract, ""); gateWarn != "" {
+		st.warnings.add(fmt.Sprintf("plugin %s@%s (explicitly included): %s; the target cluster must provide it", pin.name, pin.tag, gateWarn))
 	}
 
 	return nil
@@ -563,6 +605,12 @@ func (st *resolveState) resolveDeps(ctx context.Context, contract *internal.Plug
 // resolveDepFresh picks the newest version of one dependency that satisfies
 // the constraint, passes the bundle gate, and resolves its own dependencies.
 func (st *resolveState) resolveDepFresh(ctx context.Context, req internal.PluginRequirement, constraint *semver.Constraints, reason Reason, delta *selectionDelta, visited map[pluginName]bool, path []string, depth int, enforceGate bool) (string, error) {
+	if st.in.NoCatalog {
+		// Nothing to pick a version from: only a pinned version could have
+		// satisfied this dependency, and none did.
+		return fmt.Sprintf("dependency %q (constraint %q): no pinned version satisfies it; with --proxy-registry pin it explicitly: --include-plugin %s@=<version>", req.Name, req.Constraint, req.Name), nil
+	}
+
 	versions, err := st.catalog.PluginVersions(ctx, req.Name)
 	if err != nil {
 		if isNotPublished(err) {
