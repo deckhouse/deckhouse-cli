@@ -371,14 +371,16 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 }
 
 // writePlugins renders the plugins line, the module-grouped provenance tree
-// (verbose only), and skipped plugins with reasons (always - losing a plugin
-// in an air-gapped bundle is an operational surprise). e.g.:
+// (verbose only), then skipped plugins with reasons and resolver warnings
+// (always - losing a plugin in an air-gapped bundle, or shipping one the
+// target cluster cannot run, is an operational surprise). e.g.:
 //
 //	║ Plugins:    2  ·  1 for modules  ·  1 dependency
 //	║     postgresql
 //	║       postgresql-mgr              [v1.2.0, v1.1.0]
 //	║       └ db-connector              [v0.9.1]  (dependency)
 //	║     skipped: backup-tool - requires module "postgresql" >=3.0.0
+//	║     warning: plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it
 func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 	label := cLabel(padLabel("Plugins"))
 
@@ -421,6 +423,10 @@ func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 
 	for _, skip := range p.SkippedPlugins {
 		fmt.Fprintf(b, "%s     %s\n", bar(), cWarn("skipped: "+skip.Name+" - "+skip.Reason))
+	}
+
+	for _, warning := range p.Warnings {
+		fmt.Fprintf(b, "%s     %s\n", bar(), cWarn("warning: "+warning))
 	}
 }
 

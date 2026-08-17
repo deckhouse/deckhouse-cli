@@ -497,7 +497,8 @@ func TestRenderPullSummary(t *testing.T) {
 // the stdout TTY check and NO_COLOR, which the logger writes to).
 // TestRenderPullSummary_Plugins pins the plugins section: the aggregate line
 // with the provenance breakdown, the module-grouped tree in verbose mode, the
-// dependency nesting, and skipped plugins visible without verbose.
+// dependency nesting, and skipped plugins plus resolver warnings visible
+// without verbose.
 func TestRenderPullSummary_Plugins(t *testing.T) {
 	color.NoColor = true
 
@@ -532,6 +533,9 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		SkippedPlugins: []mirror.SkippedPluginStat{
 			{Name: "backup-tool", Reason: `for module postgresql v1.0.0: requires module "postgresql" >=3.0.0`},
 		},
+		Warnings: []string{
+			`plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it`,
+		},
 		TotalImages: 4,
 	}
 
@@ -561,6 +565,13 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		require.Contains(t, out, "skipped: backup-tool")
 		require.Contains(t, out, `requires module "postgresql" >=3.0.0`)
 		require.NotContains(t, out, "└", "the tree is verbose-only")
+	})
+
+	t.Run("warnings are visible without verbose", func(t *testing.T) {
+		out := renderPullSummary(base(), false)
+
+		require.Contains(t, out, "warning: plugin velero-helper@v0.3.0 (explicitly included)")
+		require.Contains(t, out, `requires module "velero" which is not in the bundle`)
 	})
 
 	t.Run("verbose renders the module-grouped tree", func(t *testing.T) {
