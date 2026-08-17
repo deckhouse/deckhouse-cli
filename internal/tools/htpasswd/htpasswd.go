@@ -189,12 +189,16 @@ func (o *options) hashOptions() hashOptions {
 }
 
 // runStdout implements '-n': hash a password and print it, never touching a
-// file. With a username it prints the htpasswd "username:hash" line; with no
-// username (an extension htpasswd lacks) it prints just the hash, which is what
+// file. When a username argument is present it prints the htpasswd
+// "username:hash" line, so an explicit empty username ("") prints ":hash"
+// exactly like Apache htpasswd — this makes 'd8 tools htpasswd -BinC 10 ""' a
+// drop-in for 'htpasswd -BinC 10 ""'. When no username argument is given at all
+// (an extension htpasswd lacks) it prints just the bare hash, which is what
 // 'd8 iam user ... --password-hash' consumes.
 func runStdout(cmd *cobra.Command, o *options, args []string) error {
 	var username, password string
 
+	hasUsername := false
 	havePassword := false
 
 	switch {
@@ -203,7 +207,7 @@ func runStdout(cmd *cobra.Command, o *options, args []string) error {
 		case 1:
 			password = args[0]
 		case 2:
-			username, password = args[0], args[1]
+			username, password, hasUsername = args[0], args[1], true
 		default:
 			return errors.New("usage: -n -b [username] <password>")
 		}
@@ -212,7 +216,7 @@ func runStdout(cmd *cobra.Command, o *options, args []string) error {
 	case len(args) > 1:
 		return errors.New("usage: -n [username]")
 	case len(args) == 1:
-		username = args[0]
+		username, hasUsername = args[0], true
 	}
 
 	if err := validateUsername(username); err != nil {
@@ -234,7 +238,7 @@ func runStdout(cmd *cobra.Command, o *options, args []string) error {
 	}
 
 	line := hash
-	if username != "" {
+	if hasUsername {
 		line = username + ":" + hash
 	}
 

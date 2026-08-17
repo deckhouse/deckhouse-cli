@@ -68,6 +68,31 @@ func Test_Stdout_BareHashAndUserLine(t *testing.T) {
 	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(hash), []byte("Test12345!")))
 }
 
+// Test_Stdout_HtpasswdDropInRecipe locks in the README recipe: the exact Apache
+// htpasswd invocation must work verbatim with 'd8 tools htpasswd' substituted
+// for 'htpasswd', including the bundled flags (-BinC) and the empty-username
+// ":hash" output that 'cut -d: -f2' relies on.
+//
+//	echo -n 'Test12345!' | d8 tools htpasswd -BinC 10 "" | cut -d: -f2 | tr -d '\n'
+func Test_Stdout_HtpasswdDropInRecipe(t *testing.T) {
+	out, err := run(t, "Test12345!", "-BinC", "10", "")
+	require.NoError(t, err)
+
+	// Like real htpasswd with an empty username, the line begins with ':'.
+	line := strings.TrimRight(out, "\n")
+	require.True(t, strings.HasPrefix(line, ":"), "want leading colon like htpasswd, got %q", line)
+
+	// Emulate 'cut -d: -f2 | tr -d \n'.
+	_, hash, _ := strings.Cut(line, ":")
+	require.True(t, strings.HasPrefix(hash, "$2y$"), "want bcrypt $2y$ hash, got %q", hash)
+
+	cost, err := bcrypt.Cost([]byte(hash))
+	require.NoError(t, err)
+	require.Equal(t, 10, cost, "-C 10 should yield cost 10")
+
+	require.NoError(t, bcrypt.CompareHashAndPassword([]byte(hash), []byte("Test12345!")))
+}
+
 func Test_File_CreateVerifyDeleteLifecycle(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "users.htpasswd")
 
