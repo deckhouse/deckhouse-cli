@@ -35,6 +35,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -243,10 +244,11 @@ func TestPullPlugins_DryRun(t *testing.T) {
 
 // TestPullPlugins_MultiPlatformIndexPreserved is the end-to-end proof of the
 // multi-platform keystone: a plugin published as a two-platform index with a
-// contract annotation goes through resolve -> pull -> pack and comes out of
-// the bundle tar as the same index - same digest, both platforms, contract
-// annotation intact. Runs against ggcr's in-memory registry with the real
-// client (the fake cannot store indexes).
+// contract annotation, a subject and inline child data goes through
+// resolve -> pull -> pack and comes out of the bundle tar as the same index -
+// same digest, both platforms, contract annotation, subject and data intact.
+// Runs against ggcr's in-memory registry with the real client (the fake
+// cannot store indexes).
 func TestPullPlugins_MultiPlatformIndexPreserved(t *testing.T) {
 	srv := httptest.NewServer(ggcrregistry.New())
 	t.Cleanup(srv.Close)
@@ -261,16 +263,29 @@ func TestPullPlugins_MultiPlatformIndexPreserved(t *testing.T) {
 	linuxImg := upfake.NewImageBuilder().WithFile("plugin", "linux-bin").MustBuild()
 	darwinImg := upfake.NewImageBuilder().WithFile("plugin", "darwin-bin").MustBuild()
 
+	// Inline data on one child and a subject on the index: optional OCI
+	// fields the rebuilt index must not lose.
+	linuxRaw, err := linuxImg.RawManifest()
+	require.NoError(t, err)
+
 	idx := mutate.AppendManifests(empty.Index,
-		mutate.IndexAddendum{Add: linuxImg, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}}},
+		mutate.IndexAddendum{Add: linuxImg, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}, Data: linuxRaw}},
 		mutate.IndexAddendum{Add: darwinImg, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "darwin", Architecture: "arm64"}}},
 	)
 	annotated, ok := mutate.Annotations(idx, map[string]string{"contract": encodedContract}).(v1.ImageIndex)
 	require.True(t, ok)
 
+	subjectDesc, err := partial.Descriptor(darwinImg)
+	require.NoError(t, err)
+	source, ok := mutate.Subject(annotated, *subjectDesc).(v1.ImageIndex)
+	require.True(t, ok)
+
+	sourceDigest, err := source.Digest()
+	require.NoError(t, err)
+
 	pluginRef, err := name.ParseReference(host+"/deckhouse-cli/plugins/pg-tool:v1.0.0", name.Insecure)
 	require.NoError(t, err)
-	require.NoError(t, remote.WriteIndex(pluginRef, annotated))
+	require.NoError(t, remote.WriteIndex(pluginRef, source))
 
 	// The catalog's directory-as-tags name index.
 	nameRef, err := name.ParseReference(host+"/deckhouse-cli/plugins:pg-tool", name.Insecure)
@@ -318,6 +333,12 @@ func TestPullPlugins_MultiPlatformIndexPreserved(t *testing.T) {
 	assert.ElementsMatch(t, []string{"linux/amd64", "darwin/arm64"}, platforms)
 	assert.Equal(t, encodedContract, nestedManifest.Annotations["contract"],
 		"the contract annotation must survive into the bundle")
+
+	require.NotNil(t, nestedManifest.Subject, "the index subject must survive into the bundle")
+	assert.Equal(t, subjectDesc.Digest, nestedManifest.Subject.Digest)
+	assert.Equal(t, linuxRaw, nestedManifest.Manifests[0].Data, "inline child data must survive into the bundle")
+
+	assert.Equal(t, sourceDigest, desc.Digest, "the bundled index must keep the published digest")
 }
 
 // TestLayoutFor_RejectsMalformedName: the layout directory is built from the

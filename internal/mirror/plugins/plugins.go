@@ -260,7 +260,9 @@ func (svc *Service) pullVersion(ctx context.Context, name pluginName, tag versio
 
 // rebuildIndex reassembles a multi-platform index from its children. Children
 // are fetched by digest (byte-exact); only the top-level index manifest is
-// re-marshaled locally, with its media type and annotations carried over.
+// re-marshaled locally, with its media type, annotations, subject and the
+// per-child descriptor fields carried over. Per-child artifactType is the one
+// field ggcr's mutate cannot carry.
 func rebuildIndex(ctx context.Context, pluginSvc *registryservice.PluginService, indexManifest dkpreg.IndexManifest, mediaType types.MediaType) (v1.ImageIndex, error) {
 	children := indexManifest.GetManifests()
 
@@ -279,6 +281,7 @@ func rebuildIndex(ctx context.Context, pluginSvc *registryservice.PluginService,
 				URLs:        child.GetURLs(),
 				Annotations: child.GetAnnotations(),
 				Platform:    child.GetPlatform(),
+				Data:        child.GetData(),
 			},
 		})
 	}
@@ -294,7 +297,26 @@ func rebuildIndex(ctx context.Context, pluginSvc *registryservice.PluginService,
 		idx = annotated
 	}
 
-	return mutate.IndexMediaType(idx, mediaType), nil
+	idx = mutate.IndexMediaType(idx, mediaType)
+
+	// Subject goes on last: every mutate wrapper rewrites the subject from
+	// its own field, so a wrapper added later would erase it.
+	if subject := indexManifest.GetSubject(); subject != nil {
+		withSubject, ok := mutate.Subject(idx, v1.Descriptor{
+			MediaType:    subject.GetMediaType(),
+			Size:         subject.GetSize(),
+			Digest:       subject.GetDigest(),
+			Annotations:  subject.GetAnnotations(),
+			ArtifactType: subject.GetArtifactType(),
+		}).(v1.ImageIndex)
+		if !ok {
+			return nil, fmt.Errorf("set subject on rebuilt index: unexpected mutate result type")
+		}
+
+		idx = withSubject
+	}
+
+	return idx, nil
 }
 
 func (svc *Service) packPlugins(ctx context.Context, resolution *Resolution) error {
