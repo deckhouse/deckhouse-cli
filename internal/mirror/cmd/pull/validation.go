@@ -45,6 +45,10 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 	resolveModuleFlags()
 
+	if err = validatePluginFlags(); err != nil {
+		return err
+	}
+
 	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
@@ -185,6 +189,17 @@ func resolveModuleFlags() {
 
 		fmt.Fprintln(os.Stderr, "Warning: --no-modules is ignored because --include-module is set; mirroring only the whitelisted modules.")
 	}
+}
+
+// validatePluginFlags rejects an explicit --include-plugin that could not be
+// honored: --only-extra-images pulls module extra images only and skips the
+// plugins phase, so the request would be dropped silently.
+func validatePluginFlags() error {
+	if pullflags.OnlyExtraImages && len(pullflags.PluginsWhitelist) > 0 {
+		return errors.New("--only-extra-images cannot be combined with --include-plugin: this mode pulls module extra images only and mirrors no plugins; run a separate pull for the plugins")
+	}
+
+	return nil
 }
 
 // validateProxyRegistryFlag enforces the combinations the proxy-registry

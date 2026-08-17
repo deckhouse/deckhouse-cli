@@ -787,6 +787,50 @@ func TestValidationResolveModuleFlags(t *testing.T) {
 	}
 }
 
+// TestValidationValidatePluginFlags: --only-extra-images skips the plugins
+// phase, so an explicit --include-plugin is rejected up front instead of
+// being dropped silently.
+func TestValidationValidatePluginFlags(t *testing.T) {
+	tests := []struct {
+		name             string
+		onlyExtraImages  bool
+		pluginsWhitelist []string
+		expectError      bool
+	}{
+		{name: "only-extra-images with include-plugin is rejected", onlyExtraImages: true, pluginsWhitelist: []string{"stronghold@=v1.2.3"}, expectError: true},
+		{name: "only-extra-images alone is fine", onlyExtraImages: true, expectError: false},
+		{name: "include-plugin alone is fine", pluginsWhitelist: []string{"stronghold"}, expectError: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originals := struct {
+				onlyExtraImages  bool
+				pluginsWhitelist []string
+			}{
+				onlyExtraImages:  pullflags.OnlyExtraImages,
+				pluginsWhitelist: pullflags.PluginsWhitelist,
+			}
+			defer func() {
+				pullflags.OnlyExtraImages = originals.onlyExtraImages
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
+			}()
+
+			pullflags.OnlyExtraImages = tt.onlyExtraImages
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
+
+			err := validatePluginFlags()
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "--only-extra-images cannot be combined with --include-plugin")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidationValidateChunkSizeFlag(t *testing.T) {
 	tests := []struct {
 		name        string
