@@ -148,7 +148,8 @@ d8 user lock test-user 10m --timeout 5m
 d8 user unlock test-user --timeout 5m
 
 # Reset password (bcrypt hash is required)
-HASH="$(echo -n 'Test12345!' | htpasswd -BinC 10 \"\" | cut -d: -f2 | tr -d '\n')"
+# d8 tools htpasswd is a built-in analog of Apache htpasswd, so no external tool is needed
+HASH="$(echo -n 'Test12345!' | d8 tools htpasswd -ni)"
 d8 user reset-password test-user "$HASH" --timeout 5m
 ```
 
