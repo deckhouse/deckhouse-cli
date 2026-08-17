@@ -786,3 +786,48 @@ func TestResolve_ConditionalModuleAdvisory(t *testing.T) {
 	assert.Contains(t, res.Warnings[0], "conditional")
 	assert.Contains(t, res.Warnings[0], "observability")
 }
+
+// TestResolve_MalformedNamesRejected: a plugin name is a filesystem path and
+// a registry route, so every source is held to the single-component grammar.
+// A malformed catalog entry is dropped silently (registry data), a malformed
+// --include-plugin is the user's error, and a malformed dependency name from
+// a published contract rejects the dependent.
+func TestResolve_MalformedNamesRejected(t *testing.T) {
+	t.Run("catalog entry is dropped", func(t *testing.T) {
+		stub := newStub().
+			add("../../outside", "v1.0.0", needsModule(plug("../../outside", "v1.0.0"), "m1", "")).
+			add("alpha", "v1.0.0", needsModule(plug("alpha", "v1.0.0"), "m1", ""))
+
+		res := resolve(t, stub, ResolveInput{
+			Modules: []ModuleInBundle{mod("m1", "v1.0.0")},
+		})
+
+		assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "alpha"))
+		assert.Nil(t, selectedVersions(res, "../../outside"))
+		assert.Empty(t, res.Skipped, "a malformed catalog entry is not a plugin, so it is not reported as skipped")
+	})
+
+	t.Run("explicit include is an error", func(t *testing.T) {
+		_, err := NewResolver(newStub(), log.NewNop()).Resolve(context.Background(), ResolveInput{
+			Filter: mustFilter(t, "../../outside@=v1.0.0"),
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--include-plugin ../../outside")
+		assert.Contains(t, err.Error(), "invalid plugin name")
+	})
+
+	t.Run("dependency name rejects the dependent", func(t *testing.T) {
+		stub := newStub().
+			add("alpha", "v1.0.0", needsPlugin(needsModule(plug("alpha", "v1.0.0"), "m1", ""), "../../outside", ">=1.0.0"))
+
+		res := resolve(t, stub, ResolveInput{
+			Modules: []ModuleInBundle{mod("m1", "v1.0.0")},
+		})
+
+		assert.Empty(t, res.Plugins)
+		require.Len(t, res.Skipped, 1)
+		assert.Equal(t, "alpha", res.Skipped[0].Name)
+		assert.Contains(t, res.Skipped[0].Reason, `invalid plugin name "../../outside"`)
+	})
+}

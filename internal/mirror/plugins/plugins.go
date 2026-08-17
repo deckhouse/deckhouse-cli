@@ -34,6 +34,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
+	pluginlayout "github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
@@ -342,6 +343,12 @@ func (svc *Service) printDryRunPlan(resolution *Resolution) {
 func (svc *Service) layoutFor(name pluginName) (*regimage.ImageLayout, error) {
 	if layout, ok := svc.layouts[name]; ok {
 		return layout, nil
+	}
+
+	// The resolver validates every name it emits; this guard keeps the
+	// filesystem join safe should a new name source bypass it.
+	if err := pluginlayout.ValidatePluginName(name); err != nil {
+		return nil, err
 	}
 
 	layout, err := regimage.NewImageLayout(filepath.Join(svc.workingDir, pluginsDirName, name))

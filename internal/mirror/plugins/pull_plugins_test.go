@@ -319,3 +319,16 @@ func TestPullPlugins_MultiPlatformIndexPreserved(t *testing.T) {
 	assert.Equal(t, encodedContract, nestedManifest.Annotations["contract"],
 		"the contract annotation must survive into the bundle")
 }
+
+// TestLayoutFor_RejectsMalformedName: the layout directory is built from the
+// plugin name, so a name that is not a single path component must not reach
+// the filesystem join even if it bypassed the resolver.
+func TestLayoutFor_RejectsMalformedName(t *testing.T) {
+	svc := newPhaseService(t, upfake.NewRegistry(testHost), &Options{})
+
+	_, err := svc.layoutFor("../../outside")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid plugin name")
+	assert.NoDirExists(t, filepath.Join(filepath.Dir(svc.workingDir), "outside"))
+}

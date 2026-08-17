@@ -31,6 +31,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
+	pluginlayout "github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/requirements"
 )
 
@@ -170,6 +171,14 @@ func (st *resolveState) resolveAuto(ctx context.Context) error {
 	sort.Strings(names)
 
 	for _, name := range names {
+		// The catalog is registry data. A malformed entry cannot name a
+		// published plugin, so it is dropped rather than failing the pull.
+		if err := pluginlayout.ValidatePluginName(name); err != nil {
+			st.logger.Debug(fmt.Sprintf("Skipping catalog entry: %v", err))
+
+			continue
+		}
+
 		if err := st.resolveAutoPlugin(ctx, name); err != nil {
 			return err
 		}
@@ -357,6 +366,10 @@ func (st *resolveState) resolveExplicit(ctx context.Context) error {
 func (st *resolveState) resolveExplicitPlugin(ctx context.Context, name string, constraint modules.VersionConstraint) error {
 	subject := "--include-plugin " + name
 
+	if err := pluginlayout.ValidatePluginName(name); err != nil {
+		return fmt.Errorf("%s: %w", subject, err)
+	}
+
 	// Exact tag pins bypass the stable-version list, so pre-releases stay
 	// reachable - the mirror analog of `d8 plugins install --version`.
 	exacts := modules.ExactConstraintsOf(constraint)
@@ -504,6 +517,13 @@ func (st *resolveState) resolveDeps(ctx context.Context, contract *internal.Plug
 			// Built-in d8 commands satisfy a same-named dependency by
 			// presence; there is nothing to pull.
 			continue
+		}
+
+		// The dependency name comes from a published contract - external
+		// data with no grammar of its own - and becomes a registry route
+		// and a filesystem path.
+		if err := pluginlayout.ValidatePluginName(req.Name); err != nil {
+			return fmt.Sprintf("dependency of %s: %v", path[len(path)-1], err), nil
 		}
 
 		if visited[req.Name] {
