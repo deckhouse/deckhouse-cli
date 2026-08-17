@@ -174,6 +174,12 @@ them - install/update work as usual. See `internal/mirror/README.MD`
   cannot be resolved is skipped); the chain is actually installed only for the
   finally chosen version. Recursion has a cycle guard and a depth cap.
 - Dependencies are only upgraded, never downgraded, to satisfy a constraint.
+- A plugin contract may depend on **external** modules only (those served from
+  `deckhouse/<edition>/modules/<name>`), never on modules embedded in the
+  platform image: `d8 mirror` auto-selects plugins from the mirrored external
+  modules alone, so an embedded-module requirement never triggers selection
+  and, as a secondary requirement, gets the plugin skipped as "not in the
+  bundle".
 
 ## Package map
 
