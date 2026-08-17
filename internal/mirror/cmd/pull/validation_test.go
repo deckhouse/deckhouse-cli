@@ -498,6 +498,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 		deckhouseTag             string
 		sinceVersionString       string
 		modulesWhitelist         []string
+		pluginsWhitelist         []string
 		noPlatform               bool
 		noModules                bool
 		onlyExtraImages          bool
@@ -541,11 +542,11 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			errorMsg:                 "explicit version constraint",
 		},
 		{
-			name:                     "--no-platform skips the include-platform requirement",
-			proxyRegistry:            true,
-			noPlatform:               true,
-			modulesWhitelist:         []string{"prometheus@^1.0.0"},
-			expectError:              false,
+			name:             "--no-platform skips the include-platform requirement",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			modulesWhitelist: []string{"prometheus@^1.0.0"},
+			expectError:      false,
 		},
 		{
 			name:                     "--no-modules skips the include-module requirement",
@@ -562,6 +563,23 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			noModules:     true,
 			expectError:   true,
 			errorMsg:      "nothing to do",
+		},
+		{
+			name:             "--no-platform and --no-modules with an exact plugin pin is a plugins-only pull",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			noModules:        true,
+			pluginsWhitelist: []string{"stronghold@=v1.2.3"},
+			expectError:      false,
+		},
+		{
+			name:             "plugins-only pull still rejects a ranged plugin pin",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			noModules:        true,
+			pluginsWhitelist: []string{"stronghold@^1.0.0"},
+			expectError:      true,
+			errorMsg:         "exact version",
 		},
 		{
 			name:                     "--only-extra-images still requires --include-module even with --no-modules",
@@ -612,6 +630,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				deckhouseTag             string
 				sinceVersionString       string
 				modulesWhitelist         []string
+				pluginsWhitelist         []string
 				noPlatform               bool
 				noModules                bool
 				onlyExtraImages          bool
@@ -621,6 +640,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				deckhouseTag:             pullflags.DeckhouseTag,
 				sinceVersionString:       pullflags.SinceVersionString,
 				modulesWhitelist:         pullflags.ModulesWhitelist,
+				pluginsWhitelist:         pullflags.PluginsWhitelist,
 				noPlatform:               pullflags.NoPlatform,
 				noModules:                pullflags.NoModules,
 				onlyExtraImages:          pullflags.OnlyExtraImages,
@@ -631,6 +651,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				pullflags.DeckhouseTag = originals.deckhouseTag
 				pullflags.SinceVersionString = originals.sinceVersionString
 				pullflags.ModulesWhitelist = originals.modulesWhitelist
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
 				pullflags.NoPlatform = originals.noPlatform
 				pullflags.NoModules = originals.noModules
 				pullflags.OnlyExtraImages = originals.onlyExtraImages
@@ -641,6 +662,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			pullflags.DeckhouseTag = tt.deckhouseTag
 			pullflags.SinceVersionString = tt.sinceVersionString
 			pullflags.ModulesWhitelist = tt.modulesWhitelist
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
 			pullflags.NoPlatform = tt.noPlatform
 			pullflags.NoModules = tt.noModules
 			pullflags.OnlyExtraImages = tt.onlyExtraImages

@@ -192,7 +192,8 @@ func resolveModuleFlags() {
 // not switched off via --no-platform / --no-modules / --only-extra-images)
 // must come with an explicit lower bound, because the probe cannot rely
 // on the registry's tag catalog and has to be told where to start
-// incrementing from.
+// incrementing from. Plugins are a component too: exact --include-plugin
+// pins address manifests by tag, so a plugins-only proxy pull is valid.
 //
 // Notes:
 //   - --deckhouse-tag / --since-version conflicts: --deckhouse-tag asks
@@ -218,12 +219,13 @@ func validateProxyRegistryFlag() error {
 
 	needPlatform := !pullflags.NoPlatform
 	needModules := !pullflags.NoModules || pullflags.OnlyExtraImages
+	needPlugins := len(pullflags.PluginsWhitelist) > 0
 
 	// At least one component must actually be pulled — otherwise the
 	// flag is a no-op against a registry that probably already failed
 	// to satisfy the user.
-	if !needPlatform && !needModules {
-		return errors.New("--proxy-registry has nothing to do: both --no-platform and --no-modules are set")
+	if !needPlatform && !needModules && !needPlugins {
+		return errors.New("--proxy-registry has nothing to do: --no-platform and --no-modules are set and no --include-plugin is given")
 	}
 
 	if needPlatform && pullflags.PlatformConstraintString == "" {
