@@ -40,6 +40,7 @@ import (
 	backup "github.com/deckhouse/deckhouse-cli/internal/backup/cmd"
 	cr "github.com/deckhouse/deckhouse-cli/internal/cr/cmd"
 	data "github.com/deckhouse/deckhouse-cli/internal/data/cmd"
+	distcmd "github.com/deckhouse/deckhouse-cli/internal/dist/cmd"
 	iam "github.com/deckhouse/deckhouse-cli/internal/iam/cmd"
 	iamuser "github.com/deckhouse/deckhouse-cli/internal/iam/user/cmd"
 	mirror "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd"
@@ -47,7 +48,6 @@ import (
 	packagecmd "github.com/deckhouse/deckhouse-cli/internal/packagecmd"
 	pluginscmd "github.com/deckhouse/deckhouse-cli/internal/plugins/cmd"
 	"github.com/deckhouse/deckhouse-cli/internal/plugins/flags"
-	selfupdatecmd "github.com/deckhouse/deckhouse-cli/internal/selfupdate/cmd"
 	snapshot "github.com/deckhouse/deckhouse-cli/internal/snapshot/cmd"
 	status "github.com/deckhouse/deckhouse-cli/internal/status/cmd"
 	system "github.com/deckhouse/deckhouse-cli/internal/system/cmd"
@@ -133,12 +133,10 @@ func (r *RootCommand) registerCommands() {
 
 	// delivery-kit and package ship as built-in commands, not as plugins. Declaring
 	// them here satisfies a plugin's dependency on either name without a registry lookup.
-	r.cmd.AddCommand(pluginscmd.NewCommand(
-		r.logger.Named("plugins-command"),
+	r.cmd.AddCommand(distcmd.NewCommand(
+		r.logger.Named("dist-command"),
 		[]string{commands.DeliveryKitCommandName, pluginscmd.PackagePluginName},
 	))
-
-	r.cmd.AddCommand(selfupdatecmd.NewCommand(r.logger.Named("cli-command")))
 }
 
 func (r *RootCommand) Execute() error {

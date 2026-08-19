@@ -34,7 +34,7 @@ type PluginInfo struct {
 // List returns the installed plugins. The registry-packages-proxy serves only
 // allow-listed images by exact name and exposes no catalog endpoint, so the set
 // of available plugins cannot be listed - a plugin is inspected by name with
-// `d8 plugins versions <name>`.
+// `d8 dist plugins versions <name>`.
 func (m *Manager) List() []PluginInfo {
 	installed, err := m.fetchInstalledPlugins()
 	if err != nil {

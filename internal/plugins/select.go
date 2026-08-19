@@ -166,7 +166,7 @@ func noCompatibleError(pluginName string, rejected []rejectedCandidate) error {
 			Category: fmt.Sprintf("no stable version of plugin %q is published", pluginName),
 			Suggestions: []diagnostic.Suggestion{{
 				Cause:     "only pre-releases (rc, alpha, beta) exist",
-				Solutions: []string{fmt.Sprintf("install a pre-release explicitly: d8 plugins install %s --version <version>", pluginName)},
+				Solutions: []string{fmt.Sprintf("install a pre-release explicitly: d8 dist plugins install %s --version <version>", pluginName)},
 			}},
 		}
 	}
@@ -186,8 +186,8 @@ func noCompatibleError(pluginName string, rejected []rejectedCandidate) error {
 	suggestions = append(suggestions, diagnostic.Suggestion{
 		Cause: "no version could be installed",
 		Solutions: []string{
-			fmt.Sprintf("inspect a version's requirements: d8 plugins contract %s", pluginName),
-			fmt.Sprintf("or install an exact version: d8 plugins install %s --version <version>", pluginName),
+			fmt.Sprintf("inspect a version's requirements: d8 dist plugins contract %s", pluginName),
+			fmt.Sprintf("or install an exact version: d8 dist plugins install %s --version <version>", pluginName),
 		},
 	})
 

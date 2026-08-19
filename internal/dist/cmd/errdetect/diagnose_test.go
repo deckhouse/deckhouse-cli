@@ -38,7 +38,7 @@ func TestDiagnose(t *testing.T) {
 	}{
 		{"401", rpp.ErrUnauthorized, "unauthorized (401)", "OIDC"},
 		{"403", rpp.ErrForbidden, "forbidden (403)", "cli-download"},
-		{"404", rpp.ErrNotFound, "version not found (404)", "d8 cli versions"},
+		{"404", rpp.ErrNotFound, "version not found (404)", "d8 dist versions"},
 		{"5xx", rpp.ErrUpstream, "upstream error (5xx)", "registry-packages-proxy pods"},
 		{"discovery", rpp.ErrEndpointDiscovery, "endpoint discovery via the Kubernetes API failed", "--rpp-endpoint"},
 	}

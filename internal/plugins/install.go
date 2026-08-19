@@ -222,7 +222,7 @@ func (m *Manager) planForExplicit(ctx context.Context, pluginName string, versio
 			Category: fmt.Sprintf("cannot install plugin %q %s", pluginName, version.Original()),
 			Suggestions: []diagnostic.Suggestion{{
 				Cause:     reason.summary(),
-				Solutions: []string{fmt.Sprintf("inspect the plugin's requirements: d8 plugins contract %s", pluginName)},
+				Solutions: []string{fmt.Sprintf("inspect the plugin's requirements: d8 dist plugins contract %s", pluginName)},
 			}},
 		}
 	}
@@ -679,7 +679,7 @@ func (m *Manager) linkCurrent(paths pluginPaths) error {
 
 // cacheContract writes the plugin contract JSON to
 // <plugin-dir>/cache/contracts/<name>.json for later lookups by
-// validatePluginConflicts and `d8 plugins list`. The write is atomic (temp +
+// validatePluginConflicts and `d8 dist plugins list`. The write is atomic (temp +
 // rename): the runtime gate reads this file lock-free before every plugin run,
 // and a torn contract would hard-block the plugin until a --force reinstall.
 func (m *Manager) cacheContract(pluginName string, plugin *internal.Plugin) error {

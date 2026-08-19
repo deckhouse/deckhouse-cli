@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package flags defines the shared CLI flag set used by the d8 plugins
+// Package flags defines the shared CLI flag set used by the `d8 dist plugins`
 // management subcommands and consumed when building the registry-packages-proxy
 // client and enforcing cluster-side requirements.
 package flags

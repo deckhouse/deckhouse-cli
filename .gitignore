@@ -33,7 +33,7 @@ bin/
 
 # Release assets
 d8
-dist/
+/dist/
 /build/
 tmp/
 

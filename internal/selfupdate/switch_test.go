@@ -31,7 +31,7 @@ import (
 )
 
 // TestSwitchToStoredVersionRepointsSymlink exercises the store-hit half of
-// `d8 cli use` for a managed install: no stage function, no .old churn - just
+// `d8 dist use` for a managed install: no stage function, no .old churn - just
 // an atomic repoint of the `current` symlink.
 func TestSwitchToStoredVersionRepointsSymlink(t *testing.T) {
 	dir := t.TempDir()

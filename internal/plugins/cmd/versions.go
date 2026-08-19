@@ -27,8 +27,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 )
 
-// newVersionsCommand returns `d8 plugins versions <name>` - list all
-// published versions of one plugin, the same verb `d8 cli versions` uses for
+// newVersionsCommand returns `d8 dist plugins versions <name>` - list all
+// published versions of one plugin, the same verb `d8 dist versions` uses for
 // the CLI itself.
 func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 	return &cobra.Command{
@@ -38,7 +38,7 @@ func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 			"marked, versions newer than it are highlighted.\n\n" +
 			"Versions are fetched by the plugin's name through the registry-packages-proxy, so no\n" +
 			"catalog access is needed. Install a specific version with\n" +
-			"'d8 plugins install <name> --version X' - a version already on disk is switched to\n" +
+			"'d8 dist plugins install <name> --version X' - a version already on disk is switched to\n" +
 			"instantly, without a download.",
 		Args: cobra.ExactArgs(1),
 		ValidArgsFunction: func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -97,7 +97,7 @@ func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 
 // formatPluginVersionList renders the version list newest-first: versions newer
 // than the installed one are green, the installed one is starred and cyan,
-// older ones are dimmed - the same grouping `d8 cli versions` uses. A nil
+// older ones are dimmed - the same grouping `d8 dist versions` uses. A nil
 // current (plugin not installed, version unknown) produces a plain uncolored
 // list. Reports whether current appeared in the list.
 func formatPluginVersionList(versions []*semver.Version, current *semver.Version) ([]string, bool) {
