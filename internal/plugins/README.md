@@ -158,6 +158,15 @@ A failure at any step leaves the previous version installed and working.
 | skip TLS verification on both legs (API server and proxy) | `--insecure-skip-tls-verify` |
 | skip cluster-side requirement checks | `--skip-cluster-checks` / `D8_PLUGINS_SKIP_CLUSTER_CHECKS=1` |
 
+## Air-gapped delivery
+
+`d8 mirror pull` mirrors plugins into the images bundle automatically (plugins
+whose contracts name the mirrored modules, plus their mandatory plugin
+dependencies; `--include-plugin` adds more). After `d8 mirror push` the target
+registry holds them at `deckhouse-cli/plugins/<name>`, where the proxy serves
+them - install/update work as usual. See `internal/mirror/README.MD`
+(Plugin Mirroring).
+
 ## Boundaries and deliberate decisions
 
 - Listing the full plugin catalog over RPP is not supported (the proxy has no
@@ -168,6 +177,12 @@ A failure at any step leaves the previous version installed and working.
   cannot be resolved is skipped); the chain is actually installed only for the
   finally chosen version. Recursion has a cycle guard and a depth cap.
 - Dependencies are only upgraded, never downgraded, to satisfy a constraint.
+- A plugin contract may depend on **external** modules only (those served from
+  `deckhouse/<edition>/modules/<name>`), never on modules embedded in the
+  platform image: `d8 mirror` auto-selects plugins from the mirrored external
+  modules alone, so an embedded-module requirement never triggers selection
+  and, as a secondary requirement, gets the plugin skipped as "not in the
+  bundle".
 
 ## Package map
 

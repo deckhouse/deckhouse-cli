@@ -83,11 +83,16 @@ type PushServiceOptions struct {
 //	│       ├── index.json
 //	│       ├── release/
 //	│       └── <extra-name>/
-//	└── packages/                      # Packages
-//	    └── <package-name>/
-//	        ├── index.json
-//	        ├── version/
-//	        └── <extra-name>/
+//	├── packages/                      # Packages
+//	│   └── <package-name>/
+//	│       ├── index.json
+//	│       ├── version/
+//	│       └── <extra-name>/
+//	└── deckhouse-cli/                 # d8 CLI plugins
+//	    └── plugins/
+//	        └── <plugin-name>/
+//	            ├── index.json
+//	            └── blobs/
 type PushService struct {
 	client     client.Client
 	options    *PushServiceOptions
@@ -162,6 +167,13 @@ func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
 	// Create packages index (deckhouse/packages:<package-name> tags for discovery)
 	if err := svc.userLogger.Process("Create packages index", func() error {
 		return svc.createPackagesIndex(ctx, dirPath, summary)
+	}); err != nil {
+		return summary, err
+	}
+
+	// Create plugins index (deckhouse-cli/plugins:<plugin-name> tags for discovery)
+	if err := svc.userLogger.Process("Create plugins index", func() error {
+		return svc.createPluginsIndex(ctx, dirPath, summary)
 	}); err != nil {
 		return summary, err
 	}
@@ -373,8 +385,8 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 }
 
 // recordPushedComponent tallies a pushed layout into the summary by its bundle
-// segment. Modules and packages are counted from their index step, so their
-// layouts are ignored here.
+// segment. Modules, packages, and plugins are counted from their index steps,
+// so their layouts are ignored here.
 func recordPushedComponent(summary *PushSummary, segment string) {
 	first, _, _ := strings.Cut(segment, "/")
 
@@ -385,6 +397,8 @@ func recordPushedComponent(summary *PushSummary, segment string) {
 		summary.InstallerPushed = true
 	case internal.SecuritySegment:
 		summary.SecurityDatabases++
+	case internal.D8CLISegment:
+		// Plugins are counted by createPluginsIndex.
 	}
 }
 
@@ -528,6 +542,65 @@ func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string,
 	}
 
 	svc.userLogger.Infof("Packages index created successfully")
+
+	return nil
+}
+
+// createPluginsIndex creates the CLI plugins index in the registry: a small
+// random image per plugin with tag = plugin name on the deckhouse-cli/plugins
+// path. The same directory-as-tags convention modules and packages use; the
+// registry-bundle server synthesizes an identical index for bundle-served
+// registries, so both air-gapped delivery shapes look the same.
+func (svc *PushService) createPluginsIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
+	pluginsDir := filepath.Join(rootDir, internal.D8CLISegment, internal.D8PluginsSegment)
+
+	entries, err := os.ReadDir(pluginsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			svc.userLogger.InfoLn("No plugins directory found, skipping plugins index")
+			return nil
+		}
+
+		return fmt.Errorf("read plugins directory %q: %w", pluginsDir, err)
+	}
+
+	var pluginNames []string
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			pluginNames = append(pluginNames, entry.Name())
+		}
+	}
+
+	if len(pluginNames) == 0 {
+		svc.userLogger.InfoLn("No plugins found, skipping plugins index")
+		return nil
+	}
+
+	slices.Sort(pluginNames)
+	summary.Plugins = len(pluginNames)
+	svc.userLogger.Infof("Creating plugins index with %d plugins", len(pluginNames))
+
+	pluginsClient := svc.client.WithSegment(internal.D8CLISegment, internal.D8PluginsSegment)
+
+	for _, pluginName := range pluginNames {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		svc.userLogger.Infof("Creating index tag: %s:%s", pluginsClient.GetRegistry(), pluginName)
+
+		img, err := random.Image(32, 1)
+		if err != nil {
+			return fmt.Errorf("create random image for plugin discovery tag %s: %w", pluginName, err)
+		}
+
+		if err := pluginsClient.PushImage(ctx, pluginName, img); err != nil {
+			return fmt.Errorf("push plugin index tag %s to registry %s: %w", pluginName, pluginsClient.GetRegistry(), err)
+		}
+	}
+
+	svc.userLogger.Infof("Plugins index created successfully")
 
 	return nil
 }

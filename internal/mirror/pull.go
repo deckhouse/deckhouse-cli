@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/packages"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/plugins"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -60,6 +63,12 @@ type PullServiceOptions struct {
 	// PackageFilter is the filter for package selection (whitelist/blacklist).
 	// Packages reuse the modules filter because selection logic is identical.
 	PackageFilter *modules.Filter
+	// PluginFilter carries --include-plugin entries (whitelist, additive to
+	// the module-driven plugin auto-selection). May be nil.
+	PluginFilter *modules.Filter
+	// PluginBuiltins are d8 built-in command names that satisfy a same-named
+	// plugin dependency by presence (never pulled).
+	PluginBuiltins []string
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
@@ -86,6 +95,7 @@ type PullService struct {
 	modulesService   *modules.Service
 	packagesService  *packages.Service
 	installerService *installer.Service
+	pluginsService   *plugins.Service
 
 	options *PullServiceOptions
 
@@ -168,6 +178,20 @@ func NewPullService(
 				BundleDir:       options.BundleDir,
 				BundleChunkSize: options.BundleChunkSize,
 				Timeout:         options.Timeout,
+				DryRun:          options.DryRun,
+				ProxyRegistry:   options.ProxyRegistry,
+			},
+			logger,
+			userLogger,
+		),
+		pluginsService: plugins.NewService(
+			registryService,
+			tmpDir,
+			&plugins.Options{
+				Filter:          options.PluginFilter,
+				Builtins:        builtinsSet(options.PluginBuiltins),
+				BundleDir:       options.BundleDir,
+				BundleChunkSize: options.BundleChunkSize,
 				DryRun:          options.DryRun,
 				ProxyRegistry:   options.ProxyRegistry,
 			},
@@ -270,7 +294,74 @@ func (svc *PullService) Pull(ctx context.Context) (*PullSummary, error) {
 		return summary, fmt.Errorf("pull package release images: %w", err)
 	}
 
+	// Plugins resolve against what the earlier phases put into the bundle
+	// (module and platform versions), so this phase runs last.
+	if svc.options.OnlyExtraImages {
+		summary.Plugins.Skipped = true
+	} else {
+		if err := svc.pluginsService.PullPlugins(ctx, svc.pluginsInput()); err != nil {
+			return summary, fmt.Errorf("pull plugins: %w", err)
+		}
+
+		summary.Plugins = toPluginsStats(svc.pluginsService.Stats())
+	}
+
 	return summary, nil
+}
+
+// pluginsInput assembles the plugins phase input from what the earlier phases
+// actually selected: module versions from the modules stats, platform
+// versions from the platform stats. Both are recorded at resolution time, so
+// the handoff works in dry-run too.
+func (svc *PullService) pluginsInput() plugins.PullInput {
+	return buildPluginsInput(svc.modulesService.Stats(), svc.platformService.Stats().Versions)
+}
+
+func buildPluginsInput(modulesStats modules.ModulesStats, platformVersions []string) plugins.PullInput {
+	in := plugins.PullInput{}
+
+	for _, module := range modulesStats.Modules {
+		versions := parseSemvers(module.Versions)
+		if len(versions) == 0 {
+			continue
+		}
+
+		in.Modules = append(in.Modules, plugins.ModuleInBundle{Name: module.Name, Versions: versions})
+	}
+
+	in.PlatformVersions = parseSemvers(platformVersions)
+
+	return in
+}
+
+// parseSemvers parses version tags, dropping unparseable ones (e.g. channel
+// aliases) - plugin contracts constrain semver versions only.
+func parseSemvers(raw []string) []*semver.Version {
+	versions := make([]*semver.Version, 0, len(raw))
+
+	for _, tag := range raw {
+		version, err := semver.NewVersion(tag)
+		if err != nil {
+			continue
+		}
+
+		versions = append(versions, version)
+	}
+
+	return versions
+}
+
+func builtinsSet(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+
+	return set
 }
 
 // The mapper functions below copy each service's package-local stat struct into
@@ -300,6 +391,35 @@ func toModulesStats(s modules.ModulesStats) ModulesStats {
 		TotalImages:     s.TotalImages,
 		TotalVEX:        s.TotalVEX,
 	}
+}
+
+func toPluginsStats(s plugins.PluginsStats) PluginsStats {
+	stats := PluginsStats{
+		Attempted:   s.Attempted,
+		Warnings:    s.Warnings,
+		TotalImages: s.TotalImages,
+	}
+
+	for _, p := range s.Plugins {
+		versions := make([]PluginVersionStat, 0, len(p.Versions))
+
+		for _, v := range p.Versions {
+			reasons := make([]PluginReason, 0, len(v.Reasons))
+			for _, r := range v.Reasons {
+				reasons = append(reasons, PluginReason{Kind: r.Kind.String(), Subject: r.Subject, Constraint: r.Constraint})
+			}
+
+			versions = append(versions, PluginVersionStat{Version: v.Version, Reasons: reasons})
+		}
+
+		stats.Plugins = append(stats.Plugins, PluginStat{Name: p.Name, Images: p.Images, Versions: versions})
+	}
+
+	for _, skip := range s.Skipped {
+		stats.SkippedPlugins = append(stats.SkippedPlugins, SkippedPluginStat{Name: skip.Name, Reason: skip.Reason})
+	}
+
+	return stats
 }
 
 func toPackagesStats(s packages.PackagesStats) PackagesStats {

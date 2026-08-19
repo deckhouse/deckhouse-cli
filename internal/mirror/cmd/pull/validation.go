@@ -45,6 +45,10 @@ func parseAndValidateParameters(_ *cobra.Command, args []string) error {
 
 	resolveModuleFlags()
 
+	if err = validatePluginFlags(); err != nil {
+		return err
+	}
+
 	if err = validateProxyRegistryFlag(); err != nil {
 		return err
 	}
@@ -187,12 +191,24 @@ func resolveModuleFlags() {
 	}
 }
 
+// validatePluginFlags rejects an explicit --include-plugin that could not be
+// honored: --only-extra-images pulls module extra images only and skips the
+// plugins phase, so the request would be dropped silently.
+func validatePluginFlags() error {
+	if pullflags.OnlyExtraImages && len(pullflags.PluginsWhitelist) > 0 {
+		return errors.New("--only-extra-images cannot be combined with --include-plugin: this mode pulls module extra images only and mirrors no plugins; run a separate pull for the plugins")
+	}
+
+	return nil
+}
+
 // validateProxyRegistryFlag enforces the combinations the proxy-registry
 // probe needs to work: each component that is actually being pulled (i.e.
 // not switched off via --no-platform / --no-modules / --only-extra-images)
 // must come with an explicit lower bound, because the probe cannot rely
 // on the registry's tag catalog and has to be told where to start
-// incrementing from.
+// incrementing from. Plugins are a component too: exact --include-plugin
+// pins address manifests by tag, so a plugins-only proxy pull is valid.
 //
 // Notes:
 //   - --deckhouse-tag / --since-version conflicts: --deckhouse-tag asks
@@ -218,12 +234,13 @@ func validateProxyRegistryFlag() error {
 
 	needPlatform := !pullflags.NoPlatform
 	needModules := !pullflags.NoModules || pullflags.OnlyExtraImages
+	needPlugins := len(pullflags.PluginsWhitelist) > 0
 
 	// At least one component must actually be pulled — otherwise the
 	// flag is a no-op against a registry that probably already failed
 	// to satisfy the user.
-	if !needPlatform && !needModules {
-		return errors.New("--proxy-registry has nothing to do: both --no-platform and --no-modules are set")
+	if !needPlatform && !needModules && !needPlugins {
+		return errors.New("--proxy-registry has nothing to do: --no-platform and --no-modules are set and no --include-plugin is given")
 	}
 
 	if needPlatform && pullflags.PlatformConstraintString == "" {
@@ -243,6 +260,15 @@ func validateProxyRegistryFlag() error {
 			if !strings.Contains(entry, "@") {
 				return fmt.Errorf("--proxy-registry requires every --include-module entry to specify an explicit version constraint (e.g. %q); without it the probe would start at v0.0.0 and miss everything", strings.TrimSpace(entry)+"@^1.0.0")
 			}
+		}
+	}
+
+	// A proxy registry serves no plugins catalog, so version ranges cannot be
+	// resolved; only exact pins address manifests directly by tag.
+	for _, entry := range pullflags.PluginsWhitelist {
+		name, constraint, hasConstraint := strings.Cut(strings.TrimSpace(entry), "@")
+		if !hasConstraint || !strings.HasPrefix(strings.TrimSpace(constraint), "=") {
+			return fmt.Errorf("--proxy-registry requires every --include-plugin entry to pin an exact version (e.g. %q): the registry serves no catalog to resolve version ranges against", strings.TrimSpace(name)+"@=v1.0.0")
 		}
 	}
 

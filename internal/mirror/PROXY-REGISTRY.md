@@ -24,6 +24,8 @@ Caching/proxy registries usually refuse the catalog API outright — they only s
 | Pull from a caching/proxy registry that has already cached the desired versions | `--proxy-registry` + `--include-platform` + `--include-module` |
 | Pull from a registry that supports the catalog API but you still want range-based filtering | omit `--proxy-registry`, use `--include-platform` alone |
 
+**d8 CLI plugins:** automatic plugin selection needs the plugins catalog, which a proxy registry does not serve, so it is skipped in this mode. To mirror plugins, pin them exactly: `--include-plugin <name>@=vX.Y.Z` (exact pins address manifests by tag, no listing involved; the CLI validates this up front). A pinned plugin's mandatory plugin dependencies must be pinned the same way - there is no catalog to pick their versions from, and the pull fails naming the dependency otherwise.
+
 ---
 
 ## End-to-end flow

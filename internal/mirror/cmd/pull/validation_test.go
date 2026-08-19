@@ -498,6 +498,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 		deckhouseTag             string
 		sinceVersionString       string
 		modulesWhitelist         []string
+		pluginsWhitelist         []string
 		noPlatform               bool
 		noModules                bool
 		onlyExtraImages          bool
@@ -541,11 +542,11 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			errorMsg:                 "explicit version constraint",
 		},
 		{
-			name:                     "--no-platform skips the include-platform requirement",
-			proxyRegistry:            true,
-			noPlatform:               true,
-			modulesWhitelist:         []string{"prometheus@^1.0.0"},
-			expectError:              false,
+			name:             "--no-platform skips the include-platform requirement",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			modulesWhitelist: []string{"prometheus@^1.0.0"},
+			expectError:      false,
 		},
 		{
 			name:                     "--no-modules skips the include-module requirement",
@@ -562,6 +563,23 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			noModules:     true,
 			expectError:   true,
 			errorMsg:      "nothing to do",
+		},
+		{
+			name:             "--no-platform and --no-modules with an exact plugin pin is a plugins-only pull",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			noModules:        true,
+			pluginsWhitelist: []string{"stronghold@=v1.2.3"},
+			expectError:      false,
+		},
+		{
+			name:             "plugins-only pull still rejects a ranged plugin pin",
+			proxyRegistry:    true,
+			noPlatform:       true,
+			noModules:        true,
+			pluginsWhitelist: []string{"stronghold@^1.0.0"},
+			expectError:      true,
+			errorMsg:         "exact version",
 		},
 		{
 			name:                     "--only-extra-images still requires --include-module even with --no-modules",
@@ -612,6 +630,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				deckhouseTag             string
 				sinceVersionString       string
 				modulesWhitelist         []string
+				pluginsWhitelist         []string
 				noPlatform               bool
 				noModules                bool
 				onlyExtraImages          bool
@@ -621,6 +640,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				deckhouseTag:             pullflags.DeckhouseTag,
 				sinceVersionString:       pullflags.SinceVersionString,
 				modulesWhitelist:         pullflags.ModulesWhitelist,
+				pluginsWhitelist:         pullflags.PluginsWhitelist,
 				noPlatform:               pullflags.NoPlatform,
 				noModules:                pullflags.NoModules,
 				onlyExtraImages:          pullflags.OnlyExtraImages,
@@ -631,6 +651,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				pullflags.DeckhouseTag = originals.deckhouseTag
 				pullflags.SinceVersionString = originals.sinceVersionString
 				pullflags.ModulesWhitelist = originals.modulesWhitelist
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
 				pullflags.NoPlatform = originals.noPlatform
 				pullflags.NoModules = originals.noModules
 				pullflags.OnlyExtraImages = originals.onlyExtraImages
@@ -641,6 +662,7 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 			pullflags.DeckhouseTag = tt.deckhouseTag
 			pullflags.SinceVersionString = tt.sinceVersionString
 			pullflags.ModulesWhitelist = tt.modulesWhitelist
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
 			pullflags.NoPlatform = tt.noPlatform
 			pullflags.NoModules = tt.noModules
 			pullflags.OnlyExtraImages = tt.onlyExtraImages
@@ -652,6 +674,60 @@ func TestValidationValidateProxyRegistryFlag(t *testing.T) {
 				if tt.errorMsg != "" {
 					assert.Contains(t, err.Error(), tt.errorMsg)
 				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestValidateProxyRegistryFlag_PluginPins: with --proxy-registry every
+// --include-plugin entry must pin an exact version - the registry serves no
+// catalog, so version ranges have nothing to resolve against.
+func TestValidateProxyRegistryFlag_PluginPins(t *testing.T) {
+	tests := []struct {
+		name             string
+		pluginsWhitelist []string
+		expectError      bool
+	}{
+		{name: "no plugin includes", pluginsWhitelist: nil, expectError: false},
+		{name: "exact pin passes", pluginsWhitelist: []string{"stronghold@=v1.2.3"}, expectError: false},
+		{name: "bare name rejected", pluginsWhitelist: []string{"stronghold"}, expectError: true},
+		{name: "semver range rejected", pluginsWhitelist: []string{"stronghold@^1.0.0"}, expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originals := struct {
+				proxyRegistry            bool
+				platformConstraintString string
+				noModules                bool
+				pluginsWhitelist         []string
+			}{
+				proxyRegistry:            pullflags.ProxyRegistry,
+				platformConstraintString: pullflags.PlatformConstraintString,
+				noModules:                pullflags.NoModules,
+				pluginsWhitelist:         pullflags.PluginsWhitelist,
+			}
+			defer func() {
+				pullflags.ProxyRegistry = originals.proxyRegistry
+				pullflags.PlatformConstraintString = originals.platformConstraintString
+				pullflags.NoModules = originals.noModules
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
+			}()
+
+			// A valid proxy-registry context, so only the plugin rule fires.
+			pullflags.ProxyRegistry = true
+			pullflags.PlatformConstraintString = "^1.64.0"
+			pullflags.NoModules = true
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
+
+			err := validateProxyRegistryFlag()
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "include-plugin")
+				assert.Contains(t, err.Error(), "exact version")
 			} else {
 				assert.NoError(t, err)
 			}
@@ -707,6 +783,50 @@ func TestValidationResolveModuleFlags(t *testing.T) {
 			resolveModuleFlags()
 
 			assert.Equal(t, tt.expectedNoModules, pullflags.NoModules)
+		})
+	}
+}
+
+// TestValidationValidatePluginFlags: --only-extra-images skips the plugins
+// phase, so an explicit --include-plugin is rejected up front instead of
+// being dropped silently.
+func TestValidationValidatePluginFlags(t *testing.T) {
+	tests := []struct {
+		name             string
+		onlyExtraImages  bool
+		pluginsWhitelist []string
+		expectError      bool
+	}{
+		{name: "only-extra-images with include-plugin is rejected", onlyExtraImages: true, pluginsWhitelist: []string{"stronghold@=v1.2.3"}, expectError: true},
+		{name: "only-extra-images alone is fine", onlyExtraImages: true, expectError: false},
+		{name: "include-plugin alone is fine", pluginsWhitelist: []string{"stronghold"}, expectError: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originals := struct {
+				onlyExtraImages  bool
+				pluginsWhitelist []string
+			}{
+				onlyExtraImages:  pullflags.OnlyExtraImages,
+				pluginsWhitelist: pullflags.PluginsWhitelist,
+			}
+			defer func() {
+				pullflags.OnlyExtraImages = originals.onlyExtraImages
+				pullflags.PluginsWhitelist = originals.pluginsWhitelist
+			}()
+
+			pullflags.OnlyExtraImages = tt.onlyExtraImages
+			pullflags.PluginsWhitelist = tt.pluginsWhitelist
+
+			err := validatePluginFlags()
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "--only-extra-images cannot be combined with --include-plugin")
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

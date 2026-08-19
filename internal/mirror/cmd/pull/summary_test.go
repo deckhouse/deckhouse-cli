@@ -408,17 +408,18 @@ func TestRenderPullSummary(t *testing.T) {
 			skippedCount: -1,
 		},
 		{
-			name: "everything skipped renders five skipped lines and no body",
+			name: "everything skipped renders six skipped lines and no body",
 			summary: &mirror.PullSummary{
 				Platform:  mirror.ComponentStats{Skipped: true},
 				Installer: mirror.ComponentStats{Skipped: true},
 				Security:  mirror.SecurityStats{Skipped: true},
 				Modules:   mirror.ModulesStats{Skipped: true},
 				Packages:  mirror.PackagesStats{Skipped: true},
+				Plugins:   mirror.PluginsStats{Skipped: true},
 			},
-			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:"},
+			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:", "Plugins:"},
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
-			skippedCount: 5,
+			skippedCount: 6,
 		},
 		{
 			name: "moved modules path with modules pulled is warned about",
@@ -494,6 +495,122 @@ func TestRenderPullSummary(t *testing.T) {
 // enabled and fully suppressed otherwise - the contract that keeps escape codes
 // out of pipes, files, and captured logs (fatih/color flips color.NoColor from
 // the stdout TTY check and NO_COLOR, which the logger writes to).
+// TestRenderPullSummary_Plugins pins the plugins section: the aggregate line
+// with the provenance breakdown, the module-grouped tree in verbose mode, the
+// dependency nesting, and skipped plugins plus resolver warnings visible
+// without verbose.
+func TestRenderPullSummary_Plugins(t *testing.T) {
+	color.NoColor = true
+
+	pluginsStats := mirror.PluginsStats{
+		Attempted: true,
+		Plugins: []mirror.PluginStat{
+			{
+				Name:   "db-connector",
+				Images: 1,
+				Versions: []mirror.PluginVersionStat{{
+					Version: "v0.9.1",
+					Reasons: []mirror.PluginReason{{Kind: "dependency", Subject: "postgresql-mgr@v1.2.0", Constraint: ">=0.9.0"}},
+				}},
+			},
+			{
+				Name:   "postgresql-mgr",
+				Images: 2,
+				Versions: []mirror.PluginVersionStat{
+					{Version: "v1.2.0", Reasons: []mirror.PluginReason{{Kind: "module", Subject: "postgresql", Constraint: ">=1.5.0"}}},
+					{Version: "v1.1.0", Reasons: []mirror.PluginReason{{Kind: "module", Subject: "postgresql", Constraint: ">=1.0.0 <1.5.0"}}},
+				},
+			},
+			{
+				Name:   "velero-helper",
+				Images: 1,
+				Versions: []mirror.PluginVersionStat{{
+					Version: "v0.3.0",
+					Reasons: []mirror.PluginReason{{Kind: "explicit", Subject: "--include-plugin velero-helper"}},
+				}},
+			},
+		},
+		SkippedPlugins: []mirror.SkippedPluginStat{
+			{Name: "backup-tool", Reason: `for module postgresql v1.0.0: requires module "postgresql" >=3.0.0`},
+		},
+		Warnings: []string{
+			`plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it`,
+		},
+		TotalImages: 4,
+	}
+
+	base := func() *mirror.PullSummary {
+		return &mirror.PullSummary{
+			Elapsed:  time.Minute,
+			Platform: mirror.ComponentStats{Attempted: true},
+			Security: mirror.SecurityStats{Attempted: true, Available: true},
+			Modules:  mirror.ModulesStats{Attempted: true},
+			Packages: mirror.PackagesStats{Attempted: true},
+			Plugins:  pluginsStats,
+		}
+	}
+
+	t.Run("aggregate line with provenance breakdown", func(t *testing.T) {
+		out := renderPullSummary(base(), false)
+
+		require.Contains(t, out, "Plugins:")
+		require.Contains(t, out, "1 for modules")
+		require.Contains(t, out, "1 dependency")
+		require.Contains(t, out, "1 explicit")
+	})
+
+	t.Run("skips are visible without verbose", func(t *testing.T) {
+		out := renderPullSummary(base(), false)
+
+		require.Contains(t, out, "skipped: backup-tool")
+		require.Contains(t, out, `requires module "postgresql" >=3.0.0`)
+		require.NotContains(t, out, "└", "the tree is verbose-only")
+	})
+
+	t.Run("warnings are visible without verbose", func(t *testing.T) {
+		out := renderPullSummary(base(), false)
+
+		require.Contains(t, out, "warning: plugin velero-helper@v0.3.0 (explicitly included)")
+		require.Contains(t, out, `requires module "velero" which is not in the bundle`)
+	})
+
+	t.Run("verbose renders the module-grouped tree", func(t *testing.T) {
+		out := renderPullSummary(base(), true)
+
+		require.Contains(t, out, "postgresql\n", "the module group header must be present")
+		require.Contains(t, out, "postgresql-mgr")
+		require.Contains(t, out, "[v1.2.0, v1.1.0]", "versions are sorted newest-first, like modules")
+		require.Contains(t, out, "└ db-connector")
+		require.Contains(t, out, "(dependency)")
+		require.Contains(t, out, "explicit\n", "explicit-only plugins get their own group")
+		require.Contains(t, out, "velero-helper")
+	})
+
+	t.Run("phase skipped renders skipped", func(t *testing.T) {
+		s := base()
+		s.Plugins = mirror.PluginsStats{Skipped: true}
+
+		out := renderPullSummary(s, false)
+		require.Regexp(t, `Plugins:\s+skipped`, out)
+	})
+
+	t.Run("phase never ran renders not pulled", func(t *testing.T) {
+		s := base()
+		s.Plugins = mirror.PluginsStats{}
+
+		out := renderPullSummary(s, false)
+		require.Regexp(t, `Plugins:\s+not pulled`, out)
+	})
+
+	t.Run("zero plugins render a bare count", func(t *testing.T) {
+		s := base()
+		s.Plugins = mirror.PluginsStats{Attempted: true}
+
+		out := renderPullSummary(s, false)
+		require.Regexp(t, `Plugins:\s+0`, out)
+	})
+}
+
 func TestRenderPullSummary_ColorGating(t *testing.T) {
 	orig := color.NoColor
 	defer func() { color.NoColor = orig }()

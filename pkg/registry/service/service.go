@@ -47,6 +47,7 @@ type Service struct {
 	deckhouseService *DeckhouseService
 	security         *SecurityServices
 	installer        *InstallerServices
+	plugins          *PluginsService
 
 	// modulesPath is the registry path where modules live, relative to the
 	// edition root. Defaults to "modules"; empty means the edition root. May
@@ -111,6 +112,7 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger, opts .
 
 	// services that are not scoped by edition
 	s.installer = NewInstallerServices(installerServiceName, c.WithSegment("installer"), logger.Named("installer"))
+	s.plugins = NewPluginsService(c.WithSegment(deckhouseCLISegment, pluginsSegment), logger.Named("plugins"))
 
 	return s
 }
@@ -159,6 +161,12 @@ func (s *Service) Security() *SecurityServices {
 
 func (s *Service) InstallerService() *InstallerServices {
 	return s.installer
+}
+
+// PluginService returns the CLI plugins catalog service. It is scoped to
+// <root>/deckhouse-cli/plugins, outside the edition segment.
+func (s *Service) PluginService() *PluginsService {
+	return s.plugins
 }
 
 // GetEditionFromRegistryPath cuts the edition from the registry path

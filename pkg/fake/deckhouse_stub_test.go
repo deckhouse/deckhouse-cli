@@ -165,3 +165,42 @@ func TestNewRegistryClientStub_GetRegistry(t *testing.T) {
 	// registry.deckhouse.ru/deckhouse/fe
 	assert.Equal(t, "registry.deckhouse.ru/deckhouse/fe", client.GetRegistry())
 }
+
+// TestNewRegistryClientStub_Modules verifies the modules catalog: the
+// cert-manager module with a version reachable via its stable channel.
+func TestNewRegistryClientStub_Modules(t *testing.T) {
+	client := fake.NewRegistryClientStub()
+	ctx := context.Background()
+
+	names, err := client.WithSegment("modules").ListTags(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"cert-manager"}, names)
+
+	releaseTags, err := client.WithSegment("modules", "cert-manager", "release").ListTags(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"stable", "v0.5.0"}, releaseTags)
+
+	err = client.WithSegment("modules", "cert-manager").CheckImageExists(ctx, "v0.5.0")
+	assert.NoError(t, err)
+}
+
+// TestNewRegistryClientStub_PluginsCatalog verifies the plugins catalog: the
+// name index tag and the plugin version image carrying a contract annotation.
+func TestNewRegistryClientStub_PluginsCatalog(t *testing.T) {
+	client := fake.NewRegistryClientStub()
+	ctx := context.Background()
+
+	names, err := client.WithSegment("deckhouse-cli", "plugins").ListTags(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"cert-manager-tool"}, names)
+
+	pluginClient := client.WithSegment("deckhouse-cli", "plugins", "cert-manager-tool")
+	require.NoError(t, pluginClient.CheckImageExists(ctx, "v1.0.0"))
+
+	manifestResult, err := pluginClient.GetManifest(ctx, "v1.0.0")
+	require.NoError(t, err)
+	manifest, err := manifestResult.GetManifest()
+	require.NoError(t, err)
+	assert.NotEmpty(t, manifest.GetAnnotations()["contract"],
+		"the plugin version must carry the base64 contract annotation")
+}

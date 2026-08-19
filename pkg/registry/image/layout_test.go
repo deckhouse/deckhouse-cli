@@ -21,7 +21,9 @@ import (
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -134,6 +136,100 @@ func TestAddImage_NewDescriptorForSameTagDifferentDigest(t *testing.T) {
 	require.NotNil(t, meta.GetDigest())
 	assert.Equal(t, digestB.String(), meta.GetDigest().String(),
 		"in-memory metadata for the tag must reflect the latest AddImage call")
+}
+
+// buildMultiPlatformIndex builds a two-platform OCI index with a top-level
+// annotation - the shape CLI plugin images are published in.
+func buildMultiPlatformIndex(t *testing.T, contract string) v1.ImageIndex {
+	t.Helper()
+
+	linuxImg := upfake.NewImageBuilder().WithFile("plugin", "linux-bin").MustBuild()
+	darwinImg := upfake.NewImageBuilder().WithFile("plugin", "darwin-bin").MustBuild()
+
+	idx := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{
+			Add:        linuxImg,
+			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}},
+		},
+		mutate.IndexAddendum{
+			Add:        darwinImg,
+			Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "darwin", Architecture: "arm64"}},
+		},
+	)
+
+	withAnnotations := mutate.Annotations(idx, map[string]string{"contract": contract})
+
+	annotated, ok := withAnnotations.(v1.ImageIndex)
+	require.True(t, ok, "mutate.Annotations on an index must return an index")
+
+	return annotated
+}
+
+// TestAddIndex_PreservesIndexStructure checks that the index lands as one
+// descriptor, the children keep their platforms, the contract annotation
+// survives byte-exact, and the ref/short_tag annotations for the pusher are
+// set.
+func TestAddIndex_PreservesIndexStructure(t *testing.T) {
+	l, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	idx := buildMultiPlatformIndex(t, "ZmFrZS1jb250cmFjdA==")
+	idxDigest, err := idx.Digest()
+	require.NoError(t, err)
+
+	const tagRef = "example.io/deckhouse-cli/plugins/foo:v1.0.0"
+	require.NoError(t, l.AddIndex(idx, "v1.0.0", tagRef))
+
+	require.Equal(t, 1, indexDescriptorCount(t, l),
+		"a single AddIndex call must produce exactly one descriptor")
+
+	topIndex, err := l.Path().ImageIndex()
+	require.NoError(t, err)
+	topManifest, err := topIndex.IndexManifest()
+	require.NoError(t, err)
+
+	desc := topManifest.Manifests[0]
+	assert.True(t, desc.MediaType.IsIndex(), "the descriptor must keep the index media type")
+	assert.Equal(t, idxDigest, desc.Digest, "the index digest must be preserved")
+	assert.Equal(t, tagRef, desc.Annotations[regimage.AnnotationImageReferenceName])
+	assert.Equal(t, "v1.0.0", desc.Annotations[regimage.AnnotationImageShortTag])
+
+	nested, err := topIndex.ImageIndex(desc.Digest)
+	require.NoError(t, err, "the nested index must be readable from the layout")
+	nestedManifest, err := nested.IndexManifest()
+	require.NoError(t, err)
+
+	require.Len(t, nestedManifest.Manifests, 2, "both platform children must survive")
+	platforms := []string{
+		nestedManifest.Manifests[0].Platform.String(),
+		nestedManifest.Manifests[1].Platform.String(),
+	}
+	assert.ElementsMatch(t, []string{"linux/amd64", "darwin/arm64"}, platforms)
+	assert.Equal(t, "ZmFrZS1jb250cmFjdA==", nestedManifest.Annotations["contract"],
+		"the top-level contract annotation must survive intact")
+
+	meta, err := l.GetMeta("v1.0.0")
+	require.NoError(t, err)
+	require.NotNil(t, meta.GetDigest())
+	assert.Equal(t, idxDigest.String(), meta.GetDigest().String())
+	assert.Equal(t, "example.io/deckhouse-cli/plugins/foo@"+idxDigest.String(), meta.GetDigestReference())
+}
+
+// TestAddIndex_IdempotentForSameTagAndDigest: same guard as AddImage - a
+// repeated call with the same (tag, digest) must not append a duplicate
+// descriptor, or retried pulls would inflate the layout and the push.
+func TestAddIndex_IdempotentForSameTagAndDigest(t *testing.T) {
+	l, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	idx := buildMultiPlatformIndex(t, "ZmFrZS1jb250cmFjdA==")
+
+	require.NoError(t, l.AddIndex(idx, "v1.0.0", "example.io/repo:v1.0.0"))
+	require.NoError(t, l.AddIndex(idx, "v1.0.0", "example.io/repo:v1.0.0"),
+		"second AddIndex with same tag+digest must be a no-op, not an error")
+
+	assert.Equal(t, 1, indexDescriptorCount(t, l),
+		"AddIndex must not append a second descriptor for the same (tag, digest)")
 }
 
 // TestCountManifestsMatching verifies that CountManifestsMatching counts only

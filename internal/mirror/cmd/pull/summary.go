@@ -84,6 +84,11 @@ var (
 //	║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]
 //	║ Packages:   1
 //	║     deckhouse                       [v1.69.1]
+//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║     console
+//	║       console-ctl                   [v0.4.1]
+//	║       └ db-connector                [v0.9.1]  (dependency)
+//	║     skipped: backup-tool - for module console v1.40.0: requires module "console" >=2.0.0
 //	║
 //	║ Bundle artifacts (3 files)
 //	║   platform.tar                      2.9 GiB
@@ -117,6 +122,7 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	writeSecurity(&b, s.Security)
 	writeModules(&b, s.Modules, verbose)
 	writePackages(&b, s.Packages, verbose)
+	writePlugins(&b, s.Plugins, verbose)
 
 	if !s.DryRun && len(s.Bundle.Files) > 0 {
 		b.WriteString(bar() + "\n")
@@ -361,6 +367,259 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 		}
 
 		fmt.Fprintf(b, "%s     %s\n", bar(), line)
+	}
+}
+
+// writePlugins renders the plugins line, the module-grouped provenance tree
+// (verbose only), then skipped plugins with reasons and resolver warnings
+// (always - losing a plugin in an air-gapped bundle, or shipping one the
+// target cluster cannot run, is an operational surprise). e.g.:
+//
+//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║     postgresql
+//	║       postgresql-mgr              [v1.2.0, v1.1.0]
+//	║       └ db-connector              [v0.9.1]  (dependency)
+//	║     skipped: backup-tool - requires module "postgresql" >=3.0.0
+//	║     warning: plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it
+func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
+	label := cLabel(padLabel("Plugins"))
+
+	if p.Skipped {
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
+		return
+	}
+
+	if !p.Attempted {
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not pulled"))
+		return
+	}
+
+	// Aggregate: count plus the provenance breakdown (why plugins are here).
+	parts := []string{cCount(fmt.Sprint(len(p.Plugins)))}
+
+	counts := countPluginProvenance(p.Plugins)
+	if counts.forModules > 0 {
+		parts = append(parts, cDim(fmt.Sprintf("%d for modules", counts.forModules)))
+	}
+
+	if counts.dependencies > 0 {
+		word := "dependencies"
+		if counts.dependencies == 1 {
+			word = "dependency"
+		}
+
+		parts = append(parts, cDim(fmt.Sprintf("%d %s", counts.dependencies, word)))
+	}
+
+	if counts.explicit > 0 {
+		parts = append(parts, cDim(fmt.Sprintf("%d explicit", counts.explicit)))
+	}
+
+	fmt.Fprintf(b, "%s %s %s\n", bar(), label, strings.Join(parts, "  "+cDim("·")+"  "))
+
+	if verbose {
+		writePluginsTree(b, p.Plugins)
+	}
+
+	for _, skip := range p.SkippedPlugins {
+		fmt.Fprintf(b, "%s     %s\n", bar(), cWarn("skipped: "+skip.Name+" - "+skip.Reason))
+	}
+
+	for _, warning := range p.Warnings {
+		fmt.Fprintf(b, "%s     %s\n", bar(), cWarn("warning: "+warning))
+	}
+}
+
+// pluginProvenanceCounts is the per-category tally of the aggregate line.
+type pluginProvenanceCounts struct {
+	forModules   int
+	dependencies int
+	explicit     int
+}
+
+// countPluginProvenance counts each plugin once by its strongest provenance:
+// serving a mirrored module beats an explicit include, which beats being
+// someone's dependency.
+func countPluginProvenance(plugins []mirror.PluginStat) pluginProvenanceCounts {
+	var counts pluginProvenanceCounts
+
+	for _, plugin := range plugins {
+		provenance := pluginProvenance(plugin)
+
+		switch {
+		case len(provenance.modules) > 0:
+			counts.forModules++
+		case provenance.explicit:
+			counts.explicit++
+		default:
+			counts.dependencies++
+		}
+	}
+
+	return counts
+}
+
+// pluginProvenanceInfo is one plugin's provenance aggregated across its
+// versions: the sorted modules it serves, the plugins depending on it, and
+// whether it was explicitly included.
+type pluginProvenanceInfo struct {
+	modules    []string
+	dependents []string
+	explicit   bool
+}
+
+func pluginProvenance(plugin mirror.PluginStat) pluginProvenanceInfo {
+	var info pluginProvenanceInfo
+
+	seenModules := make(map[string]struct{})
+	seenDependents := make(map[string]struct{})
+
+	for _, version := range plugin.Versions {
+		for _, reason := range version.Reasons {
+			switch reason.Kind {
+			case "module":
+				if _, ok := seenModules[reason.Subject]; !ok {
+					seenModules[reason.Subject] = struct{}{}
+					info.modules = append(info.modules, reason.Subject)
+				}
+			case "dependency":
+				// Subject is "<dependent>@<version>"; group by the plugin name.
+				name, _, _ := strings.Cut(reason.Subject, "@")
+				if _, ok := seenDependents[name]; !ok {
+					seenDependents[name] = struct{}{}
+					info.dependents = append(info.dependents, name)
+				}
+			case "explicit":
+				info.explicit = true
+			}
+		}
+	}
+
+	sort.Strings(info.modules)
+	sort.Strings(info.dependents)
+
+	return info
+}
+
+// pluginTreeNode is one rendered plugin with its dependency children.
+type pluginTreeNode struct {
+	stat     mirror.PluginStat
+	note     string
+	children []*pluginTreeNode
+}
+
+// writePluginsTree renders plugins grouped by the module they serve, with
+// dependency plugins nested under their dependents and explicitly included
+// plugins in their own group. e.g.:
+//
+//	║     postgresql
+//	║       postgresql-mgr              [v1.1.0, v1.2.0]
+//	║       └ db-connector              [v0.9.1]  (dependency)
+//	║     explicit
+//	║       velero-helper               [v0.3.0]
+func writePluginsTree(b *strings.Builder, plugins []mirror.PluginStat) {
+	nodes := make(map[string]*pluginTreeNode, len(plugins))
+	for _, plugin := range plugins {
+		nodes[plugin.Name] = &pluginTreeNode{stat: plugin}
+	}
+
+	// Group roots by the module they serve (first module alphabetically; the
+	// rest become an "(also for ...)" note) or under "explicit". Dependency-only
+	// plugins nest under their first dependent.
+	groups := make(map[string][]*pluginTreeNode)
+
+	var groupNames []string
+
+	addToGroup := func(group string, node *pluginTreeNode) {
+		if _, ok := groups[group]; !ok {
+			groupNames = append(groupNames, group)
+		}
+
+		groups[group] = append(groups[group], node)
+	}
+
+	for _, plugin := range plugins {
+		node := nodes[plugin.Name]
+		provenance := pluginProvenance(plugin)
+
+		switch {
+		case len(provenance.modules) > 0:
+			if len(provenance.modules) > 1 {
+				node.note = cDim("(also for " + strings.Join(provenance.modules[1:], ", ") + ")")
+			}
+
+			addToGroup(provenance.modules[0], node)
+		case provenance.explicit:
+			addToGroup("explicit", node)
+		case len(provenance.dependents) > 0:
+			node.note = cDim("(dependency)")
+			if parent, ok := nodes[provenance.dependents[0]]; ok {
+				parent.children = append(parent.children, node)
+				continue
+			}
+
+			addToGroup("dependencies", node)
+		default:
+			addToGroup("other", node)
+		}
+	}
+
+	// Module groups sort alphabetically; the pseudo-groups (explicit,
+	// dependency orphans) always render after them.
+	pseudo := map[string]int{"dependencies": 1, "explicit": 2, "other": 3}
+
+	sort.Slice(groupNames, func(i, j int) bool {
+		pi, pj := pseudo[groupNames[i]], pseudo[groupNames[j]]
+		if pi != pj {
+			return pi < pj
+		}
+
+		return groupNames[i] < groupNames[j]
+	})
+
+	for _, group := range groupNames {
+		fmt.Fprintf(b, "%s     %s\n", bar(), group)
+
+		for _, node := range groups[group] {
+			writePluginNode(b, node, 0)
+		}
+	}
+}
+
+// writePluginNode renders one plugin line and recurses into its dependency
+// children, indenting each level under its parent.
+func writePluginNode(b *strings.Builder, node *pluginTreeNode, depth int) {
+	name := node.stat.Name
+	if depth > 0 {
+		name = strings.Repeat("  ", depth-1) + "└ " + name
+	}
+
+	versions := make([]string, 0, len(node.stat.Versions))
+	for _, v := range node.stat.Versions {
+		versions = append(versions, v.Version)
+	}
+
+	line := name
+
+	suffix := ""
+	if len(versions) > 0 {
+		suffix = "  " + cVersion("["+strings.Join(sortVersions(versions), ", ")+"]")
+	}
+
+	if node.note != "" {
+		suffix += "  " + node.note
+	}
+
+	if suffix != "" {
+		line = fmt.Sprintf("%-*s%s", nameWidth, name, suffix)
+	}
+
+	fmt.Fprintf(b, "%s       %s\n", bar(), line)
+
+	sort.Slice(node.children, func(i, j int) bool { return node.children[i].stat.Name < node.children[j].stat.Name })
+
+	for _, child := range node.children {
+		writePluginNode(b, child, depth+1)
 	}
 }
 

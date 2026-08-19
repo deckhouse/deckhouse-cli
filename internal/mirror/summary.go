@@ -109,6 +109,52 @@ type PackagesStats struct {
 	TotalVEX int
 }
 
+// PluginReason is one provenance edge of a pulled plugin version: why it is
+// in the bundle. Kind is "module" (Subject = module name), "dependency"
+// (Subject = "<dependent>@<version>"), or "explicit" (Subject = the flag).
+type PluginReason struct {
+	Kind       string
+	Subject    string
+	Constraint string
+}
+
+// PluginVersionStat is one pulled plugin version with its provenance.
+type PluginVersionStat struct {
+	Version string
+	Reasons []PluginReason
+}
+
+// PluginStat is one plugin's contribution to the pull.
+type PluginStat struct {
+	Name   string
+	Images int
+	// Versions are the pulled versions, newest first. Available in dry-run too.
+	Versions []PluginVersionStat
+}
+
+// SkippedPluginStat is a plugin the resolver considered and dropped, with the
+// reason spelled out.
+type SkippedPluginStat struct {
+	Name   string
+	Reason string
+}
+
+// PluginsStats aggregates the plugins phase accounting.
+type PluginsStats struct {
+	// Skipped is true when the phase did not run (--only-extra-images).
+	Skipped bool
+	// Attempted is true when the plugins phase ran.
+	Attempted bool
+	// Plugins holds the per-plugin breakdown, sorted by name.
+	Plugins []PluginStat
+	// SkippedPlugins are plugins the resolver dropped, with reasons.
+	SkippedPlugins []SkippedPluginStat
+	// Warnings are resolver advisories worth showing in the summary.
+	Warnings []string
+	// TotalImages is the sum of images across all plugins.
+	TotalImages int
+}
+
 // BundleFile is one logical bundle artifact (platform.tar, installer.tar,
 // security.tar, module-<name>.tar), possibly spread over .NNNN.chunk files.
 type BundleFile struct {
@@ -153,6 +199,7 @@ type PullSummary struct {
 	Security  SecurityStats
 	Modules   ModulesStats
 	Packages  PackagesStats
+	Plugins   PluginsStats
 
 	// Bundle is populated by the CLI from the bundle directory (real pull only).
 	Bundle BundleStats
@@ -184,6 +231,9 @@ type PushSummary struct {
 	SecurityDatabases int
 	// Modules is the number of module repositories pushed.
 	Modules int
+	// Plugins is the number of CLI plugin repositories pushed, counted from
+	// the plugins index step.
+	Plugins int
 	// Packages is the number of package repositories pushed.
 	Packages int
 }

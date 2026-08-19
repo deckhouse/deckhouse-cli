@@ -71,7 +71,8 @@ func (s *Service) PackageExists(bundleDir, pkgName string) bool {
 	return false
 }
 
-// PushLayout pushes all images from an OCI layout to the registry
+// PushLayout pushes all images from an OCI layout to the registry.
+// A descriptor holding a nested index (multi-platform image) is pushed whole.
 func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client client.Client) error {
 	index, err := layoutPath.ImageIndex()
 	if err != nil {
@@ -96,12 +97,6 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 
 	for i, manifest := range manifests {
 		tag := manifest.Annotations[regimage.AnnotationImageShortTag]
-
-		img, err := index.Image(manifest.Digest)
-		if err != nil {
-			return fmt.Errorf("read image %s from layout %s: %w", tag, layoutPath, err)
-		}
-
 		imageReferenceString := fmt.Sprintf("%s:%s", client.GetRegistry(), tag)
 
 		err = retry.RunTask(
@@ -109,18 +104,36 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 			s.userLogger,
 			fmt.Sprintf("[%d / %d] Pushing %s", i+1, len(manifests), imageReferenceString),
 			task.WithConstantRetries(pushRetryAttempts, pushRetryDelay, func(ctx context.Context) error {
-				if err := client.PushImage(ctx, tag, img); err != nil {
-					return fmt.Errorf("write %s:%s to registry: %w", client.GetRegistry(), tag, err)
-				}
-
-				return nil
+				return pushManifest(ctx, index, manifest, client, tag)
 			}))
 		if err != nil {
-			return fmt.Errorf("push image %s: %w", tag, err)
+			return fmt.Errorf("push %s: %w", imageReferenceString, err)
 		}
 	}
 
 	return nil
+}
+
+// pushManifest reads one descriptor's content from the layout and pushes it
+// under tag. A nested index (multi-platform image, e.g. a CLI plugin) is
+// pushed whole, so its platform children and annotations survive; index.Image
+// would refuse an index media type.
+func pushManifest(ctx context.Context, index v1.ImageIndex, desc v1.Descriptor, dest client.Client, tag string) error {
+	if desc.MediaType.IsIndex() {
+		idx, err := index.ImageIndex(desc.Digest)
+		if err != nil {
+			return fmt.Errorf("read image index from layout: %w", err)
+		}
+
+		return dest.PushIndex(ctx, tag, idx)
+	}
+
+	img, err := index.Image(desc.Digest)
+	if err != nil {
+		return fmt.Errorf("read image from layout: %w", err)
+	}
+
+	return dest.PushImage(ctx, tag, img)
 }
 
 // dedupManifestsByShortTag filters and deduplicates manifests for pushing.

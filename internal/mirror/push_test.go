@@ -99,6 +99,52 @@ func buildLayoutBundle(t *testing.T, dir, tarName, prefix, shortTag string) stri
 	return tarPath
 }
 
+// TestPushService_PluginsLayout verifies the plugin leg of push: a bundle tar
+// prefixed deckhouse-cli/plugins/<name> lands verbatim at that registry path,
+// the discovery tag appears on the plugins index, the summary counts it, and
+// --modules-path-suffix never moves plugin paths.
+func TestPushService_PluginsLayout(t *testing.T) {
+	const (
+		repoHost   = "registry.example.com/deckhouse/ee"
+		pluginName = "postgresql-mgr"
+		pluginTag  = "v1.2.0"
+	)
+
+	bundleDir := t.TempDir()
+	pluginPkg := buildLayoutBundle(t, bundleDir, "plugin-"+pluginName+".tar",
+		path.Join("deckhouse-cli", "plugins", pluginName), pluginTag)
+
+	reg := upfake.NewRegistry(repoHost)
+	destClient := pkgclient.Adapt(upfake.NewClient(reg))
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := NewPushService(destClient, &PushServiceOptions{
+		Packages:   []string{pluginPkg},
+		WorkingDir: t.TempDir(),
+		// A moved modules path must not touch plugins.
+		ModulesPathSuffix: "/my/mods",
+	}, logger, userLogger)
+
+	summary, err := svc.Push(context.Background())
+	require.NoError(t, err, "push must succeed")
+
+	assert.Equal(t, 1, summary.Plugins, "one plugin repository pushed")
+	assert.False(t, summary.PlatformPushed, "a plugin layout must not be classified as platform")
+
+	ctx := context.Background()
+
+	pluginClient := destClient.WithSegment("deckhouse-cli", "plugins", pluginName)
+	assert.NoErrorf(t, pluginClient.CheckImageExists(ctx, pluginTag),
+		"plugin image must exist at %s:%s", pluginClient.GetRegistry(), pluginTag)
+
+	indexClient := destClient.WithSegment("deckhouse-cli", "plugins")
+	tags, err := indexClient.ListTags(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tags, pluginName, "discovery tag must exist on the plugins index path")
+}
+
 // TestPushService_ModulesPathSuffix verifies that --modules-path-suffix moves
 // both module images and their discovery index tag, while non-module layouts
 // stay put. The default (empty / "/modules") keeps the historical layout.

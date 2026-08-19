@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 )
 
@@ -45,6 +46,23 @@ const (
 	homeFallbackDir  = ".deckhouse-cli"
 	VersionDirPrefix = "v"
 )
+
+// pluginNameLayout matches a valid plugin name: a single lowercase OCI path
+// component. Anything else cannot name a published plugin and, used
+// unvalidated, would build filesystem paths outside the plugins root ("..",
+// "a/b") or alter registry routes.
+var pluginNameLayout = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`)
+
+// ValidatePluginName guards a plugin name from any external source (user
+// input, registry catalog, plugin contract) before it becomes a filesystem
+// path or a registry route.
+func ValidatePluginName(name string) error {
+	if !pluginNameLayout.MatchString(name) {
+		return fmt.Errorf("invalid plugin name %q", name)
+	}
+
+	return nil
+}
 
 // PluginsRoot returns <installRoot>/plugins.
 func PluginsRoot(installRoot string) string {

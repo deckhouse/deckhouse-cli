@@ -120,6 +120,21 @@ modules) are only *verified* - d8 never changes the cluster for you.
   cluster-side checks to a warning - useful when the cluster is unreachable or
   air-gapped. Plugin-to-plugin requirements are still enforced.
 
+## Air-gapped installs (via d8 mirror)
+
+`d8 mirror pull` mirrors plugins into the images bundle automatically: every
+plugin whose contract names a mirrored module is selected (per bundled module
+version, newest compatible), along with its mandatory plugin dependencies;
+`--include-plugin <name>[@constraint]` adds more. After `d8 mirror push`, the
+plugins live at `<target>/deckhouse-cli/plugins/<name>` - exactly where the
+in-cluster registry-packages-proxy looks - so `d8 plugins install <name>`
+works in the air-gapped cluster with no extra setup. See
+`internal/mirror/README.MD` (Plugin Mirroring) for selection details.
+
+Note: the proxy serves plugins by exact name; listing the catalog through it
+is not supported. To see what a registry offers, use
+`crane ls <target>/deckhouse-cli/plugins` (or `d8 cr ls`).
+
 ## Flags and environment variables
 
 | Flag | Env | Purpose |
