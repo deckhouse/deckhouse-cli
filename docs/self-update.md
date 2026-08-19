@@ -26,7 +26,7 @@ that holds two permissions on the cluster. Access to master nodes is not needed.
 1. Ask an administrator to grant your user or group access. They bind one
    ClusterRole and one read permission, both described in
    [Granting access to CLI downloads](/products/kubernetes-platform/documentation/v1/modules/registry-packages-proxy/#granting-access-to-cli-downloads).
-   The same grant also covers `d8 plugins`.
+   The same grant also covers `d8 dist plugins`.
 
 1. Use the kubeconfig you already use for `kubectl`, as long as it carries a
    token. A client-certificate config - the `kubernetes-admin` one on a master
@@ -36,7 +36,7 @@ that holds two permissions on the cluster. Access to master nodes is not needed.
 1. Check that it works:
 
    ```bash
-   d8 cli check
+   d8 dist check
    ```
 
    `up to date`, or a newer version being offered, means access is fine. On
@@ -174,7 +174,7 @@ $ d8 dist use v0.13.0            # repeated: "deckhouse-cli is already at v0.13.
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
 | `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
 
-`d8 cli` opens two TLS connections, each verified on its own: one to the
+`d8 dist` opens two TLS connections, each verified on its own: one to the
 Kubernetes API server to find the proxy, one to the proxy to download.
 `--insecure-skip-tls-verify` covers both.
 

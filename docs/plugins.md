@@ -18,10 +18,10 @@ Plugins are versioned binaries distributed through the cluster registry.
 Plugins are pulled from the in-cluster **registry-packages-proxy**, the same
 channel as d8 self-update. This is the only supported path: every
 `d8 dist plugins` command reaches the registry through the proxy, so a
-reachable cluster is
-required. (A hidden, temporary `--source` flag pulls straight from a registry
-repo instead - see [Advanced](#advanced-hidden-flags) - but it bypasses the
-cluster and is not the intended flow.) The access model:
+reachable cluster is required. (A hidden, temporary `--source` flag pulls
+straight from a registry repo instead - see
+[Advanced](#advanced-hidden-flags) - but it bypasses the cluster and is not
+the intended flow.) The access model:
 
 - Authentication: the **Bearer token** from your kubeconfig (client
   certificates do not work).
@@ -83,8 +83,8 @@ active one:
 
 Rules that follow from this layout:
 
-- `d8 dist plugins update` stays **within the installed major**. Crossing majors is
-  always an explicit decision: `--use-major N` or `--version X`.
+- `d8 dist plugins update` stays **within the installed major**. Crossing
+  majors is always an explicit decision: `--use-major N` or `--version X`.
 - Installing a version that is already on disk just repoints the symlink - no
   download.
 - Installing the active version says so and does nothing; `--force`
