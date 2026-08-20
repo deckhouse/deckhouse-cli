@@ -114,7 +114,9 @@ func sha1Hash(password string) string {
 // then as plaintext, mirroring how htpasswd -v probes a password file.
 func verifyHash(password, stored string) (bool, error) {
 	switch {
-	case strings.HasPrefix(stored, "$2a$"), strings.HasPrefix(stored, "$2b$"), strings.HasPrefix(stored, "$2y$"):
+	case strings.HasPrefix(stored, "$2a$"), strings.HasPrefix(stored, "$2b$"),
+		strings.HasPrefix(stored, "$2x$"), strings.HasPrefix(stored, "$2y$"),
+		strings.HasPrefix(stored, "$2$"):
 		err := bcrypt.CompareHashAndPassword([]byte(stored), []byte(password))
 		if err == nil {
 			return true, nil
