@@ -17,6 +17,7 @@ limitations under the License.
 package cmd
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -265,4 +266,92 @@ func Test_cli_LifecycleMessages(t *testing.T) {
 	_, err = run(t, "", "-D", file, "ghost")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
+}
+
+// Test_cli_EmptyUsernameRejectedForFileOps covers the fix for the empty-username
+// collision: add/update, delete and verify against a file now reject an empty
+// username (which would otherwise clobber blank lines in the file), while the
+// '-n' stdout mode still accepts an explicit empty username and prints ":hash"
+// exactly like `htpasswd -n ""`.
+func Test_cli_EmptyUsernameRejectedForFileOps(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "u.htpasswd")
+
+	// -c create (batch) with an empty username is rejected before the file is written.
+	_, err := run(t, "", "-cb", "-C", "4", file, "", "pw")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "username must not be empty")
+
+	// The plaintext form from the original bug report is rejected too.
+	_, err = run(t, "", "-cb", "-p", file, "", "pw")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "username must not be empty")
+
+	// Seed a real user, then confirm delete and verify also reject "".
+	_, err = run(t, "", "-cb", "-C", "4", file, "alice", "pw")
+	require.NoError(t, err)
+
+	_, err = run(t, "", "-D", file, "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "username must not be empty")
+
+	_, err = run(t, "", "-bv", file, "", "pw")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "username must not be empty")
+
+	// -n stdout mode still allows an explicit empty username (":hash").
+	out, err := run(t, "", "-nb", "-C", "4", "", "pw")
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(strings.TrimSpace(out), ":$2y$04$"), "got %q", out)
+}
+
+// cli_exitCode extracts the process exit code a command's error carries via the
+// ExitCode() method (see internal/tools/htpasswd/exit.go). Errors without one —
+// e.g. file-access failures — map to 1, exactly as cmd/d8/root.go decides.
+func cli_exitCode(t *testing.T, err error) int {
+	t.Helper()
+	require.Error(t, err)
+
+	var coder interface{ ExitCode() int }
+	if errors.As(err, &coder) {
+		return coder.ExitCode()
+	}
+
+	return 1
+}
+
+// Test_cli_ExitCodes locks the Apache-htpasswd-compatible exit codes d8 now
+// returns: 2 usage/syntax, 3 verification failure, 5 over-long username, 6
+// bad/absent user, and 1 for file-access errors.
+func Test_cli_ExitCodes(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "u.htpasswd")
+	_, err := run(t, "", "-cb", "-C", "4", file, "alice", "pw")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name  string
+		want  int
+		stdin string
+		args  []string
+	}{
+		{"conflicting_flags", 2, "", []string{"-c", "-n", "f", "u"}},
+		{"two_algorithms", 2, "", []string{"-nb", "-B", "-m", "u", "p"}},
+		{"cost_without_bcrypt", 2, "", []string{"-nb", "-m", "-C", "8", "u", "p"}},
+		{"cost_out_of_range", 2, "", []string{"-nb", "-B", "-C", "99", "u", "p"}},
+		{"rounds_without_shacrypt", 2, "", []string{"-nb", "-r", "5000", "u", "p"}},
+		{"colon_in_username", 6, "", []string{"-nb", "-C", "4", "a:b", "p"}},
+		{"username_too_long", 5, "", []string{"-nb", "-C", "4", strings.Repeat("u", 256), "p"}},
+		{"verify_wrong_password", 3, "", []string{"-bv", file, "alice", "WRONG"}},
+		{"verify_user_not_found", 6, "", []string{"-bv", file, "ghost", "x"}},
+		{"empty_username_file", 2, "", []string{"-cb", "-C", "4", file, "", "pw"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := run(t, c.stdin, c.args...)
+			require.Equal(t, c.want, cli_exitCode(t, err), "exit code for %v", c.args)
+		})
+	}
+
+	// A missing password file (no -c) is a file-access error: exit 1, unwrapped.
+	_, err = run(t, "", "-b", "-C", "4", filepath.Join(t.TempDir(), "nope"), "u", "p")
+	require.Equal(t, 1, cli_exitCode(t, err), "missing file must be exit 1")
 }

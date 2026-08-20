@@ -30,6 +30,8 @@ import (
 //   - apr1: `openssl passwd -apr1` + Apache `htpasswd -vb` round-trip
 //   - $5$/$6$: python3 crypt (SHA256/SHA512) + `openssl passwd -5/-6`
 // A mismatch means the port diverged from the canonical algorithm.
+// Reference versions: Apache htpasswd 2.4.58 (apache2-utils), OpenSSL 3.0.13,
+// libxcrypt 4.4.36, Python 3.12.3.
 
 func Test_crypt_DESEdgeCases(t *testing.T) {
 	cases := []struct{ name, password, salt, want string }{

@@ -142,34 +142,34 @@ func Test_pf_DuplicateUser_RemoveDropsAll(t *testing.T) {
 	require.Equal(t, []string{"bob:BBB"}, pf.lines, "both alice entries removed, like real htpasswd -D")
 }
 
-// Test_pf_DuplicateUser_UpsertReplacesOnlyFirst documents the ASYMMETRY /
-// PARITY-GAP: upsert replaces only the FIRST matching line and leaves later
-// duplicates stale. Real htpasswd rewrites EVERY matching line, so after a
-// password rotation the second (old-hash) line would linger here and still be
-// honored by other consumers (Apache/nginx) of the file.
-func Test_pf_DuplicateUser_UpsertReplacesOnlyFirst(t *testing.T) {
+// Test_pf_DuplicateUser_UpsertReplacesAll pins the parity-fixed behavior: upsert
+// rewrites EVERY matching line for a user (not just the first), matching real
+// htpasswd. A password rotation on a duplicate-user file therefore leaves no
+// stale old-hash line behind.
+func Test_pf_DuplicateUser_UpsertReplacesAll(t *testing.T) {
 	pf := &passwdFile{lines: []string{"alice:AAA", "bob:BBB", "alice:CCC"}}
 
 	existed := pf.upsert("alice", "UPDATED")
 	require.True(t, existed)
 
 	require.Equal(t,
-		[]string{"alice:UPDATED", "bob:BBB", "alice:CCC"},
+		[]string{"alice:UPDATED", "bob:BBB", "alice:UPDATED"},
 		pf.lines,
-		"DIVERGENCE from htpasswd: only the first alice line is updated; alice:CCC stays stale",
+		"both alice lines are updated, like real htpasswd; no stale duplicate remains",
 	)
 
-	// get still returns the first (now-updated) hash, so the stale line is shadowed here.
 	hash, ok := pf.get("alice")
 	require.True(t, ok)
 	require.Equal(t, "UPDATED", hash)
 }
 
-// Test_pf_EmptyUsernameCollidesWithBlankLine documents a BUG: because a blank
-// line's user is "", an empty-username get/upsert/remove collides with blank
-// lines. Real htpasswd instead APPENDS a ":hash" line and preserves the blank
-// line. validateUsername("") is allowed, so this is reachable from the CLI file
-// flow (e.g. `d8 tools htpasswd -b -p file "" pw`).
+// Test_pf_EmptyUsernameCollidesWithBlankLine pins a low-level quirk of the
+// passwdFile methods: because a blank line's user is "", an empty-username
+// get/upsert/remove collides with blank lines (real htpasswd would instead
+// append a ":hash" line and preserve the blank line). This is no longer
+// reachable from the CLI — the file flows reject an empty username up front (see
+// Test_cli_EmptyUsernameRejectedForFileOps) — but the methods themselves still
+// behave this way, so the guard at the flow layer must stay.
 func Test_pf_EmptyUsernameCollidesWithBlankLine(t *testing.T) {
 	dir := t.TempDir()
 	// Leading blank line, a comment, then a real user.
@@ -181,23 +181,23 @@ func Test_pf_EmptyUsernameCollidesWithBlankLine(t *testing.T) {
 
 	// get("") matches the blank line and falsely reports the empty user exists.
 	hash, ok := pf.get("")
-	require.True(t, ok, "BUG: get(\"\") matches a blank line")
+	require.True(t, ok, "quirk: get(\"\") matches a blank line")
 	require.Equal(t, "", hash)
 
 	// upsert("") OVERWRITES the blank line instead of appending, and reports
 	// existed=true (so the CLI prints "Updating" rather than "Adding").
 	existed := pf.upsert("", "ZZZ")
-	require.True(t, existed, "BUG: upsert(\"\") reports the empty user pre-existed")
+	require.True(t, existed, "quirk: upsert(\"\") reports the empty user pre-existed")
 	require.Equal(t,
 		[]string{":ZZZ", "# comment", "alice:AAA"},
 		pf.lines,
-		"BUG: the blank line is clobbered; real htpasswd would keep it and append :ZZZ",
+		"quirk: the blank line is clobbered; real htpasswd would keep it and append :ZZZ",
 	)
 
 	// remove("") drops all blank lines.
 	pf2, err := loadPasswdFile(path)
 	require.NoError(t, err)
-	require.True(t, pf2.remove(""), "BUG: remove(\"\") deletes blank lines")
+	require.True(t, pf2.remove(""), "quirk: remove(\"\") deletes blank lines")
 	require.Equal(t, []string{"# comment", "alice:AAA"}, pf2.lines)
 }
 

@@ -306,3 +306,30 @@ func Test_hash_GenerateDispatch(t *testing.T) {
 	_, err := generateHash(password, hashOptions{alg: algorithm("bogus")})
 	require.Error(t, err, "unknown algorithm must error")
 }
+
+// Test_hash_VerifyLegacyBcryptIdentifiers confirms verifyHash routes the legacy
+// bcrypt identifiers $2$ and $2x$ (alongside $2a$/$2b$/$2y$) to the bcrypt
+// verifier. Go's bcrypt accepts any minor-version byte and computes the same
+// hash regardless of the identifier, so these verify (empirically confirmed with
+// x/crypto v0.54.0); before the fix they fell through to the plaintext branch
+// and failed. Each variant is built from a fresh $2a$ hash by rewriting only the
+// identifier, which does not change what bcrypt verifies for an ASCII password.
+func Test_hash_VerifyLegacyBcryptIdentifiers(t *testing.T) {
+	base, err := bcrypt.GenerateFromPassword([]byte("password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(string(base), "$2a$"))
+
+	rest := string(base)[len("$2a$"):] // "04$<salt><hash>"
+	for _, id := range []string{"$2$", "$2b$", "$2x$", "$2y$"} {
+		stored := id + rest
+		t.Run(id, func(t *testing.T) {
+			ok, err := verifyHash("password", stored)
+			require.NoError(t, err)
+			require.True(t, ok, "correct password must verify against %q", stored)
+
+			ok, err = verifyHash("wrongpassword", stored)
+			require.NoError(t, err)
+			require.False(t, ok, "wrong password must be rejected by %q", stored)
+		})
+	}
+}
