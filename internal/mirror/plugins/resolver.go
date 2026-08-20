@@ -156,11 +156,12 @@ func (w *warningLog) add(msg string) {
 func (st *resolveState) resolveAuto(ctx context.Context) error {
 	names, err := st.catalog.PluginNames(ctx)
 	if err != nil {
-		if isNotPublished(err) {
+		if isUnavailable(err) {
 			// The source registry has no plugins catalog (older registries,
-			// self-hosted mirrors). Nothing to auto-select; explicit includes
-			// still resolve against their own repositories.
-			st.logger.Debug("The registry has no plugins catalog, skipping plugin auto-selection")
+			// self-hosted mirrors) or keeps it out of this identity's scope.
+			// Nothing to auto-select; explicit includes still resolve
+			// against their own repositories.
+			st.logger.Debug("The registry has no plugins catalog or denies access to it, skipping plugin auto-selection")
 
 			return nil
 		}
@@ -190,9 +191,10 @@ func (st *resolveState) resolveAuto(ctx context.Context) error {
 func (st *resolveState) resolveAutoPlugin(ctx context.Context, name string) error {
 	versions, err := st.catalog.PluginVersions(ctx, name)
 	if err != nil {
-		if isNotPublished(err) {
-			// A name tag in the catalog index without a version repo behind it.
-			st.logger.Debug(fmt.Sprintf("Plugin %q is in the catalog index but has no published versions", name))
+		if isUnavailable(err) {
+			// A name tag in the catalog index without a readable version
+			// repo behind it.
+			st.logger.Debug(fmt.Sprintf("Plugin %q is in the catalog index but has no accessible versions", name))
 
 			return nil
 		}
@@ -613,7 +615,7 @@ func (st *resolveState) resolveDepFresh(ctx context.Context, req internal.Plugin
 
 	versions, err := st.catalog.PluginVersions(ctx, req.Name)
 	if err != nil {
-		if isNotPublished(err) {
+		if isUnavailable(err) {
 			return fmt.Sprintf("dependency %q is not published in the plugins catalog", req.Name), nil
 		}
 
@@ -1040,4 +1042,13 @@ func formatVersions(versions []*semver.Version) string {
 // is operational.
 func isNotPublished(err error) bool {
 	return errors.Is(err, dkpclient.ErrImageNotFound) || errmatch.IsRepoNotFound(err) || errmatch.IsImageNotFound(err)
+}
+
+// isUnavailable widens isNotPublished with access denial for the automatic
+// selection: a token-auth registry refuses any path outside the identity's
+// scope, published or not, and an optional plugin behind such a path is no
+// different from an unpublished one. Explicit includes keep the strict
+// check: the user asked for them by name, so a refusal must be reported.
+func isUnavailable(err error) bool {
+	return isNotPublished(err) || errmatch.IsAccessDenied(err)
 }

@@ -20,6 +20,7 @@ package errmatch
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
@@ -58,6 +59,33 @@ func IsRepoNotFound(err error) bool {
 
 	// String fallback: same as IsImageNotFound - covers HEAD responses and plain text errors.
 	return strings.Contains(err.Error(), "NAME_UNKNOWN")
+}
+
+// IsAccessDenied returns true if the registry refused the request for lack
+// of rights: HTTP 401/403 or the UNAUTHORIZED/DENIED error codes. Token-auth
+// registries answer this way for any path outside the identity's scope,
+// whether or not the repository exists.
+func IsAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var transportErr *transport.Error
+	if errors.As(err, &transportErr) &&
+		(transportErr.StatusCode == http.StatusUnauthorized || transportErr.StatusCode == http.StatusForbidden) {
+		return true
+	}
+
+	if hasDiagnosticCode(err, transport.UnauthorizedErrorCode) || hasDiagnosticCode(err, transport.DeniedErrorCode) {
+		return true
+	}
+
+	// String fallback: same as the matchers above - HEAD responses carry no
+	// body and some registries answer with plain text.
+	errMsg := err.Error()
+
+	return strings.Contains(errMsg, "UNAUTHORIZED") || strings.Contains(errMsg, "DENIED") ||
+		strings.Contains(errMsg, "401 Unauthorized") || strings.Contains(errMsg, "403 Forbidden")
 }
 
 // hasDiagnosticCode checks if err is a *transport.Error containing

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -352,4 +353,47 @@ func TestLayoutFor_RejectsMalformedName(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid plugin name")
 	assert.NoDirExists(t, filepath.Join(filepath.Dir(svc.workingDir), "outside"))
+}
+
+// TestPullPlugins_DeniedCatalogIsSkipped: a registry that answers the plugins
+// catalog with HTTP 401 (token-auth registries do this for any path outside
+// the identity's scope, published or not) does not fail the phase. The real
+// transport error travels through the registry client; the phase mirrors
+// nothing and reports nothing, like for a registry without a catalog.
+func TestPullPlugins_DeniedCatalogIsSkipped(t *testing.T) {
+	upstream := ggcrregistry.New()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v2/deckhouse-cli/plugins/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}`))
+
+			return
+		}
+
+		upstream.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	regSvc := registryservice.NewService(pkgclient.NewFromOptions(host, regclient.WithInsecure(true)), pkg.NoEdition, logger)
+
+	bundleDir := t.TempDir()
+	svc := NewService(regSvc, t.TempDir(), &Options{BundleDir: bundleDir}, logger, log.NewSLogger(slog.LevelWarn))
+
+	err := svc.PullPlugins(context.Background(), PullInput{
+		Modules: []ModuleInBundle{mod("postgresql", "v1.5.0")},
+	})
+	require.NoError(t, err, "a denied plugins catalog must not fail the pull")
+
+	entries, err := os.ReadDir(bundleDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+
+	stats := svc.Stats()
+	assert.True(t, stats.Attempted)
+	assert.Empty(t, stats.Plugins)
+	assert.Empty(t, stats.Warnings)
+	assert.Empty(t, stats.Skipped)
 }
