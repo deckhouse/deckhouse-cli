@@ -23,6 +23,8 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/get"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
+
+	olcedar "github.com/deckhouse/deckhouse-cli/internal/olcedar/cmd"
 	module "github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd"
 	pkg "github.com/deckhouse/deckhouse-cli/internal/system/cmd/package/cmd"
 	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"
@@ -53,6 +55,7 @@ func NewCommand() *cobra.Command {
 		collectdebuginfo.NewCommand(),
 		queue.NewCommand(),
 		logs.NewCommand(),
+		olcedar.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(systemCmd)
