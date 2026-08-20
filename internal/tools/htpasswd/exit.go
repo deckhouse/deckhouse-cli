@@ -55,7 +55,18 @@ func coded(code int, err error) error {
 
 // usageErr, verifyErr, overflowErr and badUserErr build a coded error from a
 // printf-style message, one per htpasswd exit-code class.
-func usageErr(format string, a ...any) error    { return &exitError{exitUsage, fmt.Errorf(format, a...)} }
-func verifyErr(format string, a ...any) error   { return &exitError{exitVerify, fmt.Errorf(format, a...)} }
-func overflowErr(format string, a ...any) error { return &exitError{exitOverflow, fmt.Errorf(format, a...)} }
-func badUserErr(format string, a ...any) error  { return &exitError{exitBadUser, fmt.Errorf(format, a...)} }
+func usageErr(format string, a ...any) error {
+	return &exitError{exitUsage, fmt.Errorf(format, a...)}
+}
+
+func verifyErr(format string, a ...any) error {
+	return &exitError{exitVerify, fmt.Errorf(format, a...)}
+}
+
+func overflowErr(format string, a ...any) error {
+	return &exitError{exitOverflow, fmt.Errorf(format, a...)}
+}
+
+func badUserErr(format string, a ...any) error {
+	return &exitError{exitBadUser, fmt.Errorf(format, a...)}
+}
