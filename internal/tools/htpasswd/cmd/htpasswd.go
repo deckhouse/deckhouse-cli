@@ -46,7 +46,7 @@ Algorithms (choose one; default bcrypt):
   -s  SHA-1          INSECURE, unsalted
   -p  plaintext      INSECURE, no hashing
 
-Unlike Apache htpasswd (apr1 at cost 5 by default), d8 defaults to bcrypt at cost 10, so 'd8 tools htpasswd -n <username>' produces a strong hash ready for 'd8 iam user create/reset-password --password-hash'. With -n and no username the bare hash is printed, which is exactly what --password-hash expects.
+Unlike Apache htpasswd (apr1 at cost 5 by default), d8 defaults to bcrypt at cost 10, so 'd8 tools htpasswd -n <username>' produces a strong hash ready for 'd8 iam user create/reset-password --password-hash'. With -n and no username the bare hash is printed, which is exactly what --password-hash expects. The -2 and -5 SHA-crypt algorithms and the -r rounds flag are d8 extensions; Apache htpasswd has no -2, -5, or -r flag.
 
 © Flant JSC 2026`
 

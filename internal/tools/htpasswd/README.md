@@ -14,7 +14,7 @@ d8 tools htpasswd -v passwordfile username
 
 ## Flags
 
-Every flag matches Apache htpasswd, including bundling (`-nbB`) and the digit algorithm flags (`-2`, `-5`).
+Every Apache htpasswd flag is supported, including flag bundling (`-nbB`). Three flags are **d8 extensions** with no Apache htpasswd equivalent: the SHA-crypt algorithm flags `-2` (SHA-256) and `-5` (SHA-512), and `-r` (rounds).
 
 | Flag | Meaning |
 |------|---------|
@@ -25,7 +25,7 @@ Every flag matches Apache htpasswd, including bundling (`-nbB`) and the digit al
 | `-b` | Batch mode: take the password from the command line. |
 | `-i` | Read the password from stdin without confirmation. |
 | `-C` | bcrypt cost/work factor (4–31); only with `-B`. |
-| `-r` | SHA-256/512 rounds (1000–999999999); only with `-2`/`-5`. |
+| `-r` | SHA-256/512 rounds (1000–999999999); only with `-2`/`-5`. **d8 extension.** |
 
 ## Algorithms
 
@@ -35,15 +35,15 @@ Select one; the default is bcrypt.
 |------|--------|-------|
 | `-B` | bcrypt (`$2y$`) | Secure. The default. |
 | `-m` | Apache MD5 / apr1 (`$apr1$`) | Legacy htpasswd default. |
-| `-2` | SHA-256 crypt (`$5$`) | Secure. |
-| `-5` | SHA-512 crypt (`$6$`) | Secure. |
+| `-2` | SHA-256 crypt (`$5$`) | Secure. **d8 extension** (not in Apache htpasswd). |
+| `-5` | SHA-512 crypt (`$6$`) | Secure. **d8 extension** (not in Apache htpasswd). |
 | `-d` | CRYPT / DES | **Insecure**: only the first 8 characters are used. |
 | `-s` | SHA-1 (`{SHA}`) | **Insecure**: unsalted. |
 | `-p` | plaintext | **Insecure**: no hashing. |
 
 ## Differences from Apache htpasswd
 
-Apache htpasswd defaults to apr1-MD5 at bcrypt cost 5. `d8 tools htpasswd` defaults to **bcrypt at cost 10** so the output is strong and directly usable by `d8 iam user create` / `d8 iam user reset-password`. It also adds one extension: with `-n` and no username, it prints the bare hash (Apache htpasswd always requires a username and prints `username:hash`), which is exactly what `--password-hash` expects. Every explicit algorithm flag behaves identically to htpasswd, and bcrypt output uses the `$2y$` identifier for byte-level parity.
+Apache htpasswd defaults to apr1-MD5 (and, for `-B`, to bcrypt cost 5). `d8 tools htpasswd` defaults to **bcrypt at cost 10** so the output is strong and directly usable by `d8 iam user create` / `d8 iam user reset-password`. d8 also adds extensions Apache htpasswd lacks: with `-n` and no username it prints the bare hash (Apache htpasswd always requires a username and prints `username:hash`), which is exactly what `--password-hash` expects; and the SHA-crypt algorithms `-2`/`-5` plus the `-r` rounds flag (Apache htpasswd has no `-2`, `-5`, or `-r`). Each algorithm flag Apache htpasswd also defines (`-B`, `-m`, `-d`, `-s`, `-p`) behaves identically, and bcrypt output uses the `$2y$` identifier for byte-level parity. Two further divergences: d8 allows bcrypt `-C` up to 31 (Apache caps it at 17), and d8 exits non-zero on any error rather than using Apache's dedicated exit codes (2 for usage, 3 for verification failure, etc.).
 
 ## Examples
 

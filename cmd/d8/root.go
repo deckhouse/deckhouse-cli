@@ -204,6 +204,15 @@ func execute() {
 			fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
 		}
 
-		os.Exit(1)
+		// Commands may attach an htpasswd-style exit code via an ExitCode()
+		// method (see internal/tools/htpasswd); everything else exits 1.
+		exitCode := 1
+
+		var coder interface{ ExitCode() int }
+		if errors.As(err, &coder) {
+			exitCode = coder.ExitCode()
+		}
+
+		os.Exit(exitCode)
 	}
 }

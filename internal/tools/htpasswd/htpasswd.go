@@ -134,7 +134,7 @@ func parseOptions(cmd *cobra.Command) (*options, error) {
 	for _, s := range selected {
 		if on, _ := f.GetBool(s.flag); on {
 			if found {
-				return nil, errors.New("only one hashing algorithm flag may be given (-B, -m, -2, -5, -d, -s, -p)")
+				return nil, usageErr("only one hashing algorithm flag may be given (-B, -m, -2, -5, -d, -s, -p)")
 			}
 
 			o.alg = s.alg
@@ -148,37 +148,37 @@ func parseOptions(cmd *cobra.Command) (*options, error) {
 func (o *options) validate() error {
 	switch {
 	case o.create && o.stdout:
-		return errors.New("-c (create) and -n (stdout) cannot be combined")
+		return usageErr("-c (create) and -n (stdout) cannot be combined")
 	case o.stdout && o.delete:
-		return errors.New("-n (stdout) and -D (delete) cannot be combined")
+		return usageErr("-n (stdout) and -D (delete) cannot be combined")
 	case o.stdout && o.verify:
-		return errors.New("-n (stdout) and -v (verify) cannot be combined")
+		return usageErr("-n (stdout) and -v (verify) cannot be combined")
 	case o.verify && o.create:
-		return errors.New("-v (verify) and -c (create) cannot be combined")
+		return usageErr("-v (verify) and -c (create) cannot be combined")
 	case o.verify && o.delete:
-		return errors.New("-v (verify) and -D (delete) cannot be combined")
+		return usageErr("-v (verify) and -D (delete) cannot be combined")
 	case o.create && o.delete:
-		return errors.New("-c (create) and -D (delete) cannot be combined")
+		return usageErr("-c (create) and -D (delete) cannot be combined")
 	case o.batch && o.stdinPw:
-		return errors.New("-b (batch) and -i (stdin) cannot be combined")
+		return usageErr("-b (batch) and -i (stdin) cannot be combined")
 	case o.delete && (o.batch || o.stdinPw):
-		return errors.New("-D (delete) does not take a password")
+		return usageErr("-D (delete) does not take a password")
 	}
 
 	if o.costSet && o.alg != algBcrypt {
-		return errors.New("-C (cost) is only valid with -B (bcrypt)")
+		return usageErr("-C (cost) is only valid with -B (bcrypt)")
 	}
 
 	if o.roundsSet && o.alg != algSHA256 && o.alg != algSHA512 {
-		return errors.New("-r (rounds) is only valid with -2 or -5")
+		return usageErr("-r (rounds) is only valid with -2 or -5")
 	}
 
 	if o.alg == algBcrypt && (o.cost < bcrypt.MinCost || o.cost > bcrypt.MaxCost) {
-		return fmt.Errorf("bcrypt cost must be between %d and %d, got %d", bcrypt.MinCost, bcrypt.MaxCost, o.cost)
+		return usageErr("bcrypt cost must be between %d and %d, got %d", bcrypt.MinCost, bcrypt.MaxCost, o.cost)
 	}
 
 	if o.roundsSet && (o.rounds < shaCryptMinRounds || o.rounds > shaCryptMaxRounds) {
-		return fmt.Errorf("rounds must be between %d and %d, got %d", shaCryptMinRounds, shaCryptMaxRounds, o.rounds)
+		return usageErr("rounds must be between %d and %d, got %d", shaCryptMinRounds, shaCryptMaxRounds, o.rounds)
 	}
 
 	return nil
@@ -209,12 +209,12 @@ func runStdout(cmd *cobra.Command, o *options, args []string) error {
 		case 2:
 			username, password, hasUsername = args[0], args[1], true
 		default:
-			return errors.New("usage: -n -b [username] <password>")
+			return usageErr("usage: -n -b [username] <password>")
 		}
 
 		havePassword = true
 	case len(args) > 1:
-		return errors.New("usage: -n [username]")
+		return usageErr("usage: -n [username]")
 	case len(args) == 1:
 		username, hasUsername = args[0], true
 	}
@@ -234,7 +234,7 @@ func runStdout(cmd *cobra.Command, o *options, args []string) error {
 
 	hash, err := generateHash(password, o.hashOptions())
 	if err != nil {
-		return err
+		return coded(exitVerify, err)
 	}
 
 	line := hash
@@ -271,7 +271,7 @@ func runAddUpdate(cmd *cobra.Command, o *options, args []string) error {
 
 	hash, err := generateHash(password, o.hashOptions())
 	if err != nil {
-		return err
+		return coded(exitVerify, err)
 	}
 
 	existed := pf.upsert(username, hash)
@@ -293,10 +293,14 @@ func runAddUpdate(cmd *cobra.Command, o *options, args []string) error {
 // runDelete removes a user from a password file.
 func runDelete(cmd *cobra.Command, _ *options, args []string) error {
 	if len(args) != 2 {
-		return errors.New("usage: -D <passwordfile> <username>")
+		return usageErr("usage: -D <passwordfile> <username>")
 	}
 
 	file, username := args[0], args[1]
+
+	if username == "" {
+		return usageErr("username must not be empty")
+	}
 
 	pf, err := loadPasswdFile(file)
 	if err != nil {
@@ -308,7 +312,7 @@ func runDelete(cmd *cobra.Command, _ *options, args []string) error {
 	}
 
 	if !pf.remove(username) {
-		return fmt.Errorf("user %s not found in %q", username, file)
+		return badUserErr("user %s not found in %q", username, file)
 	}
 
 	if err := pf.save(); err != nil {
@@ -338,7 +342,7 @@ func runVerify(cmd *cobra.Command, o *options, args []string) error {
 
 	stored, ok := pf.get(username)
 	if !ok {
-		return fmt.Errorf("user %s not found in %q", username, file)
+		return badUserErr("user %s not found in %q", username, file)
 	}
 
 	match, err := verifyHash(password, stored)
@@ -347,7 +351,7 @@ func runVerify(cmd *cobra.Command, o *options, args []string) error {
 	}
 
 	if !match {
-		return fmt.Errorf("password verification failed for user %s", username)
+		return verifyErr("password verification failed for user %s", username)
 	}
 
 	fmt.Fprintf(cmd.ErrOrStderr(), "Password for user %s correct.\n", username)
@@ -364,13 +368,13 @@ func fileUserPassword(cmd *cobra.Command, o *options, args []string, confirm boo
 
 	if o.batch {
 		if len(args) != 3 {
-			return "", "", "", errors.New("usage: -b <passwordfile> <username> <password>")
+			return "", "", "", usageErr("usage: -b <passwordfile> <username> <password>")
 		}
 
 		file, username, password = args[0], args[1], args[2]
 	} else {
 		if len(args) != 2 {
-			return "", "", "", errors.New("usage: <passwordfile> <username>")
+			return "", "", "", usageErr("usage: <passwordfile> <username>")
 		}
 
 		file, username = args[0], args[1]
@@ -387,6 +391,10 @@ func fileUserPassword(cmd *cobra.Command, o *options, args []string, confirm boo
 		return "", "", "", err
 	}
 
+	if username == "" {
+		return "", "", "", usageErr("username must not be empty")
+	}
+
 	return file, username, password, nil
 }
 
@@ -394,15 +402,15 @@ func fileUserPassword(cmd *cobra.Command, o *options, args []string, confirm boo
 // separator), no control characters, and at most 255 bytes.
 func validateUsername(username string) error {
 	if strings.Contains(username, ":") {
-		return errors.New("username must not contain a ':' character")
+		return badUserErr("username must not contain a ':' character")
 	}
 
 	if strings.ContainsAny(username, "\n\r\t") {
-		return errors.New("username must not contain control characters")
+		return badUserErr("username must not contain control characters")
 	}
 
 	if len(username) > 255 {
-		return errors.New("username must be at most 255 characters")
+		return overflowErr("username must be at most 255 characters")
 	}
 
 	return nil
@@ -473,7 +481,7 @@ func readPasswordPrompt(prompts io.Writer, stdinFd int, confirm bool) (string, e
 	}
 
 	if string(first) != string(second) {
-		return "", errors.New("passwords do not match")
+		return "", verifyErr("passwords do not match")
 	}
 
 	return string(first), nil

@@ -25,8 +25,10 @@ import (
 	"strings"
 )
 
-// defaultFileMode matches the permissions Apache htpasswd gives a freshly
-// created password file.
+// defaultFileMode is applied to a freshly created password file. Apache htpasswd
+// instead requests 0666 and lets the umask reduce it (so 0644 under a 022 umask,
+// 0664 under 002); d8 sets 0644 directly. On an update the existing file's mode
+// is preserved instead (see loadPasswdFile).
 const defaultFileMode os.FileMode = 0o644
 
 // passwdFile is an in-memory view of an htpasswd file. Lines that do not match
@@ -89,22 +91,26 @@ func (pf *passwdFile) get(username string) (string, bool) {
 	return "", false
 }
 
-// upsert sets username's hash, replacing the existing entry in place or
-// appending a new one. It reports whether the user already existed.
+// upsert sets username's hash, replacing every existing entry for that user in
+// place (matching real htpasswd, which rewrites all duplicate lines) or
+// appending a new one when there is none. It reports whether the user already
+// existed.
 func (pf *passwdFile) upsert(username, hash string) bool {
 	newLine := username + ":" + hash
+	found := false
 
 	for i, line := range pf.lines {
 		if lineUser(line) == username {
 			pf.lines[i] = newLine
-
-			return true
+			found = true
 		}
 	}
 
-	pf.lines = append(pf.lines, newLine)
+	if !found {
+		pf.lines = append(pf.lines, newLine)
+	}
 
-	return false
+	return found
 }
 
 // remove deletes username's entry, reporting whether it existed.
