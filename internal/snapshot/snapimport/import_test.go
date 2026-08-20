@@ -3132,3 +3132,97 @@ func TestRun_BlocksOnUnboundNodes(t *testing.T) {
 		t.Errorf("expected the leaf import marker to be created in pass 1 before the bind gate: %v", gErr)
 	}
 }
+
+// versionCapturingRESTMapper wraps a meta.RESTMapper and records every version argument
+// RESTMapping was called with, so a test can assert exactly which version constant a
+// caller used without needing a full hand-rolled Mapper mock.
+type versionCapturingRESTMapper struct {
+	meta.RESTMapper
+	gotVersions []string
+}
+
+func (m *versionCapturingRESTMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	m.gotVersions = append(m.gotVersions, versions...)
+
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+// TestConfig_VolumeSnapshotResource guards against volumeSnapshotResource() ever resolving the
+// CSI VolumeSnapshot RESTMapping through aggapi.VSConnectorVersion (the unrelated
+// storage-foundation subresources group's version) instead of aggapi.VolumeSnapshotVersion (the
+// CSI external-snapshotter CRD group's own version). The two constants happen to both equal "v1"
+// today, so a regression that swapped them back would NOT be caught by any test asserting success
+// alone — every "success" case here also asserts the exact version string passed to RESTMapping.
+func TestConfig_VolumeSnapshotResource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		mapperGVKs []schema.GroupVersionKind
+		wantErr    bool
+	}{
+		{
+			name: "success: CSI VolumeSnapshot registered only under its real v1 resolves",
+			mapperGVKs: []schema.GroupVersionKind{
+				{Group: aggapi.VolumeSnapshotGroup, Version: "v1", Kind: aggapi.VolumeSnapshotKind},
+			},
+		},
+		{
+			// A RESTMapper reflecting the real cluster (CSI VolumeSnapshot only ever served at
+			// v1) must still fail to resolve if the caller asked for any other version — this is
+			// what would happen if volumeSnapshotResource() were changed to pass
+			// aggapi.VSConnectorVersion and that constant ever diverged from "v1".
+			name: "error: mapper has no v1 mapping registered",
+			mapperGVKs: []schema.GroupVersionKind{
+				{Group: aggapi.VolumeSnapshotGroup, Version: "v1beta1", Kind: aggapi.VolumeSnapshotKind},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			base := meta.NewDefaultRESTMapper(nil)
+			for _, gvk := range tt.mapperGVKs {
+				base.Add(gvk, meta.RESTScopeNamespace)
+			}
+
+			mapper := &versionCapturingRESTMapper{RESTMapper: base}
+			cfg := Config{Mapper: mapper}
+
+			gvr, err := cfg.volumeSnapshotResource()
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("volumeSnapshotResource(): expected error, got resource %v", gvr)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("volumeSnapshotResource(): unexpected error: %v", err)
+			}
+
+			if gvr.Resource != aggapi.VolumeSnapshotResource {
+				t.Errorf("resource: got %q, want %q", gvr.Resource, aggapi.VolumeSnapshotResource)
+			}
+
+			// The regression this test exists to catch: the version requested must be the CSI
+			// external-snapshotter VolumeSnapshot CRD group's real wire version, "v1" — pinned
+			// here as a literal (the actual, stable CSI contract), not as aggapi.VolumeSnapshotVersion,
+			// so the test also catches that constant itself drifting away from the real CSI
+			// version, not just a swap for the unrelated aggapi.VSConnectorVersion (the
+			// storage-foundation subresources group's version, which happens to equal "v1" today
+			// but is independent and could diverge in the future).
+			const realCSIVolumeSnapshotVersion = "v1"
+
+			if len(mapper.gotVersions) != 1 || mapper.gotVersions[0] != realCSIVolumeSnapshotVersion {
+				t.Errorf("RESTMapping version args: got %v, want [%q] (the real CSI VolumeSnapshot version)",
+					mapper.gotVersions, realCSIVolumeSnapshotVersion)
+			}
+		})
+	}
+}

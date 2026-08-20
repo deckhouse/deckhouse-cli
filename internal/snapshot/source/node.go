@@ -165,7 +165,7 @@ func (n *Node) Ref() aggapi.NodeRef {
 //
 // For orphan leaf volume nodes this is also the node's own ref:
 // APIVersion=snapshot.storage.k8s.io/v1, Kind=VolumeSnapshot, Name=VS CR name. The
-// VolumeSnapshot connector (subresources.snapshot.storage.k8s.io) resolves this ref via
+// VolumeSnapshot connector (subresources.storage-foundation.deckhouse.io) resolves this ref via
 // VolumeSnapshot.status.boundSnapshotContentName to the leaf's own child SnapshotContent
 // ManifestCheckpoint (which holds the captured PVC manifest).
 func (n *Node) ManifestScopeRef() aggapi.NodeRef {

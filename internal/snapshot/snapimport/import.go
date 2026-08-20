@@ -1369,7 +1369,7 @@ func (cfg Config) snapshotResource() (schema.GroupVersionResource, error) {
 func (cfg Config) volumeSnapshotResource() (schema.GroupVersionResource, error) {
 	mapping, err := cfg.Mapper.RESTMapping(
 		schema.GroupKind{Group: aggapi.VolumeSnapshotGroup, Kind: volumeSnapshotKind},
-		aggapi.VSConnectorVersion)
+		aggapi.VolumeSnapshotVersion)
 	if err != nil {
 		return schema.GroupVersionResource{}, fmt.Errorf("resolve VolumeSnapshot resource: %w", err)
 	}
