@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,6 +42,7 @@ type catalogStub struct {
 	contracts  map[string]*internal.Plugin // "name@tag"
 	invalid    map[string]bool             // "name@tag" -> broken published contract
 	transport  map[string]bool             // "name@tag" -> transport error on contract fetch
+	denied     map[string]bool             // name -> the registry refuses the plugin repository (HTTP 401)
 	namesCalls int
 }
 
@@ -50,6 +52,7 @@ func newStub() *catalogStub {
 		contracts: make(map[string]*internal.Plugin),
 		invalid:   make(map[string]bool),
 		transport: make(map[string]bool),
+		denied:    make(map[string]bool),
 	}
 }
 
@@ -77,6 +80,25 @@ func (s *catalogStub) failTransport(name, tag string) *catalogStub {
 	return s
 }
 
+// denyRepository lists the plugin in the catalog index but answers its
+// repository with HTTP 401, the way a token-auth registry treats a path
+// outside the identity's scope.
+func (s *catalogStub) denyRepository(name string) *catalogStub {
+	s.registerName(name)
+	s.denied[name] = true
+
+	return s
+}
+
+// accessDenied is the error a registry client surfaces for a refused path:
+// the raw transport error, wrapped like the real client does.
+func accessDenied(what string) error {
+	return fmt.Errorf("failed to list tags: %w", &transport.Error{
+		StatusCode: 401,
+		Errors:     []transport.Diagnostic{{Code: transport.UnauthorizedErrorCode, Message: "authentication required: " + what}},
+	})
+}
+
 func (s *catalogStub) registerName(name string) {
 	for _, existing := range s.names {
 		if existing == name {
@@ -98,6 +120,10 @@ func (s *catalogStub) PluginNames(_ context.Context) ([]string, error) {
 }
 
 func (s *catalogStub) PluginVersions(_ context.Context, name string) ([]*semver.Version, error) {
+	if s.denied[name] {
+		return nil, fmt.Errorf("list versions of plugin %q: %w", name, accessDenied(name))
+	}
+
 	tags, ok := s.tags[name]
 	if !ok {
 		return nil, fmt.Errorf("list versions of plugin %q: %w", name, dkpclient.ErrImageNotFound)
@@ -912,4 +938,89 @@ func TestResolve_ExplicitIncludeClearsAutoSkip(t *testing.T) {
 	require.Len(t, res.Warnings, 1)
 	assert.Contains(t, res.Warnings[0], "console-tool@v1.0.0 (explicitly included)")
 	assert.Contains(t, res.Warnings[0], `requires module "console" >=2.0.0`)
+}
+
+// TestResolve_DeniedCatalogSkipsAutoWithWarning: a registry that refuses the
+// plugins catalog (HTTP 401, the answer of token-auth registries for paths
+// outside the identity's scope) is treated like a registry without a catalog:
+// nothing is auto-selected, the pull goes on. Unlike a missing catalog the
+// skip is reported as a warning. Explicit includes still resolve.
+func TestResolve_DeniedCatalogSkipsAutoWithWarning(t *testing.T) {
+	stub := newStub().
+		add("velero-helper", "v0.3.0", plug("velero-helper", "v0.3.0"))
+	stub.namesErr = accessDenied("deckhouse-cli/plugins")
+
+	res := resolve(t, stub, ResolveInput{
+		Modules: []ModuleInBundle{mod("postgresql", "v1.5.0")},
+		Filter:  mustFilter(t, "velero-helper"),
+	})
+
+	assert.Equal(t, []string{"v0.3.0"}, selectedVersions(res, "velero-helper"),
+		"explicit includes must survive a denied catalog")
+	assert.Len(t, res.Plugins, 1, "nothing must be auto-selected from a denied catalog")
+	require.Len(t, res.Warnings, 1)
+	assert.Contains(t, res.Warnings[0], "denies access to the plugins catalog")
+	assert.Contains(t, res.Warnings[0], "UNAUTHORIZED", "the registry's own answer must be visible to the operator")
+	assert.Empty(t, res.Skipped)
+}
+
+// TestResolve_DeniedPluginRepositorySkipped: a plugin listed in the catalog
+// whose repository the registry refuses is skipped with a reason, not fatal.
+func TestResolve_DeniedPluginRepositorySkipped(t *testing.T) {
+	stub := newStub().
+		add("pg-tool", "v1.0.0", needsModule(plug("pg-tool", "v1.0.0"), "postgresql", ">=1.0.0")).
+		denyRepository("pg-tool")
+
+	res := resolve(t, stub, ResolveInput{
+		Modules: []ModuleInBundle{mod("postgresql", "v1.5.0")},
+	})
+
+	assert.Empty(t, res.Plugins)
+	require.Len(t, res.Skipped, 1)
+	assert.Equal(t, "pg-tool", res.Skipped[0].Name)
+	assert.Contains(t, res.Skipped[0].Reason, "denies access")
+}
+
+// TestResolve_DeniedDependencySkipsDependent: a mandatory dependency behind a
+// refused repository is unmet like an unpublished one - the dependent plugin
+// is skipped with the reason, the pull goes on. The dependency itself is
+// also reported skipped: it is a catalog entry with a closed repository.
+func TestResolve_DeniedDependencySkipsDependent(t *testing.T) {
+	contract := needsModule(plug("pg-tool", "v1.0.0"), "postgresql", ">=1.0.0")
+	contract = needsPlugin(contract, "dep-a", ">=1.0.0")
+
+	stub := newStub().
+		add("pg-tool", "v1.0.0", contract).
+		denyRepository("dep-a")
+
+	res := resolve(t, stub, ResolveInput{
+		Modules: []ModuleInBundle{mod("postgresql", "v1.5.0")},
+	})
+
+	assert.Empty(t, res.Plugins)
+
+	skipped := make(map[string]string, len(res.Skipped))
+	for _, skip := range res.Skipped {
+		skipped[skip.Name] = skip.Reason
+	}
+
+	require.Contains(t, skipped, "pg-tool")
+	assert.Contains(t, skipped["pg-tool"], `dependency "dep-a"`)
+	assert.Contains(t, skipped["pg-tool"], "denies access")
+	require.Contains(t, skipped, "dep-a")
+	assert.Contains(t, skipped["dep-a"], "denies access")
+}
+
+// TestResolve_DeniedExplicitIncludeFails: the user asked for the plugin by
+// name, so a refused repository is not masked - the registry's answer
+// reaches the operator as the error.
+func TestResolve_DeniedExplicitIncludeFails(t *testing.T) {
+	stub := newStub().denyRepository("velero-helper")
+
+	_, err := NewResolver(stub, log.NewNop()).Resolve(context.Background(), ResolveInput{
+		Filter: mustFilter(t, "velero-helper"),
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNAUTHORIZED")
 }

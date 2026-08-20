@@ -165,6 +165,17 @@ func (st *resolveState) resolveAuto(ctx context.Context) error {
 			return nil
 		}
 
+		if errmatch.IsAccessDenied(err) {
+			// A token-auth registry refuses any path outside the identity's
+			// scope, published or not. The plugins catalog is optional, so a
+			// closed one means "no plugins from this source". Unlike a
+			// missing catalog this is said out loud: published plugins may
+			// sit behind it.
+			st.warnings.add(fmt.Sprintf("plugin auto-selection skipped: the registry denies access to the plugins catalog, no plugins are mirrored from it (%v)", err))
+
+			return nil
+		}
+
 		return fmt.Errorf("list plugins catalog: %w", err)
 	}
 
@@ -193,6 +204,13 @@ func (st *resolveState) resolveAutoPlugin(ctx context.Context, name string) erro
 		if isNotPublished(err) {
 			// A name tag in the catalog index without a version repo behind it.
 			st.logger.Debug(fmt.Sprintf("Plugin %q is in the catalog index but has no published versions", name))
+
+			return nil
+		}
+
+		if errmatch.IsAccessDenied(err) {
+			// Catalog entry visible, repository closed by per-path rules.
+			st.skipped = append(st.skipped, SkippedPlugin{Name: name, Reason: "the registry denies access to its repository"})
 
 			return nil
 		}
@@ -615,6 +633,10 @@ func (st *resolveState) resolveDepFresh(ctx context.Context, req internal.Plugin
 	if err != nil {
 		if isNotPublished(err) {
 			return fmt.Sprintf("dependency %q is not published in the plugins catalog", req.Name), nil
+		}
+
+		if errmatch.IsAccessDenied(err) {
+			return fmt.Sprintf("dependency %q: the registry denies access to its repository", req.Name), nil
 		}
 
 		return "", err

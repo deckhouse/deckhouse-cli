@@ -75,3 +75,40 @@ func TestIsRepoNotFound_Negative(t *testing.T) {
 	assert.False(t, IsRepoNotFound(errors.New("some other error")))
 	assert.False(t, IsRepoNotFound(nil))
 }
+
+func TestIsAccessDenied_TypedStatus(t *testing.T) {
+	assert.True(t, IsAccessDenied(&transport.Error{StatusCode: 401}))
+	assert.True(t, IsAccessDenied(&transport.Error{StatusCode: 403}))
+}
+
+func TestIsAccessDenied_TypedCode(t *testing.T) {
+	unauthorized := &transport.Error{
+		StatusCode: 401,
+		Errors:     []transport.Diagnostic{{Code: transport.UnauthorizedErrorCode, Message: "authentication required"}},
+	}
+	assert.True(t, IsAccessDenied(fmt.Errorf("failed to list tags: %w", unauthorized)))
+
+	denied := &transport.Error{
+		StatusCode: 403,
+		Errors:     []transport.Diagnostic{{Code: transport.DeniedErrorCode, Message: "requested access to the resource is denied"}},
+	}
+	assert.True(t, IsAccessDenied(fmt.Errorf("get manifest: %w", denied)))
+}
+
+func TestIsAccessDenied_FallbackString(t *testing.T) {
+	assert.True(t, IsAccessDenied(errors.New("GET https://r/v2/x/tags/list: UNAUTHORIZED: authentication required")))
+	assert.True(t, IsAccessDenied(errors.New("DENIED: requested access to the resource is denied")))
+	assert.True(t, IsAccessDenied(errors.New("unexpected status code 401 Unauthorized")))
+	assert.True(t, IsAccessDenied(errors.New("unexpected status code 403 Forbidden")))
+}
+
+func TestIsAccessDenied_Negative(t *testing.T) {
+	notFound := &transport.Error{
+		StatusCode: 404,
+		Errors:     []transport.Diagnostic{{Code: transport.NameUnknownErrorCode}},
+	}
+	assert.False(t, IsAccessDenied(notFound))
+	assert.False(t, IsAccessDenied(errors.New("NAME_UNKNOWN: repository name not known to registry")))
+	assert.False(t, IsAccessDenied(errors.New("connection reset by peer")))
+	assert.False(t, IsAccessDenied(nil))
+}
