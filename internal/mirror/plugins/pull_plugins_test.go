@@ -358,8 +358,8 @@ func TestLayoutFor_RejectsMalformedName(t *testing.T) {
 // TestPullPlugins_DeniedCatalogIsSkipped: a registry that answers the plugins
 // catalog with HTTP 401 (token-auth registries do this for any path outside
 // the identity's scope, published or not) does not fail the phase. The real
-// transport error travels through the registry client; the phase records a
-// warning and mirrors nothing.
+// transport error travels through the registry client; the phase mirrors
+// nothing and reports nothing, like for a registry without a catalog.
 func TestPullPlugins_DeniedCatalogIsSkipped(t *testing.T) {
 	upstream := ggcrregistry.New()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -394,6 +394,6 @@ func TestPullPlugins_DeniedCatalogIsSkipped(t *testing.T) {
 	stats := svc.Stats()
 	assert.True(t, stats.Attempted)
 	assert.Empty(t, stats.Plugins)
-	require.Len(t, stats.Warnings, 1)
-	assert.Contains(t, stats.Warnings[0], "denies access to the plugins catalog")
+	assert.Empty(t, stats.Warnings)
+	assert.Empty(t, stats.Skipped)
 }

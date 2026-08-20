@@ -940,12 +940,12 @@ func TestResolve_ExplicitIncludeClearsAutoSkip(t *testing.T) {
 	assert.Contains(t, res.Warnings[0], `requires module "console" >=2.0.0`)
 }
 
-// TestResolve_DeniedCatalogSkipsAutoWithWarning: a registry that refuses the
-// plugins catalog (HTTP 401, the answer of token-auth registries for paths
-// outside the identity's scope) is treated like a registry without a catalog:
-// nothing is auto-selected, the pull goes on. Unlike a missing catalog the
-// skip is reported as a warning. Explicit includes still resolve.
-func TestResolve_DeniedCatalogSkipsAutoWithWarning(t *testing.T) {
+// TestResolve_DeniedCatalogSkipsAuto: a registry that refuses the plugins
+// catalog (HTTP 401, the answer of token-auth registries for paths outside
+// the identity's scope) is treated like a registry without a catalog:
+// nothing is auto-selected, nothing is reported, the pull goes on. Explicit
+// includes still resolve.
+func TestResolve_DeniedCatalogSkipsAuto(t *testing.T) {
 	stub := newStub().
 		add("velero-helper", "v0.3.0", plug("velero-helper", "v0.3.0"))
 	stub.namesErr = accessDenied("deckhouse-cli/plugins")
@@ -958,15 +958,14 @@ func TestResolve_DeniedCatalogSkipsAutoWithWarning(t *testing.T) {
 	assert.Equal(t, []string{"v0.3.0"}, selectedVersions(res, "velero-helper"),
 		"explicit includes must survive a denied catalog")
 	assert.Len(t, res.Plugins, 1, "nothing must be auto-selected from a denied catalog")
-	require.Len(t, res.Warnings, 1)
-	assert.Contains(t, res.Warnings[0], "denies access to the plugins catalog")
-	assert.Contains(t, res.Warnings[0], "UNAUTHORIZED", "the registry's own answer must be visible to the operator")
+	assert.Empty(t, res.Warnings)
 	assert.Empty(t, res.Skipped)
 }
 
-// TestResolve_DeniedPluginRepositorySkipped: a plugin listed in the catalog
-// whose repository the registry refuses is skipped with a reason, not fatal.
-func TestResolve_DeniedPluginRepositorySkipped(t *testing.T) {
+// TestResolve_DeniedPluginRepositoryIgnored: a plugin listed in the catalog
+// whose repository the registry refuses is passed over like one without
+// published versions - quietly.
+func TestResolve_DeniedPluginRepositoryIgnored(t *testing.T) {
 	stub := newStub().
 		add("pg-tool", "v1.0.0", needsModule(plug("pg-tool", "v1.0.0"), "postgresql", ">=1.0.0")).
 		denyRepository("pg-tool")
@@ -976,15 +975,13 @@ func TestResolve_DeniedPluginRepositorySkipped(t *testing.T) {
 	})
 
 	assert.Empty(t, res.Plugins)
-	require.Len(t, res.Skipped, 1)
-	assert.Equal(t, "pg-tool", res.Skipped[0].Name)
-	assert.Contains(t, res.Skipped[0].Reason, "denies access")
+	assert.Empty(t, res.Skipped)
+	assert.Empty(t, res.Warnings)
 }
 
 // TestResolve_DeniedDependencySkipsDependent: a mandatory dependency behind a
 // refused repository is unmet like an unpublished one - the dependent plugin
-// is skipped with the reason, the pull goes on. The dependency itself is
-// also reported skipped: it is a catalog entry with a closed repository.
+// is skipped with the reason, the pull goes on.
 func TestResolve_DeniedDependencySkipsDependent(t *testing.T) {
 	contract := needsModule(plug("pg-tool", "v1.0.0"), "postgresql", ">=1.0.0")
 	contract = needsPlugin(contract, "dep-a", ">=1.0.0")
@@ -998,17 +995,9 @@ func TestResolve_DeniedDependencySkipsDependent(t *testing.T) {
 	})
 
 	assert.Empty(t, res.Plugins)
-
-	skipped := make(map[string]string, len(res.Skipped))
-	for _, skip := range res.Skipped {
-		skipped[skip.Name] = skip.Reason
-	}
-
-	require.Contains(t, skipped, "pg-tool")
-	assert.Contains(t, skipped["pg-tool"], `dependency "dep-a"`)
-	assert.Contains(t, skipped["pg-tool"], "denies access")
-	require.Contains(t, skipped, "dep-a")
-	assert.Contains(t, skipped["dep-a"], "denies access")
+	require.Len(t, res.Skipped, 1)
+	assert.Equal(t, "pg-tool", res.Skipped[0].Name)
+	assert.Contains(t, res.Skipped[0].Reason, `dependency "dep-a" is not published`)
 }
 
 // TestResolve_DeniedExplicitIncludeFails: the user asked for the plugin by

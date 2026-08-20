@@ -421,7 +421,7 @@ What is checked at mirror time vs install time:
 
 After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <target>/deckhouse-cli/plugins` shows the names).
 
-If the source registry has no `deckhouse-cli/plugins` catalog, the automatic selection is skipped quietly. If the registry denies access to the catalog (HTTP 401/403 - token-auth registries answer this way for any path outside the license's scope, published or not), the automatic selection is skipped too, with a warning in the log and in the summary. Explicit `--include-plugin` entries still resolve against their own repositories, and a denied explicit include fails the pull.
+If the source registry has no `deckhouse-cli/plugins` catalog, or denies access to it (HTTP 401/403 - token-auth registries answer this way for any path outside the license's scope, published or not), the automatic selection is skipped quietly. Explicit `--include-plugin` entries still resolve against their own repositories, and a denied explicit include fails the pull.
 
 ---
 
