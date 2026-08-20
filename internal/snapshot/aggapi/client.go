@@ -23,7 +23,9 @@ limitations under the License.
 //     namespace made relative). Served by the node's OWN subresource group (core
 //     group for the core Snapshot, the domain-prefixed group for domain snapshot CRs
 //     — the domain apiserver proxies to the core content layer); CSI VolumeSnapshot
-//     leaves use the dedicated VS-connector group instead.
+//     leaves use the dedicated storage-foundation VS-connector group instead (distinct
+//     from the CSI VolumeSnapshot CRD's own group, which neither storage-foundation nor
+//     state-snapshotter owns).
 //   - manifests-with-data-restoration: a ready-to-apply manifest array for the
 //     node's whole subtree (the server delegates domain subtrees internally).
 //     Served by the node's OWN subresource group (core group for the core
@@ -33,8 +35,9 @@ limitations under the License.
 //     the core Snapshot, the domain-prefixed group for domain snapshot CRs — the
 //     domain apiserver's upload facade records the node's own childrenSnapshotRefs and
 //     forwards the manifests to the core content layer); CSI VolumeSnapshot leaves use
-//     the dedicated VS-connector group instead. The upload is bind-first: it returns
-//     409 ImportContentNotBound until the node's SnapshotContent is bound.
+//     the dedicated storage-foundation VS-connector group instead. The upload is
+//     bind-first: it returns 409 ImportContentNotBound until the node's SnapshotContent
+//     is bound.
 //
 // All three subresources now route the same way — by the node's own group — so there is
 // no longer any download/upload group asymmetry. Every subresource is addressed by the
@@ -74,15 +77,26 @@ const (
 	// -> "subresources.sds-unified-snapshots-poc.deckhouse.io").
 	DomainSubresourcesGroupPrefix = "subresources."
 
-	// VSConnectorGroup is the generic-PVC extended VolumeSnapshot connector subresource group.
-	VSConnectorGroup = "subresources.snapshot.storage.k8s.io"
+	// VSConnectorGroup is the generic-PVC extended VolumeSnapshot connector subresource
+	// group, owned and served by storage-foundation. It is intentionally NOT the CSI
+	// external-snapshotter group (VolumeSnapshotGroup below) — storage-foundation only
+	// exposes subresources on the VolumeSnapshot's namespaced identity, it does not own
+	// the VolumeSnapshot CRD itself.
+	VSConnectorGroup = "subresources.storage-foundation.deckhouse.io"
 	// VSConnectorVersion is the version served under VSConnectorGroup.
 	VSConnectorVersion = "v1"
 
 	// StorageGroup is the API group of the core Snapshot / SnapshotContent CRDs.
 	StorageGroup = "state-snapshotter.deckhouse.io"
 	// VolumeSnapshotGroup is the CSI external-snapshotter API group of VolumeSnapshot leaves.
+	// This is the real CSI CRD group — neither storage-foundation nor state-snapshotter owns
+	// it — and is a distinct group from VSConnectorGroup above; do not conflate the two.
 	VolumeSnapshotGroup = "snapshot.storage.k8s.io"
+	// VolumeSnapshotVersion is the API version of the CSI external-snapshotter
+	// VolumeSnapshot CRD group (VolumeSnapshotGroup). It is independent of
+	// VSConnectorVersion (the subresources group's version) even though both currently
+	// equal "v1" — the two happen to match today, but do not reuse one for the other.
+	VolumeSnapshotVersion = "v1"
 	// VolumeSnapshotResource is the resource plural of CSI VolumeSnapshot objects.
 	VolumeSnapshotResource = "volumesnapshots"
 	// VolumeSnapshotKind is the kind of CSI VolumeSnapshot leaf nodes.
@@ -644,7 +658,8 @@ func (c *Client) LeafDataExportTarget(ref NodeRef) (string, string, string, erro
 
 // subresourceGroupVersion returns the aggregated subresource group and version that
 // serves restore/upload for a node of the given GVK:
-//   - CSI VolumeSnapshot leaves -> the VS-connector group.
+//   - CSI VolumeSnapshot leaves -> the storage-foundation VS-connector group (distinct
+//     from VolumeSnapshotGroup, the CSI VolumeSnapshot CRD's own group).
 //   - the core Snapshot (state-snapshotter.deckhouse.io) -> the core subresources group.
 //   - any domain snapshot CR -> "subresources." + its API group, same version.
 func subresourceGroupVersion(ref NodeRef) (string, string, error) {

@@ -111,7 +111,7 @@ func TestDownloadPath(t *testing.T) {
 		{
 			name: "csi volume snapshot leaf uses vs-connector group",
 			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
-			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
+			want: "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
 		},
 	}
 
@@ -157,7 +157,7 @@ func TestSubresourcePath(t *testing.T) {
 			name: "csi volume snapshot leaf restore uses vs-connector group",
 			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
 			sub:  SubManifestsRestore,
-			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
+			want: "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
 		},
 	}
 
@@ -203,7 +203,7 @@ func TestUploadPath(t *testing.T) {
 		{
 			name: "csi volume snapshot leaf upload uses vs-connector group",
 			ref:  NodeRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-1", Namespace: "ns"},
-			want: "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+			want: "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
 		},
 	}
 
@@ -294,16 +294,19 @@ func TestResourceFor_NoMapper(t *testing.T) {
 // (e.g. regressing domain upload back to the core group, or the reverse of the earlier
 // domain-download proxy work) fails fast here.
 //
-// Server contract summary (verified against state-snapshotter source):
+// Server contract summary (verified against state-snapshotter source, VS-connector against
+// storage-foundation):
 //   - manifests-download (GET): core group for Snapshot; domain-prefixed group for domain CRs
-//     (domainapi proxies to the core content layer); VS-connector for VS leaf. Every path is
-//     addressed by the node's own namespaced CR — the CLI never reads cluster-scoped
-//     snapshotcontents; restore_handler.go SetupRoutes + domainapi/handler.go.
+//     (domainapi proxies to the core content layer); VS-connector (storage-foundation) for VS
+//     leaf. Every path is addressed by the node's own namespaced CR — the CLI never reads
+//     cluster-scoped snapshotcontents; restore_handler.go SetupRoutes + domainapi/handler.go.
 //   - manifests-with-data-restoration (GET): core group for Snapshot; domain-prefixed
-//     group for domain CRs (domainapi/handler.go, GET-only); VS-connector for VS leaf.
+//     group for domain CRs (domainapi/handler.go, GET-only); VS-connector (storage-foundation)
+//     for VS leaf.
 //   - manifests-and-children-refs-upload (POST): core group for Snapshot; domain-prefixed group
 //     for domain CRs (domainapi upload facade — bind-first, forwards manifests to the core content
-//     layer); VS-connector for VS leaf. Routed by the node's own group, symmetric to download/restore.
+//     layer); VS-connector (storage-foundation) for VS leaf. Routed by the node's own group,
+//     symmetric to download/restore.
 func TestAggregatedAPIContract(t *testing.T) {
 	c := NewClient(nil, testMapper())
 
@@ -332,11 +335,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
-		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload
+		// storage-foundation VS-connector: handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsDownload
 		{
 			name:       "VS leaf: manifests-download -> VS-connector group",
 			pathFn:     func(c *Client) (string, error) { return c.downloadPath(vsRef) },
-			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
+			wantPath:   "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-download",
 			wantMethod: http.MethodGet,
 		},
 
@@ -356,11 +359,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-with-data-restoration",
 			wantMethod: http.MethodGet,
 		},
-		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsWithDataRestoration
+		// storage-foundation VS-connector: handleVolumeSnapshotNamespaced -> handleVolumeSnapshotManifestsWithDataRestoration
 		{
 			name:       "VS leaf: manifests-with-data-restoration -> VS-connector group",
 			pathFn:     func(c *Client) (string, error) { return c.subresourcePath(vsRef, SubManifestsRestore) },
-			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
+			wantPath:   "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-with-data-restoration",
 			wantMethod: http.MethodGet,
 		},
 
@@ -381,11 +384,11 @@ func TestAggregatedAPIContract(t *testing.T) {
 			wantPath:   "/apis/subresources.sds-unified-snapshots-poc.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/vds-1/manifests-and-children-refs-upload",
 			wantMethod: http.MethodPost,
 		},
-		// volumesnapshot_connector.go handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
+		// storage-foundation VS-connector: handleVolumeSnapshotNamespaced -> handleManifestsAndChildrenUpload (verb: create/POST)
 		{
 			name:       "VS leaf: manifests-and-children-refs-upload -> VS-connector group",
 			pathFn:     func(c *Client) (string, error) { return c.uploadPath(vsRef) },
-			wantPath:   "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
+			wantPath:   "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/ns/volumesnapshots/vs-1/manifests-and-children-refs-upload",
 			wantMethod: http.MethodPost,
 		},
 	}
