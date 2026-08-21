@@ -62,40 +62,69 @@ type Choices struct {
 	StaticAddress bool
 }
 
-// ChooseDisk settles which disk the OS is installed onto, and whether the
-// install may erase what is on it. A selector given on the command line has to
-// resolve to exactly one disk; without one the operator picks from the list.
-func ChooseDisk(p *prompt.Prompt, inventory *machine.Inventory, selector machine.Selector, wipe bool) (machine.Disk, bool, error) {
+// ChooseDisk settles which disk the node runs on. A disk that already carries
+// BOOT/CONFIG/DATA is adopted rather than installed onto: init identifies it
+// itself and provisions nothing. Mirrors resolveSystemDisk of
+// images/init/src/0.1/disk.go in the initramfs repository, where an installed
+// disk yields install=false.
+func ChooseDisk(p *prompt.Prompt, inventory *machine.Inventory, selector machine.Selector, wipe bool) (machine.Disk, error) {
 	if len(inventory.Disks) == 0 {
-		return machine.Disk{}, false, errors.New("this machine reports no disks, so there is nothing to install onto")
+		return machine.Disk{}, errors.New("this machine reports no disks, so there is nothing to install onto")
 	}
 
 	disk, err := pickDisk(p, inventory, selector)
 	if err != nil {
-		return machine.Disk{}, false, err
+		return machine.Disk{}, err
 	}
 
-	if disk.State == machine.StateBlank {
-		return disk, false, nil
+	for _, note := range DiskNotes(inventory, disk, wipe) {
+		p.Printf("%s\n", note)
 	}
+
+	return disk, nil
+}
+
+// DiskNotes says what this disk means for the machine, in the order an operator
+// needs to hear it. Nothing here refuses: what the notes warn about cannot be
+// settled from an inventory, only by the operator who knows how the machine
+// booted.
+func DiskNotes(inventory *machine.Inventory, disk machine.Disk, wipe bool) []string {
+	var notes []string
 
 	if wipe {
-		return disk, true, nil
+		notes = append(notes, fmt.Sprintf(
+			"--wipe erases %s and reinstalls onto it. The install copies the UKI and the rootfs from "+
+				"the installer media under /run/media, and a machine booted from its own disk has none: "+
+				"there the erase succeeds and the copy then fails, leaving nothing to boot from. "+
+				"Pass it only for a machine booted from installation media.", disk.Name))
+	} else if disk.State != machine.StateBlank {
+		notes = append(notes, fmt.Sprintf(
+			"%s already carries this system's layout, so it is adopted as it is: nothing is installed and "+
+				"nothing is erased. Reinstalling onto it takes --wipe, and only from installation media.", disk.Name))
 	}
 
-	confirmed, err := p.Confirm(fmt.Sprintf(
-		"Disk %s is %s and the install will erase it. Continue?", disk.Name, disk.State), false)
-	if err != nil {
-		return machine.Disk{}, false, err
+	if other, found := otherLayoutDisk(inventory, disk); found {
+		notes = append(notes, fmt.Sprintf(
+			"%s also carries this system's layout. The node identifies its disk by that layout before it reads "+
+				"any selector, so it would take %s and leave %s alone. Detach %s before adding this machine.",
+			other.Name, other.Name, disk.Name, other.Name))
 	}
 
-	if !confirmed {
-		return machine.Disk{}, false, fmt.Errorf(
-			"disk %s is %s, not %s: erasing it has to be confirmed, or allowed with --wipe",
-			disk.Name, disk.State, machine.StateBlank)
+	return notes
+}
+
+// otherLayoutDisk is a disk that is not the chosen one and still carries the
+// layout, which the node would pick over what this document names.
+func otherLayoutDisk(inventory *machine.Inventory, chosen machine.Disk) (machine.Disk, bool) {
+	for _, disk := range inventory.Disks {
+		if disk.Name == chosen.Name || disk.State != machine.StateSystemLayout {
+			continue
+		}
+
+		return disk, true
 	}
 
-	return disk, true, nil
+	return machine.Disk{}, false
 }
 
 func pickDisk(p *prompt.Prompt, inventory *machine.Inventory, selector machine.Selector) (machine.Disk, error) {
@@ -230,8 +259,10 @@ func BuildDocument(template *unstructured.Unstructured, choices Choices) ([]byte
 		return nil, fmt.Errorf("set the node name: %w", err)
 	}
 
-	if err := unstructured.SetNestedMap(document.Object, storageOf(choices), "spec", "storage"); err != nil {
-		return nil, fmt.Errorf("set the storage: %w", err)
+	if storage, install := storageOf(choices); install {
+		if err := unstructured.SetNestedMap(document.Object, storage, "spec", "storage"); err != nil {
+			return nil, fmt.Errorf("set the storage: %w", err)
+		}
 	}
 
 	if err := unstructured.SetNestedMap(document.Object, networkOf(choices), "spec", "network"); err != nil {
@@ -246,13 +277,26 @@ func BuildDocument(template *unstructured.Unstructured, choices Choices) ([]byte
 	return body, nil
 }
 
-func storageOf(choices Choices) map[string]any {
+// storageOf names the disk to install onto. A machine whose disk already carries
+// the layout is handed no storage at all: the node identifies that disk itself,
+// and a selector that disagrees with the pin recorded at install would send it
+// through a reinstall it has no media for.
+func storageOf(choices Choices) (map[string]any, bool) {
+	if !choices.Wipe && choices.Disk.State != machine.StateBlank {
+		return nil, false
+	}
+
 	selector := map[string]any{}
 	for key, value := range choices.Selector {
 		selector[key] = value
 	}
 
-	return map[string]any{"diskSelector": selector, "wipe": choices.Wipe}
+	storage := map[string]any{"diskSelector": selector}
+	if choices.Wipe {
+		storage["wipe"] = true
+	}
+
+	return storage, true
 }
 
 func networkOf(choices Choices) map[string]any {

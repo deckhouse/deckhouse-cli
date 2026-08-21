@@ -76,34 +76,40 @@ func assuming() *prompt.Prompt {
 	return prompt.New(strings.NewReader(""), &bytes.Buffer{}, true)
 }
 
-// A disk that already holds a system is never picked for the operator: the
-// install erases it.
-func TestChooseDiskRefusesSystemLayoutWithoutConfirmation(t *testing.T) {
-	_, _, err := ChooseDisk(assuming(), inventory(), machine.Selector{"serial": "ZA20ABCD"}, false)
-	require.ErrorContains(t, err, machine.StateSystemLayout)
-	require.ErrorContains(t, err, "--wipe")
-}
+// A disk that already carries the layout is adopted, not installed onto: init
+// identifies it itself and provisions nothing. Erasing it is a separate,
+// explicit decision.
+func TestChooseDiskAdoptsADiskThatCarriesTheLayout(t *testing.T) {
+	p, out := asking("")
 
-func TestChooseDiskAsksBeforeErasing(t *testing.T) {
-	p, out := asking("n\n")
-
-	_, _, err := ChooseDisk(p, inventory(), machine.Selector{"serial": "ZA20ABCD"}, false)
-	require.ErrorContains(t, err, "--wipe")
-	require.Contains(t, out.String(), "will erase it")
-
-	p, _ = asking("y\n")
-
-	disk, wipe, err := ChooseDisk(p, inventory(), machine.Selector{"serial": "ZA20ABCD"}, false)
+	disk, err := ChooseDisk(p, inventory(), machine.Selector{"serial": "ZA20ABCD"}, false)
 	require.NoError(t, err)
 	require.Equal(t, "sda", disk.Name)
-	require.True(t, wipe)
+	require.Contains(t, out.String(), "adopted as it is")
+	require.Contains(t, out.String(), "--wipe")
 }
 
-func TestChooseDiskTakesWipeAsTheConfirmation(t *testing.T) {
-	disk, wipe, err := ChooseDisk(assuming(), inventory(), machine.Selector{"serial": "ZA20ABCD"}, true)
-	require.NoError(t, err)
-	require.Equal(t, "sda", disk.Name)
-	require.True(t, wipe)
+// --wipe is the reinstall, and a reinstall needs installation media: init
+// erases the disk first and only then looks for the UKI under /run/media.
+func TestDiskNotesWarnThatWipeNeedsInstallationMedia(t *testing.T) {
+	notes := DiskNotes(inventory(), inventory().Disks[1], true)
+	require.Len(t, notes, 1)
+	require.Contains(t, notes[0], "/run/media")
+	require.Contains(t, notes[0], "nothing to boot from")
+}
+
+// The node identifies its disk by the layout before it reads any selector, so a
+// second disk carrying one silently wins over what the document names.
+func TestDiskNotesWarnAboutAnotherDiskCarryingTheLayout(t *testing.T) {
+	notes := DiskNotes(inventory(), inventory().Disks[0], false)
+	require.Len(t, notes, 1)
+	require.Contains(t, notes[0], "sda also carries")
+	require.Contains(t, notes[0], "Detach sda")
+}
+
+func TestDiskNotesAreSilentOnASingleBlankDisk(t *testing.T) {
+	oneDisk := &machine.Inventory{Disks: []machine.Disk{{Name: "nvme0n1", State: machine.StateBlank}}}
+	require.Empty(t, DiskNotes(oneDisk, oneDisk.Disks[0], false))
 }
 
 // The single blank disk is the default, and it is still confirmed by pressing
@@ -111,10 +117,9 @@ func TestChooseDiskTakesWipeAsTheConfirmation(t *testing.T) {
 func TestChooseDiskDefaultsToTheOnlyBlankDisk(t *testing.T) {
 	p, out := asking("\n")
 
-	disk, wipe, err := ChooseDisk(p, inventory(), nil, false)
+	disk, err := ChooseDisk(p, inventory(), nil, false)
 	require.NoError(t, err)
 	require.Equal(t, "nvme0n1", disk.Name)
-	require.False(t, wipe)
 	require.Contains(t, out.String(), "477Gi")
 	require.Contains(t, out.String(), "holds an OS")
 }
@@ -123,18 +128,18 @@ func TestChooseDiskRefusesToGuessBetweenTwoBlankDisks(t *testing.T) {
 	twoBlank := inventory()
 	twoBlank.Disks[1].State = machine.StateBlank
 
-	_, _, err := ChooseDisk(assuming(), twoBlank, nil, false)
+	_, err := ChooseDisk(assuming(), twoBlank, nil, false)
 	require.ErrorIs(t, err, prompt.ErrNoDefault)
 	require.ErrorContains(t, err, "--disk-selector")
 }
 
 func TestChooseDiskRefusesASelectorMatchingSeveralDisks(t *testing.T) {
-	_, _, err := ChooseDisk(assuming(), inventory(), machine.Selector{"name": "*"}, false)
+	_, err := ChooseDisk(assuming(), inventory(), machine.Selector{"name": "*"}, false)
 	require.ErrorContains(t, err, "matches 2 disks")
 }
 
 func TestChooseDiskRefusesASelectorMatchingNothing(t *testing.T) {
-	_, _, err := ChooseDisk(assuming(), inventory(), machine.Selector{"serial": "nosuchserial"}, false)
+	_, err := ChooseDisk(assuming(), inventory(), machine.Selector{"serial": "nosuchserial"}, false)
 	require.ErrorContains(t, err, "matches no disk")
 }
 
@@ -167,8 +172,8 @@ func TestChooseInterfaceRefusesAnInterfaceTheMachineLacks(t *testing.T) {
 func TestBuildDocumentFillsTheMachineHalfIntoTheClusterHalf(t *testing.T) {
 	document, err := BuildDocument(template(), Choices{
 		NodeName:  "worker-1",
+		Disk:      inventory().Disks[0],
 		Selector:  machine.Selector{"serial": "S3Z8NB0K700002"},
-		Wipe:      true,
 		Interface: inventory().Interfaces[0],
 	})
 	require.NoError(t, err)
@@ -188,8 +193,11 @@ func TestBuildDocumentFillsTheMachineHalfIntoTheClusterHalf(t *testing.T) {
 	serial, _, _ := unstructured.NestedString(object, "spec", "storage", "diskSelector", "serial")
 	require.Equal(t, "S3Z8NB0K700002", serial)
 
-	wipe, _, _ := unstructured.NestedBool(object, "spec", "storage", "wipe")
-	require.True(t, wipe)
+	// Nothing asked for an erase, so nothing in the document asks for one: with
+	// wipe unset the node installs onto a blank disk and provisions nothing on
+	// a disk that already carries the layout.
+	_, found, _ := unstructured.NestedBool(object, "spec", "storage", "wipe")
+	require.False(t, found)
 
 	interfaces, _, _ := unstructured.NestedSlice(object, "spec", "network", "interfaces")
 	require.Len(t, interfaces, 1)
@@ -202,9 +210,53 @@ func TestBuildDocumentFillsTheMachineHalfIntoTheClusterHalf(t *testing.T) {
 	require.Equal(t, bootstrapToken, token)
 }
 
+// A machine whose disk already carries the layout is handed no storage at all:
+// the node identifies that disk itself, and a selector disagreeing with the pin
+// recorded at install would send it through a reinstall it has no media for.
+func TestBuildDocumentOmitsStorageForAnAdoptedDisk(t *testing.T) {
+	document, err := BuildDocument(template(), Choices{
+		NodeName:  "worker-1",
+		Disk:      inventory().Disks[1],
+		Selector:  machine.Selector{"serial": "ZA20ABCD"},
+		Interface: inventory().Interfaces[0],
+	})
+	require.NoError(t, err)
+
+	object := map[string]any{}
+	require.NoError(t, yaml.Unmarshal(document, &object))
+
+	_, found, _ := unstructured.NestedString(object, "spec", "storage", "diskSelector", "serial")
+	require.False(t, found)
+
+	_, found, _ = unstructured.NestedBool(object, "spec", "storage", "wipe")
+	require.False(t, found)
+}
+
+// --wipe is the only thing that writes wipe, and it names the disk to erase.
+func TestBuildDocumentWritesWipeOnlyWhenAskedTo(t *testing.T) {
+	document, err := BuildDocument(template(), Choices{
+		NodeName:  "worker-1",
+		Disk:      inventory().Disks[1],
+		Selector:  machine.Selector{"serial": "ZA20ABCD"},
+		Wipe:      true,
+		Interface: inventory().Interfaces[0],
+	})
+	require.NoError(t, err)
+
+	object := map[string]any{}
+	require.NoError(t, yaml.Unmarshal(document, &object))
+
+	wipe, _, _ := unstructured.NestedBool(object, "spec", "storage", "wipe")
+	require.True(t, wipe)
+
+	serial, _, _ := unstructured.NestedString(object, "spec", "storage", "diskSelector", "serial")
+	require.Equal(t, "ZA20ABCD", serial)
+}
+
 func TestBuildDocumentPinsTheAddressWhenAskedTo(t *testing.T) {
 	document, err := BuildDocument(template(), Choices{
 		NodeName:      "worker-1",
+		Disk:          inventory().Disks[0],
 		Selector:      machine.Selector{"serial": "S3Z8NB0K700002"},
 		Interface:     inventory().Interfaces[0],
 		StaticAddress: true,
@@ -226,6 +278,7 @@ func TestBuildDocumentPinsTheAddressWhenAskedTo(t *testing.T) {
 func TestRedactHidesEverySecretTheTemplateCarries(t *testing.T) {
 	document, err := BuildDocument(template(), Choices{
 		NodeName:  "worker-1",
+		Disk:      inventory().Disks[0],
 		Selector:  machine.Selector{"serial": "S3Z8NB0K700002"},
 		Interface: inventory().Interfaces[0],
 	})
