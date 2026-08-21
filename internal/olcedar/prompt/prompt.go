@@ -52,6 +52,12 @@ func (p *Prompt) Printf(format string, args ...any) {
 	fmt.Fprintf(p.out, format, args...)
 }
 
+// Note writes a paragraph the operator has to read, set off by a blank line so
+// it does not run into the answer above it or the question below.
+func (p *Prompt) Note(text string) {
+	fmt.Fprintf(p.out, "\n%s\n", text)
+}
+
 // Choose shows a numbered list and returns the index picked. defaultIndex of
 // NoDefault means the answer has to be typed: nothing here may be picked for
 // the operator.
@@ -73,6 +79,8 @@ func (p *Prompt) Choose(title string, options []string, defaultIndex int) (int, 
 	for i, option := range options {
 		fmt.Fprintf(p.out, "  %d) %s\n", i+1, option)
 	}
+
+	fmt.Fprintln(p.out)
 
 	for {
 		answer, err := p.ask(question("Choice", defaultLabel(defaultIndex)))
@@ -107,6 +115,8 @@ func (p *Prompt) Confirm(text string, defaultYes bool) (bool, error) {
 		suffix = "Y/n"
 	}
 
+	fmt.Fprintln(p.out)
+
 	for {
 		answer, err := p.ask(fmt.Sprintf("%s [%s]: ", text, suffix))
 		if err != nil {
@@ -135,6 +145,8 @@ func (p *Prompt) Line(text, defaultValue string) (string, error) {
 
 		return defaultValue, nil
 	}
+
+	fmt.Fprintln(p.out)
 
 	answer, err := p.ask(question(text, defaultValue))
 	if err != nil {

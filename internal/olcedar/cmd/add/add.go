@@ -137,6 +137,7 @@ func run(cmd *cobra.Command, target string, opts *options) error {
 	ctx := cmd.Context()
 	address := machine.Address(target)
 	p := prompt.New(cmd.InOrStdin(), cmd.OutOrStdout(), opts.yes)
+	started := time.Now()
 
 	kube, dyn, err := clients(cmd)
 	if err != nil {
@@ -157,10 +158,14 @@ func run(cmd *cobra.Command, target string, opts *options) error {
 		return err
 	}
 
+	read := time.Since(started)
+
 	choices, err := decide(ctx, p, kube, inventory, machine.Host(address), opts)
 	if err != nil {
 		return err
 	}
+
+	decided := time.Now()
 
 	document, err := plan.BuildDocument(template, *choices)
 	if err != nil {
@@ -179,13 +184,40 @@ func run(cmd *cobra.Command, target string, opts *options) error {
 		return err
 	}
 
-	p.Printf("\n%s accepted the configuration and is installing itself as %s.\n", address, choices.NodeName)
+	push := time.Since(decided)
+
+	p.Printf("\n%s took the configuration and is bringing itself up as %s.\n", address, choices.NodeName)
 
 	if !opts.wait {
+		printTimings(p, read, push, 0)
+
 		return nil
 	}
 
-	return waitForNode(ctx, p, kube, choices.NodeName, opts.waitTimeout)
+	registration, err := waitForNode(ctx, p, kube, choices.NodeName, opts.waitTimeout)
+	if err != nil {
+		return err
+	}
+
+	printTimings(p, read, push, registration)
+
+	return nil
+}
+
+// printTimings says where the time went, so the cost of adding a node is a
+// measurement rather than an impression. The operator's own thinking time sits
+// between the read and the push and is deliberately not counted.
+func printTimings(p *prompt.Prompt, read, push, registration time.Duration) {
+	p.Printf("\nTimings\n")
+	p.Printf("  read the cluster and the machine  %8s\n", read.Round(time.Millisecond*100))
+	p.Printf("  pushed the configuration          %8s\n", push.Round(time.Millisecond*100))
+
+	if registration == 0 {
+		return
+	}
+
+	p.Printf("  node registered                   %8s\n", registration.Round(time.Second))
+	p.Printf("  machine time in total             %8s\n", (push + registration).Round(time.Second))
 }
 
 func validate(opts *options, interactive bool) error {
@@ -366,17 +398,29 @@ func printRedacted(cmd *cobra.Command, document []byte) error {
 	return nil
 }
 
-func waitForNode(ctx context.Context, p *prompt.Prompt, kube kubernetes.Interface, name string, timeout time.Duration) error {
+func waitForNode(
+	ctx context.Context,
+	p *prompt.Prompt,
+	kube kubernetes.Interface,
+	name string,
+	timeout time.Duration,
+) (time.Duration, error) {
 	started := time.Now()
 
 	p.Printf("Waiting for %s to register, up to %s.\n", name, timeout)
 
-	if err := cluster.WaitForNode(ctx, kube, name, timeout); err != nil {
-		return err
+	tick := func(elapsed time.Duration) {
+		p.Printf("  still waiting, %s\n", elapsed)
 	}
 
-	p.Printf("%s registered in %s. It becomes Ready once the cluster rolls its modules onto it:\n  d8 k wait --for=condition=Ready node/%s\n",
-		name, time.Since(started).Round(time.Second), name)
+	if err := cluster.WaitForNode(ctx, kube, name, timeout, tick); err != nil {
+		return 0, err
+	}
 
-	return nil
+	registration := time.Since(started)
+
+	p.Printf("\n%s registered in %s. It turns Ready once the cluster rolls its modules onto it:\n  d8 k wait --for=condition=Ready node/%s\n",
+		name, registration.Round(time.Second), name)
+
+	return registration, nil
 }

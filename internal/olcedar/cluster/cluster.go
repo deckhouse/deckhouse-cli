@@ -195,15 +195,42 @@ func NodeExists(ctx context.Context, kube kubernetes.Interface, name string) (bo
 	return true, nil
 }
 
-// WaitForNode waits until the node registers. Registration is what this command
-// can promise: it means the machine installed itself and its kubelet reached
-// the cluster. Readiness comes later, from the modules rolled onto the node.
-func WaitForNode(ctx context.Context, kube kubernetes.Interface, name string, timeout time.Duration) error {
-	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		return NodeExists(ctx, kube, name)
+// pollInterval is how often the cluster is asked about the node, and
+// tickInterval how often the wait says out loud that it is still waiting.
+const (
+	pollInterval = 5 * time.Second
+	tickInterval = 30 * time.Second
+)
+
+// WaitForNode waits until the node registers, reporting how long it has been
+// waiting through tick. Registration is what this command can promise: it means
+// the machine installed itself and its kubelet reached the cluster. Readiness
+// comes later, from the modules rolled onto the node.
+func WaitForNode(
+	ctx context.Context,
+	kube kubernetes.Interface,
+	name string,
+	timeout time.Duration,
+	tick func(elapsed time.Duration),
+) error {
+	started := time.Now()
+	ticked := started
+
+	err := wait.PollUntilContextTimeout(ctx, pollInterval, timeout, true, func(ctx context.Context) (bool, error) {
+		registered, err := NodeExists(ctx, kube, name)
+		if err != nil || registered {
+			return registered, err
+		}
+
+		if time.Since(ticked) >= tickInterval {
+			ticked = time.Now()
+			tick(time.Since(started).Round(time.Second))
+		}
+
+		return false, nil
 	})
 	if err != nil {
-		return fmt.Errorf("wait for node %s to register: %w", name, err)
+		return fmt.Errorf("wait for node %s to register after %s: %w", name, time.Since(started).Round(time.Second), err)
 	}
 
 	return nil

@@ -78,7 +78,7 @@ func ChooseDisk(p *prompt.Prompt, inventory *machine.Inventory, selector machine
 	}
 
 	for _, note := range DiskNotes(inventory, disk, wipe) {
-		p.Printf("%s\n", note)
+		p.Note(note)
 	}
 
 	return disk, nil
@@ -166,6 +166,10 @@ func matchOne(selector machine.Selector, disks []machine.Disk) (machine.Disk, er
 // defaultDisk offers the one blank disk, and nothing when there is a choice to
 // make: a disk holding data is never picked for the operator.
 func defaultDisk(disks []machine.Disk) int {
+	if len(disks) == 1 {
+		return 0
+	}
+
 	found := prompt.NoDefault
 
 	for i, disk := range disks {
