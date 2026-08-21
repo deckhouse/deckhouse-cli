@@ -42,7 +42,7 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return help(err, "registry-packages-proxy: forbidden (403)",
 			"the identity may not download the CLI",
 			"bind the ClusterRole 'd8:registry-packages-proxy:cli-download' to the user/group",
-			"authorization is cached ~5 min - after binding, retry with a fresh token")
+			"a denied check is cached ~30s - after binding the role, wait half a minute and retry with the same token")
 	case errors.Is(err, rpp.ErrNotFound):
 		return help(err, "registry-packages-proxy: version not found (404)",
 			"this deckhouse-cli version is not published",

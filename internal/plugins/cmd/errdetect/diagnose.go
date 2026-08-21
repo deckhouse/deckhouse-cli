@@ -38,11 +38,14 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 		return help(err, "registry-packages-proxy: unauthorized (401)",
 			"no accepted Bearer token (a client-certificate kubeconfig is not enough)",
 			"use a kubeconfig with an OIDC token (Kubeconfig Generator or 'd8 login')")
+	// Plugins are downloaded over /v1/images/, which kube-rbac-proxy authorizes
+	// through the deployments/cli-binary subresource: that is the cli-download
+	// role, not packages-download (it covers /v1/packages/).
 	case errors.Is(err, rpp.ErrForbidden):
 		return help(err, "registry-packages-proxy: forbidden (403)",
 			"the identity may not download plugins",
-			"bind the ClusterRole 'd8:registry-packages-proxy:packages-download' to the user/group",
-			"authorization is cached ~5 min - after binding, retry with a fresh token")
+			"bind the ClusterRole 'd8:registry-packages-proxy:cli-download' to the user/group",
+			"a denied check is cached ~30s - after binding the role, wait half a minute and retry with the same token")
 	case errors.Is(err, rpp.ErrNotFound):
 		return help(err, "registry-packages-proxy: plugin or version not found (404)",
 			"this plugin or version is not published",
