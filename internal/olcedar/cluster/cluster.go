@@ -72,7 +72,10 @@ func FetchTemplate(ctx context.Context, dyn dynamic.Interface, group string) (*u
 	}
 
 	if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("read the node configuration template of %s: %w", group, err)
+		return nil, fmt.Errorf("read the node configuration template of %s: %w. "+
+			"It is served by an aggregated API, so this read is proxied by the kube-apiserver to node-controller "+
+			"of node-manager: a node-controller that is down, unreachable or unregistered fails it. "+
+			"Check it with: d8 k get apiservice v1alpha1.templates.internal.deckhouse.io", group, err)
 	}
 
 	return nil, explainMissingTemplate(ctx, dyn, group)

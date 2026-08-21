@@ -43,6 +43,12 @@ const (
 	networkStatic = "static"
 )
 
+// clusterRequestTimeout bounds one read of the cluster. The template is served
+// by an aggregated API: the kube-apiserver proxies the request to
+// node-controller, and a backend that does not answer would otherwise hang the
+// command with nothing on the screen.
+const clusterRequestTimeout = 30 * time.Second
+
 var addLong = templates.LongDesc(`
 Add a machine to the cluster as a static node running an immutable OS (olcedar).
 
@@ -144,14 +150,20 @@ func run(cmd *cobra.Command, target string, opts *options) error {
 		return err
 	}
 
+	p.Printf("asking %s who holds the maintenance port\n", address)
+
 	if err := checkMachineIsNotANode(ctx, kube, address); err != nil {
 		return err
 	}
+
+	p.Printf("reading the node configuration template of %s\n", opts.group)
 
 	template, err := cluster.FetchTemplate(ctx, dyn, opts.group)
 	if err != nil {
 		return err
 	}
+
+	p.Printf("reading the inventory of %s\n", address)
 
 	inventory, err := machine.FetchInventory(ctx, address)
 	if err != nil {
@@ -248,6 +260,13 @@ func clients(cmd *cobra.Command) (kubernetes.Interface, dynamic.Interface, error
 	}
 
 	restConfig, kube, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("set up the Kubernetes client: %w", err)
+	}
+
+	restConfig.Timeout = clusterRequestTimeout
+
+	kube, err = kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("set up the Kubernetes client: %w", err)
 	}

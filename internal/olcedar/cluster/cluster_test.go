@@ -23,12 +23,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func node(name, group string, addresses ...string) *corev1.Node {
@@ -84,6 +86,20 @@ func TestFetchTemplateExplainsAGroupOfTheWrongType(t *testing.T) {
 	_, err := FetchTemplate(context.Background(), dynamicClient(nodeGroup("worker", "CloudEphemeral", "")), "worker")
 	require.ErrorContains(t, err, "CloudEphemeral")
 	require.ErrorContains(t, err, "provisioned by the cluster itself")
+}
+
+// A read that fails for any reason other than a missing template names where
+// the answer comes from: the failure is almost never in the kube-apiserver.
+func TestFetchTemplateNamesTheAggregatedAPIOnFailure(t *testing.T) {
+	client := dynamicClient()
+	client.PrependReactor("get", "nodeconfigtemplates", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewTimeoutError("the backend did not answer", 30)
+	})
+
+	_, err := FetchTemplate(context.Background(), client, "worker")
+	require.ErrorContains(t, err, "aggregated API")
+	require.ErrorContains(t, err, "node-controller")
+	require.ErrorContains(t, err, "d8 k get apiservice")
 }
 
 func TestFetchTemplateExplainsAMissingGroup(t *testing.T) {
