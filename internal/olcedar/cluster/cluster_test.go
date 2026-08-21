@@ -19,6 +19,7 @@ package cluster
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -132,6 +133,22 @@ func TestNodeNameByAddressNamesTheNodeHoldingTheAddress(t *testing.T) {
 
 	require.Equal(t, "worker-0", NodeNameByAddress(context.Background(), kube, "10.12.4.55"))
 	require.Empty(t, NodeNameByAddress(context.Background(), kube, "10.12.4.56"))
+}
+
+// The wait says out loud that it is still waiting, and reports how long it
+// waited when the node never registers.
+func TestWaitForNodeReportsHowLongItWaited(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err := WaitForNode(ctx, fake.NewSimpleClientset(), "worker-1", 10*time.Millisecond, func(time.Duration) {})
+	require.ErrorContains(t, err, "wait for node worker-1 to register after")
+}
+
+func TestWaitForNodeReturnsAsSoonAsTheNodeIsThere(t *testing.T) {
+	err := WaitForNode(context.Background(), fake.NewSimpleClientset(node("worker-1", "worker")),
+		"worker-1", time.Minute, func(time.Duration) {})
+	require.NoError(t, err)
 }
 
 func TestNodeExists(t *testing.T) {
