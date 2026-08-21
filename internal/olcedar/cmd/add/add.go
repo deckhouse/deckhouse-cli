@@ -95,7 +95,7 @@ func NewCommand() *cobra.Command {
 	flags.StringVar(&opts.diskSelector, "disk-selector", "", "Disk to install onto, as key=value (serial, wwid, name, busPath, model)")
 	flags.StringVar(&opts.network, "network", "", "Network configuration: dhcp or static (default asks, dhcp)")
 	flags.StringVar(&opts.networkInterface, "network-interface", "", "Interface to configure, when the address reaches the machine through a forward")
-	flags.BoolVar(&opts.wipe, "wipe", false, "Allow the install to erase a disk that is not blank")
+	flags.BoolVar(&opts.wipe, "wipe", false, "Erase the disk and reinstall onto it; only for a machine booted from installation media")
 	flags.BoolVar(&opts.yes, "yes", false, "Answer every question with its default, and refuse where there is no default")
 	flags.BoolVar(&opts.dryRun, "dry-run", false, "Print the document with its secrets redacted instead of pushing it")
 	flags.BoolVar(&opts.wait, "wait", true, "Wait for the node to register in the cluster")
@@ -269,7 +269,7 @@ func decide(
 		return nil, err
 	}
 
-	disk, wipe, err := plan.ChooseDisk(p, inventory, selector, opts.wipe)
+	disk, err := plan.ChooseDisk(p, inventory, selector, opts.wipe)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +293,7 @@ func decide(
 		NodeName:      name,
 		Disk:          disk,
 		Selector:      machine.SelectorFor(disk),
-		Wipe:          wipe,
+		Wipe:          opts.wipe,
 		Interface:     iface,
 		StaticAddress: static,
 	}, nil
