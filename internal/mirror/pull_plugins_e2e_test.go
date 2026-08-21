@@ -450,9 +450,10 @@ func TestPullE2E_OnlyExtraImages_PluginsSkipped(t *testing.T) {
 
 // TestPullE2E_RoundTrip_PullThenPushPlugins carries plugins through the whole
 // mirror path: pull from the source registry, pack into bundle tars, push the
-// tars into a target registry. The plugin repository must land verbatim at
-// deckhouse-cli/plugins with its discovery tag, and --modules-path-suffix
-// must move modules only.
+// tars into a target registry with an edition segment. The plugin repository
+// must land at deckhouse-cli/plugins under the root above that edition, with
+// its discovery tag, while --modules-path-suffix moves modules only and they
+// stay under the edition.
 func TestPullE2E_RoundTrip_PullThenPushPlugins(t *testing.T) {
 	reg := upfake.NewRegistry(pullStubRootURL)
 	addModule(reg, "postgresql", map[string]string{"stable": "v1.5.0", "alpha": "v1.10.0"})
@@ -478,13 +479,14 @@ func TestPullE2E_RoundTrip_PullThenPushPlugins(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, tars)
 
-	destReg := upfake.NewRegistry("registry.example.com/deckhouse/ee")
-	destClient := pkgclient.Adapt(upfake.NewClient(destReg))
+	destReg := upfake.NewRegistry("registry.example.com")
+	hostClient := pkgclient.Adapt(upfake.NewClient(destReg))
 
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
 
-	pushSvc := NewPushService(destClient, &PushServiceOptions{
+	pushSvc := NewPushService(hostClient, &PushServiceOptions{
+		TargetPath: "/deckhouse/ee",
 		Packages:   tars,
 		WorkingDir: t.TempDir(),
 		// A moved modules path must not touch plugins.
@@ -496,18 +498,28 @@ func TestPullE2E_RoundTrip_PullThenPushPlugins(t *testing.T) {
 
 	assert.Equal(t, 1, pushSummary.Plugins, "one plugin repository pushed")
 	assert.Equal(t, 1, pushSummary.Modules)
+	assert.Equal(t, "registry.example.com/deckhouse/deckhouse-cli/plugins", pushSvc.pluginsPath.Path)
 
-	// Both resolved plugin versions land verbatim at deckhouse-cli/plugins.
-	pluginClient := destClient.WithSegment("deckhouse-cli", "plugins", "postgresql-mgr")
+	// Plugins are rooted above the edition: registry.example.com/deckhouse,
+	// not .../deckhouse/ee. Both resolved plugin versions land there.
+	rootClient := hostClient.WithSegment("deckhouse")
+	destClient := rootClient.WithSegment("ee")
+
+	pluginClient := rootClient.WithSegment("deckhouse-cli", "plugins", "postgresql-mgr")
 	assert.NoError(t, pluginClient.CheckImageExists(ctx, "v1.1.0"))
 	assert.NoError(t, pluginClient.CheckImageExists(ctx, "v1.2.0"))
 
 	// The discovery tag makes the plugin visible to catalog listing.
-	catalogTags, err := destClient.WithSegment("deckhouse-cli", "plugins").ListTags(ctx)
+	catalogTags, err := rootClient.WithSegment("deckhouse-cli", "plugins").ListTags(ctx)
 	require.NoError(t, err)
 	assert.Contains(t, catalogTags, "postgresql-mgr")
 
-	// The module moved with the suffix; the plugin stayed put.
+	// Nothing plugin-related is left under the edition.
+	underEdition := destClient.WithSegment("deckhouse-cli", "plugins", "postgresql-mgr")
+	assert.Error(t, underEdition.CheckImageExists(ctx, "v1.1.0"),
+		"plugins must not be written under the edition segment")
+
+	// The module moved with the suffix and stayed under the edition.
 	movedModule := destClient.WithSegment("my", "mods", "postgresql")
 	assert.NoError(t, movedModule.CheckImageExists(ctx, "v1.5.0"))
 	assert.NoError(t, movedModule.CheckImageExists(ctx, "v1.10.0"))

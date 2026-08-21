@@ -244,8 +244,11 @@ func (p *Pusher) warnNonDefaultModulesPath() {
 
 // executeNewPush runs the push using the push service.
 // This service expects the bundle to have the exact same structure as the registry:
-// - Each OCI layout's relative path becomes its registry segment
-// - Works with unified bundles where pull saved the structure as-is
+//   - Each OCI layout's relative path becomes its registry segment
+//   - Works with unified bundles where pull saved the structure as-is
+//   - CLI plugins (deckhouse-cli/) are the exception: they go to the registry
+//     root above the target's edition segment, e.g. REGISTRY/dkp/ee pushes them
+//     to REGISTRY/dkp/deckhouse-cli/plugins
 func (p *Pusher) executeNewPush() error {
 	// Set up graceful cancellation on Ctrl+C
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -268,16 +271,15 @@ func (p *Pusher) executeNewPush() error {
 		clientOpts = append(clientOpts, regclient.WithTimeout(MirrorTimeout))
 	}
 
+	// The client is scoped to the host only. The service scopes the target
+	// path itself: it needs the path to place CLI plugins at the registry
+	// root above the target's edition segment.
 	client := pkgclient.NewFromOptions(p.pushParams.RegistryHost, clientOpts...)
-
-	// Scope to the registry path
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
-	}
 
 	svc := mirror.NewPushService(
 		client,
 		&mirror.PushServiceOptions{
+			TargetPath:        p.pushParams.RegistryPath,
 			Packages:          Packages,
 			WorkingDir:        p.pushParams.WorkingDir,
 			ModulesPathSuffix: p.pushParams.ModulesPathSuffix,

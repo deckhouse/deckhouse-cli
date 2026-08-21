@@ -27,10 +27,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"syscall"
 
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/deckhouse/deckhouse-cli/internal"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/errmatch"
 	"github.com/deckhouse/deckhouse-cli/pkg/diagnostic"
 )
@@ -41,6 +44,7 @@ const (
 	categoryAuth          = "Authentication failed"
 	categoryAuth401       = "Authentication failed (HTTP 401 Unauthorized)"
 	categoryAuth403       = "Access denied (HTTP 403 Forbidden)"
+	categoryPluginsRoot   = "Access denied to the CLI plugins path above the target"
 	categoryRateLimit     = "Rate limited by registry (HTTP 429 Too Many Requests)"
 	categoryServerError   = "Registry server error"
 	categoryDNS           = "DNS resolution failed"
@@ -122,6 +126,11 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 				},
 			},
 		}
+
+	// A denied write to the plugins root names a path the user never typed:
+	// spell that path out instead of giving the generic credentials advice.
+	case isPluginsRootAuthError(err):
+		return diagnosePluginsRootDenied(err)
 
 	case isAuthenticationError(err):
 		category := categoryAuth
@@ -346,7 +355,51 @@ func Diagnose(err error) *diagnostic.HelpfulError {
 	return nil
 }
 
+// diagnosePluginsRootDenied explains a 401/403 on the CLI plugins root: where
+// the write went, why that path is above the target, and how to unblock it.
+func diagnosePluginsRootDenied(err error) *diagnostic.HelpfulError {
+	var rootErr *mirror.PluginsRootError
+	errors.As(err, &rootErr)
+
+	report := rootErr.Report
+
+	category := categoryPluginsRoot
+	if code := authStatusCode(err); code != 0 {
+		category = fmt.Sprintf("%s (HTTP %d)", categoryPluginsRoot, code)
+	}
+
+	pluginsRepo := path.Join(report.Root, internal.D8CLISegment)
+
+	return &diagnostic.HelpfulError{
+		Category:    category,
+		OriginalErr: err,
+		Suggestions: []diagnostic.Suggestion{
+			{
+				Cause: fmt.Sprintf(
+					"d8 CLI plugins are written to %s, the registry root above the %q edition of the target %s "+
+						"(registry-packages-proxy in the cluster looks for them there). "+
+						"The registry refused the write to %s: the credentials cover only the target path, or the registry has no repository at that level",
+					report.Path, report.Edition, report.Target, rootErr.Repo,
+				),
+				Solutions: []string{
+					fmt.Sprintf("Grant the account push access to %s and its sub-repositories", pluginsRepo),
+					fmt.Sprintf("If the registry needs repositories (projects) created up front, create %s next to %s", pluginsRepo, report.Target),
+					"To push the bundle without plugins, pass the archives with --file and leave out plugin-<name>.tar",
+				},
+			},
+		},
+	}
+}
+
 // --- detection functions ---
+
+// isPluginsRootAuthError reports a 401/403 on a write to the CLI plugins
+// root above the target (see mirror.PluginsRootError).
+func isPluginsRootAuthError(err error) bool {
+	var rootErr *mirror.PluginsRootError
+
+	return errors.As(err, &rootErr) && isAuthenticationError(err)
+}
 
 func isEOF(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
