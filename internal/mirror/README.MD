@@ -411,6 +411,8 @@ Registry layout (at the **bare root**, outside the edition segment - like the in
 | `<root>/deckhouse-cli/plugins` | Plugin catalog; its tags are plugin names |
 | `<root>/deckhouse-cli/plugins/<name>:<vX.Y.Z>` | One plugin version - a multi-platform OCI index (linux/darwin/windows) |
 
+`<root>` is the registry path **without** the edition: `registry.deckhouse.io/deckhouse/deckhouse-cli/plugins`, never `registry.deckhouse.io/deckhouse/ee/deckhouse-cli/plugins`. Pull derives it by cutting a trailing edition segment (`ce`, `be`, `se`, `se-plus`, `ee`, `fe`) off `--source`, and the in-cluster registry-packages-proxy derives it the same way from the cluster's `imagesRepo`. Push applies the same rule to its target, so the two sides agree: `d8 mirror push ./bundle REGISTRY/dkp/ee` writes the platform, modules, packages and security databases under `REGISTRY/dkp/ee` and the plugins to `REGISTRY/dkp/deckhouse-cli/plugins`. A target without an edition segment (`registry.company.com/deckhouse`, `dev-registry.deckhouse.io/sys/deckhouse-oss`) is used as is. The push log says where plugins go before the first plugin upload.
+
 **Bundle output:** one `plugin-<name>.tar` per plugin. Multi-platform indexes are stored whole, so every platform binary and the contract annotation reach the target registry exactly as published.
 
 What is checked at mirror time vs install time:
@@ -419,7 +421,9 @@ What is checked at mirror time vs install time:
 - `kubernetes` and `noneOf` requirements are cluster-side: `d8 plugins install` enforces them on the target cluster as usual.
 - Conditional requirements never gate mirroring; conflicts show up as warnings.
 
-After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <target>/deckhouse-cli/plugins` shows the names).
+After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <target-without-edition>/deckhouse-cli/plugins` shows the names, e.g. `crane ls REGISTRY/dkp/deckhouse-cli/plugins` after a push to `REGISTRY/dkp/ee`).
+
+Because plugins are written one level above the target, the push credentials must be allowed to write there too. When the registry answers HTTP 401/403 for `<root>/deckhouse-cli/...` while the target itself is writable, the push fails at the first plugin write - the pre-push access check covers the target only, so the components under it are uploaded first - with a diagnostic that names the refused repository, the target it sits above and the edition that was cut off; grant the account push access to `<root>/deckhouse-cli` (or create that repository, on registries that need repositories created up front), or push the bundle without `plugin-<name>.tar` archives via `--file`.
 
 If the source registry has no `deckhouse-cli/plugins` catalog, or denies access to it (HTTP 401/403 - token-auth registries answer this way for any path outside the license's scope, published or not), the automatic selection is skipped quietly. Explicit `--include-plugin` entries still resolve against their own repositories, and a denied explicit include fails the pull.
 
@@ -491,7 +495,9 @@ When `--modules-path-suffix` moves modules off the default `modules/` and module
 
 Uploads a previously downloaded Deckhouse Kubernetes Platform distribution bundle to a third-party container registry. This is typically used to populate an air-gapped registry with Deckhouse images.
 
-Before uploading, push runs a write-access check against the target repository (15-second timeout, or `D8_MIRROR_TIMEOUT`); set `MIRROR_BYPASS_ACCESS_CHECKS=1` to proceed even if that check fails. Chunked packages (`<name>.tar.NNNN.chunk`) are reassembled transparently, and each image upload is retried up to 4 times. After the layouts are pushed, small discovery-index tags are created at `<repo>/modules:<module>` and `<repo>/packages:<package>` so the mirrored modules and packages can be enumerated by tag listing.
+Before uploading, push runs a write-access check against the target repository (15-second timeout, or `D8_MIRROR_TIMEOUT`); set `MIRROR_BYPASS_ACCESS_CHECKS=1` to proceed even if that check fails. Chunked packages (`<name>.tar.NNNN.chunk`) are reassembled transparently, and each image upload is retried up to 4 times. After the layouts are pushed, small discovery-index tags are created at `<repo>/modules:<module>`, `<repo>/packages:<package>` and `<root>/deckhouse-cli/plugins:<plugin>` so the mirrored modules, packages and plugins can be enumerated by tag listing.
+
+Everything in the bundle is written under the target as is, with one exception: d8 CLI plugins go to the registry root **above** the target's edition segment, `REGISTRY/dkp/ee` -> `REGISTRY/dkp/deckhouse-cli/plugins`, because that is where pull reads them from and where the in-cluster registry-packages-proxy looks for them (it cuts the edition off the cluster's `imagesRepo` the same way). A target without an edition segment is used as is. See [Plugin Mirroring](#plugin-mirroring) for the rule and the access rights it needs.
 
 ### Synopsis
 
@@ -553,11 +559,18 @@ d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse \
   --registry-login admin \
   --registry-password secretpassword \
   --tmp-dir /mnt/large-disk/tmp
+
+# Push to an edition-suffixed target (the DKP docs layout): the platform,
+# modules, packages and security databases go under registry.company.com/dkp/ee,
+# the CLI plugins to registry.company.com/dkp/deckhouse-cli/plugins
+d8 mirror push /tmp/d8-bundle registry.company.com/dkp/ee \
+  --registry-login admin \
+  --registry-password secretpassword
 ```
 
 ### Summary
 
-After a push, `d8 mirror` prints a framed summary of what was written to the target registry (platform, installer, security databases, module and package counts).
+After a push, `d8 mirror` prints a framed summary of what was written to the target registry (platform, installer, security databases, module, package and plugin counts).
 
 When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pushed, the summary warns about the non-default modules path, highlighting it with a hint of the standard path. A default path, or a moved path that no module went through, produces no warning.
 

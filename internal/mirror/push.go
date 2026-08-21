@@ -49,6 +49,12 @@ const (
 
 // PushServiceOptions contains configuration options for PushService
 type PushServiceOptions struct {
+	// TargetPath is the repository path under the registry host the bundle is
+	// pushed to, e.g. "/deckhouse/ee". Leading and trailing slashes are
+	// ignored; empty pushes to the host root. A trailing edition segment
+	// ("ee", "se-plus", ...) is cut off to get the root CLI plugins are
+	// written under (see PluginsPathReport).
+	TargetPath string
 	// Packages is the list of tar/chunked package archive paths to push.
 	Packages []string
 	// WorkingDir is the temporary directory for unpacking bundles
@@ -94,16 +100,27 @@ type PushServiceOptions struct {
 //	            ├── index.json
 //	            └── blobs/
 type PushService struct {
-	client     client.Client
+	// client is scoped to the push target: host + TargetPath.
+	client client.Client
+	// targetRef is the push target as a registry reference,
+	// e.g. "registry.example.com/deckhouse/ee".
+	targetRef string
+	// pluginsRoot is scoped to the target minus its trailing edition segment.
+	// The deckhouse-cli/ part of the bundle is written under it, everything
+	// else under client. Equals client when the target has no edition.
+	pluginsRoot client.Client
+	pluginsPath PluginsPathReport
+
 	options    *PushServiceOptions
 	pusher     *pusher.Service
 	logger     *dkplog.Logger
 	userLogger *log.SLogger
 }
 
-// NewPushService creates a new PushService
+// NewPushService creates a new PushService. hostClient is scoped to the
+// registry host only; the service scopes it to options.TargetPath itself.
 func NewPushService(
-	client client.Client,
+	hostClient client.Client,
 	options *PushServiceOptions,
 	logger *dkplog.Logger,
 	userLogger *log.SLogger,
@@ -112,12 +129,25 @@ func NewPushService(
 		options = &PushServiceOptions{}
 	}
 
+	host := hostClient.GetRegistry()
+	target := hostClient.WithSegment(pkgclient.PathToSegments(options.TargetPath)...)
+
+	// CLI plugins live at the registry root above the edition, the same rule
+	// pull reads them by and registry-packages-proxy looks them up by.
+	rootPath, edition := pluginsRootPath(options.TargetPath)
+	pluginsRoot := hostClient.WithSegment(pkgclient.PathToSegments(rootPath)...)
+
+	targetRef := path.Join(host, options.TargetPath)
+
 	return &PushService{
-		client:     client,
-		options:    options,
-		pusher:     pusher.NewService(logger, userLogger),
-		logger:     logger,
-		userLogger: userLogger,
+		client:      target,
+		targetRef:   targetRef,
+		pluginsRoot: pluginsRoot,
+		pluginsPath: newPluginsPathReport(targetRef, path.Join(host, rootPath), edition),
+		options:     options,
+		pusher:      pusher.NewService(logger, userLogger),
+		logger:      logger,
+		userLogger:  userLogger,
 	}
 }
 
@@ -126,7 +156,9 @@ func NewPushService(
 // using its relative path as the registry segment.
 //
 // The key principle: no path transformations. Whatever path the layout has
-// in the unpacked directory becomes its path in the registry.
+// in the unpacked directory becomes its path in the registry. The two
+// exceptions are the modules path (--modules-path-suffix) and the
+// deckhouse-cli/ segment, which is rooted above the target's edition.
 func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
 	// The modules path is known up front, so it is on the summary even on error.
 	summary := &PushSummary{ModulesPath: svc.modulesPathReport()}
@@ -184,7 +216,7 @@ func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
 // modulesPathReport resolves the target modules path for the push summary,
 // honoring --modules-path-suffix.
 func (svc *PushService) modulesPathReport() ModulesPathReport {
-	return BuildModulesPathReport(svc.client.GetRegistry(), svc.options.ModulesPathSuffix)
+	return BuildModulesPathReport(svc.targetRef, svc.options.ModulesPathSuffix)
 }
 
 // modulesPath returns the registry path for module repositories, relative to
@@ -296,6 +328,14 @@ func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string, summ
 
 	svc.userLogger.Infof("Found %d layouts to push", len(layouts))
 
+	// Say where plugins go before the first write there: it is the one path
+	// that is not under the target the user typed.
+	if slices.ContainsFunc(layouts, func(layoutDir string) bool {
+		return isPluginsSegment(layoutSegment(rootDir, layoutDir))
+	}) {
+		svc.userLogger.InfoLn(svc.pluginsPath.Notice())
+	}
+
 	for _, layoutDir := range layouts {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -307,6 +347,26 @@ func (svc *PushService) pushAllLayouts(ctx context.Context, rootDir string, summ
 	}
 
 	return nil
+}
+
+// layoutSegment is the bundle segment of a layout: its path relative to the
+// unpacked root in slash form, so it is registry-native and OS-independent
+// (filepath.Rel yields OS separators on Windows). Empty for the root layout.
+func layoutSegment(rootDir, layoutDir string) string {
+	relPath, _ := filepath.Rel(rootDir, layoutDir)
+	if relPath == "." {
+		return ""
+	}
+
+	return filepath.ToSlash(relPath)
+}
+
+// isPluginsSegment reports whether a bundle segment belongs to the
+// deckhouse-cli/ part of the bundle, which is rooted above the edition.
+func isPluginsSegment(segment string) bool {
+	first, _, _ := strings.Cut(segment, "/")
+
+	return first == internal.D8CLISegment
 }
 
 // findLayouts finds all OCI layouts in the directory by looking for index.json files.
@@ -351,15 +411,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 		return nil
 	}
 
-	// Build registry segment from relative path. Use slash form so the
-	// segment is registry-native and OS-independent (filepath.Rel yields
-	// OS separators on Windows).
-	relPath, _ := filepath.Rel(rootDir, layoutDir)
-
-	segment := ""
-	if relPath != "." {
-		segment = filepath.ToSlash(relPath)
-	}
+	segment := layoutSegment(rootDir, layoutDir)
 	// support old behavior when modules stored as "module-<name>.tar"
 	if strings.HasPrefix(layoutDir, "module-") {
 		segment = internal.ModulesSegment
@@ -371,17 +423,48 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	// Rewrite the leading "modules" component to honor --modules-path-suffix.
 	segment = svc.remapModulesSegment(segment)
 
-	targetClient := svc.client.WithSegment(pkgclient.PathToSegments(segment)...)
+	targetClient := svc.layoutRoot(origSegment).WithSegment(pkgclient.PathToSegments(segment)...)
 
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
 	if err := svc.pusher.PushLayout(ctx, layout.Path(layoutDir), targetClient); err != nil {
-		return fmt.Errorf("push layout %q to registry %s: %w", relPath, targetClient.GetRegistry(), err)
+		err = fmt.Errorf("push layout %q to registry %s: %w", origSegment, targetClient.GetRegistry(), err)
+
+		return svc.wrapPluginsRootError(origSegment, err)
 	}
 
 	recordPushedComponent(summary, origSegment)
 
 	return nil
+}
+
+// layoutRoot returns the registry root a bundle segment is written under: the
+// deckhouse-cli/ segment goes above the target's edition, everything else to
+// the target. It takes the bundle segment, not the registry path the layout
+// ends up at, so a --modules-path-suffix naming the deckhouse-cli segment
+// still moves modules within the target.
+func (svc *PushService) layoutRoot(bundleSegment string) client.Client {
+	if isPluginsSegment(bundleSegment) {
+		return svc.pluginsRoot
+	}
+
+	return svc.client
+}
+
+// wrapPluginsRootError marks a failed write to the plugins root with the
+// paths involved, but only when that root differs from the target: that is
+// the case where the user did not type the path the registry refused and
+// needs it spelled out. Other errors pass through unchanged.
+func (svc *PushService) wrapPluginsRootError(segment string, err error) error {
+	if !isPluginsSegment(segment) || !svc.pluginsPath.Moved() {
+		return err
+	}
+
+	return &PluginsRootError{
+		Repo:   path.Join(svc.pluginsPath.Root, segment),
+		Report: svc.pluginsPath,
+		Err:    err,
+	}
 }
 
 // recordPushedComponent tallies a pushed layout into the summary by its bundle
@@ -548,9 +631,10 @@ func (svc *PushService) createPackagesIndex(ctx context.Context, rootDir string,
 
 // createPluginsIndex creates the CLI plugins index in the registry: a small
 // random image per plugin with tag = plugin name on the deckhouse-cli/plugins
-// path. The same directory-as-tags convention modules and packages use; the
-// registry-bundle server synthesizes an identical index for bundle-served
-// registries, so both air-gapped delivery shapes look the same.
+// path under the plugins root (above the target's edition, see
+// PluginsPathReport). The same directory-as-tags convention modules and
+// packages use; the registry-bundle server synthesizes an identical index for
+// bundle-served registries, so both air-gapped delivery shapes look the same.
 func (svc *PushService) createPluginsIndex(ctx context.Context, rootDir string, summary *PushSummary) error {
 	pluginsDir := filepath.Join(rootDir, internal.D8CLISegment, internal.D8PluginsSegment)
 
@@ -581,7 +665,8 @@ func (svc *PushService) createPluginsIndex(ctx context.Context, rootDir string, 
 	summary.Plugins = len(pluginNames)
 	svc.userLogger.Infof("Creating plugins index with %d plugins", len(pluginNames))
 
-	pluginsClient := svc.client.WithSegment(internal.D8CLISegment, internal.D8PluginsSegment)
+	pluginsSegment := path.Join(internal.D8CLISegment, internal.D8PluginsSegment)
+	pluginsClient := svc.layoutRoot(pluginsSegment).WithSegment(internal.D8CLISegment, internal.D8PluginsSegment)
 
 	for _, pluginName := range pluginNames {
 		if err := ctx.Err(); err != nil {
@@ -596,7 +681,9 @@ func (svc *PushService) createPluginsIndex(ctx context.Context, rootDir string, 
 		}
 
 		if err := pluginsClient.PushImage(ctx, pluginName, img); err != nil {
-			return fmt.Errorf("push plugin index tag %s to registry %s: %w", pluginName, pluginsClient.GetRegistry(), err)
+			err = fmt.Errorf("push plugin index tag %s to registry %s: %w", pluginName, pluginsClient.GetRegistry(), err)
+
+			return svc.wrapPluginsRootError(pluginsSegment, err)
 		}
 	}
 
