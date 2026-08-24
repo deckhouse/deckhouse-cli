@@ -27,12 +27,13 @@ import (
 )
 
 type CommandInfo struct {
-	Name        string              `json:"name,omitempty"`
-	Description string              `json:"description"`
-	Version     string              `json:"version,omitempty"`
-	Aliases     []string            `json:"aliases"`
-	Flags       map[string]FlagInfo `json:"flags"`
-	Subcommands []CommandInfo       `json:"subcommands"`
+	Name            string              `json:"name,omitempty"`
+	Description     string              `json:"description"`
+	LongDescription string              `json:"longDescription,omitempty"`
+	Version         string              `json:"version,omitempty"`
+	Aliases         []string            `json:"aliases"`
+	Flags           map[string]FlagInfo `json:"flags"`
+	Subcommands     []CommandInfo       `json:"subcommands"`
 }
 
 type FlagInfo struct {
@@ -113,12 +114,13 @@ func extractCommands(cmd *cobra.Command) CommandInfo {
 	}
 
 	return CommandInfo{
-		Name:        cmd.Use,
-		Description: cmd.Short,
-		Version:     cmd.Version,
-		Flags:       flags,
-		Aliases:     cmd.Aliases,
-		Subcommands: subcommands,
+		Name:            cmd.Use,
+		Description:     cmd.Short,
+		LongDescription: cmd.Long,
+		Version:         cmd.Version,
+		Flags:           flags,
+		Aliases:         cmd.Aliases,
+		Subcommands:     subcommands,
 	}
 }
 
