@@ -118,6 +118,7 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 			Namespace: debugNamespace,
 		},
 	}
+
 	_, err := kube.CoreV1().ServiceAccounts(debugNamespace).Create(ctx, sa, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create ServiceAccount %s/%s: %w", debugNamespace, resourceName, err)
@@ -188,6 +189,7 @@ func createOrUpdateRole(ctx context.Context, kube kubernetes.Interface, role *rb
 	}
 
 	existing.Rules = role.Rules
+
 	_, err = kube.RbacV1().Roles(role.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("update Role %s/%s: %w", role.Namespace, role.Name, err)
@@ -213,6 +215,7 @@ func createOrUpdateRoleBinding(ctx context.Context, kube kubernetes.Interface, b
 
 	existing.Subjects = binding.Subjects
 	existing.RoleRef = binding.RoleRef
+
 	_, err = kube.RbacV1().RoleBindings(binding.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("update RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
@@ -251,6 +254,7 @@ func buildDebugPod(namespace, image string, command []string) *corev1.Pod {
 func createDebugPod(ctx context.Context, kube kubernetes.Interface, namespace, image string, command []string) (*corev1.Pod, error) {
 	if existing, err := kube.CoreV1().Pods(namespace).Get(ctx, resourceName, metav1.GetOptions{}); err == nil {
 		fmt.Fprintf(os.Stderr, "Deleting leftover debug pod %s/%s\n", namespace, existing.Name)
+
 		if err := deletePod(ctx, kube, namespace, existing.Name); err != nil {
 			return nil, err
 		}
