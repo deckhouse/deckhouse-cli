@@ -108,11 +108,25 @@ var dataImportGVR = schema.GroupVersionResource{Group: "storage-foundation.deckh
 var ErrForeignDataImport = errors.New("foreign DataImport collision")
 
 // errDataImportRecheck signals EnsureDataImport that the DataImport changed under our feet
-// while alignDataImportTTL was retrying a conflicting update — it was deleted, or it
+// while alignDataImportSpec was retrying a conflicting update — it was deleted, or it
 // transitioned to Ready=False/Expired — so the object must be re-evaluated from the top of
 // EnsureDataImport's reconcile loop (recreate or delete-and-recreate) rather than patched as
 // if it were still the healthy object the caller started with.
 var errDataImportRecheck = errors.New("DataImport changed during TTL alignment")
+
+// errUploadUnauthorized marks an importer response that rejected the client's
+// identity (401) or permissions (403).
+var errUploadUnauthorized = errors.New("importer rejected the client identity")
+
+// uploadStatusError wraps err with errUploadUnauthorized when statusCode is 401 or 403, so
+// callers can detect a rejected identity via errors.Is without parsing message text.
+func uploadStatusError(statusCode int, err error) error {
+	if statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", err, errUploadUnauthorized)
+	}
+
+	return err
+}
 
 // VolumeImporter imports a data leaf's volume bytes by creating an SVDM DataImport,
 // waiting for the importer to be ready, streaming the archive bytes, finalising the
@@ -150,6 +164,7 @@ type clusterVolumeImporter struct {
 	sc                *transport.Client
 	newUploadClient   func([]byte, string) (uploadHTTPClient, error)
 	ttl               string
+	publish           bool
 	poll              time.Duration
 	wait              time.Duration
 	requestTimeout    time.Duration
@@ -158,27 +173,42 @@ type clusterVolumeImporter struct {
 	log               *slog.Logger
 }
 
-// NewClusterVolumeImporter builds the live VolumeImporter. ttl is the DataImport TTL,
-// wait bounds the per-DataImport readiness/completion waits, and poll is the polling
-// cadence. Block-volume uploads stream-decode directly into the PUT (see putBlock), so
-// no scratch directory for decompressed temporary files is needed.
-func NewClusterVolumeImporter(
-	dyn dynamic.Interface,
-	sc *transport.Client,
-	ttl string,
-	wait, poll time.Duration,
-	log *slog.Logger,
-) VolumeImporter {
+// ClusterVolumeImporterOptions configures NewClusterVolumeImporter.
+type ClusterVolumeImporterOptions struct {
+	// Dynamic is the dynamic client used for DataImport CR lifecycle and status polling.
+	Dynamic dynamic.Interface
+	// Transport authenticates the HTTPS byte upload to the importer pod (or, when Publish
+	// is set, the published ingress endpoint).
+	Transport *transport.Client
+	// TTL is the idle TTL applied to every DataImport this importer creates or reuses.
+	TTL string
+	// Publish selects the published (ingress) upload endpoint instead of the in-cluster
+	// importer service.
+	Publish bool
+	// Wait bounds the per-DataImport readiness/completion waits.
+	Wait time.Duration
+	// Poll is the polling cadence used while waiting on DataImport status.
+	Poll time.Duration
+	// Log receives lifecycle events; a nil Log defaults to slog.Default().
+	Log *slog.Logger
+}
+
+// NewClusterVolumeImporter builds the live VolumeImporter. Block-volume uploads
+// stream-decode directly into the PUT (see putBlock), so no scratch directory for
+// decompressed temporary files is needed.
+func NewClusterVolumeImporter(opts ClusterVolumeImporterOptions) VolumeImporter {
+	log := opts.Log
 	if log == nil {
 		log = slog.Default()
 	}
 
 	return &clusterVolumeImporter{
-		dyn:               dyn,
-		sc:                sc,
-		ttl:               ttl,
-		poll:              poll,
-		wait:              wait,
+		dyn:               opts.Dynamic,
+		sc:                opts.Transport,
+		ttl:               opts.TTL,
+		publish:           opts.Publish,
+		poll:              opts.Poll,
+		wait:              opts.Wait,
 		requestTimeout:    DefaultControlRequestTimeout,
 		newRequestContext: context.WithTimeout,
 		fsDecodeDeps:      defaultFSDecodeDependencies(),
@@ -243,8 +273,12 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 	}
 
 	spec := map[string]interface{}{
-		"ttl":  c.ttl,
-		"mode": dataImportModePopulateData,
+		"ttl": c.ttl,
+		// Always set explicitly, including false: alignDataImportSpec compares this
+		// field against the server's returned value, and an implicit server-side
+		// default would make that comparison depend on a value we never sent.
+		"publish": c.publish,
+		"mode":    dataImportModePopulateData,
 		"snapshotRef": map[string]interface{}{
 			"apiVersion": leaf.APIVersion,
 			"kind":       leaf.Kind,
@@ -274,9 +308,10 @@ func (c *clusterVolumeImporter) EnsureDataImport(ctx context.Context, leaf Plann
 			}
 
 			if !conditionFalseWithReason(existing, conditionReady, reasonExpired) {
-				// Align spec.ttl with the current run so retrying a stalled import with a
-				// longer --ttl is honoured instead of keeping the first create's value.
-				if tErr := c.alignDataImportTTL(ctx, ri, existing, leaf); tErr != nil {
+				// Align spec.ttl and spec.publish with the current run so retrying a stalled
+				// import with a longer --ttl, or a different --publish, is honoured instead
+				// of keeping the first create's values.
+				if tErr := c.alignDataImportSpec(ctx, ri, existing, leaf); tErr != nil {
 					if errors.Is(tErr, errDataImportRecheck) {
 						continue
 					}
@@ -333,6 +368,10 @@ func dataImportShortID(leaf PlannedNode) string {
 	return leaf.DataImportIdentity[:dataImportIdentityIDLength]
 }
 
+// dataImportAnnotations intentionally excludes spec.publish: publish is a property of
+// how the CLI transports bytes to an existing DataImport, not of the archive content it
+// identifies, so a --publish value change on a retry must not turn a reused DataImport
+// into a foreign one (see validateDataImportSpec) and block resume.
 func dataImportAnnotations(leaf PlannedNode) map[string]string {
 	return map[string]string{
 		dataImportIdentityVersionAnnotation: dataImportIdentityVersion,
@@ -370,6 +409,9 @@ func validateDataImportMetadata(obj *unstructured.Unstructured, leaf PlannedNode
 	return nil
 }
 
+// validateDataImportSpec does not check spec.publish for the same reason
+// dataImportAnnotations does not carry it: publish is a transport property, not part of
+// the leaf's content identity.
 func validateDataImportSpec(obj *unstructured.Unstructured, leaf PlannedNode) error {
 	mode, found, err := unstructured.NestedString(obj.Object, "spec", "mode")
 	if err != nil || !found || mode != dataImportModePopulateData {
@@ -413,17 +455,24 @@ func validateDataImportSpec(obj *unstructured.Unstructured, leaf PlannedNode) er
 	return nil
 }
 
-// alignDataImportTTL patches a reused DataImport's spec.ttl to the current run's TTL when it
-// drifted, so increasing --ttl on a retry takes effect. No-op when already aligned.
+// alignDataImportSpec patches a reused DataImport's spec.ttl and spec.publish to the
+// current run's intent when either drifted, so increasing --ttl on a retry, or changing
+// --publish between runs, takes effect. No-op when both are already aligned. publish is
+// aligned in both directions (including true -> false): a prior --publish=true run must
+// not keep exposing the upload publicly once a later run asks for the in-cluster path.
+//
+// Both fields share one Update because they land on the same object in the same
+// reconcile pass; a second Update here would open a second, redundant conflict window on
+// top of the one this function's own retry loop already handles.
 //
 // The whole body runs inside retry.RetryOnConflict, mirroring reconcileExistingMarker: a
 // conflicting Update forces a re-Get on the next attempt (current = nil), and the re-Get's
 // result is re-validated against leaf and re-checked for the Expired condition before any
-// patch is attempted, so a concurrent run cannot cause a stale-revision TTL patch to land on
+// patch is attempted, so a concurrent run cannot cause a stale-revision patch to land on
 // a foreign or already-expired object. errDataImportRecheck is returned as-is (never wrapped)
 // when the re-Get finds the object gone or expired, so EnsureDataImport's caller can tell
 // "retry from scratch" apart from a genuine patch failure via errors.Is.
-func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, leaf PlannedNode) error {
+func (c *clusterVolumeImporter) alignDataImportSpec(ctx context.Context, ri dynamic.ResourceInterface, existing *unstructured.Unstructured, leaf PlannedNode) error {
 	current := existing
 	didUpdate := false
 
@@ -452,14 +501,20 @@ func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynam
 			return errDataImportRecheck
 		}
 
-		cur, _, _ := unstructured.NestedString(current.Object, "spec", "ttl")
-		if cur == c.ttl {
+		curTTL, _, _ := unstructured.NestedString(current.Object, "spec", "ttl")
+		curPublish, _, _ := unstructured.NestedBool(current.Object, "spec", "publish")
+
+		if curTTL == c.ttl && curPublish == c.publish {
 			return nil
 		}
 
 		candidate := current.DeepCopy()
 		if setErr := unstructured.SetNestedField(candidate.Object, c.ttl, "spec", "ttl"); setErr != nil {
 			return fmt.Errorf("set DataImport ttl: %w", setErr)
+		}
+
+		if setErr := unstructured.SetNestedField(candidate.Object, c.publish, "spec", "publish"); setErr != nil {
+			return fmt.Errorf("set DataImport publish: %w", setErr)
 		}
 
 		patched, updateErr := runControlRequest(ctx, c.requestTimeout, c.newRequestContext,
@@ -482,12 +537,13 @@ func (c *clusterVolumeImporter) alignDataImportTTL(ctx context.Context, ri dynam
 			return err
 		}
 
-		return fmt.Errorf("patch DataImport %s/%s ttl: %w", existing.GetNamespace(), existing.GetName(), err)
+		return fmt.Errorf("patch DataImport %s/%s spec: %w", existing.GetNamespace(), existing.GetName(), err)
 	}
 
 	if didUpdate {
-		c.log.Info("aligned DataImport ttl",
-			slog.String("namespace", existing.GetNamespace()), slog.String("name", existing.GetName()), slog.String("ttl", c.ttl))
+		c.log.Info("aligned DataImport spec",
+			slog.String("namespace", existing.GetNamespace()), slog.String("name", existing.GetName()),
+			slog.String("ttl", c.ttl), slog.Bool("publish", c.publish))
 	}
 
 	return nil
@@ -563,7 +619,7 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 		return err
 	}
 
-	url, _, _ := unstructured.NestedString(di.Object, "status", "url")
+	url := c.uploadBaseURL(di)
 	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	caB64, _, _ := unstructured.NestedString(di.Object, "status", "ca")
 
@@ -574,10 +630,28 @@ func (c *clusterVolumeImporter) UploadVolumeData(ctx context.Context, leaf Plann
 	defer httpClient.CloseIdleConnections()
 
 	if err := c.sendVolumeData(ctx, httpClient, url, volumeMode, leaf, namespace, diName, setTotal, onProgress, activate); err != nil {
+		if c.publish && errors.Is(err, errUploadUnauthorized) {
+			return fmt.Errorf("%w; ingress does not forward client TLS certificates — "+
+				"use a kubeconfig with a bearer token, or --publish=false from inside the cluster", err)
+		}
+
 		return err
 	}
 
 	return c.waitDataImportCompleted(ctx, leaf, diName, namespace)
+}
+
+// uploadBaseURL returns the endpoint clients must upload to: the published
+// ingress URL when publish is enabled, otherwise the in-cluster importer URL.
+func (c *clusterVolumeImporter) uploadBaseURL(di *unstructured.Unstructured) string {
+	field := "url"
+	if c.publish {
+		field = "publicURL"
+	}
+
+	url, _, _ := unstructured.NestedString(di.Object, "status", field)
+
+	return url
 }
 
 func verifyLeafPayloadCurrent(ctx context.Context, leaf PlannedNode) error {
@@ -761,8 +835,22 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 		return nil, fmt.Errorf("decode DataImport status.ca: %w", err)
 	}
 
-	if err := transport.ValidateHTTPSIdentity(rawURL, ca); err != nil {
-		return nil, fmt.Errorf("validate DataImport upload identity: %w", err)
+	// Through Ingress, TLS terminates at ingress-nginx's own certificate, which never chains
+	// to the importer pod's internal CA — endpoint-specific pinning is impossible there, so
+	// publish=true trades it for a merged trust pool (below). Confined to that branch;
+	// insecure-skip-tls-verify inherited from kubeconfig is untouched either way.
+	if c.publish {
+		if err := transport.ValidateHTTPSURL(rawURL); err != nil {
+			return nil, fmt.Errorf("validate DataImport publish upload URL: %w", err)
+		}
+	}
+
+	// status.ca is normally empty on the publish path (no internal CA to pin to there), so
+	// identity pinning is skipped only in that case; it stays mandatory otherwise.
+	if !c.publish || len(ca) > 0 {
+		if err := transport.ValidateHTTPSIdentity(rawURL, ca); err != nil {
+			return nil, fmt.Errorf("validate DataImport upload identity: %w", err)
+		}
 	}
 
 	if c.newUploadClient != nil {
@@ -776,8 +864,14 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 	sub := c.sc.Copy()
 	sub.SetRequestTimeout(0)
 
-	if err := sub.SetTLSIdentityCAData(ca); err != nil {
-		return nil, fmt.Errorf("configure DataImport upload TLS identity: %w", err)
+	if c.publish {
+		sub.SetTLSCAData(ca)
+	}
+
+	if !c.publish {
+		if err := sub.SetTLSIdentityCAData(ca); err != nil {
+			return nil, fmt.Errorf("configure DataImport upload TLS identity: %w", err)
+		}
 	}
 
 	if err := sub.SetNetworkTimeouts(transport.NetworkTimeouts{
@@ -801,7 +895,9 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 }
 
 // waitDataImportReady blocks until the DataImport reports Ready=True with a populated
-// status.url and volumeMode.
+// volumeMode and upload endpoint — status.url normally, or status.publicURL when c.publish
+// is set (the controller never revokes Ready once granted, so a DataImport republished after
+// becoming Ready can sit at Ready=True with an empty publicURL until the ingress catches up).
 func (c *clusterVolumeImporter) waitDataImportReady(
 	ctx context.Context,
 	leaf PlannedNode,
@@ -829,7 +925,7 @@ func (c *clusterVolumeImporter) waitDataImportReady(
 			return nil, fmt.Errorf("data import %s/%s expired before becoming Ready (idle TTL elapsed); increase --ttl or retry", namespace, name)
 		}
 
-		url, _, _ := unstructured.NestedString(di.Object, "status", "url")
+		url := c.uploadBaseURL(di)
 		volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 
 		if conditionTrue(di, conditionReady) && url != "" && volumeMode != "" {
@@ -837,6 +933,14 @@ func (c *clusterVolumeImporter) waitDataImportReady(
 		}
 
 		if time.Now().After(deadline) {
+			if c.publish && url == "" {
+				return nil, fmt.Errorf(
+					"timeout waiting for DataImport %s/%s to become Ready: status.publicURL is still empty; "+
+						"the storage-foundation ingress may not be configured, or retry with --publish=false from inside the cluster",
+					namespace, name,
+				)
+			}
+
 			return nil, fmt.Errorf("timeout waiting for DataImport %s/%s to become Ready", namespace, name)
 		}
 
@@ -2147,7 +2251,8 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 
 		return 0, nil
 	default:
-		return 0, fmt.Errorf("HEAD %s returned status %d (%s)", url, resp.StatusCode, resp.Status)
+		return 0, uploadStatusError(resp.StatusCode,
+			fmt.Errorf("HEAD %s returned status %d (%s)", url, resp.StatusCode, resp.Status))
 	}
 }
 
@@ -2202,7 +2307,8 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, to
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+		return 0, false, uploadStatusError(resp.StatusCode,
+			fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status))
 	}
 
 	if err := bodyReport.validateExact(); err != nil {
@@ -2277,7 +2383,8 @@ func postFinished(ctx context.Context, httpClient httpDoer, baseURL string) erro
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("finished returned status %d (%s)", resp.StatusCode, resp.Status)
+		return uploadStatusError(resp.StatusCode,
+			fmt.Errorf("finished returned status %d (%s)", resp.StatusCode, resp.Status))
 	}
 
 	return nil
