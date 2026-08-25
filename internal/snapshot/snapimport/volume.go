@@ -837,8 +837,11 @@ func (c *clusterVolumeImporter) uploadClient(caB64, rawURL string) (uploadHTTPCl
 
 	// Through Ingress, TLS terminates at ingress-nginx's own certificate, which never chains
 	// to the importer pod's internal CA — endpoint-specific pinning is impossible there, so
-	// publish=true trades it for a merged trust pool (below). Confined to that branch;
-	// insecure-skip-tls-verify inherited from kubeconfig is untouched either way.
+	// publish=true trades it for a merged trust pool (below). Confined to that branch. Both
+	// branches force server certificate verification on regardless of what the caller's
+	// kubeconfig set for insecure-skip-tls-verify/tls-server-name — only the trust model
+	// differs: publish EXTENDS trust (system roots + kubeconfig CA + status.ca merged into one
+	// pool), non-publish REPLACES it (pinned exclusively to the importer pod's internal CA).
 	if c.publish {
 		if err := transport.ValidateHTTPSURL(rawURL); err != nil {
 			return nil, fmt.Errorf("validate DataImport publish upload URL: %w", err)

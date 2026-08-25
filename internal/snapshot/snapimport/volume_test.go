@@ -5172,9 +5172,10 @@ func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
 	unrelatedCA := unrelatedCertificatePEM(t)
 
 	tests := []struct {
-		name    string
-		publish bool
-		wantErr bool
+		name     string
+		publish  bool
+		insecure bool
+		wantErr  bool
 	}{
 		{
 			name:    "success: publish merges the unrelated CA with the kubeconfig-trusted pool",
@@ -5185,17 +5186,49 @@ func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
 			publish: false,
 			wantErr: true,
 		},
+		{
+			// Regression guard for the insecure-skip-tls-verify bypass: SetTLSCAData must force
+			// verification on even though the caller's kubeconfig inherited Insecure: true, so a
+			// server whose certificate is in NEITHER the system pool NOR the explicitly supplied
+			// CA must still be rejected -- and, crucially, the bearer token must never reach that
+			// untrusted server, since a failed handshake means the request body (headers
+			// included) was never sent.
+			name:     "error: publish with inherited insecure-skip-tls-verify still enforces verification and never leaks the bearer token",
+			publish:  true,
+			insecure: true,
+			wantErr:  true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			targetURL := srv.URL
+			configCAData := trustedCA
+
+			var receivedAuthHeader string
+
+			if tc.insecure {
+				// A dedicated server (rather than the shared srv above) guarantees its
+				// certificate is untrusted by construction, and lets this subtest read
+				// receivedAuthHeader without racing the other subtests' concurrent requests
+				// against the shared srv.
+				untrustedSrv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					receivedAuthHeader = r.Header.Get("Authorization")
+				}))
+				t.Cleanup(untrustedSrv.Close)
+
+				targetURL = untrustedSrv.URL
+				configCAData = nil
+			}
+
 			config := &restclient.Config{
-				Host:        srv.URL,
+				Host:        targetURL,
 				BearerToken: "must-not-leak",
 				TLSClientConfig: restclient.TLSClientConfig{
-					CAData: trustedCA,
+					Insecure: tc.insecure,
+					CAData:   configCAData,
 				},
 			}
 
@@ -5204,13 +5237,13 @@ func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
 				publish: tc.publish,
 			}
 
-			httpClient, err := importer.uploadClient(base64.StdEncoding.EncodeToString(unrelatedCA), srv.URL)
+			httpClient, err := importer.uploadClient(base64.StdEncoding.EncodeToString(unrelatedCA), targetURL)
 			if err != nil {
 				t.Fatalf("uploadClient: %v", err)
 			}
 			t.Cleanup(httpClient.CloseIdleConnections)
 
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, nil)
 			if err != nil {
 				t.Fatalf("build request: %v", err)
 			}
@@ -5222,7 +5255,11 @@ func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
 
 			if tc.wantErr {
 				if doErr == nil {
-					t.Fatal("request unexpectedly succeeded against the real origin under strict (non-publish) pinning to an unrelated CA")
+					t.Fatal("request unexpectedly succeeded against an untrusted origin")
+				}
+
+				if tc.insecure && receivedAuthHeader != "" {
+					t.Fatalf("Authorization header leaked to an untrusted server: %q", receivedAuthHeader)
 				}
 
 				return
