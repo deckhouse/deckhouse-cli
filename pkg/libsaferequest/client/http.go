@@ -62,6 +62,13 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	return &SafeClient{restConfig}, nil
 }
 
+// NewSafeClientForConfig derives a SafeClient from an already-resolved REST
+// configuration instead of re-parsing --kubeconfig/--context flags, so a probe
+// built from it targets the same cluster the caller already resolved.
+func NewSafeClientForConfig(config *rest.Config) *SafeClient {
+	return &SafeClient{restConfig: rest.CopyConfig(config)}
+}
+
 // SetProbeEndpoint configures host, TLS ServerName and timeout for probe requests.
 func (c *SafeClient) SetProbeEndpoint(timeout time.Duration, targetHost, kubeServiceServerName string) {
 	c.restConfig.Host = targetHost

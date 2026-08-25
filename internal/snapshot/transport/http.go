@@ -1221,6 +1221,14 @@ func (c *Client) SetTLSCAData(caData []byte) {
 	}
 }
 
+// ValidateHTTPSURL requires rawURL to be a well-formed HTTPS origin, without
+// requiring a CA (unlike ValidateHTTPSIdentity, whose CA argument may be empty
+// on the publish path).
+func ValidateHTTPSURL(rawURL string) error {
+	_, err := parseHTTPSOrigin(rawURL)
+	return err
+}
+
 // ValidateHTTPSIdentity requires an HTTPS origin and a strictly parseable,
 // non-empty PEM certificate bundle suitable for endpoint-specific trust.
 func ValidateHTTPSIdentity(rawURL string, caData []byte) error {

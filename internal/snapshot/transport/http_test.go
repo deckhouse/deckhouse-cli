@@ -1212,6 +1212,64 @@ func TestTLSIdentityClient_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestValidateHTTPSURL verifies ValidateHTTPSURL accepts only a well-formed HTTPS origin,
+// without requiring a CA argument (unlike ValidateHTTPSIdentity) -- the publish upload path
+// (status.ca empty by design behind Ingress) relies on this weaker check.
+func TestValidateHTTPSURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{
+			name:   "success: well-formed HTTPS origin",
+			rawURL: "https://importer.example.test:8443",
+		},
+		{
+			name:    "error: plaintext HTTP origin",
+			rawURL:  "http://importer.example.test",
+			wantErr: true,
+		},
+		{
+			name:    "error: empty string",
+			rawURL:  "",
+			wantErr: true,
+		},
+		{
+			name:    "error: malformed URL",
+			rawURL:  "://bad-url",
+			wantErr: true,
+		},
+		{
+			name:    "error: scheme-less host",
+			rawURL:  "importer.example.test",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateHTTPSURL(tc.rawURL)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateHTTPSURL(%q) = nil, want error", tc.rawURL)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ValidateHTTPSURL(%q) = %v, want nil", tc.rawURL, err)
+			}
+		})
+	}
+}
+
 func newPersistentTLSServer(
 	t *testing.T,
 	serial int64,
