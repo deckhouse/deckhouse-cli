@@ -27,6 +27,9 @@ var ruleScopes = lint.RuleScopes{
 	rules.InstanceNamespaceRuleID: {
 		lint.TypeApplication: {lint.ScopeStatic, lint.ScopeBundle},
 	},
+	rules.JobNameRuleID: {
+		lint.TypeApplication: {lint.ScopeStatic, lint.ScopeBundle},
+	},
 }
 
 // RuleScopes returns the rules narrowed to fewer targets than the linter itself runs in.
@@ -49,8 +52,8 @@ type LinterSettings struct {
 }
 
 // RulesSettings holds the severity configuration for each tunable rule in the templates linter.
-// The instance-prefix and instance-namespace rules are intentionally absent: they encode hard
-// multi-instance contracts and run at the linter-level severity without per-rule overrides.
+// The instance-prefix, instance-namespace and job-name rules are intentionally absent: they
+// encode hard contracts and run at the linter-level severity without per-rule overrides.
 type RulesSettings struct {
 	PDB         lint.RuleSettings
 	ServicePort lint.RuleSettings
@@ -68,7 +71,7 @@ func NewLinter(cfg Config, res *diag.Collector) *Linter {
 	}
 }
 
-// Linter runs templates rules against an application package directory.
+// Linter runs template rules against a package directory.
 type Linter struct {
 	config   Config
 	settings RulesSettings
@@ -85,6 +88,10 @@ func (l *Linter) Lint(ctx context.Context) {
 
 	if l.runs(rules.InstanceNamespaceRuleID) {
 		rules.NewInstanceNamespaceRule(l.config.Rendered, l.collector).Check(ctx)
+	}
+
+	if l.runs(rules.JobNameRuleID) {
+		rules.NewJobNameRule(l.config.Rendered, l.collector).Check(ctx)
 	}
 
 	if l.runs(rules.PDBRuleID) {

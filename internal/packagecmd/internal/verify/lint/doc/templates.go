@@ -60,6 +60,30 @@ var templatesDoc = Linter{
 			Tunable: false,
 		},
 		{
+			ID:      rules.JobNameRuleID,
+			Summary: "Restricts Job names to 52 characters",
+			Description: []string{
+				"Job names are limited to 52 characters by the package naming convention. The rendered name is checked after all template values and prefixes have been applied.",
+			},
+			Reports: []string{
+				"a rendered Job has a metadata.name longer than 52 characters",
+			},
+			Example: Example{
+				Reported: []string{
+					"kind: Job",
+					"metadata:",
+					"  name: {{ .Application.Instance.Name }}-a-very-long-maintenance-job-name",
+				},
+				Accepted: []string{
+					"kind: Job",
+					"metadata:",
+					"  name: {{ .Application.Instance.Name }}-maintenance",
+				},
+			},
+			Fix:     "Shorten metadata.name to 52 characters or fewer, including values added during template rendering.",
+			Tunable: false,
+		},
+		{
 			ID:      rules.PDBRuleID,
 			Summary: "Requires a PodDisruptionBudget for every pod controller",
 			Description: []string{
@@ -175,7 +199,7 @@ var templatesDoc = Linter{
 		},
 	},
 	Notes: []string{
-		"The instance-prefix and instance-namespace rules encode hard multi-instance contracts: they have no per-rule severity and always run at the linter severity.",
-		"Both are checked for application packages only, which deploy once per instance. A module deploys once per cluster and is not subject to them.",
+		"The instance-prefix, instance-namespace and job-name rules encode hard contracts: they have no per-rule severity and always run at the linter severity.",
+		"All three are checked for application packages only, which deploy once per instance. A module deploys once per cluster and is not subject to them.",
 	},
 }
