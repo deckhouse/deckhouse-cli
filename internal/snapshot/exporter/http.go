@@ -47,6 +47,24 @@ type Doer interface {
 // caller's intended offset.
 var ErrContentRangeMismatch = errors.New("server Content-Range does not match requested range")
 
+// ErrExportUnauthorized classifies a 401/403 from the data-exporter endpoint.
+// On the public (Ingress) path this is the expected outcome for a
+// certificate-authenticated kubeconfig: Ingress terminates TLS with its own
+// certificate and does not forward the client certificate to the exporter pod, so
+// only bearer-token kubeconfigs authenticate through it.
+var ErrExportUnauthorized = errors.New("data exporter rejected the request as unauthorized")
+
+// exportStatusError wraps err with ErrExportUnauthorized when the HTTP status
+// indicates an authentication or authorization failure, so callers can classify it
+// with errors.Is instead of matching on message text.
+func exportStatusError(code int, err error) error {
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", ErrExportUnauthorized, err)
+	}
+
+	return err
+}
+
 // ErrDataPlaneIdle is reported by a Fetcher-issued response body when no bytes
 // arrive for the configured idle window (see idleReadCloser). The data plane
 // deliberately runs without an overall request deadline — volume transfers are
@@ -73,10 +91,11 @@ const (
 
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
-	doer              Doer
-	sourceHashDoer    Doer
-	idleTimeout       time.Duration
-	sourceHashTimeout func(size int64) time.Duration
+	doer                    Doer
+	sourceHashDoer          Doer
+	idleTimeout             time.Duration
+	sourceHashTimeout       func(size int64) time.Duration
+	publishUnauthorizedHint bool
 }
 
 // FetcherOption customizes a Fetcher at construction time.
@@ -98,6 +117,13 @@ func WithSourceHashDoer(doer Doer) FetcherOption {
 			f.sourceHashDoer = doer
 		}
 	}
+}
+
+// WithPublishUnauthorizedHint makes this Fetcher append an actionable hint to
+// ErrExportUnauthorized failures. Only the publish path sets it, so the in-cluster
+// path never advertises an Ingress-specific remedy.
+func WithPublishUnauthorizedHint() FetcherOption {
+	return func(f *Fetcher) { f.publishUnauthorizedHint = true }
 }
 
 // NewFetcher creates a Fetcher backed by the given Doer. Unless overridden via
@@ -125,6 +151,23 @@ func (f *Fetcher) guardBody(ctx context.Context, body io.ReadCloser) io.ReadClos
 	}
 
 	return newIdleReadCloser(ctx, body, f.idleTimeout)
+}
+
+// hintPublishUnauthorized appends an actionable hint to err when it classifies as
+// ErrExportUnauthorized and this Fetcher was built with WithPublishUnauthorizedHint;
+// otherwise err is returned unchanged.
+func (f *Fetcher) hintPublishUnauthorized(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if !f.publishUnauthorizedHint || !errors.Is(err, ErrExportUnauthorized) {
+		return err
+	}
+
+	return fmt.Errorf("%w; --publish streams through the Ingress endpoint, which only accepts "+
+		"a bearer-token kubeconfig (a certificate-based kubeconfig is rejected). Rerun without "+
+		"--publish to use the in-cluster endpoint.", err)
 }
 
 // BlockURL returns the block-volume endpoint for a DataExport base URL.
@@ -163,7 +206,8 @@ func (f *Fetcher) HeadVolume(ctx context.Context, blockURL string) (int64, error
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HEAD %s: unexpected status %s", blockURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode, fmt.Errorf("HEAD %s: unexpected status %s", blockURL, resp.Status))
+		return 0, f.hintPublishUnauthorized(statusErr)
 	}
 
 	if resp.ContentLength < 0 {
@@ -197,7 +241,11 @@ func (f *Fetcher) RangeGet(ctx context.Context, blockURL string, start, end int6
 
 	if resp.StatusCode != http.StatusPartialContent {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("GET %s (range %d-%d): expected 206, got %s", blockURL, start, end, resp.Status)
+
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("GET %s (range %d-%d): expected 206, got %s", blockURL, start, end, resp.Status))
+
+		return nil, f.hintPublishUnauthorized(statusErr)
 	}
 
 	if err := validateContentRange(resp.Header.Get("Content-Range"), start, end); err != nil {
@@ -314,7 +362,8 @@ func (f *Fetcher) ListDir(ctx context.Context, filesURL string, yield func(Item)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode, fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status))
+		return f.hintPublishUnauthorized(statusErr)
 	}
 
 	// Guard the bounded listing body too: a stalled listing must not hang the
@@ -370,7 +419,10 @@ func (f *Fetcher) SourceMD5(ctx context.Context, fileURL string, size int64) (st
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HEAD source hash for %s: unexpected status %s", fileURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("HEAD source hash for %s: unexpected status %s", fileURL, resp.Status))
+
+		return "", f.hintPublishUnauthorized(statusErr)
 	}
 
 	return resp.Header.Get(sourceHashHeader), nil
@@ -414,7 +466,10 @@ func (f *Fetcher) GetFile(ctx context.Context, fileURL string) (io.ReadCloser, e
 
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: unexpected status %s", fileURL, resp.Status)
+
+		statusErr := exportStatusError(resp.StatusCode, fmt.Errorf("GET %s: unexpected status %s", fileURL, resp.Status))
+
+		return nil, f.hintPublishUnauthorized(statusErr)
 	}
 
 	return f.guardBody(ctx, resp.Body), nil

@@ -134,62 +134,105 @@ func OpenExport(
 		return nil, fmt.Errorf("ensure DataExport for leaf %q: %w", leafName, err)
 	}
 
-	ready, err := WaitReady(ctx, c, log, namespace, de.Name)
+	var o ensureOptions
+
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	publicEndpoint := o.publish
+
+	var waitOpts []WaitReadyOption
+	if publicEndpoint {
+		waitOpts = append(waitOpts, WithPublicEndpoint())
+	}
+
+	ready, err := WaitReady(ctx, c, log, namespace, de.Name, waitOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("wait DataExport %q ready: %w", de.Name, err)
 	}
 
-	dataHTTPClient, sourceHashHTTPClient, err := buildSubClients(sc, ready)
+	dataHTTPClient, sourceHashHTTPClient, err := buildSubClients(sc, ready, publicEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("build sub-clients for DataExport %q: %w", de.Name, err)
+	}
+
+	var fetcherOpts []FetcherOption
+
+	fetcherOpts = append(fetcherOpts, WithSourceHashDoer(sourceHashHTTPClient))
+	if publicEndpoint {
+		fetcherOpts = append(fetcherOpts, WithPublishUnauthorizedHint())
 	}
 
 	return NewExport(
 		namespace,
 		de.Name,
 		ready.Status.VolumeMode,
-		ready.Status.URL,
-		NewFetcher(dataHTTPClient, WithSourceHashDoer(sourceHashHTTPClient)),
+		exportBaseURL(ready, publicEndpoint),
+		NewFetcher(dataHTTPClient, fetcherOpts...),
 		dataHTTPClient,
 		sourceHashHTTPClient,
 	), nil
 }
 
 // buildSubClients creates exactly two persistent, isolated HTTP clients pinned
-// to the DataExport's internal HTTPS origin and status.ca. Ordinary data calls
-// retain the short response-header timeout and progress-based body watchdog.
-// Source-hash HEAD requests get a separate transport ceiling because the
-// producer computes their response header by synchronously reading the complete
-// file; SourceMD5 applies the tighter size-derived request deadline.
+// to the DataExport's base URL (its internal HTTPS origin, or the public Ingress
+// URL when publicEndpoint is true) and status.ca. Ordinary data calls retain the
+// short response-header timeout and progress-based body watchdog. Source-hash
+// HEAD requests get a separate transport ceiling because the producer computes
+// their response header by synchronously reading the complete file; SourceMD5
+// applies the tighter size-derived request deadline.
 func buildSubClients(
 	sc *transport.Client,
 	de *deapi.DataExport,
+	publicEndpoint bool,
 ) (*transport.PersistentHTTPClient, *transport.PersistentHTTPClient, error) {
+	baseURL := exportBaseURL(de, publicEndpoint)
+
 	caBytes, err := base64.StdEncoding.DecodeString(de.Status.CA)
 	if err != nil {
 		return nil, nil, fmt.Errorf("decode DataExport status.ca: %w", err)
 	}
 
-	if err := transport.ValidateHTTPSIdentity(de.Status.URL, caBytes); err != nil {
-		return nil, nil, fmt.Errorf("validate DataExport download identity: %w", err)
+	if publicEndpoint {
+		// The public endpoint is terminated by ingress-nginx with its own certificate,
+		// signed by a CA the exporter pod's status.ca knows nothing about. Pinning trust
+		// to status.ca (SetTLSIdentityCAData) would therefore always fail the handshake;
+		// the merged pool built by SetTLSCAData (system roots + kubeconfig CA + status.ca
+		// when present) is the correct trust source here. Verification stays MANDATORY:
+		// SetTLSCAData unconditionally clears Insecure and ServerName, so an
+		// insecure-skip-tls-verify kubeconfig cannot downgrade it.
+		if err := transport.ValidateHTTPSURL(baseURL); err != nil {
+			return nil, nil, fmt.Errorf("validate DataExport public download URL: %w", err)
+		}
+	}
+
+	if !publicEndpoint || len(caBytes) > 0 {
+		if err := transport.ValidateHTTPSIdentity(baseURL, caBytes); err != nil {
+			return nil, nil, fmt.Errorf("validate DataExport download identity: %w", err)
+		}
 	}
 
 	sub := sc.Copy()
 
-	if err := sub.SetTLSIdentityCAData(caBytes); err != nil {
+	if publicEndpoint {
+		sub.SetTLSCAData(caBytes) // returns nothing — do not wrap in `if err :=`
+	} else if err := sub.SetTLSIdentityCAData(caBytes); err != nil {
 		return nil, nil, fmt.Errorf("configure ordinary data TLS identity: %w", err)
 	}
 
 	sub.SetResponseHeaderTimeout(dataPlaneResponseHeaderTimeout)
 
-	dataHTTPClient, err := sub.NewPersistentHTTPSClientForOrigin(de.Status.URL)
+	dataHTTPClient, err := sub.NewPersistentHTTPSClientForOrigin(baseURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build ordinary data HTTP client: %w", err)
 	}
 
 	sourceHashSub := sc.Copy()
 
-	if err := sourceHashSub.SetTLSIdentityCAData(caBytes); err != nil {
+	if publicEndpoint {
+		sourceHashSub.SetTLSCAData(caBytes) // returns nothing — do not wrap in `if err :=`
+	} else if err := sourceHashSub.SetTLSIdentityCAData(caBytes); err != nil {
 		dataHTTPClient.CloseIdleConnections()
 
 		return nil, nil, fmt.Errorf("configure source-hash TLS identity: %w", err)
@@ -197,7 +240,7 @@ func buildSubClients(
 
 	sourceHashSub.SetResponseHeaderTimeout(sourceHashTimeoutCeiling)
 
-	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPSClientForOrigin(de.Status.URL)
+	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPSClientForOrigin(baseURL)
 	if err != nil {
 		dataHTTPClient.CloseIdleConnections()
 
