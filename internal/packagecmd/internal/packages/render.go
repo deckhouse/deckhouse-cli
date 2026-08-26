@@ -140,6 +140,11 @@ func buildPlatformValues() any {
 			"ingressClass":         "nginx",
 			"publicDomainTemplate": "%s.%s.domain.io",
 		},
+		"discovery": map[string]any{
+			"apiVersions": []string{"autoscaling.k8s.io/v1/VerticalPodAutoscaler", "cert-manager.io/v1"},
+		},
+		"capabilities":   []string{"autoscaling.k8s.io/v1/VerticalPodAutoscaler", "cert-manager.io/v1"},
+		"enabledModules": []string{"verticalPodAutoscaler", "certManager"},
 	}
 }
 

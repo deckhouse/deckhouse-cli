@@ -67,8 +67,8 @@ type TemplatesSettings struct {
 }
 
 // TemplatesRulesSettings configures individual templates linter rules.
-// The instance-prefix and instance-namespace rules are intentionally not exposed here;
-// they encode hard multi-instance contracts and are not user-tunable.
+// The instance-prefix, instance-namespace and job-name rules are intentionally not exposed
+// here; they encode hard contracts and are not user-tunable.
 type TemplatesRulesSettings struct {
 	// PDB configures checks that every pod controller is covered by a PodDisruptionBudget.
 	PDB RuleSettings `mapstructure:"pdb"`
