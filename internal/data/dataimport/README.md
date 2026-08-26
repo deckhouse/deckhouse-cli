@@ -1,14 +1,46 @@
 # DataImport
 Subcommand for the Deckhouse CLI to create/import/delete data via DataImport resources.
 
-This command drives the **standalone PVC import** mode of `DataImport`
-(`spec.mode: CreatePVC`): the target PVC is fully defined by the
+This command drives the **standalone PVC import**: the target PVC is fully defined by the
 PVC template you pass to `create`, data is uploaded straight into it, and no
 snapshot/`VolumeSnapshotContent` artifact is produced. (The snapshot-leaf import
 mode is driven separately by `d8 snapshot upload`.)
 
+The two modules that serve `DataImport` spell this destination differently, and `d8 data import`
+writes whichever spelling belongs to the module it resolved (see below): `spec.mode: CreatePVC`
+plus a root `spec.pvcTemplate` for `storage-foundation`, and `spec.targetRef` carrying the same
+template for `storage-volume-data-manager`.
+
 The PVC template **must** carry `metadata.name` — the DataImport targets the PVC by
 that name; `create` rejects a template without it before contacting the API server.
+
+### Which module serves DataImport
+
+Two Deckhouse modules serve the same CRD under different API groups:
+
+| Module | API group |
+| --- | --- |
+| `storage-foundation` | `storage-foundation.deckhouse.io/v1alpha1` |
+| `storage-volume-data-manager` | `storage.deckhouse.io/v1alpha1` |
+
+`d8 data` picks one per invocation instead of being built against a fixed group, because editions
+differ in which module they ship: `storage-foundation` supersedes the other, but an edition without
+it carries `storage-volume-data-manager` alone.
+
+The choice is made from two questions the API server is asked before the command does any work:
+which of the two groups it serves (discovery), and which of them the calling user may read in the
+target namespace (`SelfSubjectAccessReview`). `storage-foundation` wins when both answers are yes
+for it; otherwise the other module is used. Both questions are answerable by any authenticated
+user, so this works for the ordinary users who run `d8 data` and not only for cluster admins.
+
+The two answers are kept apart on purpose, so the error you get names the one thing that has to
+change: a group that nothing serves means the module is not enabled, while a served group you are
+not authorized for means an RBAC grant is missing. Check the latter with:
+
+```shell
+d8 k auth can-i get dataimports.storage-foundation.deckhouse.io -n NAMESPACE
+d8 k auth can-i get dataimports.storage.deckhouse.io -n NAMESPACE
+```
 
 ### Available Commands
 - create    – ensure PVC (from template) and create DataImport

@@ -12,7 +12,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -40,7 +42,7 @@ func TestListFilesystem_OK(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
@@ -76,7 +78,7 @@ func TestListBlock_OK(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/block", "Block", newSafe(), nil
@@ -111,7 +113,7 @@ func TestListFilesystem_NotDir(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		// Re-enable support for unauthenticated requests inside unit tests.
 		safereq.SupportNoAuth = true
 		return srv.URL + "/api/v1/files", "Filesystem", newSafe(), nil
@@ -128,4 +130,21 @@ func TestListFilesystem_NotDir(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid source path")
+}
+
+// TestMain stubs the API-group resolution for every test in this package.
+//
+// Resolution is the one step of Run that talks to a real API server, and it now runs before any
+// of the behaviour these tests cover. Left unstubbed, each test would dial whatever cluster the
+// developer's kubeconfig happens to point at — which is how these tests started failing against a
+// live stand rather than against their own httptest server. The decision table resolution
+// implements is covered in internal/data/dataapi instead.
+func TestMain(m *testing.M) {
+	util.ResolveClientFunc = func(_ context.Context, _ *safereq.SafeClient, _ string, _ *slog.Logger) (dataapi.Backend, ctrlclient.Client, error) {
+		return dataapi.Backend{GroupVersion: dataapi.FoundationGroupVersion, Module: "storage-foundation"},
+			fakeclient.NewClientBuilder().Build(),
+			nil
+	}
+
+	os.Exit(m.Run())
 }

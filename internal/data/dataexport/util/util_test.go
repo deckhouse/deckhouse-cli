@@ -13,6 +13,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 )
 
@@ -340,6 +341,118 @@ func TestGetDataExportWithRestart_ExpiredRecreates(t *testing.T) {
 	assert.Empty(t, recreated.Status.Conditions, "expired condition must be cleared after recreate")
 	assert.Equal(t, "PersistentVolumeClaim", recreated.Spec.TargetRef.Kind, "TargetRef must be carried over to the fresh export")
 	assert.True(t, recreated.Spec.Publish, "Publish must be carried over to the fresh export")
+}
+
+// TestGetDataExportWithRestart_StandaloneExpiredConditionRecreates covers the other producer's
+// spelling of expiry: a standalone Type=="Expired" condition must trigger the same recreate as
+// storage-foundation's Ready=False/Reason=Expired.
+//
+// The fixture pairs Expired=True with a still-True Ready deliberately, because that is the state a
+// real storage-volume-data-manager cluster passes through rather than an invented one: its exporter
+// pod raises the standalone condition, and only the next controller reconcile mirrors it onto
+// Ready. A client that waited for the Ready spelling would keep polling a dead exporter for however
+// long that reconcile takes, and then for the producer's whole retention TTL if it never lands.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts.
+func TestGetDataExportWithRestart_StandaloneExpiredConditionRecreates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToSchemeFor(dataapi.LegacyGroupVersion)(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	expired := &v1alpha1.DataExport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
+		Spec: v1alpha1.DataexportSpec{
+			// No group: the older producer's schema has no such property and prunes the one the
+			// CLI sent, so this is how the object reads back from it.
+			TargetRef: v1alpha1.TargetRefSpec{Kind: "VolumeSnapshot", Name: "my-vs"},
+		},
+		Status: v1alpha1.DataExportStatus{
+			URL: "https://10.0.0.1:8085/",
+			Conditions: []metav1.Condition{
+				{Type: "Expired", Status: metav1.ConditionTrue, Reason: "Expired", Message: "ttl reached"},
+				readyCond(metav1.ConditionTrue, "PodReady", "Pod is ready"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataExportWithRestart(ctx, "test-de", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
+
+	var recreated v1alpha1.DataExport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-de", Namespace: "test-ns"}, &recreated))
+	assert.Empty(t, recreated.Status.Conditions, "the stale status must be gone after the recreate")
+	assert.Equal(t, "VolumeSnapshot", recreated.Spec.TargetRef.Kind)
+	assert.Equal(t, "my-vs", recreated.Spec.TargetRef.Name)
+
+	// The group is derived from the kind rather than copied off the stale object. Copying would
+	// carry the empty group above into the fresh export, which addresses the core group — a
+	// different object entirely on a cluster that also has a core-group resource by that name.
+	assert.Equal(t, "snapshot.storage.k8s.io", recreated.Spec.TargetRef.Group,
+		"the recreate must derive the group from the kind, not inherit the pruned empty one")
+}
+
+// TestGetDataExportWithRestart_UnknownTargetKindKeepsTheObject covers a DataExport whose target
+// kind this CLI does not know. storage-foundation puts no enum on targetRef.kind and documents that
+// any snapshot kind is resolved generically through the leaf's bound SnapshotContent, so such an
+// object is legitimate rather than corrupt.
+//
+// The property under test is that the user keeps their object. Resolving the group after the delete
+// turns an unrecognised kind into a destroyed DataExport: the delete lands, the group lookup fails,
+// and nothing is recreated. Whatever else the CLI does with a kind it cannot classify, it must not
+// be that.
+//
+// Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts.
+func TestGetDataExportWithRestart_UnknownTargetKindKeepsTheObject(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	orig := maxRetryAttempts
+	maxRetryAttempts = -1
+	t.Cleanup(func() { maxRetryAttempts = orig })
+
+	expired := &v1alpha1.DataExport{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-de", Namespace: "test-ns"},
+		Spec: v1alpha1.DataexportSpec{
+			TargetRef: v1alpha1.TargetRefSpec{
+				Group: "demo.deckhouse.io",
+				Kind:  "SomeDomainSnapshot",
+				Name:  "my-target",
+			},
+		},
+		Status: v1alpha1.DataExportStatus{
+			URL: "https://10.0.0.1:8085/",
+			Conditions: []metav1.Condition{
+				readyCond(metav1.ConditionFalse, "Expired", "export idle timeout reached"),
+			},
+		},
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
+
+	_, err := GetDataExportWithRestart(ctx, "test-de", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting",
+		"an unknown kind must not turn the recreate into a bare failure")
+
+	var recreated v1alpha1.DataExport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-de", Namespace: "test-ns"}, &recreated),
+		"the object must still exist: it is the user's, and we deleted the previous one")
+	assert.Equal(t, "SomeDomainSnapshot", recreated.Spec.TargetRef.Kind)
+	assert.Equal(t, "my-target", recreated.Spec.TargetRef.Name)
+	assert.Equal(t, "demo.deckhouse.io", recreated.Spec.TargetRef.Group,
+		"with no derivation available, the group recorded on the object is the best answer left")
 }
 
 func TestEnsureDataExportPublish(t *testing.T) {

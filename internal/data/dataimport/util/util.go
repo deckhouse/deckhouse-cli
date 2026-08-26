@@ -16,12 +16,17 @@ import (
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 // var instead of const to allow test override.
 var maxRetryAttempts = 60
+
+// ResolveClientFunc is a function pointer for test stubbing: resolution is the first thing a
+// command does and the only step that contacts the API server before any of the work under test.
+var ResolveClientFunc = ResolveClient
 
 const (
 	retryInterval = 3
@@ -31,6 +36,34 @@ const (
 	uploadFinishedSubpath = "api/v1/finished"
 )
 
+// ResolveClient resolves which of the two producers serves DataImport to this user in this
+// namespace, and returns both the answer and a control-plane client bound to it.
+//
+// Every `d8 data import` subcommand starts here rather than registering a fixed group, because
+// the same binary ships to clusters that serve only storage-foundation's group, only
+// storage-volume-data-manager's, or both with the user authorized for one of them. The resolved
+// backend is returned alongside the client because the request body differs between the two
+// producers (see CreateDataImport) and because callers that build their own client later
+// (PrepareUpload) must bind it to the same group.
+func ResolveClient(
+	ctx context.Context,
+	sClient *safeClient.SafeClient,
+	namespace string,
+	log *slog.Logger,
+) (dataapi.Backend, ctrlrtclient.Client, error) {
+	backend, err := dataapi.Resolve(ctx, sClient.RESTConfig(), dataapi.ResourceDataImports, namespace, log)
+	if err != nil {
+		return dataapi.Backend{}, nil, err
+	}
+
+	rtClient, err := sClient.NewRTClient(v1alpha1.AddToSchemeFor(backend.GroupVersion))
+	if err != nil {
+		return dataapi.Backend{}, nil, err
+	}
+
+	return backend, rtClient, nil
+}
+
 func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataImport, error) {
 	diObj := &v1alpha1.DataImport{}
 
@@ -39,16 +72,12 @@ func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlr
 		return nil, fmt.Errorf("kube Get dataimport: %s", err.Error())
 	}
 
-	for _, condition := range diObj.Status.Conditions {
-		if condition.Type == "Ready" {
-			if condition.Status != "True" {
-				return nil, fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
-					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
-					condition.Message, condition.Reason)
-			}
-
-			break
-		}
+	// An object with no Ready condition at all has not been reconciled yet rather than failed,
+	// so only a Ready condition that is present and not True is an error here.
+	if notReady := dataio.NotReady(diObj.Status.Conditions); notReady != nil {
+		return nil, fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
+			diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
+			notReady.Message, notReady.Reason)
 	}
 
 	return diObj, nil
@@ -66,8 +95,16 @@ func DeleteDataImport(ctx context.Context, diName, namespace string, rtClient ct
 	return err
 }
 
+// CreateDataImport creates a DataImport that streams the uploaded bytes into a newly created PVC,
+// in the request shape the resolved backend understands.
+//
+// backend selects that shape, and there is no shape that satisfies both producers: whichever one
+// is addressed rejects a body written for the other. storage-foundation requires spec.mode plus a
+// spec.pvcTemplate at the root and has no targetRef property; storage-volume-data-manager requires
+// spec.targetRef carrying the same template and has no mode.
 func CreateDataImport(
 	ctx context.Context,
+	backend dataapi.Backend,
 	name, namespace, ttl string,
 	publish, waitForFirstConsumer bool,
 	pvcTpl *v1alpha1.PersistentVolumeClaimTemplateSpec,
@@ -77,32 +114,40 @@ func CreateDataImport(
 		ttl = dataio.DefaultTTL
 	}
 
-	// CreatePVC requires a pvcTemplate whose metadata.name is set: the controller names the
-	// imported PVC after it, and the server CEL rejects an empty name. Fail early with a
-	// clear message instead of surfacing an opaque admission error.
+	// Both producers name the imported PVC after the template's metadata.name and reject an
+	// empty one. Fail early with a clear message instead of surfacing an opaque admission error.
 	if pvcTpl == nil || pvcTpl.Name == "" {
 		return fmt.Errorf("DataImport %s/%s requires a PVC template with metadata.name set", namespace, name)
 	}
 
+	spec := v1alpha1.DataImportSpec{
+		TTL:                  ttl,
+		Publish:              publish,
+		WaitForFirstConsumer: waitForFirstConsumer,
+	}
+
+	if backend.Legacy() {
+		spec.TargetRef = &v1alpha1.DataImportTargetRefSpec{
+			Kind:        v1alpha1.PersistentVolumeClaimKind,
+			PvcTemplate: pvcTpl,
+		}
+	} else {
+		// Mode is sent explicitly even though the CRD defaults it: mode is immutable after
+		// creation, so relying on the server-side default would silently bind the object to
+		// whatever default a future CRD revision ships.
+		spec.Mode = v1alpha1.DataImportModeCreatePVC
+		spec.PvcTemplate = pvcTpl
+	}
+
+	// TypeMeta is left empty on purpose: the client stamps the apiVersion from the scheme it was
+	// built with, which is the group resolved for this run — a literal here would name one
+	// producer's group on every request, including requests to the other one.
 	obj := &v1alpha1.DataImport{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: v1alpha1.SchemeGroupVersion.String(),
-			Kind:       "DataImport",
-		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: v1alpha1.DataImportSpec{
-			TTL:                  ttl,
-			Publish:              publish,
-			WaitForFirstConsumer: waitForFirstConsumer,
-			// Sent explicitly even though the CRD defaults it: mode is immutable after creation,
-			// so relying on the server-side default would silently bind the object to whatever
-			// default a future CRD revision ships.
-			Mode:        v1alpha1.DataImportModeCreatePVC,
-			PvcTemplate: pvcTpl,
-		},
+		Spec: spec,
 	}
 
 	if err := rtClient.Create(ctx, obj); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -114,6 +159,7 @@ func CreateDataImport(
 
 func GetDataImportWithRestart(
 	ctx context.Context,
+	backend dataapi.Backend,
 	diName, namespace string,
 	rtClient ctrlrtclient.Client,
 	log *slog.Logger,
@@ -130,49 +176,48 @@ func GetDataImportWithRestart(
 
 		var notReadyErr error
 
-		for _, condition := range diObj.Status.Conditions {
-			// The DataImport controller no longer carries a standalone "Expired" condition; expiry is
-			// now the Ready condition with Status=False and Reason="Expired" (symmetric with
-			// DataExport). Detect it on the Ready condition and auto-restart the import, rather than
-			// waiting for the producer's GC (which only deletes an expired DataImport after its
-			// retention TTL).
-			if condition.Type != "Ready" {
-				continue
+		// An expired import is recreated here rather than waited out: after expiry the producer's
+		// garbage collector only removes the object once its retention TTL runs out, so polling
+		// would stall for the whole of that retention. Both producers' spellings of expiry are
+		// recognised by dataio.IsExpired.
+		switch {
+		case dataio.IsExpired(diObj.Status.Conditions):
+			if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
+				return nil, err
 			}
 
-			switch {
-			case condition.Status == "False" && condition.Reason == "Expired":
-				if err := DeleteDataImport(ctx, diName, namespace, rtClient); err != nil {
-					return nil, err
-				}
+			// DestinationTemplate reads the template from whichever of the two spec shapes the
+			// producer that wrote this object uses; reading Spec.PvcTemplate directly would
+			// recreate a storage-volume-data-manager import with an empty template.
+			pvcTemplate := diObj.Spec.DestinationTemplate()
+			if pvcTemplate == nil {
+				pvcTemplate = &v1alpha1.PersistentVolumeClaimTemplateSpec{}
+			}
 
-				pvcTemplate := &v1alpha1.PersistentVolumeClaimTemplateSpec{}
-				if diObj.Spec.PvcTemplate != nil {
-					pvcTemplate = diObj.Spec.PvcTemplate
-				}
-
-				if err := CreateDataImport(
-					ctx,
-					diName,
-					namespace,
-					diObj.Spec.TTL,
-					diObj.Spec.Publish,
-					diObj.Spec.WaitForFirstConsumer,
-					pvcTemplate,
-					rtClient,
-				); err != nil {
-					return nil, err
-				}
-				// Recreated: the stale object's status.url/status.volumeMode still belong to the
-				// dead importer until retention-GC reaps it, so we must not let this object fall
-				// through to the readiness checks below as if it were done. Keep retrying until the
-				// fresh import becomes Ready.
-				notReadyErr = fmt.Errorf("DataImport %s/%s expired; recreated, waiting for the new import to become Ready",
-					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
-			case condition.Status != "True":
+			if err := CreateDataImport(
+				ctx,
+				backend,
+				diName,
+				namespace,
+				diObj.Spec.TTL,
+				diObj.Spec.Publish,
+				diObj.Spec.WaitForFirstConsumer,
+				pvcTemplate,
+				rtClient,
+			); err != nil {
+				return nil, err
+			}
+			// Recreated: the stale object's status.url/status.volumeMode still belong to the
+			// dead importer until retention-GC reaps it, so we must not let this object fall
+			// through to the readiness checks below as if it were done. Keep retrying until the
+			// fresh import becomes Ready.
+			notReadyErr = fmt.Errorf("DataImport %s/%s expired; recreated, waiting for the new import to become Ready",
+				diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name)
+		default:
+			if notReady := dataio.NotReady(diObj.Status.Conditions); notReady != nil {
 				notReadyErr = fmt.Errorf("DataImport %s/%s is not Ready: %s (%s)",
 					diObj.ObjectMeta.Namespace, diObj.ObjectMeta.Name,
-					condition.Message, condition.Reason)
+					notReady.Message, notReady.Reason)
 			}
 		}
 
@@ -209,8 +254,13 @@ func GetDataImportWithRestart(
 	}
 }
 
+// PrepareUpload waits for the import to be usable and returns the data-plane URL, the importer
+// base URL, the volume mode and a client trusting the importer's CA. backend is the group
+// resolved for this run; it builds this function's own control-plane client, which would
+// otherwise default to storage-foundation's group regardless of what the cluster serves.
 func PrepareUpload(
 	ctx context.Context,
+	backend dataapi.Backend,
 	diName, namespace string,
 	publish bool,
 	sClient *safeClient.SafeClient,
@@ -222,7 +272,7 @@ func PrepareUpload(
 		decodedBytes    []byte
 	)
 
-	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
+	rtClient, err := sClient.NewRTClient(v1alpha1.AddToSchemeFor(backend.GroupVersion))
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -243,7 +293,7 @@ func PrepareUpload(
 		return "", "", "", nil, err
 	}
 
-	diObj, err = GetDataImportWithRestart(ctx, diName, namespace, rtClient, log)
+	diObj, err = GetDataImportWithRestart(ctx, backend, diName, namespace, rtClient, log)
 	if err != nil {
 		return "", "", "", nil, err
 	}

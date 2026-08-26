@@ -89,11 +89,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	rtClient, err := sc.NewRTClient(v1alpha1.AddToScheme)
-	if err != nil {
-		return err
-	}
-
 	data, err := os.ReadFile(pvcFilePath)
 	if err != nil {
 		return err
@@ -112,6 +107,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		namespace = pvcSpec.Namespace
 	}
 
+	// Resolved only once the namespace is final: the producer is picked partly from what the user
+	// may do in that namespace, and asking about the empty namespace would ask about cluster-wide
+	// permission instead — which a user holding rights in one namespace does not have.
+	backend, rtClient, err := util.ResolveClientFunc(ctx, sc, namespace, log)
+	if err != nil {
+		return err
+	}
+
 	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
 	if err != nil {
 		return err
@@ -122,7 +125,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	if err := util.CreateDataImport(ctx, name, namespace, ttl, publish, wffc, pvcSpec, rtClient); err != nil {
+	if err := util.CreateDataImport(ctx, backend, name, namespace, ttl, publish, wffc, pvcSpec, rtClient); err != nil {
 		return err
 	}
 

@@ -26,7 +26,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -88,7 +87,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	rtClient, err := safeClient.NewRTClient(v1alpha1.AddToScheme)
+	_, rtClient, err := util.ResolveClientFunc(ctx, safeClient, namespace, log)
 	if err != nil {
 		return err
 	}

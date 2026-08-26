@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
@@ -110,6 +112,57 @@ func KindToGroup(kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported DataExport target kind %q", kind)
 	}
+}
+
+// Condition types and reasons shared by DataExport and DataImport.
+const (
+	// ConditionTypeReady is the readiness condition both producers set.
+	ConditionTypeReady = "Ready"
+
+	// ConditionTypeExpired is the standalone expiry condition storage-volume-data-manager sets.
+	// storage-foundation dropped it in favour of ReasonExpired on Ready.
+	ConditionTypeExpired = "Expired"
+
+	// ReasonExpired is the Ready-condition reason both producers use for idle expiry.
+	ReasonExpired = "Expired"
+)
+
+// IsExpired reports whether the conditions say the DataExport or DataImport has terminally
+// idle-expired, so the caller must recreate it rather than keep polling. After expiry the
+// producer's garbage collector only removes the object once its retention TTL runs out, so
+// waiting it out would stall for as long as that retention lasts.
+//
+// Both spellings of expiry are accepted, because the producers do not agree on one and a client
+// that reads only its own producer's spelling silently waits forever against the other:
+//
+//   - storage-volume-data-manager raises a standalone Expired condition (and also reports it as a
+//     Ready reason);
+//   - storage-foundation has no Expired condition type at all and reports it only as
+//     Ready=False with reason Expired.
+//
+// The two cannot be confused for one another: neither producer uses either spelling to mean
+// anything but expiry.
+func IsExpired(conditions []metav1.Condition) bool {
+	if expired := meta.FindStatusCondition(conditions, ConditionTypeExpired); expired != nil &&
+		expired.Status == metav1.ConditionTrue {
+		return true
+	}
+
+	ready := meta.FindStatusCondition(conditions, ConditionTypeReady)
+
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == ReasonExpired
+}
+
+// NotReady returns the Ready condition when it is present and not True, and nil otherwise —
+// including when the object carries no Ready condition at all, which callers treat as "nothing
+// said yet" rather than as a failure.
+func NotReady(conditions []metav1.Condition) *metav1.Condition {
+	ready := meta.FindStatusCondition(conditions, ConditionTypeReady)
+	if ready == nil || ready.Status == metav1.ConditionTrue {
+		return nil
+	}
+
+	return ready
 }
 
 func ParseArgs(args []string) ( /*deName*/ string /*srcPath*/, string, error) {

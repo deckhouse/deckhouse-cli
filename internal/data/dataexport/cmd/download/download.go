@@ -32,7 +32,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -292,7 +291,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
+	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {
 		return err
 	}
@@ -314,7 +313,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, backend, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
