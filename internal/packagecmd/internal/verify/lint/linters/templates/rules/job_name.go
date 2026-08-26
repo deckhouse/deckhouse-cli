@@ -14,7 +14,7 @@ const (
 	// JobNameRuleID is the stable identifier used to reference this rule in diagnostics.
 	JobNameRuleID = "job-name"
 	// maxJobNameLength is the maximum allowed length of a Job name.
-	maxJobNameLength = 24
+	maxJobNameLength = 23
 
 	cronJobKind = "CronJob"
 	jobKind     = "Job"
