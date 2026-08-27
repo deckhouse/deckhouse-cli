@@ -1544,9 +1544,12 @@ func defaultPortForScheme(scheme string) string {
 // and re-hashed via verifyStagedFileMD5 before the skip is trusted; on a
 // mismatch the bad blob is removed and staging falls through to re-fetch it in
 // this same run (a self-healing condition, not a hard error). When no MD5 is
-// advertised the blob is still skipped, matching the fresh-path convention,
-// with a one-line WARN. The verify costs one decode pass per already-staged
-// file per resume run, bounded by staging size — the price of not trusting
+// advertised, full content verification is impossible, but the already-staged
+// blob is still decoded to measure its plaintext size via stagedFileRawSize,
+// which is compared against the item's declared size below; a mismatch drives
+// the same self-healing re-fetch as an MD5 mismatch, with a one-line WARN.
+// The verify costs one decode pass per already-staged file per resume run,
+// bounded by staging size — the price of not trusting
 // bytes we did not just write. A trusted skip still credits the item's
 // declared size to onProgress so the numerator can reach the denominator that
 // setTotal established from the inventory total — otherwise
@@ -1573,14 +1576,10 @@ func stageCompressedFile(
 		)
 
 		if item.md5 == "" {
-			log.Warn("no source MD5 available for file, skipping integrity verification",
+			log.Warn("no source MD5 available for file, verifying size only",
 				slog.String("path", item.relPath))
 
-			if item.size >= 0 {
-				rawSize = item.size
-			} else {
-				rawSize, verifyErr = stagedFileRawSize(view, destPath, codec.Ext())
-			}
+			rawSize, verifyErr = stagedFileRawSize(view, destPath, codec.Ext())
 		} else {
 			rawSize, verifyErr = verifyStagedFileMD5(view, destPath, codec.Ext(), item.md5)
 		}
