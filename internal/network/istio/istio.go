@@ -32,11 +32,12 @@ var istioLong = templates.LongDesc(`
 Start an interactive debug container with istioctl and the RBAC needed to
 inspect pods in a target namespace (get/list pods and create pods/portforward).
 
-The ServiceAccount is created in --namespace. A Role and RoleBinding (pods
-get/list and pods/portforward create — enough to read sidecar/istiod status,
-not to mutate Istio config) are created in --target-namespace and in
---istio-namespace (default d8-istio, for istioctl proxy-status). The debug
-image is taken from ConfigMap d8-system/debug-container unless --image is set.
+The ServiceAccount is created in --namespace. Roles and RoleBindings are
+created in --target-namespace (workload pods) and --istio-namespace (default
+d8-istio): pods get/list, pods/portforward create, and in the Istio namespace
+also serviceaccounts get plus serviceaccounts/token create for istiod RPC
+auth (istioctl proxy-status). No Istio config mutations. The debug image is
+taken from ConfigMap d8-system/debug-container unless --image is set.
 
 The pod is deleted when the session ends. RBAC objects are left in place so
 the next run can reuse them.

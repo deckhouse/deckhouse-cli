@@ -43,7 +43,7 @@ func TestEnsureRBACCreatesObjects(t *testing.T) {
 
 	role, err := kube.RbacV1().Roles("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, istioctlDebugRules(), role.Rules)
+	assert.Equal(t, istioctlWorkloadRules(), role.Rules)
 
 	binding, err := kube.RbacV1().RoleBindings("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -71,7 +71,7 @@ func TestEnsureRBACIsIdempotentAndUpdatesRules(t *testing.T) {
 
 	role, err = kube.RbacV1().Roles("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, istioctlDebugRules(), role.Rules)
+	assert.Equal(t, istioctlWorkloadRules(), role.Rules)
 }
 
 func TestEnsureRBACMergesRoleBindingSubjects(t *testing.T) {
@@ -96,7 +96,7 @@ func TestEnsureRBACGrantsIstioNamespaceRead(t *testing.T) {
 
 	role, err := kube.RbacV1().Roles(defaultIstioNS).Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, istioctlDebugRules(), role.Rules)
+	assert.Equal(t, istioctlIstioControlPlaneRules(), role.Rules)
 
 	for _, rule := range role.Rules {
 		assert.NotContains(t, rule.Verbs, "update")
@@ -109,8 +109,13 @@ func TestEnsureRBACGrantsIstioNamespaceRead(t *testing.T) {
 	require.Len(t, binding.Subjects, 1)
 	assert.Equal(t, "default", binding.Subjects[0].Namespace)
 
-	_, err = kube.RbacV1().Roles("app-ns").Get(ctx, resourceName, metav1.GetOptions{})
+	appRole, err := kube.RbacV1().Roles("app-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
+	assert.Equal(t, istioctlWorkloadRules(), appRole.Rules)
+
+	for _, rule := range appRole.Rules {
+		assert.NotContains(t, rule.Resources, "serviceaccounts/token")
+	}
 }
 
 func TestResolveDebugImage(t *testing.T) {

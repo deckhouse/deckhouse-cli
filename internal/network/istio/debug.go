@@ -133,7 +133,12 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 	}
 
 	for _, ns := range uniqueNonEmpty(targetNamespace, istioNamespace) {
-		if err := ensureNamespaceAccess(ctx, kube, debugNamespace, ns); err != nil {
+		rules := istioctlWorkloadRules()
+		if ns == istioNamespace {
+			rules = istioctlIstioControlPlaneRules()
+		}
+
+		if err := ensureNamespaceAccess(ctx, kube, debugNamespace, ns, rules); err != nil {
 			return err
 		}
 	}
@@ -141,13 +146,18 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 	return nil
 }
 
-func ensureNamespaceAccess(ctx context.Context, kube kubernetes.Interface, debugNamespace, roleNamespace string) error {
+func ensureNamespaceAccess(
+	ctx context.Context,
+	kube kubernetes.Interface,
+	debugNamespace, roleNamespace string,
+	rules []rbacv1.PolicyRule,
+) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName,
 			Namespace: roleNamespace,
 		},
-		Rules: istioctlDebugRules(),
+		Rules: rules,
 	}
 	if err := createOrUpdateRole(ctx, kube, role); err != nil {
 		return err
@@ -193,7 +203,7 @@ func uniqueNonEmpty(values ...string) []string {
 	return out
 }
 
-func istioctlDebugRules() []rbacv1.PolicyRule {
+func istioctlWorkloadRules() []rbacv1.PolicyRule {
 	return []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{""},
@@ -206,6 +216,23 @@ func istioctlDebugRules() []rbacv1.PolicyRule {
 			Verbs:     []string{"create"},
 		},
 	}
+}
+
+// istioctlIstioControlPlaneRules adds TokenRequest access istioctl needs to
+// authenticate RPC calls to istiod (e.g. proxy-status). No Istio CR writes.
+func istioctlIstioControlPlaneRules() []rbacv1.PolicyRule {
+	return append(istioctlWorkloadRules(),
+		rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"serviceaccounts"},
+			Verbs:     []string{"get"},
+		},
+		rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"serviceaccounts/token"},
+			Verbs:     []string{"create"},
+		},
+	)
 }
 
 func createOrUpdateRole(ctx context.Context, kube kubernetes.Interface, role *rbacv1.Role) error {
