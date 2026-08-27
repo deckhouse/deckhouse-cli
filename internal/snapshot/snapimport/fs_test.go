@@ -1217,6 +1217,108 @@ func TestScanFSTar_AcceptsStructuralDirectoryChain(t *testing.T) {
 	}
 }
 
+// TestScanFSTar_RawTotal covers scanFSTar's rawTotal accumulation: the exact sum of every
+// regular entry's PAX raw size, ignoring directory and other non-regular entries entirely.
+func TestScanFSTar_RawTotal(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success: empty tar sums to zero", func(t *testing.T) {
+		t.Parallel()
+
+		var tarBuf bytes.Buffer
+
+		tw := tar.NewWriter(&tarBuf)
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar: %v", err)
+		}
+
+		tarPath := filepath.Join(t.TempDir(), "data.tar")
+		if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write data.tar: %v", err)
+		}
+
+		scan, err := scanFSTar(context.Background(), tarPath)
+		if err != nil {
+			t.Fatalf("scanFSTar: %v", err)
+		}
+		t.Cleanup(func() { _ = scan.Close() })
+
+		if scan.rawTotal != 0 {
+			t.Errorf("rawTotal = %d, want 0", scan.rawTotal)
+		}
+	})
+
+	t.Run("success: only reserved empty directory sums to zero", func(t *testing.T) {
+		t.Parallel()
+
+		var tarBuf bytes.Buffer
+
+		tw := tar.NewWriter(&tarBuf)
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "lost+found/", Mode: 0o700}); err != nil {
+			t.Fatalf("write reserved empty directory header: %v", err)
+		}
+
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar: %v", err)
+		}
+
+		tarPath := filepath.Join(t.TempDir(), "data.tar")
+		if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write data.tar: %v", err)
+		}
+
+		scan, err := scanFSTar(context.Background(), tarPath)
+		if err != nil {
+			t.Fatalf("scanFSTar: %v", err)
+		}
+		t.Cleanup(func() { _ = scan.Close() })
+
+		if scan.rawTotal != 0 {
+			t.Errorf("rawTotal = %d, want 0 (no regular entries)", scan.rawTotal)
+		}
+
+		if scan.ReservedEmptyDirectoryCount != 1 {
+			t.Errorf("ReservedEmptyDirectoryCount = %d, want 1", scan.ReservedEmptyDirectoryCount)
+		}
+	})
+
+	t.Run("success: sums only regular entries, ignoring directories", func(t *testing.T) {
+		t.Parallel()
+
+		first := []byte("first entry content")
+		second := []byte("a somewhat longer second entry content")
+
+		var tarBuf bytes.Buffer
+
+		tw := tar.NewWriter(&tarBuf)
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "dir/", Mode: 0o755}); err != nil {
+			t.Fatalf("write directory header: %v", err)
+		}
+
+		addTarEntryMetadata(t, tw, "first.txt", "first.txt", "none", int64(len(first)), first, 0o600, 0, 0, time.Time{})
+		addTarEntryMetadata(t, tw, "dir/second.txt", "dir/second.txt", "none", int64(len(second)), second, 0o600, 0, 0, time.Time{})
+
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar: %v", err)
+		}
+
+		tarPath := filepath.Join(t.TempDir(), "data.tar")
+		if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+			t.Fatalf("write data.tar: %v", err)
+		}
+
+		scan, err := scanFSTar(context.Background(), tarPath)
+		if err != nil {
+			t.Fatalf("scanFSTar: %v", err)
+		}
+		t.Cleanup(func() { _ = scan.Close() })
+
+		if want := int64(len(first) + len(second)); scan.rawTotal != want {
+			t.Errorf("rawTotal = %d, want %d", scan.rawTotal, want)
+		}
+	})
+}
+
 func TestScanFSTar_AcceptsReservedEmptyDirectory(t *testing.T) {
 	t.Parallel()
 
@@ -3144,10 +3246,10 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutTransfer(t *testing.T) 
 		t.Errorf("onProgress total = %d, want %d (skipped alpha.txt must still be credited at its exact decompressed size, plus beta.txt)", progressed, want)
 	}
 
-	// setTotal must grow progressively: alpha.txt's exact size becomes known first from
-	// authenticated PAX metadata before its done-skip proof, then beta.txt adds its own
-	// exact size — never a single upfront call with the grand total.
-	wantTotals := []int64{int64(len(alphaPlain)), int64(len(alphaPlain) + len(betaPlain))}
+	// setTotal is called exactly once, before any HEAD/PUT, with the exact sum of every
+	// regular entry's PAX raw size (alpha.txt + beta.txt) computed by the header-only
+	// preflight pass — never a progressively growing running total.
+	wantTotals := []int64{int64(len(alphaPlain) + len(betaPlain))}
 	if len(totals) != len(wantTotals) {
 		t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)
 	}
@@ -3165,6 +3267,122 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutTransfer(t *testing.T) 
 
 	if len(dirAfter) != len(dirBefore) {
 		t.Errorf("archive directory entry count changed during upload: before=%d after=%d (a temp file was left behind)", len(dirBefore), len(dirAfter))
+	}
+}
+
+// countingHTTPDoer counts every HTTPDo call made through it, so a test can prove an event
+// (like a setTotal call) happened strictly before the first HTTP request.
+type countingHTTPDoer struct {
+	inner httpDoer
+	calls int
+}
+
+func (d *countingHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
+	d.calls++
+
+	return d.inner.HTTPDo(req)
+}
+
+// TestImportFSFromTar_SetsExactTotalOnce proves setTotal is called exactly once, with the
+// exact sum of every regular entry's PAX raw size, strictly before any HEAD or PUT request —
+// not progressively, and not after any HTTP call has already been issued.
+func TestImportFSFromTar_SetsExactTotalOnce(t *testing.T) {
+	t.Parallel()
+
+	first := []byte("first entry, exact raw size known from PAX metadata")
+	second := []byte("second entry, a different exact raw size")
+
+	var tarBuf bytes.Buffer
+
+	tw := tar.NewWriter(&tarBuf)
+	addTarEntryMetadata(t, tw, "first.txt", "first.txt", "none", int64(len(first)), first, 0o600, 1, 2, time.Time{})
+	addTarEntryMetadata(t, tw, "second.txt", "second.txt", "none", int64(len(second)), second, 0o600, 1, 2, time.Time{})
+
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "data.tar")
+
+	if err := os.WriteFile(tarPath, tarBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("write data.tar: %v", err)
+	}
+
+	imp := newFakeFileImporter()
+	srv := httptest.NewServer(imp)
+	t.Cleanup(srv.Close)
+
+	doer := &countingHTTPDoer{inner: plainHTTPDoer{}}
+
+	var (
+		totalCalls          int
+		lastTotal           int64
+		httpCallsAtSetTotal int
+	)
+
+	setTotal := func(n int64) {
+		totalCalls++
+		lastTotal = n
+		httpCallsAtSetTotal = doer.calls
+	}
+
+	if err := importFSFromTar(context.Background(), doer, srv.URL, tarPath, discardLogger(), setTotal, nil, nil); err != nil {
+		t.Fatalf("importFSFromTar: %v", err)
+	}
+
+	if totalCalls != 1 {
+		t.Fatalf("setTotal called %d times, want exactly 1", totalCalls)
+	}
+
+	if want := int64(len(first) + len(second)); lastTotal != want {
+		t.Errorf("setTotal value = %d, want %d (exact sum of both entries)", lastTotal, want)
+	}
+
+	if httpCallsAtSetTotal != 0 {
+		t.Errorf("setTotal was called after %d HTTP request(s) had already been issued, want 0", httpCallsAtSetTotal)
+	}
+}
+
+// TestImportFSTar_RawTotalMismatchAfterUpload proves the post-loop defensive check that
+// extends the entry-count/identity revalidation to bytes: if the tar's regular-entry raw-size
+// total observed during the upload pass disagrees with the total computed by the earlier
+// preflight pass (scan.rawTotal, already reported to the caller via the single up-front
+// setTotal call), the upload fails rather than silently reporting a wrong total.
+func TestImportFSTar_RawTotalMismatchAfterUpload(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("single entry content for the raw-total mismatch fixture")
+	tarPath := writeSingleEntryFSTar(t, "none", content)
+
+	file, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", tarPath, err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+
+	scan, err := scanFSTarSource(context.Background(), file, tarPath)
+	if err != nil {
+		t.Fatalf("scanFSTarSource: %v", err)
+	}
+	t.Cleanup(func() { _ = scan.Close() })
+
+	// Simulate the preflight-computed total disagreeing with what the upload pass would
+	// walk, without touching any on-disk byte (which would also trip the per-entry digest
+	// revalidation and mask this specific defensive check).
+	scan.rawTotal++
+
+	imp := newFakeFileImporter()
+	srv := httptest.NewServer(imp)
+	t.Cleanup(srv.Close)
+
+	err = uploadFSTarFromScan(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, file, discardLogger(), nil, nil, nil, &scan)
+	if err == nil {
+		t.Fatal("expected error for raw-size total mismatch, got nil")
+	}
+
+	if !errors.Is(err, archive.ErrInvalidFSMetadata) {
+		t.Errorf("expected error wrapping archive.ErrInvalidFSMetadata, got: %v", err)
 	}
 }
 
@@ -4140,11 +4358,11 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 				t.Errorf("onProgress total = %d, want %d", reported, want)
 			}
 
-			// setTotal must grow progressively across both not-done entries: first.dat's
-			// exact size is measured (or read from hdr.Size for codec "none") before
-			// second.dat is even reached, then second.dat's own exact size is added on
-			// top — proving the running sum, not a single grand total known up front.
-			wantTotals := []int64{int64(len(firstContent)), int64(len(firstContent) + len(secondContent))}
+			// setTotal is called exactly once, before any HEAD/PUT, with the exact sum of
+			// both entries' PAX raw sizes computed by the header-only preflight pass — the
+			// bar's denominator is complete from the very first byte, not a running sum
+			// that only reaches its final value once the last entry is reached.
+			wantTotals := []int64{int64(len(firstContent) + len(secondContent))}
 			if len(totals) != len(wantTotals) {
 				t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)
 			}

@@ -540,6 +540,10 @@ type fsTarScan struct {
 	unsupportedEntryCount       uint64
 	unsupportedEntrySummary     string
 	removeAll                   func(string) error
+	// rawTotal is the exact sum of every regular entry's PAX raw size, computed once
+	// during this preflight pass. It is the upload's true total, known before any HEAD
+	// or PUT — see uploadFSTarFromScanWithDependencies's single up-front setTotal call.
+	rawTotal int64
 }
 
 func (s *fsTarScan) Close() error {
@@ -1055,7 +1059,9 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // codec-geometry checks without activating a transfer.
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
-// called with a running sum of exact PAX raw sizes as entries are walked.
+// called exactly once, before any HEAD or PUT, with the exact sum of every regular
+// entry's PAX raw size (computed by the header-only preflight above, not the upload
+// pass) — the bar's denominator is therefore complete from the very first byte.
 //
 // activate, when non-nil, is called once per entry that actually needs a real PUT (the
 // NOT-done branch), never inside the `if done` server-side-skip branch above it. This is
@@ -1276,6 +1282,15 @@ func uploadFSTarFromScanWithDependencies(
 			slog.Int("directory_count", scan.ReservedEmptyDirectoryCount))
 	}
 
+	// scan.rawTotal is the exact sum of every regular entry's PAX raw size, computed by
+	// the preflight pass that already ran (scanFSTarReaderWithOptions). Reporting it here,
+	// once, before the first byte of this second (upload) pass is sent keeps the bar's
+	// denominator complete from the start, unlike a per-entry running total that only
+	// reaches its final value once the LAST entry is reached.
+	if setTotal != nil {
+		setTotal(scan.rawTotal)
+	}
+
 	info, err := source.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", tarPath, err)
@@ -1391,16 +1406,16 @@ func uploadFSTarFromScanWithDependencies(
 			)
 		}
 
+		// runningTotal is NOT reported via setTotal progressively any more (see the
+		// single up-front setTotal(scan.rawTotal) call above): it exists purely so the
+		// post-loop check below can prove the tar's regular-entry raw sizes did not
+		// change between the preflight pass and this upload pass.
 		runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
 		if err != nil {
 			return errors.Join(
 				fmt.Errorf("account tar entry %s: %w", relPath, err),
 				closeFSTarSequence(sequence),
 			)
-		}
-
-		if setTotal != nil {
-			setTotal(runningTotal)
 		}
 
 		fileURL, err := fileUploadURL(baseURL, relPath)
@@ -1462,6 +1477,19 @@ func uploadFSTarFromScanWithDependencies(
 		return errors.Join(
 			fmt.Errorf("%w: tar entry count changed after preflight (entries %d/%d, regular entries %d/%d)",
 				archive.ErrInvalidFSMetadata, entryIndex, scan.entryCount, regularIndex, scan.regularCount),
+			closeFSTarSequence(sequence),
+		)
+	}
+
+	// Extends the entry/regular-count check above to bytes: the total already reported to
+	// the caller via the up-front setTotal(scan.rawTotal) call must match what this pass
+	// actually walked, proving the tar's regular-entry raw sizes did not change between the
+	// preflight pass and this upload pass (the per-entry digest revalidation above already
+	// proves identity and order; this proves the declared sizes too).
+	if runningTotal != scan.rawTotal {
+		return errors.Join(
+			fmt.Errorf("%w: tar raw size total changed after preflight (%d/%d bytes)",
+				archive.ErrInvalidFSMetadata, runningTotal, scan.rawTotal),
 			closeFSTarSequence(sequence),
 		)
 	}
@@ -1660,6 +1688,7 @@ func scanFSTarReaderWithOptions(
 	var (
 		entryCount   uint64
 		regularCount uint64
+		rawTotal     int64
 	)
 
 	for {
@@ -1742,6 +1771,13 @@ func scanFSTarReaderWithOptions(
 				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
 			}
 
+			rawTotal, err = addRawSize(rawTotal, metadata.RawSize)
+			if err != nil {
+				_ = sequence.Close()
+
+				return cleanup(fmt.Errorf("account tar entry %q: %w", hdr.Name, err))
+			}
+
 			record.Kind = fsTarRecordRegular
 			record.Path = path.Clean(metadata.OriginalPath)
 			regularCount++
@@ -1803,6 +1839,7 @@ func scanFSTarReaderWithOptions(
 		unsupportedEntryCount:       diagnostics.count,
 		unsupportedEntrySummary:     diagnostics.summary(),
 		removeAll:                   options.removeAll,
+		rawTotal:                    rawTotal,
 	}, nil
 }
 

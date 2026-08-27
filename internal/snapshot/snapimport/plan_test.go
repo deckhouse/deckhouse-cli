@@ -1192,6 +1192,80 @@ func TestBuildPlan_LeafStorageParams(t *testing.T) {
 	}
 }
 
+// TestBuildPlan_ReadsPayloadSizeFields verifies that PlannedNode.PayloadRawSizeBytes/
+// PayloadStoredSizeBytes/FormatVersion are read verbatim from snapshot.yaml
+// Volumes[0].RawSizeBytes/StoredSizeBytes and the envelope's own formatVersion —
+// writeArchiveNode always produces a current-format (v3) archive, since WriteSnapshotYAML's
+// MarshalJSON unconditionally stamps SnapshotFormatVersionCurrent.
+func TestBuildPlan_ReadsPayloadSizeFields(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leafDir := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		blockData:  []byte("rawbytes"),
+		blockExt:   ".zst",
+		volumes: []archive.VolumeInfo{{
+			StorageClassName: "sc-fast",
+			Size:             "1Gi",
+			VolumeMode:       "Block",
+			RawSizeBytes:     1077665792,
+			StoredSizeBytes:  900000000,
+		}},
+	})
+	finalizeArchiveChildrenChecksums(t, root)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	var leaf *PlannedNode
+
+	for i := range plan {
+		if plan[i].Kind == "VolumeSnapshot" {
+			leaf = &plan[i]
+
+			break
+		}
+	}
+
+	if leaf == nil {
+		t.Fatal("VolumeSnapshot node not found in plan")
+	}
+
+	if leaf.FormatVersion != archive.SnapshotFormatVersionCurrent {
+		t.Errorf("FormatVersion = %d, want %d", leaf.FormatVersion, archive.SnapshotFormatVersionCurrent)
+	}
+
+	if leaf.PayloadRawSizeBytes != 1077665792 {
+		t.Errorf("PayloadRawSizeBytes = %d, want 1077665792", leaf.PayloadRawSizeBytes)
+	}
+
+	if leaf.PayloadStoredSizeBytes != 900000000 {
+		t.Errorf("PayloadStoredSizeBytes = %d, want 900000000", leaf.PayloadStoredSizeBytes)
+	}
+
+	// The nominal Size/SizeBytes fields (feeding scratch-volume provisioning and resume
+	// identity) must be entirely unaffected by the new payload-size fields.
+	if leaf.Size != "1Gi" {
+		t.Errorf("Size = %q, want %q", leaf.Size, "1Gi")
+	}
+
+	if leaf.SizeBytes != 1024*1024*1024 {
+		t.Errorf("SizeBytes = %d, want %d", leaf.SizeBytes, int64(1024*1024*1024))
+	}
+}
+
 func TestDataImportIdentity_CanonicalAndDimensionComplete(t *testing.T) {
 	base := PlannedNode{
 		APIVersion:       "snapshot.storage.k8s.io/v1",
