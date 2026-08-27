@@ -35,7 +35,7 @@ func TestEnsureRBACCreatesObjects(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	ctx := context.Background()
 
-	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns"))
+	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns", ""))
 
 	sa, err := kube.CoreV1().ServiceAccounts("debug-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestEnsureRBACIsIdempotentAndUpdatesRules(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	ctx := context.Background()
 
-	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns"))
+	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns", ""))
 
 	role, err := kube.RbacV1().Roles("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestEnsureRBACIsIdempotentAndUpdatesRules(t *testing.T) {
 	_, err = kube.RbacV1().Roles("target-ns").Update(ctx, role, metav1.UpdateOptions{})
 	require.NoError(t, err)
 
-	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns"))
+	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns", ""))
 
 	role, err = kube.RbacV1().Roles("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
@@ -78,14 +78,39 @@ func TestEnsureRBACMergesRoleBindingSubjects(t *testing.T) {
 	kube := fake.NewSimpleClientset()
 	ctx := context.Background()
 
-	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns"))
-	require.NoError(t, ensureRBAC(ctx, kube, "other-ns", "target-ns"))
+	require.NoError(t, ensureRBAC(ctx, kube, "debug-ns", "target-ns", ""))
+	require.NoError(t, ensureRBAC(ctx, kube, "other-ns", "target-ns", ""))
 
 	binding, err := kube.RbacV1().RoleBindings("target-ns").Get(ctx, resourceName, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Len(t, binding.Subjects, 2)
 	assert.Equal(t, "debug-ns", binding.Subjects[0].Namespace)
 	assert.Equal(t, "other-ns", binding.Subjects[1].Namespace)
+}
+
+func TestEnsureRBACGrantsIstioNamespaceRead(t *testing.T) {
+	kube := fake.NewSimpleClientset()
+	ctx := context.Background()
+
+	require.NoError(t, ensureRBAC(ctx, kube, "default", "app-ns", defaultIstioNS))
+
+	role, err := kube.RbacV1().Roles(defaultIstioNS).Get(ctx, resourceName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, istioctlDebugRules(), role.Rules)
+
+	for _, rule := range role.Rules {
+		assert.NotContains(t, rule.Verbs, "update")
+		assert.NotContains(t, rule.Verbs, "patch")
+		assert.NotContains(t, rule.Verbs, "delete")
+	}
+
+	binding, err := kube.RbacV1().RoleBindings(defaultIstioNS).Get(ctx, resourceName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, "default", binding.Subjects[0].Namespace)
+
+	_, err = kube.RbacV1().Roles("app-ns").Get(ctx, resourceName, metav1.GetOptions{})
+	require.NoError(t, err)
 }
 
 func TestResolveDebugImage(t *testing.T) {
@@ -209,7 +234,7 @@ func TestWaitForPodRunningImagePullError(t *testing.T) {
 func TestNewCommandFlags(t *testing.T) {
 	cmd := NewCommand()
 	assert.Equal(t, "istio", cmd.Use)
-	for _, name := range []string{"namespace", "target-namespace", "image", "kubeconfig", "context"} {
+	for _, name := range []string{"namespace", "target-namespace", "istio-namespace", "image", "kubeconfig", "context"} {
 		assert.NotNil(t, cmd.Flags().Lookup(name), "missing flag %s", name)
 	}
 }

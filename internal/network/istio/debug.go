@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -46,6 +47,7 @@ const (
 	debugCMNamespace  = "d8-system"
 	debugCMName       = "debug-container"
 	debugCMImageKey   = "image"
+	defaultIstioNS    = "d8-istio"
 	podReadyTimeout   = 2 * time.Minute
 	podPollInterval   = time.Second
 	podDeleteTimeout  = 15 * time.Second
@@ -56,6 +58,7 @@ const (
 type Options struct {
 	Namespace       string
 	TargetNamespace string
+	IstioNamespace  string
 	Image           string
 	Command         []string
 }
@@ -68,7 +71,7 @@ func Run(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config
 		return err
 	}
 
-	if err := ensureRBAC(ctx, kube, opts.Namespace, opts.TargetNamespace); err != nil {
+	if err := ensureRBAC(ctx, kube, opts.Namespace, opts.TargetNamespace, opts.IstioNamespace); err != nil {
 		return err
 	}
 
@@ -92,8 +95,8 @@ func Run(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config
 		return fmt.Errorf("wait for debug pod: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Attached to %s/%s (image %s). RBAC target namespace: %s\n",
-		opts.Namespace, pod.Name, image, opts.TargetNamespace)
+	fmt.Fprintf(os.Stderr, "Attached to %s/%s (image %s). RBAC namespaces: %s\n",
+		opts.Namespace, pod.Name, image, strings.Join(uniqueNonEmpty(opts.TargetNamespace, opts.IstioNamespace), ", "))
 
 	return attachToPod(ctx, kube, restConfig, opts.Namespace, pod.Name)
 }
@@ -116,7 +119,7 @@ func resolveDebugImage(ctx context.Context, kube kubernetes.Interface, override 
 	return image, nil
 }
 
-func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, targetNamespace string) error {
+func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, targetNamespace, istioNamespace string) error {
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName,
@@ -129,10 +132,20 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 		return fmt.Errorf("create ServiceAccount %s/%s: %w", debugNamespace, resourceName, err)
 	}
 
+	for _, ns := range uniqueNonEmpty(targetNamespace, istioNamespace) {
+		if err := ensureNamespaceAccess(ctx, kube, debugNamespace, ns); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func ensureNamespaceAccess(ctx context.Context, kube kubernetes.Interface, debugNamespace, roleNamespace string) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName,
-			Namespace: targetNamespace,
+			Namespace: roleNamespace,
 		},
 		Rules: istioctlDebugRules(),
 	}
@@ -143,7 +156,7 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 	binding := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName,
-			Namespace: targetNamespace,
+			Namespace: roleNamespace,
 		},
 		Subjects: []rbacv1.Subject{{
 			Kind:      rbacv1.ServiceAccountKind,
@@ -156,11 +169,28 @@ func ensureRBAC(ctx context.Context, kube kubernetes.Interface, debugNamespace, 
 			Name:     resourceName,
 		},
 	}
-	if err := createOrUpdateRoleBinding(ctx, kube, binding); err != nil {
-		return err
+
+	return createOrUpdateRoleBinding(ctx, kube, binding)
+}
+
+func uniqueNonEmpty(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+
+		if _, ok := seen[value]; ok {
+			continue
+		}
+
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 
-	return nil
+	return out
 }
 
 func istioctlDebugRules() []rbacv1.PolicyRule {

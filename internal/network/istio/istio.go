@@ -32,9 +32,11 @@ var istioLong = templates.LongDesc(`
 Start an interactive debug container with istioctl and the RBAC needed to
 inspect pods in a target namespace (get/list pods and create pods/portforward).
 
-The ServiceAccount is created in --namespace. The Role and RoleBinding are
-created in --target-namespace (defaults to --namespace). The debug image is
-taken from ConfigMap d8-system/debug-container unless --image is set.
+The ServiceAccount is created in --namespace. A Role and RoleBinding (pods
+get/list and pods/portforward create — enough to read sidecar/istiod status,
+not to mutate Istio config) are created in --target-namespace and in
+--istio-namespace (default d8-istio, for istioctl proxy-status). The debug
+image is taken from ConfigMap d8-system/debug-container unless --image is set.
 
 The pod is deleted when the session ends. RBAC objects are left in place so
 the next run can reuse them.
@@ -94,6 +96,10 @@ func NewCommand() *cobra.Command {
 				opts.TargetNamespace = opts.Namespace
 			}
 
+			if opts.IstioNamespace == "" {
+				opts.IstioNamespace = defaultIstioNS
+			}
+
 			err = Run(cmd.Context(), kubeCl, restConfig, opts)
 			if errors.Is(err, context.Canceled) {
 				// SIGINT/SIGTERM cancels cmd.Context() via the root graceful
@@ -107,7 +113,8 @@ func NewCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&opts.Namespace, "namespace", "n", "", "Namespace for the ServiceAccount and debug pod (default: current kubeconfig namespace)")
-	cmd.Flags().StringVar(&opts.TargetNamespace, "target-namespace", "", "Namespace whose pods istioctl should be able to inspect (default: --namespace)")
+	cmd.Flags().StringVar(&opts.TargetNamespace, "target-namespace", "", "Namespace whose workload pods istioctl should inspect (default: --namespace)")
+	cmd.Flags().StringVar(&opts.IstioNamespace, "istio-namespace", defaultIstioNS, "Istio control-plane namespace for read-only access (istioctl proxy-status)")
 	cmd.Flags().StringVar(&opts.Image, "image", "", "Debug container image (default: ConfigMap d8-system/debug-container)")
 	cmd.Flags().StringP("kubeconfig", "k", utilk8s.DefaultKubeconfigPath(), "Path to kubeconfig file")
 	cmd.Flags().String("context", "", "The name of the kubeconfig context to use")
