@@ -19,6 +19,7 @@ package archive
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -164,6 +165,156 @@ func TestComputeNodeChecksum_CoversFSPAXMetadata(t *testing.T) {
 
 	if first.Hex == second.Hex {
 		t.Fatal("changing only rawSize PAX metadata must change the data.tar checksum")
+	}
+}
+
+// TestSumTarRawSizes covers SumTarRawSizes: it sums only regular-entry PAX raw sizes,
+// ignores directory and symlink entries entirely, sums to zero for an empty tar, and fails
+// on a regular entry with invalid/missing PAX metadata (ParseFSMetadata's own fail-closed
+// contract, which SumTarRawSizes relies on rather than falling back silently).
+func TestSumTarRawSizes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success: empty tar sums to zero", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+
+		tw := tar.NewWriter(&buf)
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar writer: %v", err)
+		}
+
+		total, err := SumTarRawSizes(context.Background(), bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("SumTarRawSizes: %v", err)
+		}
+
+		if total != 0 {
+			t.Errorf("total = %d, want 0", total)
+		}
+	})
+
+	t.Run("success: sums regular entries, ignores directory and symlink entries", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+
+		tw := tar.NewWriter(&buf)
+
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "dir/", Mode: 0o755}); err != nil {
+			t.Fatalf("write directory header: %v", err)
+		}
+
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "link", Linkname: "dir/first", Mode: 0o777}); err != nil {
+			t.Fatalf("write symlink header: %v", err)
+		}
+
+		writeRegularPAXEntry(t, tw, "dir/first", "none", 10)
+		writeRegularPAXEntry(t, tw, "second", "zstd", 25)
+
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar writer: %v", err)
+		}
+
+		total, err := SumTarRawSizes(context.Background(), bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("SumTarRawSizes: %v", err)
+		}
+
+		if want := int64(10 + 25); total != want {
+			t.Errorf("total = %d, want %d", total, want)
+		}
+	})
+
+	t.Run("error: regular entry missing required PAX metadata", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+
+		tw := tar.NewWriter(&buf)
+
+		// A regular entry with no PAX records at all: ParseFSMetadata must reject it,
+		// and SumTarRawSizes must propagate that failure rather than skip the entry.
+		if err := tw.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     "broken.txt",
+			Mode:     0o600,
+			Size:     3,
+		}); err != nil {
+			t.Fatalf("write header: %v", err)
+		}
+
+		if _, err := io.WriteString(tw, "abc"); err != nil {
+			t.Fatalf("write body: %v", err)
+		}
+
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar writer: %v", err)
+		}
+
+		_, err := SumTarRawSizes(context.Background(), bytes.NewReader(buf.Bytes()))
+		if !errors.Is(err, ErrInvalidFSMetadata) {
+			t.Fatalf("SumTarRawSizes error = %v, want wrapping ErrInvalidFSMetadata", err)
+		}
+	})
+
+	t.Run("error: context canceled before completion", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+
+		tw := tar.NewWriter(&buf)
+		writeRegularPAXEntry(t, tw, "first", "none", 5)
+
+		if err := tw.Close(); err != nil {
+			t.Fatalf("close tar writer: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := SumTarRawSizes(ctx, bytes.NewReader(buf.Bytes()))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SumTarRawSizes error = %v, want context.Canceled", err)
+		}
+	})
+}
+
+// writeRegularPAXEntry writes one well-formed regular PAX entry of rawSize plaintext bytes,
+// encoded (for test purposes only — the body content is irrelevant to SumTarRawSizes, which
+// reads only the PAX metadata) via the "none" codec regardless of the codec name recorded, so
+// the stored size always matches rawSize.
+func writeRegularPAXEntry(t *testing.T, tw *tar.Writer, originalPath, codec string, rawSize int64) {
+	t.Helper()
+
+	metadata, err := NewFSMetadata(codec, originalPath, rawSize)
+	if err != nil {
+		t.Fatalf("NewFSMetadata: %v", err)
+	}
+
+	storedPath, err := metadata.StoredPath()
+	if err != nil {
+		t.Fatalf("StoredPath: %v", err)
+	}
+
+	hdr := &tar.Header{
+		Format:     tar.FormatPAX,
+		Typeflag:   tar.TypeReg,
+		Name:       storedPath,
+		Mode:       0o600,
+		Size:       rawSize,
+		PAXRecords: metadata.PAXRecords(),
+	}
+
+	// SumTarRawSizes never decodes the body, so any bytes of the declared Size work here;
+	// content correctness for a given codec is exercised elsewhere (fsmetadata round trip).
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+
+	if _, err := tw.Write(make([]byte, rawSize)); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 }
 

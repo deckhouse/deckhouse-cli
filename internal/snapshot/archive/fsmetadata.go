@@ -18,8 +18,11 @@ package archive
 
 import (
 	"archive/tar"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -164,6 +167,59 @@ func (m FSMetadata) validate() error {
 	}
 
 	return nil
+}
+
+// SumTarRawSizes returns the sum of RawSize across every regular-file entry in the tar
+// stream r, read via header-only seeks (tar.Reader skips each entry's body with Seek when
+// r implements io.Seeker, never copying payload bytes). It is used to compute the exact
+// byte total a filesystem volume's data.tar will produce on import, without a second full
+// decode pass. ctx is checked once per entry so a large tar stays cancellable.
+func SumTarRawSizes(ctx context.Context, r io.Reader) (int64, error) {
+	tr := tar.NewReader(r)
+
+	var total int64
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+
+		if err != nil {
+			return 0, fmt.Errorf("read tar entry: %w", err)
+		}
+
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != 0 {
+			continue
+		}
+
+		metadata, err := ParseFSMetadata(hdr)
+		if err != nil {
+			return 0, fmt.Errorf("entry %q: %w", hdr.Name, err)
+		}
+
+		total, err = addRawSize(total, metadata.RawSize)
+		if err != nil {
+			return 0, fmt.Errorf("entry %q: %w", hdr.Name, err)
+		}
+	}
+
+	return total, nil
+}
+
+// addRawSize adds size to total, failing rather than silently wrapping when the sum would
+// overflow int64 — the same overflow-safety contract snapimport's own raw-size accounting
+// (addRawSize) applies to its running upload total.
+func addRawSize(total, size int64) (int64, error) {
+	if size > math.MaxInt64-total {
+		return 0, fmt.Errorf("raw-size total overflows int64")
+	}
+
+	return total + size, nil
 }
 
 func validateFSOriginalPath(originalPath string) error {
