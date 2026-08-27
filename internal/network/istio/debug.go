@@ -26,6 +26,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -38,6 +39,10 @@ import (
 const (
 	resourceName      = "istioctl-debug"
 	containerName     = "istioctl-debug"
+	podGenerateName   = resourceName + "-"
+	labelAppName      = "app.kubernetes.io/name"
+	labelManagedBy    = "app.kubernetes.io/managed-by"
+	managedByD8       = "d8"
 	debugCMNamespace  = "d8-system"
 	debugCMName       = "debug-container"
 	debugCMImageKey   = "image"
@@ -76,7 +81,7 @@ func Run(ctx context.Context, kube kubernetes.Interface, restConfig *rest.Config
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), podDeleteTimeout)
 		defer cancel()
 
-		if delErr := deletePod(cleanupCtx, kube, opts.Namespace, pod.Name); delErr != nil {
+		if delErr := deletePod(cleanupCtx, kube, opts.Namespace, pod.Name, pod.UID); delErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to delete debug pod %s/%s: %v\n", opts.Namespace, pod.Name, delErr)
 		}
 	}()
@@ -213,8 +218,7 @@ func createOrUpdateRoleBinding(ctx context.Context, kube kubernetes.Interface, b
 		return fmt.Errorf("get RoleBinding %s/%s: %w", binding.Namespace, binding.Name, err)
 	}
 
-	existing.Subjects = binding.Subjects
-	existing.RoleRef = binding.RoleRef
+	existing.Subjects = mergeSubjects(existing.Subjects, binding.Subjects)
 
 	_, err = kube.RbacV1().RoleBindings(binding.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if err != nil {
@@ -224,14 +228,45 @@ func createOrUpdateRoleBinding(ctx context.Context, kube kubernetes.Interface, b
 	return nil
 }
 
+func mergeSubjects(existing, add []rbacv1.Subject) []rbacv1.Subject {
+	out := append([]rbacv1.Subject(nil), existing...)
+
+	for _, subject := range add {
+		if containsSubject(out, subject) {
+			continue
+		}
+
+		out = append(out, subject)
+	}
+
+	return out
+}
+
+func containsSubject(subjects []rbacv1.Subject, want rbacv1.Subject) bool {
+	for _, subject := range subjects {
+		if subject.Kind == want.Kind &&
+			subject.Name == want.Name &&
+			subject.Namespace == want.Namespace &&
+			subject.APIGroup == want.APIGroup {
+			return true
+		}
+	}
+
+	return false
+}
+
+func debugPodSelector() string {
+	return fmt.Sprintf("%s=%s,%s=%s", labelAppName, resourceName, labelManagedBy, managedByD8)
+}
+
 func buildDebugPod(namespace, image string, command []string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName,
-			Namespace: namespace,
+			GenerateName: podGenerateName,
+			Namespace:    namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":       resourceName,
-				"app.kubernetes.io/managed-by": "d8",
+				labelAppName:   resourceName,
+				labelManagedBy: managedByD8,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -252,52 +287,52 @@ func buildDebugPod(namespace, image string, command []string) *corev1.Pod {
 }
 
 func createDebugPod(ctx context.Context, kube kubernetes.Interface, namespace, image string, command []string) (*corev1.Pod, error) {
-	if existing, err := kube.CoreV1().Pods(namespace).Get(ctx, resourceName, metav1.GetOptions{}); err == nil {
-		fmt.Fprintf(os.Stderr, "Deleting leftover debug pod %s/%s\n", namespace, existing.Name)
-
-		if err := deletePod(ctx, kube, namespace, existing.Name); err != nil {
-			return nil, err
-		}
-
-		if err := waitForPodGone(ctx, kube, namespace, existing.Name); err != nil {
-			return nil, err
-		}
-	} else if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get debug pod %s/%s: %w", namespace, resourceName, err)
+	if err := deleteTerminalDebugPods(ctx, kube, namespace); err != nil {
+		return nil, err
 	}
 
 	pod, err := kube.CoreV1().Pods(namespace).Create(ctx, buildDebugPod(namespace, image, command), metav1.CreateOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("create debug pod %s/%s: %w", namespace, resourceName, err)
+		return nil, fmt.Errorf("create debug pod in %s: %w", namespace, err)
 	}
 
 	return pod, nil
 }
 
-func deletePod(ctx context.Context, kube kubernetes.Interface, namespace, name string) error {
-	err := kube.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: ptr.To(podDeleteGraceSec),
-	})
-	if apierrors.IsNotFound(err) {
+func deleteTerminalDebugPods(ctx context.Context, kube kubernetes.Interface, namespace string) error {
+	list, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: debugPodSelector()})
+	if err != nil {
+		return fmt.Errorf("list leftover debug pods in %s: %w", namespace, err)
+	}
+
+	for i := range list.Items {
+		pod := &list.Items[i]
+		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			continue
+		}
+
+		fmt.Fprintf(os.Stderr, "Deleting leftover debug pod %s/%s\n", namespace, pod.Name)
+
+		if delErr := deletePod(ctx, kube, namespace, pod.Name, pod.UID); delErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to delete leftover debug pod %s/%s: %v\n", namespace, pod.Name, delErr)
+		}
+	}
+
+	return nil
+}
+
+func deletePod(ctx context.Context, kube kubernetes.Interface, namespace, name string, uid types.UID) error {
+	opts := metav1.DeleteOptions{GracePeriodSeconds: ptr.To(podDeleteGraceSec)}
+	if uid != "" {
+		opts.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+
+	err := kube.CoreV1().Pods(namespace).Delete(ctx, name, opts)
+	if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
 		return nil
 	}
 
 	return err
-}
-
-func waitForPodGone(ctx context.Context, kube kubernetes.Interface, namespace, name string) error {
-	return wait.PollUntilContextTimeout(ctx, podPollInterval, podReadyTimeout, true, func(ctx context.Context) (bool, error) {
-		_, err := kube.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-
-		if err != nil {
-			return false, err
-		}
-
-		return false, nil
-	})
 }
 
 func waitForPodRunning(ctx context.Context, kube kubernetes.Interface, namespace, name string) error {

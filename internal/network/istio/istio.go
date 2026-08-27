@@ -17,14 +17,14 @@ limitations under the License.
 package istio
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -57,21 +57,17 @@ func NewCommand() *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:           "istio [-- command ...]",
+		Use:           "istio",
 		Short:         "Run an interactive istioctl debug container",
 		Long:          istioLong,
 		Example:       istioExample,
+		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Match kubectl: first SIGINT/SIGTERM must stop the attach session
-			// instead of being swallowed by the d8 root graceful handler.
-			signal.Reset(syscall.SIGINT, syscall.SIGTERM)
-
-			if len(args) > 0 {
-				opts.Command = args
-			}
-
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Interactive bash only. One-shot `istio -- command` is not supported:
+			// poll-then-attach loses early stdout, treats a fast Succeeded pod as an
+			// error, and cannot propagate the container exit code (attach has none).
 			kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 			if err != nil {
 				return fmt.Errorf("read --kubeconfig: %w", err)
@@ -88,7 +84,7 @@ func NewCommand() *cobra.Command {
 			}
 
 			if opts.Namespace == "" {
-				opts.Namespace, err = kubeconfigNamespace(kubeconfigPath, contextName)
+				opts.Namespace, err = transport.KubeconfigNamespace(kubeconfigPath, contextName)
 				if err != nil {
 					return err
 				}
@@ -98,7 +94,15 @@ func NewCommand() *cobra.Command {
 				opts.TargetNamespace = opts.Namespace
 			}
 
-			return Run(cmd.Context(), kubeCl, restConfig, opts)
+			err = Run(cmd.Context(), kubeCl, restConfig, opts)
+			if errors.Is(err, context.Canceled) {
+				// SIGINT/SIGTERM cancels cmd.Context() via the root graceful
+				// handler. Run already deletes the debug pod in a defer that
+				// uses context.Background(), so treat cancel as a clean stop.
+				return nil
+			}
+
+			return err
 		},
 	}
 
@@ -109,25 +113,4 @@ func NewCommand() *cobra.Command {
 	cmd.Flags().String("context", "", "The name of the kubeconfig context to use")
 
 	return cmd
-}
-
-func kubeconfigNamespace(kubeconfigPath, contextName string) (string, error) {
-	overrides := &clientcmd.ConfigOverrides{}
-	if contextName != utilk8s.DefaultKubeContext {
-		overrides.CurrentContext = contextName
-	}
-
-	ns, _, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath},
-		overrides,
-	).Namespace()
-	if err != nil {
-		return "", fmt.Errorf("resolve namespace from kubeconfig: %w", err)
-	}
-
-	if ns == "" {
-		return "default", nil
-	}
-
-	return ns, nil
 }
