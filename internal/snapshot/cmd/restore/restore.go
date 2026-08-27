@@ -129,14 +129,18 @@ Before any dry-run or real apply, restore reads every target PersistentVolumeCla
 same-named claim is already Bound, restore refuses to reuse it because that status may
 describe stale data from an earlier operation. Restore never deletes or replaces the claim.
 
---wait only tracks PersistentVolumeClaims that appear in the restored manifest set. Disk-backed
-PVCs for domain objects are recreated asynchronously by the domain controller (not part of this
-output), so they are not awaited; the command may return before such volumes finish provisioning.
-A Pending PVC on a WaitForFirstConsumer StorageClass completes immediately only while it has no
-selected node, live Pod consumer, active provisioning event, or terminal provisioning failure.
-Once selected, consumed, or provisioning, it is polled until Bound or --timeout; an observed
-provisioning failure is returned with its cause. Success revalidates the post-apply PVC UID,
-restore source, and bound PersistentVolume identity.`,
+--wait only tracks PersistentVolumeClaims that appear in the restored manifest set, and it
+reports when this command's own wait is over, not when a workload can use the restored data.
+Disk-backed PVCs for domain objects are recreated asynchronously by the domain controller (not
+part of this output), so they are not awaited; the command may return before such volumes finish
+provisioning. A Pending PVC on a WaitForFirstConsumer StorageClass is not awaited while it has no
+selected node, live Pod consumer, active provisioning event, or terminal provisioning failure:
+every such claim is listed once, by namespace/name and StorageClass, as a claim this command does
+not wait to become Bound. Once selected, consumed, or provisioning, it is polled until Bound
+or --timeout; an observed provisioning failure is returned with its cause. An expired --timeout
+means only that the wait could not be confirmed within that period: the objects were already
+applied and are not rolled back. Success revalidates the post-apply PVC UID, restore source, and
+bound PersistentVolume identity; it does not promise that every restored PVC is Bound.`,
 		Example: `  # Restore snapshot "my-snap" in namespace "default"
   d8 snapshot restore my-snap -n default
 
@@ -177,8 +181,8 @@ restore source, and bound PersistentVolume identity.`,
 	cmd.Flags().Bool(flagDryRun, false, "validate objects via DryRunAll without persisting; skips --wait (use to preflight a restore)")
 	cmd.Flags().Bool(flagEdit, false, "open resolved manifests in $KUBE_EDITOR/$EDITOR (falling back to vi) before applying; aborts on non-zero exit, unchanged, or empty content")
 	cmd.Flags().Bool(flagNoAutoEdit, false, "disable the one automatic editor session for interactive Kubernetes Invalid (HTTP 422) preflight responses")
-	cmd.Flags().Bool(flagWait, false, "wait for manifest PVCs to become Bound; a dormant WaitForFirstConsumer PVC with no selected node, live consumer, or provisioning signal completes without polling")
-	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "timeout for the --wait Bound check")
+	cmd.Flags().Bool(flagWait, false, "wait for applicable manifest PVCs to become Bound; a dormant WaitForFirstConsumer PVC with no selected node, live consumer, or provisioning signal is listed by name and is not awaited")
+	cmd.Flags().Duration(flagTimeout, 10*time.Minute, "bounds the --wait Bound check only; an expired timeout does not roll back the applied objects")
 
 	return cmd
 }
@@ -319,6 +323,7 @@ func Run(log *slog.Logger, cmd *cobra.Command, args []string) error {
 		Mapper:                 mapper,
 		ControlPlaneTimeout:    restore.DefaultControlPlaneTimeout,
 		Log:                    log,
+		Out:                    cmd.OutOrStdout(),
 	}
 
 	log.Info("starting snapshot restore",

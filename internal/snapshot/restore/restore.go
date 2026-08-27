@@ -39,6 +39,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -224,6 +225,9 @@ type Config struct {
 	Mapper meta.RESTMapper
 	// Log receives progress output.
 	Log *slog.Logger
+	// Out receives stable user-facing result output; progress and diagnostics go to Log.
+	// Command callers pass cmd.OutOrStdout(); the zero value discards.
+	Out io.Writer
 
 	// maxStagedManifestBytes and maxStagedManifestObjects are test seams for
 	// lowering the finite aggregate staging budgets.
@@ -683,6 +687,10 @@ func applyDefaults(cfg Config) Config {
 
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
+	}
+
+	if cfg.Out == nil {
+		cfg.Out = io.Discard
 	}
 
 	if cfg.editManifests == nil {
@@ -2259,6 +2267,10 @@ func applyTargetExists(
 // before polling: a Pending claim with no selected node, live consumer, or provisioning
 // observation is a normal, non-blocking state. Once provisioning is active, its PVC and
 // bounded Event history are both rechecked until Bound or a terminal result.
+//
+// Every claim classified as not requiring a Bound observation is reported to cfg.Out by
+// name, once, before the remaining claims are polled, so the wait never ends with an
+// unexplained count of claims it stopped tracking.
 func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	if len(pvcs) == 0 {
 		return nil
@@ -2277,7 +2289,7 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 
 	cfg.Log.Info("waiting for restored PVCs to bind", slog.Int("count", len(pvcs)))
 
-	bindingModes := make(map[string]string)
+	storageClasses := make(map[string]resolvedStorageClass)
 
 	type waitRef struct {
 		pvc                 pvcRef
@@ -2287,17 +2299,17 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 	activeRefs := make([]waitRef, 0, len(pvcs))
 
 	var (
-		boundCount   int
-		skippedCount int
+		boundCount    int
+		unawaitedPVCs []unawaitedPVC
 	)
 
 	for _, ref := range pvcs {
-		mode, err := resolveVolumeBindingMode(waitCtx, cfg, scGVR, ref.storageClassName, bindingModes)
+		storageClass, err := resolveStorageClass(waitCtx, cfg, scGVR, ref.storageClassName, storageClasses)
 		if err != nil {
 			return fmt.Errorf("resolve volume binding mode for PVC %s/%s: %w", ref.namespace, ref.name, err)
 		}
 
-		recheckProvisioning := mode == volumeBindingModeWFC
+		recheckProvisioning := storageClass.bindingMode == volumeBindingModeWFC
 		if recheckProvisioning {
 			active, bound, err := inspectWFFCPVC(waitCtx, cfg, gvr, ref)
 			if err != nil {
@@ -2311,13 +2323,21 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 			}
 
 			if !active {
-				skippedCount++
+				unawaitedPVCs = append(unawaitedPVCs, unawaitedPVC{
+					namespace:    ref.namespace,
+					name:         ref.name,
+					storageClass: storageClass,
+				})
 
 				continue
 			}
 		}
 
 		activeRefs = append(activeRefs, waitRef{pvc: ref, recheckProvisioning: recheckProvisioning})
+	}
+
+	if err := reportUnawaitedPVCs(cfg.Out, unawaitedPVCs); err != nil {
+		return fmt.Errorf("restored objects were applied, but the result could not be written: %w", err)
 	}
 
 	for len(activeRefs) > 0 {
@@ -2358,7 +2378,8 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 			return waitContextError(
 				waitCtx,
 				fmt.Sprintf(
-					"waiting for PVC %s/%s to become Bound; observed phase %q",
+					"waiting for restored PVC %s/%s to become Bound; its last observed status.phase was %q;"+
+						" the restored objects were already applied and are not rolled back by the end of this wait",
 					firstRef.namespace,
 					firstRef.name,
 					unresolvedPhases[0],
@@ -2369,25 +2390,105 @@ func waitPVCsBound(ctx context.Context, cfg Config, pvcs []pvcRef) error {
 
 	cfg.Log.Info("finished waiting for restored PVCs",
 		slog.Int("bound", boundCount),
-		slog.Int("skipped_wait_for_first_consumer", skippedCount))
+		slog.Int("skipped_wait_for_first_consumer", len(unawaitedPVCs)))
 
 	return nil
 }
 
-// resolveVolumeBindingMode returns the effective volumeBindingMode for a PVC's
-// StorageClass, resolving the cluster's default StorageClass when className is empty
-// (spec.storageClassName can be legitimately unset). Results are cached per StorageClass
-// name so a restore with many PVCs on the same class issues one API call per class, not
-// one per PVC; the empty-name case is cached under a distinct key since it requires a
-// List rather than a Get.
-func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.GroupVersionResource, className string, cache map[string]string) (string, error) {
+// resolvedStorageClass is the StorageClass a claim binds through, as read during the wait.
+type resolvedStorageClass struct {
+	// name is the resolved object's name. For a claim with an empty
+	// spec.storageClassName this is the cluster default that was found, not "".
+	name string
+	// bindingMode is the class's effective volumeBindingMode, defaulted to Immediate
+	// when the class omits the field.
+	bindingMode string
+}
+
+// unawaitedPVC is one restored PersistentVolumeClaim that the wait classified as not
+// requiring a Bound observation. The claim is kept by identity, not only counted, because
+// a count alone does not say which claims the command stopped tracking.
+type unawaitedPVC struct {
+	namespace    string
+	name         string
+	storageClass resolvedStorageClass
+}
+
+// reportUnawaitedPVCs writes the single list of restored PVCs the wait does not await,
+// ordered by namespace then name. It states only what the wait actually read -- claim
+// identity, resolved StorageClass, and its volumeBindingMode -- and does not tell the
+// caller what to do next. Nothing is written when every restored claim is awaited.
+func reportUnawaitedPVCs(out io.Writer, claims []unawaitedPVC) error {
+	if out == nil || len(claims) == 0 {
+		return nil
+	}
+
+	sorted := slices.Clone(claims)
+	slices.SortFunc(sorted, func(a, b unawaitedPVC) int {
+		if byNamespace := strings.Compare(a.namespace, b.namespace); byNamespace != 0 {
+			return byNamespace
+		}
+
+		return strings.Compare(a.name, b.name)
+	})
+
+	identityWidth := 0
+
+	for _, claim := range sorted {
+		if width := len(claim.namespace) + len("/") + len(claim.name); width > identityWidth {
+			identityWidth = width
+		}
+	}
+
+	var block strings.Builder
+
+	block.WriteString("\nThe following restored PersistentVolumeClaims are not awaited:\n\n")
+
+	for _, claim := range sorted {
+		fmt.Fprintf(
+			&block,
+			"  %-*s  StorageClass %q  volumeBindingMode %s\n",
+			identityWidth,
+			claim.namespace+"/"+claim.name,
+			claim.storageClass.name,
+			claim.storageClass.bindingMode,
+		)
+	}
+
+	block.WriteString(
+		"\nThese claims use StorageClasses with volumeBindingMode WaitForFirstConsumer.\n" +
+			"They are not expected to become Bound until a consumer is scheduled, so this\n" +
+			"restore does not wait for them.\n\n",
+	)
+
+	if _, err := io.WriteString(out, block.String()); err != nil {
+		return fmt.Errorf("writing the list of %d PVCs that are not awaited: %w", len(sorted), err)
+	}
+
+	return nil
+}
+
+// resolveStorageClass returns the StorageClass a PVC actually binds through: the resolved
+// object's name and its effective volumeBindingMode. The cluster's default StorageClass is
+// resolved when className is empty (spec.storageClassName can be legitimately unset), so
+// the returned name is the class that was really read, not the claim's field. Results are
+// cached per StorageClass name so a restore with many PVCs on the same class issues one API
+// call per class, not one per PVC; the empty-name case is cached under a distinct key since
+// it requires a List rather than a Get.
+func resolveStorageClass(
+	ctx context.Context,
+	cfg Config,
+	scGVR schema.GroupVersionResource,
+	className string,
+	cache map[string]resolvedStorageClass,
+) (resolvedStorageClass, error) {
 	cacheKey := className
 	if cacheKey == "" {
 		cacheKey = "\x00default"
 	}
 
-	if mode, ok := cache[cacheKey]; ok {
-		return mode, nil
+	if resolved, ok := cache[cacheKey]; ok {
+		return resolved, nil
 	}
 
 	var (
@@ -2409,20 +2510,21 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 				err = errors.Join(err, ctxErr)
 			}
 
-			return "", fmt.Errorf("get StorageClass %q: %w", className, err)
+			return resolvedStorageClass{}, fmt.Errorf("get StorageClass %q: %w", className, err)
 		}
 	} else {
 		sc, err = findDefaultStorageClass(ctx, cfg, scGVR)
 		if err != nil {
-			return "", err
+			return resolvedStorageClass{}, err
 		}
 
 		if sc == nil {
 			cfg.Log.Info("no default StorageClass is annotated; assuming Immediate binding for PVCs with an empty storageClassName")
 
-			cache[cacheKey] = volumeBindingModeImmediate
+			resolved := resolvedStorageClass{bindingMode: volumeBindingModeImmediate}
+			cache[cacheKey] = resolved
 
-			return volumeBindingModeImmediate, nil
+			return resolved, nil
 		}
 	}
 
@@ -2431,9 +2533,10 @@ func resolveVolumeBindingMode(ctx context.Context, cfg Config, scGVR schema.Grou
 		mode = volumeBindingModeImmediate
 	}
 
-	cache[cacheKey] = mode
+	resolved := resolvedStorageClass{name: sc.GetName(), bindingMode: mode}
+	cache[cacheKey] = resolved
 
-	return mode, nil
+	return resolved, nil
 }
 
 // findDefaultStorageClass returns the cluster's default StorageClass (annotated
