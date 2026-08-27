@@ -17,6 +17,7 @@ limitations under the License.
 package volume_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -956,5 +957,174 @@ func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 
 	if err := archive.VerifyNode(nodeDir); err != nil {
 		t.Errorf("VerifyNode: %v", err)
+	}
+}
+
+// TestFinalizeNode_RecordsPayloadSizes_BlockZstd is the regression test for the live bug this
+// fix addresses: the captured nominal Size ("1Gi", standing in for a thin-provisioning
+// backend's rounded-up VolumeSnapshotContent.status.restoreSize) disagrees with the REAL
+// decoded byte length of the zstd payload actually present on disk. FinalizeNode must leave
+// Size untouched (it feeds scratch-volume provisioning on re-import) while recording the
+// measured RawSizeBytes/StoredSizeBytes from the real payload, not derived from Size at all.
+func TestFinalizeNode_RecordsPayloadSizes_BlockZstd(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-thin", "uid-thin")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	// Deliberately larger than the nominal "1Gi" below, standing in for the real bug's
+	// 1077665792-vs-1073741824 mismatch.
+	payload := bytes.Repeat([]byte("thin-provisioned-real-payload-bytes-"), 500)
+	storedBytes := writeZstdBlockPayload(t, nodeDir, payload)
+
+	data := &source.NodeData{
+		SourceRef: source.SourceRefIdentity{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "pvc-thin",
+			Namespace:  "ns",
+			UID:        "uid-thin",
+		},
+		ArtifactRef: source.ArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "vsc-thin",
+		},
+		VolumeMode:       "Block",
+		StorageClassName: "linstor-thin-r1",
+		Size:             "1Gi", // nominal, deliberately NOT equal to len(payload)
+	}
+
+	node := &source.Node{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-thin",
+		Namespace:  "ns",
+		UID:        "uid-vs-thin",
+		Data:       data,
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("FinalizeNode: %v", err)
+	}
+
+	sy, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if len(sy.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(sy.Volumes))
+	}
+
+	vol := sy.Volumes[0]
+
+	// The nominal size is NOT touched by this fix.
+	if vol.Size != "1Gi" {
+		t.Errorf("Size = %q, want unchanged %q", vol.Size, "1Gi")
+	}
+
+	// The recorded payload sizes reflect the REAL bytes on disk, not the nominal size.
+	if vol.RawSizeBytes != int64(len(payload)) {
+		t.Errorf("RawSizeBytes = %d, want %d (the real decoded payload size)", vol.RawSizeBytes, len(payload))
+	}
+
+	if vol.StoredSizeBytes != storedBytes {
+		t.Errorf("StoredSizeBytes = %d, want %d (the real on-disk compressed size)", vol.StoredSizeBytes, storedBytes)
+	}
+
+	nominalBytes := int64(1024 * 1024 * 1024)
+	if vol.RawSizeBytes == nominalBytes {
+		t.Error("RawSizeBytes must not equal the nominal 1Gi size — that is the exact bug this fix addresses")
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode: %v", err)
+	}
+}
+
+// TestFinalizeNode_RefinalizeDoneNodeKeepsSizes proves that re-finalizing an already-published
+// node (e.g. a re-publication triggered by a re-published child, with no new download in THIS
+// run) still measures and records the payload sizes correctly: MeasurePayload reads fresh from
+// the bytes already on disk every time, so a second finalize is not allowed to silently drop or
+// zero out the recorded RawSizeBytes/StoredSizeBytes.
+func TestFinalizeNode_RefinalizeDoneNodeKeepsSizes(t *testing.T) {
+	t.Parallel()
+
+	nodeDir := setupNodeDir(t)
+
+	if err := archive.WriteManifest(nodeDir, makeObjWithUID("v1", "PersistentVolumeClaim", "pvc-r", "uid-r")); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	payload := bytes.Repeat([]byte("refinalize-payload-bytes-"), 300)
+	storedBytes := writeZstdBlockPayload(t, nodeDir, payload)
+
+	data := &source.NodeData{
+		SourceRef: source.SourceRefIdentity{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+			Name:       "pvc-r",
+			Namespace:  "ns",
+			UID:        "uid-r",
+		},
+		ArtifactRef: source.ArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1",
+			Kind:       "VolumeSnapshotContent",
+			Name:       "vsc-r",
+		},
+		VolumeMode:       "Block",
+		StorageClassName: "sc-r",
+		Size:             "2Gi",
+	}
+
+	node := &source.Node{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-refinalize",
+		Namespace:  "ns",
+		UID:        "uid-vs-refinalize",
+		Data:       data,
+	}
+
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("first FinalizeNode: %v", err)
+	}
+
+	first, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML after first finalize: %v", err)
+	}
+
+	// Second finalize simulates a re-publication with no new download in this run: the
+	// payload bytes on disk are unchanged, so the re-measured sizes must be identical.
+	if err := volume.FinalizeNode(nodeDir, node); err != nil {
+		t.Fatalf("second FinalizeNode: %v", err)
+	}
+
+	second, err := archive.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML after second finalize: %v", err)
+	}
+
+	if len(first.Volumes) != 1 || len(second.Volumes) != 1 {
+		t.Fatalf("Volumes length: first=%d second=%d, want 1/1", len(first.Volumes), len(second.Volumes))
+	}
+
+	if first.Volumes[0].RawSizeBytes != int64(len(payload)) || first.Volumes[0].RawSizeBytes != second.Volumes[0].RawSizeBytes {
+		t.Errorf("RawSizeBytes not preserved across refinalize: first=%d second=%d, want %d",
+			first.Volumes[0].RawSizeBytes, second.Volumes[0].RawSizeBytes, len(payload))
+	}
+
+	if first.Volumes[0].StoredSizeBytes != storedBytes || first.Volumes[0].StoredSizeBytes != second.Volumes[0].StoredSizeBytes {
+		t.Errorf("StoredSizeBytes not preserved across refinalize: first=%d second=%d, want %d",
+			first.Volumes[0].StoredSizeBytes, second.Volumes[0].StoredSizeBytes, storedBytes)
+	}
+
+	if err := archive.VerifyNode(nodeDir); err != nil {
+		t.Errorf("VerifyNode after refinalize: %v", err)
 	}
 }

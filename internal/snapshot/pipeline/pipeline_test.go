@@ -17,6 +17,7 @@ limitations under the License.
 package pipeline_test
 
 import (
+	gotar "archive/tar"
 	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // test fixture digest, matches the exporter's hash.md5 contract
@@ -2852,11 +2853,8 @@ func TestPipeline_BlockResumeAfterMerge(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
-	require.NoError(t, os.WriteFile(
-		filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
-		[]byte("pre-merged-block-data"),
-		0o644,
-	))
+	writeMergedZstdBlockFixture(t, filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
+		[]byte("pre-merged-block-data"))
 
 	cfg := pipeline.Config{
 		Namespace:    testNS,
@@ -2894,11 +2892,7 @@ func TestPipeline_FSResumeAfterTar(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
-	require.NoError(t, os.WriteFile(
-		filepath.Join(diskSnapDir, archive.FsTarName),
-		[]byte("pre-assembled-fs-tar"),
-		0o644,
-	))
+	writeAssembledFSTarFixture(t, filepath.Join(diskSnapDir, archive.FsTarName))
 
 	cfg := pipeline.Config{
 		Namespace:    testNS,
@@ -3644,6 +3638,46 @@ func TestPipeline_ForeignMergedBlock_NotLaunderedByResume(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, correctBlock, decodeZstdBlock(t, compressed),
 		"collision dir must hold the correctly-downloaded bytes")
+}
+
+// writeMergedZstdBlockFixture writes a real, decodable zstd frame at path, standing in
+// for an already-merged block volume payload left behind by a prior run. FinalizeNode's
+// MeasurePayload reads this file's frame header (compress.DecodedSize -> ZstdDecodedSize)
+// to record its raw byte count without a full decode, which requires an explicit
+// Frame_Content_Size field — EncodeFrameStream (given a known size) stamps one,
+// EncodeFrame's default single-shot mode does not — so a placeholder that is not a
+// complete, FCS-bearing zstd frame makes finalize fail instead of exercising the
+// resume-skip path under test.
+func writeMergedZstdBlockFixture(t *testing.T, path string, payload []byte) {
+	t.Helper()
+
+	codec, err := compress.New("zstd", 0)
+	require.NoError(t, err, "compress.New(zstd, 0)")
+
+	var buf bytes.Buffer
+	require.NoError(t, codec.EncodeFrameStream(&buf, bytes.NewReader(payload), int64(len(payload))),
+		"EncodeFrameStream")
+
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
+}
+
+// writeAssembledFSTarFixture writes a minimal, valid (empty) tar file at path, standing
+// in for an already-assembled filesystem volume payload left behind by a prior run.
+// FinalizeNode's MeasurePayload parses this file as a tar (archive.SumTarRawSizes) to sum
+// its entries' raw sizes, so a placeholder that is not valid tar content makes finalize
+// fail instead of exercising the resume-skip path under test. An empty tar (no entries)
+// is sufficient: SumTarRawSizes tolerates zero regular entries and the tests using this
+// fixture assert only that DataExport is skipped and the node finalizes, not the payload's
+// recorded size.
+func writeAssembledFSTarFixture(t *testing.T, path string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	tw := gotar.NewWriter(&buf)
+	require.NoError(t, tw.Close())
+
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
 }
 
 // assertNodeComplete checks that snapshot.yaml exists in dir and VerifyNode passes.
@@ -5779,7 +5813,18 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 
 		// a.bin was fully staged as a flat blob under the OLD (larger) size, and
 		// the sizes sidecar records that stale size, so seedStreamFromDisk seeds
-		// both total (250) and current (250) — above the fresh listing total.
+		// both total (250) and current (250) — above the fresh listing total,
+		// exercising the clamp at OpenExport time below. This stale blob does
+		// NOT survive the run unchanged: the exporter carries no MD5 for a.bin,
+		// so stageCompressedFile falls back to measuring the staged blob's
+		// plaintext size and comparing it against the fresh listing's declared
+		// size (150) — the two disagree, so the self-healing re-stage path
+		// removes the stale 250-byte blob and re-fetches the true 150-byte
+		// content in this same run. The clamp assertions below only cover the
+		// progress-bar bookkeeping (seeded-then-clamped total/current), which
+		// is unaffected by WHY the final 150 bytes are correct — only that they
+		// now are, honestly, rather than a lie the old blind-trust skip left
+		// unverified.
 		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "a.bin"+codec.Ext()), bytes.Repeat([]byte("A"), int(staleSize)), 0o644))
 
 		sizesJSON, err := json.Marshal(volume.FSSizesSidecar{
@@ -6869,11 +6914,8 @@ func TestPipeline_BlockAlreadyMerged_OwnDataRef_RemovesLeftoverChunkDir(t *testi
 				archive.NodeDirName(childKind, diskSnapName))
 			require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 			seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
-			require.NoError(t, os.WriteFile(
-				filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
-				[]byte("pre-merged-block-data"),
-				0o644,
-			))
+			writeMergedZstdBlockFixture(t, filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
+				[]byte("pre-merged-block-data"))
 
 			chunkDir := filepath.Join(diskSnapDir, archive.BlockChunksDirName)
 			if tc.seedChunkDir {
@@ -7039,11 +7081,8 @@ func TestPipeline_BlockAlreadyMerged_RemoveAllFailure_StillCompletes(t *testing.
 		archive.NodeDirName(childKind, diskSnapName))
 	require.NoError(t, os.MkdirAll(filepath.Join(diskSnapDir, archive.ManifestsDirName), 0o755))
 	seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
-	require.NoError(t, os.WriteFile(
-		filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
-		[]byte("pre-merged-block-data"),
-		0o644,
-	))
+	writeMergedZstdBlockFixture(t, filepath.Join(diskSnapDir, archive.DataBlockName(".zst")),
+		[]byte("pre-merged-block-data"))
 
 	chunkDir := seedLeftoverBlockChunkDir(t, diskSnapDir)
 	require.NoError(t, os.Chmod(chunkDir, 0o555))
