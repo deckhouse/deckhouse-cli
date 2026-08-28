@@ -318,6 +318,118 @@ func TestChunkRetrier_ExhaustsBudget(t *testing.T) {
 	}
 }
 
+// chunkWarnCapture is a slog.Handler that collects Warn-or-above log messages
+// for assertions, mirroring volume_test's warnCapture (unavailable here: this
+// file is the internal test package and cannot import volume_test).
+type chunkWarnCapture struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *chunkWarnCapture) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *chunkWarnCapture) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelWarn {
+		h.mu.Lock()
+		h.msgs = append(h.msgs, r.Message)
+		h.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (h *chunkWarnCapture) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+
+func (h *chunkWarnCapture) WithGroup(_ string) slog.Handler { return h }
+
+func (h *chunkWarnCapture) warnMessages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	out := make([]string, len(h.msgs))
+	copy(out, h.msgs)
+
+	return out
+}
+
+// TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps proves that when
+// wait.Backoff.Cap forces the retry loop to stop before its declared Steps
+// budget is reached (see chunkFetchBackoff's doc comment), fetchChunk reports
+// the ACTUAL number of attempts made — never the declared Steps — in its
+// returned error, and logs each transient failure exactly once: one WARN per
+// attempt, and the exhausted error is never separately logged anywhere in
+// this call chain once it becomes final.
+func TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps(t *testing.T) {
+	t.Parallel()
+
+	payload := make([]byte, 100)
+
+	srv := newRangeServer(t, payload)
+	blockURL := srv.URL + "/block"
+
+	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 5, cutErr: io.ErrUnexpectedEOF}
+	fetcher := exporter.NewFetcher(doer)
+
+	dir := t.TempDir()
+	partPath := filepath.Join(dir, "chunk_00000.part")
+
+	// Steps=6 alone would suggest 6 attempts, but Cap=4ms forces the internal
+	// step budget to 0 early: the projected delay grows 1ms -> 2ms -> 4ms,
+	// and the 3rd projected delay (8ms) exceeds Cap, ending the loop after
+	// exactly 3 real attempts — the same arithmetic chunkFetchBackoff's doc
+	// comment works out for the production policy (5 of 6 there).
+	policy := chunkRetryPolicy{
+		backoff: wait.Backoff{
+			Steps:    6,
+			Duration: time.Millisecond,
+			Factor:   2,
+			Cap:      4 * time.Millisecond,
+		},
+		maxNoProgress: 3,
+	}
+
+	warns := &chunkWarnCapture{}
+	log := slog.New(warns)
+
+	retrier := &chunkRetrier{policy: policy}
+
+	rawLen := int64(len(payload))
+
+	err := retrier.fetchChunk(context.Background(), nil, log, fetcher, blockURL,
+		partPath, 0, 0, rawLen-1, rawLen, nil)
+	if err == nil {
+		t.Fatal("expected an error once the retry budget is exhausted, got nil")
+	}
+
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("expected errors.Is(err, io.ErrUnexpectedEOF), got: %v", err)
+	}
+
+	gotCalls := doer.callCount()
+	if gotCalls != 3 {
+		t.Fatalf("expected exactly 3 requests (Cap cuts Steps=6 short), got %d", gotCalls)
+	}
+
+	wantMsg := fmt.Sprintf("exhausted %d attempts", gotCalls)
+	if !strings.Contains(err.Error(), wantMsg) {
+		t.Errorf("error = %q, want it to name the actual attempt count (%q), not the declared Steps=%d",
+			err.Error(), wantMsg, policy.backoff.Steps)
+	}
+
+	if staleMsg := fmt.Sprintf("exhausted %d attempts", policy.backoff.Steps); strings.Contains(err.Error(), staleMsg) {
+		t.Errorf("error = %q, must not report the declared Steps budget (%d) as the attempt count",
+			err.Error(), policy.backoff.Steps)
+	}
+
+	// Every attempt here is a plain transient failure (never a no-progress or
+	// fatal one), so each is warned about exactly once: the WARN count must
+	// equal the number of attempts actually made — not more (no attempt
+	// double-logged) and not fewer (a transient attempt silently dropped).
+	if got := len(warns.warnMessages()); got != gotCalls {
+		t.Errorf("warn log count = %d, want %d (one per attempt, no double-logging)", got, gotCalls)
+	}
+}
+
 // TestChunkRetrier_DoesNotRetryFatal proves that every non-transient error
 // stops the retry loop on the very first attempt, and that errors.Is against
 // the original sentinel still holds through fetchChunk's returned error.

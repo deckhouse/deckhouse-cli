@@ -18,6 +18,7 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -162,7 +163,6 @@ func (r *chunkRetrier) fetchChunk(
 	// by value): every concurrent chunk goroutine gets its own independent
 	// copy to mutate, never the shared r.policy.backoff itself.
 	backoff := r.policy.backoff
-	steps := backoff.Steps
 
 	backoffErr := wait.ExponentialBackoffWithContext(ctx, backoff, func(stepCtx context.Context) (bool, error) {
 		attempt++
@@ -181,9 +181,16 @@ func (r *chunkRetrier) fetchChunk(
 			// ordinary transient failure, and must not be retried.
 			return false, err
 		case !exporter.IsTransientDataPlaneError(err):
+			// fetchChunkRaw wraps every error it returns through fmt.Errorf's
+			// %w, so %T on err itself always reports *fmt.wrapError and never
+			// the concrete error this classifier didn't recognize. Unwrap to
+			// the root cause first so this diagnostic can actually inform a
+			// future addition to exporter.IsTransientDataPlaneError's
+			// allow-list. This is the only place err is logged: the caller
+			// receives it back unlogged.
 			log.Debug("chunk fetch failed with a non-retryable error",
 				slog.Int("chunk", chunkIdx),
-				slog.String("error_type", fmt.Sprintf("%T", err)))
+				slog.String("error_type", fmt.Sprintf("%T", rootCause(err))))
 
 			return false, err
 		}
@@ -205,12 +212,20 @@ func (r *chunkRetrier) fetchChunk(
 
 		r.recovered.Add(1)
 
-		if attempt < steps {
-			log.Warn("retrying chunk after a transient transport failure",
-				slog.Int("chunk", chunkIdx),
-				slog.Int("attempt", attempt),
-				slog.String("error", err.Error()))
-		}
+		// wait.ExponentialBackoffWithContext mutates its OWN copy of backoff
+		// (passed by value above), so this closure has no way to observe
+		// whether backoff's Cap has already forced the step budget to 0 and
+		// this attempt is in fact the last one the loop will make (see the
+		// chunkFetchBackoff doc comment on Cap's early-termination effect).
+		// Rather than approximate that with the declared (and frequently
+		// wrong) Steps budget, always log here: on a genuinely terminal
+		// attempt this is the only place the failure is ever reported, since
+		// the error returned once the budget is exhausted (below) is not
+		// logged again anywhere in this call chain.
+		log.Warn("retrying chunk after a transient transport failure",
+			slog.Int("chunk", chunkIdx),
+			slog.Int("attempt", attempt),
+			slog.String("error", err.Error()))
 
 		return false, nil
 	})
@@ -221,9 +236,27 @@ func (r *chunkRetrier) fetchChunk(
 	case ctx.Err() != nil:
 		return fmt.Errorf("chunk %d: %w", chunkIdx, ctx.Err())
 	case wait.Interrupted(backoffErr) && lastErr != nil:
+		// attempt, not the policy's declared Steps: Cap routinely forces the
+		// backoff loop to stop one or more attempts short of Steps (see
+		// chunkFetchBackoff's doc comment), so Steps would misreport how many
+		// attempts actually happened.
 		return fmt.Errorf("chunk %d: exhausted %d attempts on transient transport failures: %w",
-			chunkIdx, steps, lastErr)
+			chunkIdx, attempt, lastErr)
 	default:
 		return backoffErr
+	}
+}
+
+// rootCause unwraps err through every %w wrapping layer and returns the
+// deepest cause, so %T on the result reports the concrete error type instead
+// of the *fmt.wrapError every fetchChunkRaw call site introduces.
+func rootCause(err error) error {
+	for {
+		unwrapped := errors.Unwrap(err)
+		if unwrapped == nil {
+			return err
+		}
+
+		err = unwrapped
 	}
 }
