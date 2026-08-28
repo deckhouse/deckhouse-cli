@@ -19,6 +19,7 @@ package volume
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -597,6 +598,277 @@ func TestChunkProgressLedger_MonotonicAcrossAttempts(t *testing.T) {
 	for i, n := range forwarded {
 		if n != want[i] {
 			t.Errorf("forwarded[%d] = %d, want %d (all: %v)", i, n, want[i], forwarded)
+		}
+	}
+}
+
+// pathOnceFlakyDoer wraps a real exporter.Doer and truncates (with cutErr,
+// after cutBytes bytes) only the FIRST request whose URL path it sees —
+// tracked per distinct path — so several concurrently-downloading chunks
+// backed by DIFFERENT paths on the same doer each flake exactly once,
+// independently, regardless of the order or overlap in which their requests
+// actually arrive. attempts records, per path, how many requests that path
+// has received (also useful for asserting "exactly one retry per chunk"
+// under real concurrency, not just sequential simulation).
+type pathOnceFlakyDoer struct {
+	inner    exporter.Doer
+	cutBytes int64
+	cutErr   error
+
+	mu        sync.Mutex
+	triggered map[string]bool
+	attempts  map[string]int
+}
+
+func (d *pathOnceFlakyDoer) Do(req *http.Request) (*http.Response, error) {
+	path := req.URL.Path
+
+	d.mu.Lock()
+
+	if d.triggered == nil {
+		d.triggered = make(map[string]bool)
+		d.attempts = make(map[string]int)
+	}
+
+	d.attempts[path]++
+
+	fireNow := !d.triggered[path]
+	if fireNow {
+		d.triggered[path] = true
+	}
+
+	d.mu.Unlock()
+
+	resp, err := d.inner.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if fireNow {
+		resp.Body = &cutBody{r: resp.Body, budget: d.cutBytes, err: d.cutErr}
+	}
+
+	return resp, nil
+}
+
+// attemptsFor returns how many requests path received, for post-hoc
+// assertions once all concurrent goroutines have finished.
+func (d *pathOnceFlakyDoer) attemptsFor(path string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.attempts[path]
+}
+
+// TestChunkRetrier_ConcurrentChunksIndependentRecoveredCount proves that
+// chunkRetrier.recovered — the single atomic counter shared by every
+// concurrently-downloading chunk in a volume — accumulates correctly when
+// MULTIPLE chunks are actually retrying AT THE SAME TIME (not one flaky
+// chunk against a background of clean ones), and that the shared onProgress
+// sink these concurrent goroutines all feed sums to exactly the total raw
+// bytes with no lost or double-counted credits. Run with -race: the only
+// thing keeping this safe is recovered's atomic.Int64 and onProgress's own
+// internal synchronization, both of which this test exercises under genuine
+// goroutine-level concurrency (an errgroup, not a sequential loop).
+func TestChunkRetrier_ConcurrentChunksIndependentRecoveredCount(t *testing.T) {
+	t.Parallel()
+
+	const numChunks = 8
+
+	payloads := make([][]byte, numChunks)
+	mux := http.NewServeMux()
+
+	for i := range numChunks {
+		// Distinct sizes so a chunk's content can't accidentally match another
+		// chunk's if the retry logic ever mixed up which durable file belongs
+		// to which goroutine.
+		payloads[i] = []byte(strings.Repeat(fmt.Sprintf("%d", i), 10+i))
+
+		path := fmt.Sprintf("/chunk/%d", i)
+		data := payloads[i]
+
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeContent(w, r, "data.img", time.Time{}, strings.NewReader(string(data)))
+		})
+	}
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	doer := &pathOnceFlakyDoer{cutBytes: 3, cutErr: io.ErrUnexpectedEOF}
+	doer.inner = srv.Client()
+	fetcher := exporter.NewFetcher(doer)
+
+	retrier := &chunkRetrier{policy: fastChunkRetryPolicy()}
+
+	var (
+		progressMu sync.Mutex
+		total      int
+	)
+
+	onProgress := func(n int) {
+		progressMu.Lock()
+		total += n
+		progressMu.Unlock()
+	}
+
+	dir := t.TempDir()
+
+	var wg sync.WaitGroup
+
+	errs := make([]error, numChunks)
+
+	for i := range numChunks {
+		wg.Add(1)
+
+		go func(idx int) {
+			defer wg.Done()
+
+			rawLen := int64(len(payloads[idx]))
+			partPath := filepath.Join(dir, fmt.Sprintf("chunk_%05d.part", idx))
+			blockURL := srv.URL + fmt.Sprintf("/chunk/%d", idx)
+
+			errs[idx] = retrier.fetchChunk(context.Background(), nil, slog.Default(), fetcher,
+				blockURL, partPath, idx, 0, rawLen-1, rawLen, onProgress)
+		}(i)
+	}
+
+	wg.Wait()
+
+	var wantTotal int
+
+	for i := range numChunks {
+		if errs[i] != nil {
+			t.Errorf("chunk %d: fetchChunk failed: %v", i, errs[i])
+		}
+
+		partPath := filepath.Join(dir, fmt.Sprintf("chunk_%05d.part", i))
+
+		got, readErr := os.ReadFile(partPath)
+		if readErr != nil {
+			t.Errorf("chunk %d: read part file: %v", i, readErr)
+			continue
+		}
+
+		if string(got) != string(payloads[i]) {
+			t.Errorf("chunk %d: part file content = %q, want %q (cross-chunk corruption?)", i, got, payloads[i])
+		}
+
+		wantTotal += len(payloads[i])
+
+		if got := doer.attemptsFor(fmt.Sprintf("/chunk/%d", i)); got != 2 {
+			t.Errorf("chunk %d: expected exactly 2 attempts (flaky + resumed retry), got %d", i, got)
+		}
+	}
+
+	if recovered := retrier.recovered.Load(); recovered != numChunks {
+		t.Errorf("recovered = %d, want %d (one retry credited per concurrently-flaking chunk)", recovered, numChunks)
+	}
+
+	progressMu.Lock()
+	defer progressMu.Unlock()
+
+	if total != wantTotal {
+		t.Errorf("shared onProgress sink summed to %d, want %d (sum of all chunks' raw lengths, no loss or double-count under concurrency)", total, wantTotal)
+	}
+}
+
+// TestChunkRetrier_ConcurrentContextCancelStopsAllRetries proves that
+// cancelling a context SHARED by several chunks that are all mid-backoff at
+// the same time stops every one of them promptly — not just the single
+// goroutine that happens to observe the cancellation first, and not after
+// each independently exhausts its own sleep. This generalizes
+// TestChunkRetrier_ContextCancelStopsRetryImmediately (one chunk, one
+// goroutine) to genuine concurrent retry.
+func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
+	t.Parallel()
+
+	const numChunks = 6
+
+	payloads := make([][]byte, numChunks)
+	mux := http.NewServeMux()
+
+	for i := range numChunks {
+		payloads[i] = []byte(strings.Repeat("x", 20))
+
+		path := fmt.Sprintf("/chunk/%d", i)
+		data := payloads[i]
+
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			http.ServeContent(w, r, "data.img", time.Time{}, strings.NewReader(string(data)))
+		})
+	}
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	// Every chunk's first attempt is truncated, driving it into backoff. A
+	// long backoff (same shape as the single-chunk cancellation test) means a
+	// natural step timeout can never be what ends the loop — only the shared
+	// ctx cancellation below can.
+	doer := &pathOnceFlakyDoer{cutBytes: 2, cutErr: io.ErrUnexpectedEOF}
+	doer.inner = srv.Client()
+	fetcher := exporter.NewFetcher(doer)
+
+	longBackoffPolicy := chunkRetryPolicy{
+		backoff: wait.Backoff{
+			Steps:    6,
+			Duration: 10 * time.Second,
+			Factor:   2,
+			Cap:      time.Minute,
+		},
+		maxNoProgress: 3,
+	}
+	retrier := &chunkRetrier{policy: longBackoffPolicy}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(30*time.Millisecond, cancel)
+
+	dir := t.TempDir()
+
+	var wg sync.WaitGroup
+
+	errs := make([]error, numChunks)
+
+	start := time.Now()
+
+	for i := range numChunks {
+		wg.Add(1)
+
+		go func(idx int) {
+			defer wg.Done()
+
+			rawLen := int64(len(payloads[idx]))
+			partPath := filepath.Join(dir, fmt.Sprintf("chunk_%05d.part", idx))
+			blockURL := srv.URL + fmt.Sprintf("/chunk/%d", idx)
+
+			errs[idx] = retrier.fetchChunk(ctx, nil, slog.Default(), fetcher,
+				blockURL, partPath, idx, 0, rawLen-1, rawLen, nil)
+		}(i)
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("all %d concurrent retries took %s to stop after cancellation, expected them to interrupt their 10s backoff sleeps promptly", numChunks, elapsed)
+	}
+
+	for i := range numChunks {
+		if errs[i] == nil {
+			t.Errorf("chunk %d: expected an error after context cancellation, got nil", i)
+			continue
+		}
+
+		if !errors.Is(errs[i], context.Canceled) {
+			t.Errorf("chunk %d: expected errors.Is(err, context.Canceled), got: %v", i, errs[i])
+		}
+
+		if got := doer.attemptsFor(fmt.Sprintf("/chunk/%d", i)); got != 1 {
+			t.Errorf("chunk %d: expected exactly 1 request before cancellation stopped the retry, got %d", i, got)
 		}
 	}
 }
