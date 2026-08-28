@@ -248,6 +248,148 @@ func TestSafeClient_SetTLSCAData_ChainsExistingWrapTransport(t *testing.T) {
 	})
 }
 
+func TestSafeClient_SetTLSCAData_InvalidCAData(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		caData []byte
+	}{
+		{name: "success: garbage bytes do not panic and verification stays forced on", caData: []byte("not a certificate")},
+		{name: "success: empty non-nil slice does not panic and verification stays forced on", caData: []byte{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sc := &SafeClient{restConfig: &rest.Config{
+				TLSClientConfig: rest.TLSClientConfig{
+					Insecure:   true,
+					ServerName: "api.example",
+				},
+			}}
+
+			sc.SetTLSCAData(tc.caData)
+
+			if sc.restConfig.TLSClientConfig.Insecure {
+				t.Error("TLSClientConfig.Insecure = true, want false")
+			}
+
+			if sc.restConfig.TLSClientConfig.ServerName != "" {
+				t.Errorf("TLSClientConfig.ServerName = %q, want empty", sc.restConfig.TLSClientConfig.ServerName)
+			}
+
+			wrapped := sc.restConfig.WrapTransport(&http.Transport{})
+
+			clonedTransport, ok := wrapped.(*http.Transport)
+			if !ok {
+				t.Fatalf("wrapped transport is %T, want *http.Transport", wrapped)
+			}
+
+			if clonedTransport.TLSClientConfig.InsecureSkipVerify {
+				t.Error("cloned TLSClientConfig.InsecureSkipVerify = true, want false")
+			}
+
+			if clonedTransport.TLSClientConfig.RootCAs == nil {
+				t.Error("cloned TLSClientConfig.RootCAs = nil, want non-nil (system pool at minimum)")
+			}
+		})
+	}
+}
+
+func TestSafeClient_SetTLSCAData_PreservesClientCertConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{name: "success: CertData/KeyData/CertFile/KeyFile survive untouched"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sc := &SafeClient{restConfig: &rest.Config{
+				TLSClientConfig: rest.TLSClientConfig{
+					Insecure: true,
+					CertData: []byte("client-cert"),
+					KeyData:  []byte("client-key"),
+					CertFile: "/etc/certs/client.crt",
+					KeyFile:  "/etc/certs/client.key",
+				},
+			}}
+
+			sc.SetTLSCAData(nil)
+
+			if string(sc.restConfig.TLSClientConfig.CertData) != "client-cert" {
+				t.Errorf("CertData = %q, want unchanged (%q)", sc.restConfig.TLSClientConfig.CertData, "client-cert")
+			}
+
+			if string(sc.restConfig.TLSClientConfig.KeyData) != "client-key" {
+				t.Errorf("KeyData = %q, want unchanged (%q)", sc.restConfig.TLSClientConfig.KeyData, "client-key")
+			}
+
+			if sc.restConfig.TLSClientConfig.CertFile != "/etc/certs/client.crt" {
+				t.Errorf("CertFile = %q, want unchanged (%q)", sc.restConfig.TLSClientConfig.CertFile, "/etc/certs/client.crt")
+			}
+
+			if sc.restConfig.TLSClientConfig.KeyFile != "/etc/certs/client.key" {
+				t.Errorf("KeyFile = %q, want unchanged (%q)", sc.restConfig.TLSClientConfig.KeyFile, "/etc/certs/client.key")
+			}
+		})
+	}
+}
+
+func TestSafeClient_SetTLSCAData_CalledTwiceChainsWithoutInfiniteRecursion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{name: "success: second call wraps over the first and both apply their CA pool"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sc := NewSafeClientForConfig(&rest.Config{})
+
+			sc.SetTLSCAData(testCACertificatePEM(t))
+			sc.SetTLSCAData(testCACertificatePEM(t))
+
+			// Guards against prev-chaining turning self-referential: if the second
+			// call's WrapTransport captured itself as prev instead of the first
+			// call's closure, invoking it here would recurse until stack overflow.
+			done := make(chan http.RoundTripper, 1)
+
+			go func() {
+				done <- sc.restConfig.WrapTransport(&http.Transport{})
+			}()
+
+			select {
+			case wrapped := <-done:
+				clonedTransport, ok := wrapped.(*http.Transport)
+				if !ok {
+					t.Fatalf("wrapped transport is %T, want *http.Transport", wrapped)
+				}
+
+				if clonedTransport.TLSClientConfig == nil || clonedTransport.TLSClientConfig.RootCAs == nil {
+					t.Error("cloned TLSClientConfig.RootCAs = nil, want non-nil")
+				}
+
+				if clonedTransport.TLSClientConfig.InsecureSkipVerify {
+					t.Error("cloned TLSClientConfig.InsecureSkipVerify = true, want false")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("WrapTransport did not return within timeout; suspected infinite recursion in chained wrappers")
+			}
+		})
+	}
+}
+
 func TestSafeClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 	t.Parallel()
 
