@@ -222,7 +222,7 @@ func (r *chunkRetrier) fetchChunk(
 		// attempt this is the only place the failure is ever reported, since
 		// the error returned once the budget is exhausted (below) is not
 		// logged again anywhere in this call chain.
-		log.Warn("retrying chunk after a transient transport failure",
+		log.Warn("chunk transfer interrupted by a transient transport failure",
 			slog.Int("chunk", chunkIdx),
 			slog.Int("attempt", attempt),
 			slog.String("error", err.Error()))
@@ -250,6 +250,12 @@ func (r *chunkRetrier) fetchChunk(
 // rootCause unwraps err through every %w wrapping layer and returns the
 // deepest cause, so %T on the result reports the concrete error type instead
 // of the *fmt.wrapError every fetchChunkRaw call site introduces.
+//
+// Known limitation: this only follows the single-error Unwrap() error chain.
+// A multi-wrap error built with fmt.Errorf("%w: %w", ...) implements
+// Unwrap() []error instead, which errors.Unwrap does not see, so rootCause
+// stops at such a node. No call site in this package produces multi-wrap
+// errors today, so this is not tightened further here.
 func rootCause(err error) error {
 	for {
 		unwrapped := errors.Unwrap(err)

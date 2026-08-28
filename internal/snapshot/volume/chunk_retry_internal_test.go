@@ -113,9 +113,10 @@ func (b *cutBody) Close() error {
 // body (every call, not just one) after cutBytes bytes with cutErr — standing
 // in for a link that breaks on every attempt.
 type scriptedRangeDoer struct {
-	inner    exporter.Doer
-	cutBytes int64
-	cutErr   error // nil disables truncation
+	inner     exporter.Doer
+	cutBytes  int64
+	cutErr    error           // nil disables truncation
+	firstSeen chan<- struct{} // optional: signaled once, on the very first Do() call
 
 	mu     sync.Mutex
 	ranges []string
@@ -124,7 +125,12 @@ type scriptedRangeDoer struct {
 func (d *scriptedRangeDoer) Do(req *http.Request) (*http.Response, error) {
 	d.mu.Lock()
 	d.ranges = append(d.ranges, req.Header.Get("Range"))
+	firstCall := len(d.ranges) == 1
 	d.mu.Unlock()
+
+	if firstCall && d.firstSeen != nil {
+		d.firstSeen <- struct{}{}
+	}
 
 	resp, err := d.inner.Do(req)
 	if err != nil {
@@ -552,7 +558,8 @@ func TestChunkRetrier_ContextCancelStopsRetryImmediately(t *testing.T) {
 	srv := newRangeServer(t, payload)
 	blockURL := srv.URL + "/block"
 
-	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 2, cutErr: io.ErrUnexpectedEOF}
+	firstSeen := make(chan struct{}, 1)
+	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 2, cutErr: io.ErrUnexpectedEOF, firstSeen: firstSeen}
 	fetcher := exporter.NewFetcher(doer)
 
 	dir := t.TempDir()
@@ -572,14 +579,31 @@ func TestChunkRetrier_ContextCancelStopsRetryImmediately(t *testing.T) {
 	retrier := &chunkRetrier{policy: longBackoffPolicy}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(20*time.Millisecond, cancel)
+	t.Cleanup(cancel)
 
 	rawLen := int64(len(payload))
 
+	var err error
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		err = retrier.fetchChunk(ctx, nil, slog.Default(), fetcher, blockURL,
+			partPath, 0, 0, rawLen-1, rawLen, nil)
+	}()
+
+	// Wait for the first request to actually be in flight before cancelling:
+	// only then is "cancel stops an in-flight backoff" the guaranteed
+	// condition under test, instead of a race against goroutine scheduling.
+	<-firstSeen
+
 	start := time.Now()
 
-	err := retrier.fetchChunk(ctx, nil, slog.Default(), fetcher, blockURL,
-		partPath, 0, 0, rawLen-1, rawLen, nil)
+	cancel()
+
+	<-done
 
 	elapsed := time.Since(start)
 
@@ -714,6 +738,40 @@ func TestChunkProgressLedger_MonotonicAcrossAttempts(t *testing.T) {
 	}
 }
 
+// TestRootCause proves rootCause unwraps a chain of %w-wrapped errors down to
+// the deepest cause, and passes both nil and an already-unwrapped error
+// through unchanged.
+func TestRootCause(t *testing.T) {
+	t.Parallel()
+
+	base := errors.New("base failure")
+
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil error returns nil", err: nil, want: nil},
+		{name: "unwrapped error returns itself", err: base, want: base},
+		{name: "single wrap returns the base", err: fmt.Errorf("attempt 1: %w", base), want: base},
+		{
+			name: "double wrap returns the deepest base",
+			err:  fmt.Errorf("attempt 2: %w", fmt.Errorf("attempt 1: %w", base)),
+			want: base,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := rootCause(tc.err); got != tc.want {
+				t.Errorf("rootCause(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // pathOnceFlakyDoer wraps a real exporter.Doer and truncates (with cutErr,
 // after cutBytes bytes) only the FIRST request whose URL path it sees —
 // tracked per distinct path — so several concurrently-downloading chunks
@@ -723,9 +781,10 @@ func TestChunkProgressLedger_MonotonicAcrossAttempts(t *testing.T) {
 // has received (also useful for asserting "exactly one retry per chunk"
 // under real concurrency, not just sequential simulation).
 type pathOnceFlakyDoer struct {
-	inner    exporter.Doer
-	cutBytes int64
-	cutErr   error
+	inner     exporter.Doer
+	cutBytes  int64
+	cutErr    error
+	firstSeen chan<- string // optional: signaled with path on that path's first Do() call
 
 	mu        sync.Mutex
 	triggered map[string]bool
@@ -750,6 +809,10 @@ func (d *pathOnceFlakyDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	d.mu.Unlock()
+
+	if fireNow && d.firstSeen != nil {
+		d.firstSeen <- path
+	}
 
 	resp, err := d.inner.Do(req)
 	if err != nil {
@@ -920,7 +983,8 @@ func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
 	// long backoff (same shape as the single-chunk cancellation test) means a
 	// natural step timeout can never be what ends the loop — only the shared
 	// ctx cancellation below can.
-	doer := &pathOnceFlakyDoer{cutBytes: 2, cutErr: io.ErrUnexpectedEOF}
+	firstSeen := make(chan string, numChunks)
+	doer := &pathOnceFlakyDoer{cutBytes: 2, cutErr: io.ErrUnexpectedEOF, firstSeen: firstSeen}
 	doer.inner = srv.Client()
 	fetcher := exporter.NewFetcher(doer)
 
@@ -936,15 +1000,13 @@ func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
 	retrier := &chunkRetrier{policy: longBackoffPolicy}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(30*time.Millisecond, cancel)
+	t.Cleanup(cancel)
 
 	dir := t.TempDir()
 
 	var wg sync.WaitGroup
 
 	errs := make([]error, numChunks)
-
-	start := time.Now()
 
 	for i := range numChunks {
 		wg.Add(1)
@@ -960,6 +1022,18 @@ func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
 				blockURL, partPath, idx, 0, rawLen-1, rawLen, nil)
 		}(i)
 	}
+
+	// Wait until every one of the numChunks goroutines has actually issued its
+	// first request before cancelling: only then is "cancel stops an in-flight
+	// backoff" the guaranteed condition under test, instead of a race against
+	// goroutine scheduling.
+	for range numChunks {
+		<-firstSeen
+	}
+
+	start := time.Now()
+
+	cancel()
 
 	wg.Wait()
 
