@@ -1195,6 +1195,9 @@ func (c *Client) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error) (c
 // run unconditionally, not only when caData is non-empty: an empty caData is the
 // normal case on the publish path (the ingress does not expose the importer pod's
 // internal CA), and verification must stay on even then.
+//
+// Keep in sync with the twin implementation in pkg/libsaferequest/client/http.go
+// (SafeClient.SetTLSCAData); the two are deliberately separate copies.
 func (c *Client) SetTLSCAData(caData []byte) {
 	sysPool, err := x509.SystemCertPool()
 	if err != nil || sysPool == nil {

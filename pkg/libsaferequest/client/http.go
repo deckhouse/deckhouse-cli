@@ -177,6 +177,30 @@ func (c *SafeClient) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error
 	return kubeRtClient, nil
 }
 
+// SetTLSCAData extends inherited server trust with a merged pool: system roots,
+// the supplied caData, and any CA already configured on this SafeClient's
+// rest.Config (e.g. from kubeconfig). It is used for endpoints that cannot be
+// pinned to a single CA — the d8 data export/import transports, both direct
+// (exporter pod, internal CA from DataExport/DataImport status) and published
+// (ingress, empty CA).
+//
+// Because a merged pool only ADDS trust, it must never be reachable through a
+// bypass: an inherited insecure-skip-tls-verify or tls-server-name from
+// kubeconfig would make certificate verification a no-op (Insecure) or check the
+// wrong hostname (ServerName) regardless of how large RootCAs is, so both are
+// forced off here — on the rest.Config itself and, since client-go may already
+// have built a base *http.Transport with those values baked in before this
+// WrapTransport runs, again on the transport clone that carries RootCAs. This
+// runs unconditionally, not only for a non-empty caData: an empty caData is the
+// normal case on the publish path, and verification must stay on even then.
+//
+// Clearing ServerName is also why SetTLSCAData must not be called after
+// SetProbeEndpoint on the same client — the probe sets ServerName to the
+// kubernetes service name on purpose. Today they never meet: the probe runs on
+// its own Copy() (internal/data/publish_detect.go).
+//
+// Keep in sync with the twin implementation in internal/snapshot/transport/http.go
+// (Client.SetTLSCAData); the two are deliberately separate copies.
 func (c *SafeClient) SetTLSCAData(caData []byte) {
 	sysPool, err := x509.SystemCertPool()
 	if err != nil || sysPool == nil {
@@ -193,20 +217,33 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 
 	c.restConfig.TLSClientConfig.CAData = nil
 	c.restConfig.TLSClientConfig.CAFile = ""
+	c.restConfig.TLSClientConfig.Insecure = false
+	c.restConfig.TLSClientConfig.ServerName = ""
+	prev := c.restConfig.WrapTransport
+
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
 		transport, ok := rt.(*http.Transport)
 		if !ok {
-			return transport
+			// CA-pool injection is a best-effort enhancement over *http.Transport;
+			// for any other RoundTripper degrade to pass-through so we never hand
+			// back a typed-nil transport that nil-panics on RoundTrip.
+			return rt
 		}
 
-		clonedTrasport := transport.Clone()
-		if clonedTrasport.TLSClientConfig == nil {
-			clonedTrasport.TLSClientConfig = &tls.Config{}
+		clonedTransport := transport.Clone()
+		if clonedTransport.TLSClientConfig == nil {
+			clonedTransport.TLSClientConfig = &tls.Config{}
 		}
 
-		clonedTrasport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.InsecureSkipVerify = false
+		clonedTransport.TLSClientConfig.ServerName = ""
 
-		return clonedTrasport
+		return clonedTransport
 	}
 }
 
