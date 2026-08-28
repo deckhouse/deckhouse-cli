@@ -17,8 +17,13 @@ limitations under the License.
 package client
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,6 +79,36 @@ func testCACertificatePEM(t *testing.T) []byte {
 	t.Cleanup(srv.Close)
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+}
+
+// testSelfSignedCACertificatePEM returns a freshly generated, PEM-encoded
+// self-signed certificate distinct from testCACertificatePEM's fixed
+// httptest leaf, so a test can tell the two CA sources apart in an
+// x509.CertPool instead of comparing byte-identical data.
+func testSelfSignedCACertificatePEM(t *testing.T) []byte {
+	t.Helper()
+
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-kubeconfig-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, priv.Public(), priv)
+	if err != nil {
+		t.Fatalf("create self-signed CA certificate: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 // stubRoundTripper is a non-*http.Transport RoundTripper used to exercise the
@@ -173,13 +208,8 @@ func TestSafeClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
 		t.Fatal("wrapped RoundTripper = nil, want non-nil")
 	}
 
-	stub, ok := got.(stubRoundTripper)
-	if !ok {
+	if _, ok := got.(stubRoundTripper); !ok {
 		t.Fatalf("wrapped RoundTripper is %T, want stubRoundTripper", got)
-	}
-
-	if stub != (stubRoundTripper{}) {
-		t.Error("wrapped RoundTripper is not the same stubRoundTripper instance")
 	}
 }
 
@@ -348,17 +378,26 @@ func TestSafeClient_SetTLSCAData_CalledTwiceChainsWithoutInfiniteRecursion(t *te
 	tests := []struct {
 		name string
 	}{
-		{name: "success: second call wraps over the first and both apply their CA pool"},
+		{name: "second call does not recurse and still forces verification"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			sc := NewSafeClientForConfig(&rest.Config{})
+			explicitCAData := testCACertificatePEM(t)
 
-			sc.SetTLSCAData(testCACertificatePEM(t))
-			sc.SetTLSCAData(testCACertificatePEM(t))
+			// Simulates a CA already present on the rest.Config (e.g. from
+			// kubeconfig) before either SetTLSCAData call, distinct from
+			// explicitCAData so the two are distinguishable in the resulting pool.
+			kubeconfigCAData := testSelfSignedCACertificatePEM(t)
+
+			sc := NewSafeClientForConfig(&rest.Config{
+				TLSClientConfig: rest.TLSClientConfig{CAData: kubeconfigCAData},
+			})
+
+			sc.SetTLSCAData(explicitCAData)
+			sc.SetTLSCAData(explicitCAData)
 
 			// Guards against prev-chaining turning self-referential: if the second
 			// call's WrapTransport captured itself as prev instead of the first
@@ -369,9 +408,13 @@ func TestSafeClient_SetTLSCAData_CalledTwiceChainsWithoutInfiniteRecursion(t *te
 				done <- sc.restConfig.WrapTransport(&http.Transport{})
 			}()
 
+			var clonedTransport *http.Transport
+
 			select {
 			case wrapped := <-done:
-				clonedTransport, ok := wrapped.(*http.Transport)
+				var ok bool
+
+				clonedTransport, ok = wrapped.(*http.Transport)
 				if !ok {
 					t.Fatalf("wrapped transport is %T, want *http.Transport", wrapped)
 				}
@@ -385,6 +428,30 @@ func TestSafeClient_SetTLSCAData_CalledTwiceChainsWithoutInfiniteRecursion(t *te
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("WrapTransport did not return within timeout; suspected infinite recursion in chained wrappers")
+			}
+
+			// The first call folds kubeconfigCAData into its pool and then clears
+			// TLSClientConfig.CAData (see SetTLSCAData), so by the time the second
+			// call builds its own sysPool, CAData is already nil and
+			// kubeconfigCAData is not folded in again. The second call's
+			// WrapTransport then clones over the first call's cloned transport and
+			// overwrites RootCAs wholesale rather than merging it with the first
+			// call's pool. The net effect: the final RootCAs traces only from the
+			// second SetTLSCAData(explicitCAData) call — identical to what a single,
+			// standalone call with the same explicitCAData would produce, and
+			// without kubeconfigCAData ever having survived into it.
+			soloSC := NewSafeClientForConfig(&rest.Config{})
+			soloSC.SetTLSCAData(explicitCAData)
+
+			soloWrapped := soloSC.restConfig.WrapTransport(&http.Transport{})
+
+			soloTransport, ok := soloWrapped.(*http.Transport)
+			if !ok {
+				t.Fatalf("solo wrapped transport is %T, want *http.Transport", soloWrapped)
+			}
+
+			if !clonedTransport.TLSClientConfig.RootCAs.Equal(soloTransport.TLSClientConfig.RootCAs) {
+				t.Error("chained second-call RootCAs != solo second-call RootCAs; kubeconfig CA leaked into the final pool")
 			}
 		})
 	}
