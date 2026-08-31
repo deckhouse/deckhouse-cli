@@ -960,12 +960,10 @@ func TestFinalizeNode_NoVolumesOmitted(t *testing.T) {
 	}
 }
 
-// TestFinalizeNode_RecordsPayloadSizes_BlockZstd is the regression test for the live bug this
-// fix addresses: the captured nominal Size ("1Gi", standing in for a thin-provisioning
-// backend's rounded-up VolumeSnapshotContent.status.restoreSize) disagrees with the REAL
-// decoded byte length of the zstd payload actually present on disk. FinalizeNode must leave
-// Size untouched (it feeds scratch-volume provisioning on re-import) while recording the
-// measured RawSizeBytes/StoredSizeBytes from the real payload, not derived from Size at all.
+// TestFinalizeNode_RecordsPayloadSizes_BlockZstd is the regression test for the live bug:
+// nominal Size ("1Gi", standing in for a thin-provisioning round-up) disagrees with the real
+// decoded zstd payload size. FinalizeNode must leave Size untouched while recording
+// RawSizeBytes/StoredSizeBytes measured from the real payload, not derived from Size.
 func TestFinalizeNode_RecordsPayloadSizes_BlockZstd(t *testing.T) {
 	t.Parallel()
 
@@ -1047,10 +1045,8 @@ func TestFinalizeNode_RecordsPayloadSizes_BlockZstd(t *testing.T) {
 }
 
 // TestFinalizeNode_RefinalizeDoneNodeKeepsSizes proves that re-finalizing an already-published
-// node (e.g. a re-publication triggered by a re-published child, with no new download in THIS
-// run) still measures and records the payload sizes correctly: MeasurePayload reads fresh from
-// the bytes already on disk every time, so a second finalize is not allowed to silently drop or
-// zero out the recorded RawSizeBytes/StoredSizeBytes.
+// node (no new download this run) still measures and records payload sizes correctly —
+// MeasurePayload reads fresh from disk every time, so a second finalize must not drop them.
 func TestFinalizeNode_RefinalizeDoneNodeKeepsSizes(t *testing.T) {
 	t.Parallel()
 

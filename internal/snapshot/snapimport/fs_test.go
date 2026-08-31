@@ -3246,9 +3246,8 @@ func TestImportFSFromTar_SkipsAlreadyUploadedEntryWithoutTransfer(t *testing.T) 
 		t.Errorf("onProgress total = %d, want %d (skipped alpha.txt must still be credited at its exact decompressed size, plus beta.txt)", progressed, want)
 	}
 
-	// setTotal is called exactly once, before any HEAD/PUT, with the exact sum of every
-	// regular entry's PAX raw size (alpha.txt + beta.txt) computed by the header-only
-	// preflight pass — never a progressively growing running total.
+	// setTotal is called exactly once, before any HEAD/PUT, with the preflight pass's
+	// exact sum of both entries' PAX raw sizes — never a progressively growing total.
 	wantTotals := []int64{int64(len(alphaPlain) + len(betaPlain))}
 	if len(totals) != len(wantTotals) {
 		t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)
@@ -3284,8 +3283,7 @@ func (d *countingHTTPDoer) HTTPDo(req *http.Request) (*http.Response, error) {
 }
 
 // TestImportFSFromTar_SetsExactTotalOnce proves setTotal is called exactly once, with the
-// exact sum of every regular entry's PAX raw size, strictly before any HEAD or PUT request —
-// not progressively, and not after any HTTP call has already been issued.
+// exact sum of every entry's PAX raw size, strictly before any HEAD or PUT request.
 func TestImportFSFromTar_SetsExactTotalOnce(t *testing.T) {
 	t.Parallel()
 
@@ -3344,11 +3342,9 @@ func TestImportFSFromTar_SetsExactTotalOnce(t *testing.T) {
 	}
 }
 
-// TestImportFSTar_RawTotalMismatchAfterUpload proves the post-loop defensive check that
-// extends the entry-count/identity revalidation to bytes: if the tar's regular-entry raw-size
-// total observed during the upload pass disagrees with the total computed by the earlier
-// preflight pass (scan.rawTotal, already reported to the caller via the single up-front
-// setTotal call), the upload fails rather than silently reporting a wrong total.
+// TestImportFSTar_RawTotalMismatchAfterUpload proves the post-loop defensive check: if the
+// upload pass's observed raw-size total disagrees with the preflight's scan.rawTotal
+// (already reported via setTotal), the upload fails instead of reporting a wrong total.
 func TestImportFSTar_RawTotalMismatchAfterUpload(t *testing.T) {
 	t.Parallel()
 
@@ -3367,9 +3363,8 @@ func TestImportFSTar_RawTotalMismatchAfterUpload(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = scan.Close() })
 
-	// Simulate the preflight-computed total disagreeing with what the upload pass would
-	// walk, without touching any on-disk byte (which would also trip the per-entry digest
-	// revalidation and mask this specific defensive check).
+	// Simulate the preflight total disagreeing with what the upload pass walks, without
+	// touching any byte (which would also trip the digest revalidation, masking this check).
 	scan.rawTotal++
 
 	imp := newFakeFileImporter()
@@ -4358,10 +4353,8 @@ func TestImportFSFromTar_PerCodecRoundTrip(t *testing.T) {
 				t.Errorf("onProgress total = %d, want %d", reported, want)
 			}
 
-			// setTotal is called exactly once, before any HEAD/PUT, with the exact sum of
-			// both entries' PAX raw sizes computed by the header-only preflight pass — the
-			// bar's denominator is complete from the very first byte, not a running sum
-			// that only reaches its final value once the last entry is reached.
+			// setTotal is called exactly once, before any HEAD/PUT, with the preflight pass's
+			// exact sum of both entries' PAX raw sizes — not a progressively growing total.
 			wantTotals := []int64{int64(len(firstContent) + len(secondContent))}
 			if len(totals) != len(wantTotals) {
 				t.Fatalf("setTotal called %d times with %v, want %d calls with %v", len(totals), totals, len(wantTotals), wantTotals)

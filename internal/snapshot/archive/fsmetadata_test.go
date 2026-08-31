@@ -168,10 +168,8 @@ func TestComputeNodeChecksum_CoversFSPAXMetadata(t *testing.T) {
 	}
 }
 
-// TestSumTarRawSizes covers SumTarRawSizes: it sums only regular-entry PAX raw sizes,
-// ignores directory and symlink entries entirely, sums to zero for an empty tar, and fails
-// on a regular entry with invalid/missing PAX metadata (ParseFSMetadata's own fail-closed
-// contract, which SumTarRawSizes relies on rather than falling back silently).
+// TestSumTarRawSizes covers SumTarRawSizes: sums only regular-entry PAX raw sizes, ignores
+// directory/symlink entries, and propagates ParseFSMetadata's fail-closed errors.
 func TestSumTarRawSizes(t *testing.T) {
 	t.Parallel()
 
@@ -281,10 +279,8 @@ func TestSumTarRawSizes(t *testing.T) {
 	})
 }
 
-// writeRegularPAXEntry writes one well-formed regular PAX entry of rawSize plaintext bytes,
-// encoded (for test purposes only — the body content is irrelevant to SumTarRawSizes, which
-// reads only the PAX metadata) via the "none" codec regardless of the codec name recorded, so
-// the stored size always matches rawSize.
+// writeRegularPAXEntry writes one well-formed regular PAX entry of rawSize plaintext bytes.
+// Body is always written raw (codec name is just metadata) so stored size always == rawSize.
 func writeRegularPAXEntry(t *testing.T, tw *tar.Writer, originalPath, codec string, rawSize int64) {
 	t.Helper()
 

@@ -28,9 +28,8 @@ import (
 	"github.com/pierrec/lz4/v4"
 )
 
-// decodedSizeStreamBufferBytes bounds the read buffer streamDecodedSize uses to drain a
-// non-zstd codec purely to measure its decoded length. Matches the copy-buffer size used
-// elsewhere in the snapshot packages (see volume.copyBufferSize).
+// decodedSizeStreamBufferBytes bounds streamDecodedSize's read buffer (matches
+// volume.copyBufferSize elsewhere in the snapshot packages).
 const decodedSizeStreamBufferBytes = 32 << 10
 
 // NewReader returns a streaming decompressing io.ReadCloser for src, selecting
@@ -158,13 +157,9 @@ func (z *zstdReadCloser) Close() error {
 	return nil
 }
 
-// DecodedSize returns the exact decoded byte length of the data at source's current
-// position, for the codec identified by ext, without necessarily decoding the whole
-// stream: for zstd (".zst") the length is read from frame headers via ZstdDecodedSize,
-// without touching any compressed payload byte; for an uncompressed stream (ext == "")
-// it is simply the stream's own length; every other registered codec (".gz", ".lz4")
-// declares no decoded-size metadata in its format, so measuring it requires a full
-// streaming decode pass. source's position is restored before return on every path.
+// DecodedSize returns the exact decoded byte length of source for codec ext. zstd reads it
+// from frame headers (no payload decode); "" is just the stream length; gzip/lz4 have no
+// decoded-size metadata, so they require a full streaming decode. source's position is restored.
 func DecodedSize(ctx context.Context, ext string, source io.ReadSeeker) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -215,10 +210,8 @@ func rawStreamSize(source io.ReadSeeker) (int64, error) {
 	return end - start, nil
 }
 
-// streamDecodedSize measures a non-zstd codec's decoded length by decoding the entire
-// stream and counting bytes: gzip and lz4 carry no decoded-size header, so there is no
-// cheaper proof. ctx is checked once per read so a large stream stays cancellable.
-// source's position is restored before return.
+// streamDecodedSize measures a non-zstd codec's decoded length by decoding the whole stream
+// and counting bytes (gzip/lz4 have no decoded-size header). Cancellable; position is restored.
 func streamDecodedSize(ctx context.Context, ext string, source io.ReadSeeker) (int64, error) {
 	start, err := source.Seek(0, io.SeekCurrent)
 	if err != nil {

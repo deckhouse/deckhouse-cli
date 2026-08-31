@@ -332,13 +332,10 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
 
-	// Simulate a prior partial run: root.txt was already staged (compressed
-	// blob written under stagingDir) but data.tar was never assembled. With no
-	// source MD5 advertised (fsTestServerWithSizes never sets hash.md5), the
-	// resume-skip branch verifies size only (see stageCompressedFile): the
-	// pre-staged blob must decode to a plaintext of the SAME length as the
-	// listing's declared size ("root-content" is 12 bytes) for the skip to
-	// stand, even though its content differs from the real source bytes.
+	// Simulate a prior partial run: root.txt was staged but data.tar wasn't assembled. With
+	// no source MD5, the resume-skip branch verifies size only — the pre-staged blob must
+	// decode to a plaintext of the same length as the listing's declared size (12 bytes) for
+	// the skip to stand, even though its content differs from the real source bytes.
 	sentinelPlaintext := bytes.Repeat([]byte("X"), len(files[0].content))
 	sentinel, err := codec.EncodeFrame(sentinelPlaintext)
 	require.NoError(t, err)

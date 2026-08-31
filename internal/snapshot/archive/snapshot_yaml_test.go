@@ -1317,9 +1317,8 @@ func TestSnapshotYAML_RoundTripV3(t *testing.T) {
 	}
 }
 
-// validateChecksumFieldTest is a minimal shape check on a NodeChecksum, mirroring the
-// invariants validateChecksum enforces internally (algorithm/hex length/short consistency),
-// without depending on unexported archive internals.
+// validateChecksumFieldTest mirrors validateChecksum's invariants (algorithm/hex
+// length/short consistency) without depending on unexported archive internals.
 func validateChecksumFieldTest(c archive.NodeChecksum) error {
 	if c.Algorithm != archive.ChecksumAlgorithmSHA256 {
 		return fmt.Errorf("algorithm = %q, want %q", c.Algorithm, archive.ChecksumAlgorithmSHA256)
@@ -1336,9 +1335,8 @@ func validateChecksumFieldTest(c archive.NodeChecksum) error {
 	return nil
 }
 
-// TestSnapshotYAML_RejectsUnsupportedVersion proves that a snapshot.yaml declaring a
-// format version beyond SnapshotFormatVersionCurrent is rejected outright, with no
-// unauthenticated-legacy escape hatch (that opt-in only widens acceptance for version 0).
+// TestSnapshotYAML_RejectsUnsupportedVersion proves a format version beyond
+// SnapshotFormatVersionCurrent is rejected outright, even with AllowUnauthenticatedLegacy.
 func TestSnapshotYAML_RejectsUnsupportedVersion(t *testing.T) {
 	t.Parallel()
 
@@ -1367,11 +1365,9 @@ func TestSnapshotYAML_RejectsUnsupportedVersion(t *testing.T) {
 	}
 }
 
-// TestVolumeInfo_ZeroSizesOmittedFromJSON proves the exact mechanism that keeps a v2 archive's
-// checksum stable after this fix: json.Marshal of a VolumeInfo whose RawSizeBytes/
-// StoredSizeBytes are their zero value must omit both keys from the output entirely — not
-// merely serialize them as 0 — because MetadataChecksum is computed over the canonical
-// json.Marshal output, and a pre-fix v2 archive's JSON never contained these keys at all.
+// TestVolumeInfo_ZeroSizesOmittedFromJSON proves RawSizeBytes/StoredSizeBytes at their zero
+// value are omitted from JSON entirely (omitempty), not serialized as 0 — required for a v2
+// archive's MetadataChecksum, computed over JSON that never had these keys, to stay stable.
 func TestVolumeInfo_ZeroSizesOmittedFromJSON(t *testing.T) {
 	t.Parallel()
 
@@ -1407,12 +1403,10 @@ func TestVolumeInfo_ZeroSizesOmittedFromJSON(t *testing.T) {
 	}
 }
 
-// snapshotYAMLShadowV2 mirrors, field-for-field and tag-for-tag, the private wire shape
-// archive.SnapshotYAML's custom MarshalJSON/UnmarshalJSON delegate to (snapshotYAMLWire).
-// It exists ONLY to construct byte-identical canonical JSON for a document that has NO
-// rawSizeBytes/storedSizeBytes keys at all — i.e. exactly what a real v2 archive written
-// before this fix produced — without invoking SnapshotYAML's own MarshalJSON, which always
-// stamps the CURRENT format version and therefore cannot itself produce v2 bytes.
+// snapshotYAMLShadowV2 mirrors the private snapshotYAMLWire shape field-for-field, but
+// without rawSizeBytes/storedSizeBytes — exactly what a real pre-fix v2 archive produced.
+// Needed because SnapshotYAML.MarshalJSON always stamps the current version, so it can't
+// itself produce v2 bytes.
 type snapshotYAMLShadowV2 struct {
 	FormatVersion    int                      `json:"formatVersion,omitempty"`
 	APIVersion       string                   `json:"apiVersion"`
@@ -1428,20 +1422,15 @@ type snapshotYAMLShadowV2 struct {
 	Volumes          []archive.VolumeInfo     `json:"volumes,omitempty"`
 }
 
-// TestSnapshotYAML_V2ArchiveStillValidates is the decisive compatibility test for this fix.
+// TestSnapshotYAML_V2ArchiveStillValidates is the decisive compatibility test for this fix:
+// it reproduces, byte for byte, a REAL pre-fix archive (formatVersion 2, no
+// rawSizeBytes/storedSizeBytes keys in its JSON, metadataChecksum computed over exactly that
+// canonical JSON) and proves it still validates.
 //
-// It reproduces, byte for byte, what a REAL archive written by the pre-fix binary looked
-// like: formatVersion 2 (SnapshotFormatVersionAuthenticatedChildren), a Volumes entry with
-// NO rawSizeBytes/storedSizeBytes keys in its JSON at all (because that Go struct field did
-// not exist yet), and a metadataChecksum computed over exactly that canonical JSON.
-//
-// If RawSizeBytes/StoredSizeBytes had been added WITHOUT `omitempty`, the CURRENT code's
-// computeSnapshotMetadataChecksum would now serialize `"rawSizeBytes":0,"storedSizeBytes":0`
-// for this same document (json.Unmarshal silently drops unknown fields when reading, but
-// json.Marshal always emits every field the struct declares, zero or not) — so the checksum
-// this test recomputes would disagree with the one the archive carries, and EVERY existing
-// v2 archive in the wild would fail to read with ErrSnapshotMetadataChecksumMismatch. This
-// test proves that did not happen.
+// Without `omitempty` on RawSizeBytes/StoredSizeBytes, computeSnapshotMetadataChecksum would
+// now serialize them as 0 even for this old document, disagreeing with the checksum the
+// archive carries — failing every v2 archive in the wild with
+// ErrSnapshotMetadataChecksumMismatch. This test proves that did not happen.
 func TestSnapshotYAML_V2ArchiveStillValidates(t *testing.T) {
 	t.Parallel()
 
@@ -1461,10 +1450,8 @@ func TestSnapshotYAML_V2ArchiveStillValidates(t *testing.T) {
 			VolumeMode:       archive.VolumeModeBlock,
 			StorageClassName: "sc-legacy",
 			Size:             "1Gi",
-			// RawSizeBytes/StoredSizeBytes intentionally absent: this struct literal never
-			// sets them, and (being the pre-fix shape) the wire type has no such fields to
-			// even accidentally populate — this is byte-for-byte what a real pre-fix archive
-			// wrote to disk.
+			// RawSizeBytes/StoredSizeBytes intentionally absent: the pre-fix wire type has no
+			// such fields — this is byte-for-byte what a real pre-fix archive wrote to disk.
 		}},
 	}
 

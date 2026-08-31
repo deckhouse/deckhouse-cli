@@ -3378,11 +3378,9 @@ func TestSendVolumeData_CompressedFullSkipRequiresExactDecodedSize(t *testing.T)
 				}, nil
 			})
 
-			// FormatVersion/PayloadRawSizeBytes (not Size) are what
-			// resolveBlockPayloadSize's fast path now trusts for a compressed leaf;
-			// setting them to a deliberately wrong tc.totalSize simulates a manifest
-			// that lies about the archive's recorded size, which the exact-decoded-size
-			// proof below must still catch.
+			// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast
+			// path; setting them to a wrong tc.totalSize simulates a lying manifest, which the
+			// exact-decoded-size proof below must still catch.
 			leaf := PlannedNode{
 				DataFile:            dataFile,
 				Ext:                 tc.ext,
@@ -3573,10 +3571,8 @@ func TestSendVolumeData_TwoRunCompressedUndercountNeverFinalizes(t *testing.T) {
 		}
 	})
 
-	// FormatVersion/PayloadRawSizeBytes (not Size) are what resolveBlockPayloadSize's
-	// fast path now trusts for a compressed leaf; a deliberately undercounted
-	// totalSize here simulates a manifest that under-reports the archive's recorded
-	// size, which must never let the leaf finalize.
+	// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast path;
+	// an undercounted totalSize simulates a manifest that under-reports, which must never finalize.
 	leaf := PlannedNode{
 		DataFile:            dataFile,
 		Ext:                 ".zst",
@@ -3743,11 +3739,9 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 				}
 			})
 
-			// FormatVersion/PayloadRawSizeBytes (not Size) are what
-			// resolveBlockPayloadSize's fast path now trusts for a compressed leaf;
-			// setting them to a deliberately wrong tc.totalSize simulates a manifest
-			// that lies about the archive's recorded size, which the exact-decoded-size
-			// proof below must still catch.
+			// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast
+			// path; setting them to a wrong tc.totalSize simulates a lying manifest, which the
+			// exact-decoded-size proof below must still catch.
 			leaf := PlannedNode{
 				DataFile:            dataFile,
 				Ext:                 ".zst",
@@ -5613,9 +5607,8 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 	}
 }
 
-// poisonReadSeeker fails the test immediately if Read or Seek is ever called. It proves
-// resolveBlockPayloadSize's fast path (a current-format archive with a non-raw codec) trusts
-// leaf.PayloadRawSizeBytes outright, without touching the payload file at all.
+// poisonReadSeeker fails the test immediately if Read or Seek is called — proves
+// resolveBlockPayloadSize's fast path trusts PayloadRawSizeBytes without touching the file.
 type poisonReadSeeker struct{ t *testing.T }
 
 func (p poisonReadSeeker) Read(_ []byte) (int, error) {
@@ -5632,12 +5625,9 @@ func (p poisonReadSeeker) Seek(_ int64, _ int) (int64, error) {
 	return 0, nil
 }
 
-// TestResolveBlockPayloadSize covers resolveBlockPayloadSize's three decision paths: the
-// current-format (>= SnapshotFormatVersionPayloadSizes) fast path for a non-raw codec, which
-// trusts leaf.PayloadRawSizeBytes without any I/O; the measured path taken for a legacy
-// archive (any codec) or for any raw (ext=="") payload regardless of format version; and the
-// v3 raw cross-check against PayloadStoredSizeBytes (ErrRawBlockSizeMismatch), which replaces
-// the old comparison against the nominal VolumeInfo.Size.
+// TestResolveBlockPayloadSize covers its three decision paths: the current-format fast path
+// for a non-raw codec (trusts PayloadRawSizeBytes, no I/O); the measured path for a legacy
+// archive or any raw payload; and the v3 raw cross-check against PayloadStoredSizeBytes.
 func TestResolveBlockPayloadSize(t *testing.T) {
 	t.Parallel()
 
@@ -5832,12 +5822,10 @@ func (d noHTTPDoer) HTTPDo(_ *http.Request) (*http.Response, error) {
 	return nil, nil
 }
 
-// TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP verifies that a raw
-// (codec none) block leaf from a current-format (v3) archive, whose on-disk
-// data.bin size disagrees with its archive-recorded PayloadStoredSizeBytes, fails
-// deterministically via resolveBlockPayloadSize and never issues a single HTTP
-// request (no HEAD, no PUT). This replaces the old comparison against the nominal
-// VolumeInfo.Size with a comparison against the measured payload footprint.
+// TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP verifies that a raw (codec none)
+// block leaf from a v3 archive, whose on-disk data.bin size disagrees with its recorded
+// PayloadStoredSizeBytes, fails deterministically via resolveBlockPayloadSize before any
+// HTTP request (no HEAD, no PUT).
 func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
 	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "data.bin")
@@ -5868,16 +5856,12 @@ func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
 	}
 }
 
-// TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail is the regression test for the
-// live bug this fix addresses: a thin-provisioning backend (e.g. LINSTOR/DRBD) rounds the
-// underlying device up from the nominal captured size, so the archive's manifest carried a
-// nominal size ("1Ki" below, standing in for the real bug's 1Gi/1073741824) while the actual
-// downloaded/decoded payload on disk is larger (2900 bytes here vs. the 1024-byte nominal,
-// standing in for the real bug's 1077665792 vs. 1073741824). Before this fix, the upload path
-// trusted the nominal VolumeInfo.Size as totalSize and failed deterministically with "declared
-// size ... does not match verified decoded size ...". After this fix, resolveBlockPayloadSize's
-// fast path reads the archive's own measured PayloadRawSizeBytes instead of the nominal size,
-// so the upload succeeds and setTotal is called with the TRUE decoded size, never the nominal one.
+// TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail is the regression test for the live
+// bug: a thin-provisioning backend rounds the device up from the nominal captured size ("1Ki"
+// below, standing in for 1Gi/1073741824), so the real payload (2900 bytes here, standing in for
+// 1077665792) exceeds it. Before this fix, upload trusted nominal Size as totalSize and failed;
+// now resolveBlockPayloadSize reads the archive's measured PayloadRawSizeBytes instead, so
+// upload succeeds and setTotal reports the TRUE decoded size.
 func TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail(t *testing.T) {
 	t.Parallel()
 
@@ -5898,9 +5882,8 @@ func TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail(t *testing.T) {
 		Ext:                 ".zst",
 		FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
 		PayloadRawSizeBytes: int64(len(payload)),
-		// Nominal captured size: deliberately smaller than the real payload above, exactly
-		// as VolumeSnapshotContent.status.restoreSize disagreed with the real device size
-		// in the live bug. resolveBlockPayloadSize must never consult this field.
+		// Nominal size, deliberately smaller than the real payload above (mirrors the live
+		// bug) — resolveBlockPayloadSize must never consult this field.
 		Size: "1Ki",
 	}
 
@@ -6021,13 +6004,10 @@ func TestHeadBlockOffset_DeviceSize_SendsNoPUTOnShortfall(t *testing.T) {
 	}
 }
 
-// TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition proves the resume/dedup path is
-// unaffected by this fix: a DataImport created by a PRE-FIX binary (whose identity label,
-// annotations, and spec never referenced PayloadRawSizeBytes/PayloadStoredSizeBytes/
-// FormatVersion at all) must still be recognised and reused — not rejected as foreign — when
-// EnsureDataImport is called again with the SAME leaf re-planned by the FIXED binary from an
-// archive that now also carries those new fields. dataImportIdentity/dataImportAnnotations/
-// node.SizeBytes/the "size-bytes" annotation must not incorporate the new fields.
+// TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition proves resume/dedup is unaffected:
+// a DataImport created by a pre-fix binary (no PayloadRawSizeBytes/PayloadStoredSizeBytes/
+// FormatVersion anywhere) must still be recognised and reused when EnsureDataImport re-plans
+// the same leaf with a fixed binary that now carries those fields.
 func TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition(t *testing.T) {
 	leafOld := volumeSnapshotLeaf("pvc-1")
 	existing := dataImportObjForLeaf(targetNS, leafOld, false)
@@ -6066,14 +6046,11 @@ func TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition(t *testing.T) {
 	}
 }
 
-// TestSendVolumeData_Block_CorruptCompressedPayload_SendsNoHTTP verifies that a
-// legacy-archive (FormatVersion below SnapshotFormatVersionPayloadSizes) compressed
-// block leaf whose on-disk bytes are not a valid frame of its declared codec fails
-// during resolveBlockPayloadSize's measurement pass, before any HEAD/PUT is attempted.
-// This replaces the old "missing/unparsable captured VolumeInfo.Size" preflight, which
-// no longer exists now that resolveBlockPayloadSize does not consult VolumeInfo.Size at
-// all; a legacy archive's compressed payload is always measured from the bytes
-// themselves, so garbage bytes are the failure mode that must be caught here.
+// TestSendVolumeData_Block_CorruptCompressedPayload_SendsNoHTTP verifies that a legacy-archive
+// compressed block leaf whose on-disk bytes aren't a valid frame fails during
+// resolveBlockPayloadSize's measurement pass, before any HEAD/PUT. A legacy archive's
+// compressed payload is always measured from the bytes themselves, so garbage bytes are the
+// failure mode caught here (replaces the old missing/unparsable-Size preflight).
 func TestSendVolumeData_Block_CorruptCompressedPayload_SendsNoHTTP(t *testing.T) {
 	for _, tc := range blockCodecCases {
 		if tc.ext == "" {

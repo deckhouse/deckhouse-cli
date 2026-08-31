@@ -2669,13 +2669,11 @@ func TestDownloadFilesystemVolume_ResumeSkip_MismatchedBlobRestaged(t *testing.T
 	}
 }
 
-// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches verifies that,
-// with no source MD5 available, an already-staged blob whose measured raw size
-// matches the fresh listing's declared size is skipped WITHOUT content
-// verification (content still cannot be proven without an MD5): no file GET is
-// issued, the assembled tar carries the staged (sentinel) content unchanged, a
-// single "verifying size only" WARN is logged, and the declared size is
-// credited to onProgress exactly once.
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches verifies that, with no
+// source MD5, an already-staged blob whose measured raw size matches the fresh listing's
+// declared size is skipped without content verification: no file GET, the sentinel content
+// survives in the tar, a single "verifying size only" WARN fires, and the size is credited
+// to onProgress once.
 func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches(t *testing.T) {
 	t.Parallel()
 
@@ -2691,9 +2689,8 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// Sentinel is the SAME length as the server content but differs byte for
-	// byte: with no advertised MD5, content still cannot be verified, but the
-	// size matches so the skip stands (resume savings preserved).
+	// Sentinel is the SAME length as the server content but differs byte for byte: content
+	// still can't be verified without MD5, but the size matches so the skip stands.
 	sentinel := bytes.Repeat([]byte("X"), len(content))
 	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
 		t.Fatal(err)
@@ -2746,15 +2743,11 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches(t *testing.T) 
 	}
 }
 
-// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers verifies that,
-// with no source MD5 available, an already-staged blob whose measured raw size
-// does NOT match the fresh listing's declared size is treated as stale and
-// re-staged within the same run: at least one file GET is issued, the
-// assembled tar carries the true server content (not the stale sentinel), the
-// existing "re-staging" WARN fires, progress reaches the declared size, and
-// the resulting tar's PAX metadata is internally consistent (SumTarRawSizes
-// succeeds), proving the raw-size PAX record was not left describing bytes
-// that were never actually written.
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers verifies that, with no
+// source MD5, an already-staged blob whose measured size does NOT match the fresh listing
+// is treated as stale and re-staged in the same run: at least one file GET fires, the tar
+// carries the true server content, the "re-staging" WARN fires, progress reaches the
+// declared size, and the resulting tar's PAX metadata stays consistent (SumTarRawSizes).
 func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers(t *testing.T) {
 	t.Parallel()
 
@@ -2770,9 +2763,8 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// Sentinel differs in LENGTH from the server content: with no advertised
-	// MD5 the skip branch can still catch this via the size check and must
-	// re-fetch rather than trust it.
+	// Sentinel differs in LENGTH from the server content: with no MD5, the skip branch
+	// still catches this via the size check and re-fetches rather than trusting it.
 	sentinel := []byte("short-stale-blob")
 	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
 		t.Fatal(err)
@@ -2824,14 +2816,10 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers(t *testing.T) 
 		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
 	}
 
-	// The assembled tar's PAX rawSize records must be honest: for the "none"
-	// codec, ParseFSMetadata (invoked per entry by SumTarRawSizes) rejects an
-	// entry whose stored byte count disagrees with its declared PAX rawSize.
-	// A stale skip that never re-fetched would leave rawSize describing the
-	// listing's declared size while the tar stored the shorter sentinel,
-	// tripping exactly this check downstream (see incident this test guards
-	// against: "invalid filesystem tar metadata: ... stores N bytes but
-	// declares raw size M").
+	// The tar's PAX rawSize records must be honest: ParseFSMetadata rejects an entry whose
+	// stored byte count disagrees with its declared rawSize. A stale skip that never
+	// re-fetched would leave rawSize describing the listing's size while the tar stored the
+	// shorter sentinel, tripping exactly this check downstream.
 	f, err := os.Open(tarPath)
 	if err != nil {
 		t.Fatalf("open tar %s: %v", tarPath, err)

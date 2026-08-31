@@ -1193,10 +1193,8 @@ func TestBuildPlan_LeafStorageParams(t *testing.T) {
 }
 
 // TestBuildPlan_ReadsPayloadSizeFields verifies that PlannedNode.PayloadRawSizeBytes/
-// PayloadStoredSizeBytes/FormatVersion are read verbatim from snapshot.yaml
-// Volumes[0].RawSizeBytes/StoredSizeBytes and the envelope's own formatVersion —
-// writeArchiveNode always produces a current-format (v3) archive, since WriteSnapshotYAML's
-// MarshalJSON unconditionally stamps SnapshotFormatVersionCurrent.
+// PayloadStoredSizeBytes/FormatVersion are read verbatim from snapshot.yaml's
+// Volumes[0].RawSizeBytes/StoredSizeBytes and its own formatVersion.
 func TestBuildPlan_ReadsPayloadSizeFields(t *testing.T) {
 	t.Parallel()
 

@@ -280,9 +280,8 @@ func TestNewReader_LZ4TruncatedFrameErrors(t *testing.T) {
 	}
 }
 
-// TestDecodedSize covers compress.DecodedSize across every registered codec, including the
-// multi-frame concatenation block-volume chunks actually produce, plus its error paths
-// (corrupt/truncated zstd, cancellation) and the position-preserving contract.
+// TestDecodedSize covers compress.DecodedSize across every codec, including multi-frame
+// concatenation, error paths (corrupt/truncated zstd, cancellation), and position restoration.
 func TestDecodedSize(t *testing.T) {
 	t.Parallel()
 
@@ -307,12 +306,9 @@ func TestDecodedSize(t *testing.T) {
 
 		for _, tc := range decodeCases {
 			if tc.ext == ".zst" {
-				// zstd cannot represent a genuinely empty payload as a frame at all: both
-				// EncodeStream and EncodeFrame produce zero output bytes for empty input
-				// (see zstd_test.go's TestEncodeStream_emptySource), which ZstdDecodedSize
-				// correctly rejects as "no frames" rather than silently reporting size 0 —
-				// there is no valid Frame_Content_Size to prove. This is exercised as an
-				// error case, not a success case, further down in this test.
+				// zstd can't represent an empty payload as a frame at all (EncodeStream/
+				// EncodeFrame produce zero bytes for empty input), so ZstdDecodedSize
+				// rejects it as "no frames" — exercised as an error case further down.
 				continue
 			}
 

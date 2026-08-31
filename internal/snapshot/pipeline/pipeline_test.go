@@ -3640,14 +3640,10 @@ func TestPipeline_ForeignMergedBlock_NotLaunderedByResume(t *testing.T) {
 		"collision dir must hold the correctly-downloaded bytes")
 }
 
-// writeMergedZstdBlockFixture writes a real, decodable zstd frame at path, standing in
-// for an already-merged block volume payload left behind by a prior run. FinalizeNode's
-// MeasurePayload reads this file's frame header (compress.DecodedSize -> ZstdDecodedSize)
-// to record its raw byte count without a full decode, which requires an explicit
-// Frame_Content_Size field — EncodeFrameStream (given a known size) stamps one,
-// EncodeFrame's default single-shot mode does not — so a placeholder that is not a
-// complete, FCS-bearing zstd frame makes finalize fail instead of exercising the
-// resume-skip path under test.
+// writeMergedZstdBlockFixture writes a real, decodable zstd frame at path, standing in for
+// an already-merged block payload left by a prior run. FinalizeNode's MeasurePayload reads
+// its frame header, which needs an explicit Frame_Content_Size (EncodeFrameStream stamps
+// one; a placeholder wouldn't, and would fail finalize instead of testing resume-skip).
 func writeMergedZstdBlockFixture(t *testing.T, path string, payload []byte) {
 	t.Helper()
 
@@ -3661,14 +3657,11 @@ func writeMergedZstdBlockFixture(t *testing.T, path string, payload []byte) {
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
 }
 
-// writeAssembledFSTarFixture writes a minimal, valid (empty) tar file at path, standing
-// in for an already-assembled filesystem volume payload left behind by a prior run.
-// FinalizeNode's MeasurePayload parses this file as a tar (archive.SumTarRawSizes) to sum
-// its entries' raw sizes, so a placeholder that is not valid tar content makes finalize
-// fail instead of exercising the resume-skip path under test. An empty tar (no entries)
-// is sufficient: SumTarRawSizes tolerates zero regular entries and the tests using this
-// fixture assert only that DataExport is skipped and the node finalizes, not the payload's
-// recorded size.
+// writeAssembledFSTarFixture writes a minimal, valid (empty) tar file at path, standing in
+// for an already-assembled filesystem payload left by a prior run: FinalizeNode's
+// MeasurePayload parses it via archive.SumTarRawSizes, so invalid tar content would fail
+// finalize instead of testing resume-skip. An empty tar is enough since these tests only
+// assert DataExport is skipped and the node finalizes, not the recorded size.
 func writeAssembledFSTarFixture(t *testing.T, path string) {
 	t.Helper()
 
@@ -5811,20 +5804,13 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 		require.NoError(t, os.MkdirAll(stagingDir, 0o755))
 		seedResumeIdentityMarker(t, diskSnapDir, diskSnapMarkerIdentity())
 
-		// a.bin was fully staged as a flat blob under the OLD (larger) size, and
-		// the sizes sidecar records that stale size, so seedStreamFromDisk seeds
-		// both total (250) and current (250) — above the fresh listing total,
-		// exercising the clamp at OpenExport time below. This stale blob does
-		// NOT survive the run unchanged: the exporter carries no MD5 for a.bin,
-		// so stageCompressedFile falls back to measuring the staged blob's
-		// plaintext size and comparing it against the fresh listing's declared
-		// size (150) — the two disagree, so the self-healing re-stage path
-		// removes the stale 250-byte blob and re-fetches the true 150-byte
-		// content in this same run. The clamp assertions below only cover the
-		// progress-bar bookkeeping (seeded-then-clamped total/current), which
-		// is unaffected by WHY the final 150 bytes are correct — only that they
-		// now are, honestly, rather than a lie the old blind-trust skip left
-		// unverified.
+		// a.bin was staged as a flat blob under the OLD (larger) size, so seedStreamFromDisk
+		// seeds total/current at 250 — above the fresh listing's 150, exercising the clamp
+		// below. The stale blob does NOT survive unchanged: with no MD5 for a.bin,
+		// stageCompressedFile measures its plaintext size, finds it disagrees with the
+		// listing's 150, and self-heals by re-fetching the true content in this same run.
+		// The clamp assertions below only cover progress-bar bookkeeping, not why the final
+		// 150 bytes end up correct.
 		require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "a.bin"+codec.Ext()), bytes.Repeat([]byte("A"), int(staleSize)), 0o644))
 
 		sizesJSON, err := json.Marshal(volume.FSSizesSidecar{

@@ -645,12 +645,8 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 			slog.String("dataimport", diName))
 
 		// The FS-upload total, like the block path's setTotal(totalSize) below, is reported
-		// as a single a-priori value before the first byte is sent: every regular entry's
-		// exact PAX raw size is already known from checksum-covered tar metadata, so
-		// importFSFromTar's own header-only preflight pass (which runs before any HEAD or
-		// PUT regardless, to validate the tar) sums them and calls setTotal exactly once
-		// with the complete total. No entry's payload is decoded to learn its size — a PAX
-		// record already carries it — so this preflight sum is cheap regardless of tar size.
+		// up front: importFSFromTar's header-only preflight pass already knows every entry's
+		// exact PAX raw size, so it sums them and calls setTotal once, before any HEAD/PUT.
 		var err error
 		if handle == nil {
 			err = importFSFromTarWithDependencies(
@@ -703,13 +699,9 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 			slog.String("dataimport", diName),
 			slog.Int64("bytes", totalSize))
 
-		// totalSize is known up front — either trusted straight from the archive's own
-		// recorded measurement (the common case, an archive at
-		// archive.SnapshotFormatVersionPayloadSizes or later) or, for an older archive,
-		// measured by resolveBlockPayloadSize without a full decode (a cheap zstd
-		// frame-header read, or a Seek for a raw payload) — and matches the onProgress
-		// increments (validated durable offsets advance the bar), so report it as the
-		// total before any bytes are sent.
+		// totalSize is known up front — trusted from the archive's recorded measurement, or
+		// else measured by resolveBlockPayloadSize without a full decode — and matches the
+		// onProgress increments, so report it as the total before any bytes are sent.
 		if setTotal != nil {
 			setTotal(totalSize)
 		}
@@ -1137,44 +1129,27 @@ func drainAndCloseResponseBody(resp *http.Response) error {
 }
 
 // ErrRawBlockSizeMismatch is returned by resolveBlockPayloadSize when a raw (codec none)
-// data.bin file's on-disk size does not match the size recorded in the archive's
-// VolumeInfo.StoredSizeBytes. Unlike a compressed payload, a raw payload has no separate
-// decompressed size to fall back on — on-disk size and recorded size are the SAME
-// quantity — so any disagreement means a truncated, corrupted, or mismatched archive.
-// Checking this before any HEAD/PUT keeps the failure deterministic and sends zero HTTP
-// requests, instead of streaming a wrong byte count to the importer and only discovering
-// the mismatch mid-transfer. An archive that never recorded StoredSizeBytes (older than
-// archive.SnapshotFormatVersionPayloadSizes) has nothing to cross-check against, so this
-// error cannot occur for it — the measured on-disk length is trusted outright.
+// data.bin's on-disk size disagrees with the archive's recorded StoredSizeBytes — for raw
+// payloads the two are definitionally equal, so any mismatch means a corrupted archive.
+// Checked before any HEAD/PUT. Never fires for an archive older than
+// SnapshotFormatVersionPayloadSizes (nothing recorded to cross-check).
 var ErrRawBlockSizeMismatch = errors.New("raw block size mismatch")
 
 var errFailedBlockDecoderClose = errors.New("failed to close block decoder")
 
 // resolveBlockPayloadSize determines a block leaf's exact upload size (totalSize).
 //
-// The common case trusts the archive's own recorded measurement (leaf.PayloadRawSizeBytes)
-// outright rather than reading the payload here: it was measured once, precisely, when the
-// archive was written (see volume.MeasurePayload), and re-measuring a possibly-compressed,
-// possibly-multi-gigabyte file before every upload would defeat the point of a streaming
-// upload path. That trust requires leaf.FormatVersion to be at least
-// archive.SnapshotFormatVersionPayloadSizes AND leaf.PayloadRawSizeBytes to be strictly
-// positive: a zero recorded size is indistinguishable between "legitimately empty payload"
-// and "never actually measured" (e.g. a manifest built directly with SnapshotYAML.MarshalJSON,
-// which always stamps the current FormatVersion regardless of whether MeasurePayload ran), so
-// it always falls back to measuring here instead of trusting a value that might be a lie.
-// An older archive never recorded a size at all, so its payload is always measured here too
-// (for zstd this is still a cheap frame-header read via compress.DecodedSize, not a full
-// decode); measuring a legitimately empty payload is equally cheap, just a redundant read.
+// For a non-raw codec on a current-format archive (FormatVersion >= SnapshotFormatVersionPayloadSizes
+// and PayloadRawSizeBytes > 0), it trusts the recorded measurement outright rather than
+// re-decoding a possibly-huge file. A zero or legacy value always falls back to measuring
+// (cheap header read for zstd, full decode otherwise).
 //
-// A raw (ext == "") payload is the one case measured unconditionally regardless of
-// FormatVersion: its on-disk length IS its decoded length (no separate decompressed size
-// exists), so obtaining it is always cheap — a single Seek, not a decode — and doing so lets
-// a new-format archive cross-check the measurement against its own recorded StoredSizeBytes
-// as a preflight (see ErrRawBlockSizeMismatch) instead of just trusting it blindly.
+// A raw (ext == "") payload is always measured — its on-disk length IS its decoded length,
+// a cheap Seek — which also lets a current-format archive cross-check StoredSizeBytes
+// (see ErrRawBlockSizeMismatch).
 //
-// source is the leaf's already-open payload reader when the caller holds one (a verified
-// rooted archive view); nil when the caller reads leaf.DataFile from a plain filesystem
-// path, which resolveBlockPayloadSize opens itself, only when actually needed.
+// source is the leaf's already-open reader when the caller holds one; nil means
+// resolveBlockPayloadSize opens leaf.DataFile itself.
 func resolveBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.ReadSeeker) (int64, error) {
 	if leaf.Ext != "" && leaf.FormatVersion >= archive.SnapshotFormatVersionPayloadSizes && leaf.PayloadRawSizeBytes > 0 {
 		return leaf.PayloadRawSizeBytes, nil
@@ -1200,12 +1175,8 @@ func resolveBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.Re
 }
 
 // measureBlockPayloadSize measures leaf's block payload size from an already-open source.
-// For ext == "" it additionally cross-checks the measured (== on-disk) length against the
-// archive-recorded StoredSizeBytes, but only when that recorded value is itself trustworthy
-// (strictly positive) — a zero StoredSizeBytes is indistinguishable between "legitimately
-// empty payload" and "never actually recorded" (see resolveBlockPayloadSize), and treating
-// the latter as a real mismatch would reject every valid archive whose manifest predates this
-// field. See ErrRawBlockSizeMismatch.
+// For ext == "" it also cross-checks the result against StoredSizeBytes, but only when that
+// value is strictly positive — zero is ambiguous between "empty" and "never recorded".
 func measureBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.ReadSeeker) (int64, error) {
 	size, err := compress.DecodedSize(ctx, leaf.Ext, source)
 	if err != nil {
@@ -2175,16 +2146,12 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 	}
 }
 
-// verifyDeviceCapacity fails BEFORE the first PUT when the importer's HEAD response proves
-// the target device is smaller than totalSize: a thin-provisioning target storage class can
-// round a volume up (or down, relative to another backend) differently than the source did,
-// so a device that is provably too small to hold totalSize would otherwise only surface as a
-// mid-transfer failure partway through the upload. deviceSizeHeader is X-Device-Size, sent by
-// the importer alongside a 200 HEAD response.
+// verifyDeviceCapacity fails BEFORE the first PUT when the importer's HEAD response
+// (deviceSizeHeader, i.e. X-Device-Size) proves the target device is smaller than totalSize
+// — otherwise this would only surface as a mid-transfer failure.
 //
-// A missing, empty, or unparsable header fails OPEN (returns nil): not every importer version
-// sends this header, and its absence is not evidence the device is too small — only its
-// presence with a value that proves a genuine shortfall is.
+// A missing, empty, or unparsable header fails OPEN (returns nil): its absence isn't
+// evidence the device is too small, only a proven shortfall is.
 func verifyDeviceCapacity(deviceSizeHeader string, totalSize int64, url string) error {
 	if deviceSizeHeader == "" {
 		return nil
