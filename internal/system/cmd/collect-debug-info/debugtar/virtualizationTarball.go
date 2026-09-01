@@ -127,6 +127,7 @@ func fetchVirtualizationPods(
 	pods := make([]virtualizationPod, 0, len(list.Items))
 	for _, item := range list.Items {
 		daemonSetOwned := false
+
 		for _, owner := range item.Metadata.OwnerReferences {
 			if owner.Kind == "DaemonSet" {
 				daemonSetOwned = true
