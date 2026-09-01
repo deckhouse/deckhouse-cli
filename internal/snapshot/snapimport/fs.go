@@ -394,7 +394,8 @@ func headFileOffset(ctx context.Context, client httpDoer, fileURL string, totalS
 		return 0, false, 0, nil
 
 	default:
-		return 0, false, 0, fmt.Errorf("HEAD %s returned status %d (%s)", fileURL, resp.StatusCode, resp.Status)
+		return 0, false, 0, uploadStatusError(resp.StatusCode,
+			fmt.Errorf("HEAD %s returned status %d (%s)", fileURL, resp.StatusCode, resp.Status))
 	}
 }
 
@@ -445,7 +446,8 @@ func doFileChunk(client httpDoer, req *http.Request, offset, requestEnd, totalSi
 	}
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		return 0, false, fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
+		return 0, false, uploadStatusError(resp.StatusCode,
+			fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status))
 	}
 
 	if err := bodyReport.validateExact(); err != nil {
