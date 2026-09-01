@@ -41,8 +41,9 @@ type DataImportList struct {
 }
 
 // DataImportMode is spec.mode — the explicit discriminator that selects what a DataImport does
-// with the imported bytes. It replaced the former polymorphic targetRef.kind discrimination; the
-// current CRD has no spec.targetRef at all (it is pruned by the structural schema).
+// with the imported bytes. storage-foundation introduced it in place of the polymorphic
+// targetRef.kind discrimination its predecessor used, and its schema has no spec.targetRef at
+// all. Left empty when addressing storage-volume-data-manager, which is the other way round.
 // See storage-foundation/api/v1alpha1/data_import.go for the SSOT.
 type DataImportMode string
 
@@ -53,9 +54,22 @@ type DataImportMode string
 // unstructured spec.
 const DataImportModeCreatePVC DataImportMode = "CreatePVC"
 
-// DataImportSpec mirrors the CreatePVC subset of the unified DataImport CRD spec that the CLI
-// produces. The CRD CEL rules require pvcTemplate and forbid snapshotRef/storageParams when
-// mode == CreatePVC, so those PopulateData-only fields are deliberately absent here.
+// DataImportSpec mirrors the PVC-creating subset of the DataImport CRD spec that the CLI
+// produces, in both shapes that subset has been given.
+//
+// The two producers disagree on how the destination is expressed, and unlike DataExport the
+// disagreement is structural rather than an extra field:
+//
+//   - storage-foundation discriminates on Mode and reads PvcTemplate from the spec root. Its CEL
+//     rules require pvcTemplate and forbid snapshotRef/storageParams when mode == CreatePVC, so
+//     those PopulateData-only fields are deliberately absent from this struct.
+//   - storage-volume-data-manager has no mode at all and requires TargetRef, carrying the same
+//     template one level down.
+//
+// Exactly one of the two shapes is filled per request, chosen from the resolved backend; the
+// other stays nil and is omitted from the wire. Filling both would survive today only because
+// each CRD prunes what it does not declare, and would start writing a field with different
+// meaning the moment either producer grows the other's key.
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
 	TTL     string `json:"ttl"`
@@ -67,11 +81,53 @@ type DataImportSpec struct {
 	// `--wffc=false` (and hence the flag's own default) impossible to express.
 	WaitForFirstConsumer bool `json:"waitForFirstConsumer"`
 
+	// Mode is the storage-foundation discriminator. Left empty for the older producer, whose
+	// schema has no such property.
 	Mode DataImportMode `json:"mode,omitempty"`
 
-	// PvcTemplate fully describes the destination PVC. Its metadata.name is mandatory — the
-	// controller names the imported PVC after it and the server CEL rejects an empty name.
+	// PvcTemplate fully describes the destination PVC for storage-foundation. Its metadata.name
+	// is mandatory — the controller names the imported PVC after it and the server CEL rejects
+	// an empty name.
 	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
+
+	// TargetRef is the storage-volume-data-manager destination, which nests the same template
+	// under a required targetRef. Left nil for storage-foundation, whose schema prunes it.
+	TargetRef *DataImportTargetRefSpec `json:"targetRef,omitempty"`
+}
+
+// DataImportTargetRefSpec is the storage-volume-data-manager shape of the import destination.
+// Its Kind enum admits PersistentVolumeClaim only, which is also the only destination
+// `d8 data import` creates.
+// +k8s:deepcopy-gen=true
+type DataImportTargetRefSpec struct {
+	// Kind is the destination kind; PersistentVolumeClaimKind is the only accepted value.
+	Kind string `json:"kind"`
+
+	// PvcTemplate fully describes the destination PVC, exactly as the storage-foundation shape
+	// spells it one level up.
+	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
+}
+
+// PersistentVolumeClaimKind is the only DataImport destination kind either producer accepts.
+const PersistentVolumeClaimKind = "PersistentVolumeClaim"
+
+// DestinationTemplate returns the destination PVC template whichever shape carries it, so
+// readers of an object fetched from the cluster do not have to know which producer wrote it.
+// Returns nil when neither shape is filled.
+func (s *DataImportSpec) DestinationTemplate() *PersistentVolumeClaimTemplateSpec {
+	if s == nil {
+		return nil
+	}
+
+	if s.PvcTemplate != nil {
+		return s.PvcTemplate
+	}
+
+	if s.TargetRef != nil {
+		return s.TargetRef.PvcTemplate
+	}
+
+	return nil
 }
 
 // +k8s:deepcopy-gen=true

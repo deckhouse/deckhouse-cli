@@ -31,6 +31,7 @@ import (
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -39,10 +40,40 @@ import (
 var (
 	PrepareDownloadFunc            = PrepareDownload
 	CreateDataExporterIfNeededFunc = CreateDataExporterIfNeeded
+	// ResolveClientFunc is stubbable because resolution is the first thing a command does and
+	// the only step that contacts the API server before any of the work under test.
+	ResolveClientFunc = ResolveClient
 )
 
 // var instead of const to allow test override.
 var maxRetryAttempts = 60
+
+// ResolveClient resolves which of the two producers serves DataExport to this user in this
+// namespace, and returns both the answer and a control-plane client bound to it.
+//
+// Every `d8 data export` subcommand starts here rather than registering a fixed group, because
+// the same binary ships to clusters that serve only storage-foundation's group, only
+// storage-volume-data-manager's, or both with the user authorized for one of them. The resolved
+// backend is returned alongside the client because callers that build their own client later
+// (PrepareDownload) must bind it to the same group.
+func ResolveClient(
+	ctx context.Context,
+	sClient *safeClient.SafeClient,
+	namespace string,
+	log *slog.Logger,
+) (dataapi.Backend, ctrlrtclient.Client, error) {
+	backend, err := dataapi.Resolve(ctx, sClient.RESTConfig(), dataapi.ResourceDataExports, namespace, log)
+	if err != nil {
+		return dataapi.Backend{}, nil, err
+	}
+
+	rtClient, err := sClient.NewRTClient(v1alpha1.AddToSchemeFor(backend.GroupVersion))
+	if err != nil {
+		return dataapi.Backend{}, nil, err
+	}
+
+	return backend, rtClient, nil
+}
 
 func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlrtclient.Client) (*v1alpha1.DataExport, error) {
 	deObj := &v1alpha1.DataExport{}
@@ -52,17 +83,12 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 		return nil, fmt.Errorf("kube Get dataexport: %s", err.Error())
 	}
 
-	// check DataExport is Ready. No status in new version of dataexport
-	for _, condition := range deObj.Status.Conditions {
-		if condition.Type == "Ready" {
-			if condition.Status != "True" {
-				return nil, fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
-					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
-					condition.Message, condition.Reason)
-			}
-
-			break
-		}
+	// An object with no Ready condition at all has not been reconciled yet rather than failed,
+	// so only a Ready condition that is present and not True is an error here.
+	if notReady := dataio.NotReady(deObj.Status.Conditions); notReady != nil {
+		return nil, fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
+			deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
+			notReady.Message, notReady.Reason)
 	}
 
 	return deObj, nil
@@ -80,38 +106,39 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 			return nil, fmt.Errorf("kube Get dataexport with restart: %s", err.Error())
 		}
 
-		for _, condition := range deObj.Status.Conditions {
-			// The DataExport catalog no longer carries a standalone "Expired" condition; expiry is now the
-			// Ready condition with Status=False and Reason="Expired" (plus status.phase=Expired). Detect it
-			// on the Ready condition and auto-restart the export, rather than waiting for the producer's GC
-			// (which only deletes an expired DataExport after its retention TTL).
-			if condition.Type != "Ready" {
-				continue
+		// An expired export is recreated here rather than waited out: after expiry the producer's
+		// garbage collector only removes the object once its retention TTL runs out, so polling
+		// would stall for the whole of that retention. Both producers' spellings of expiry are
+		// recognised by dataio.IsExpired.
+		switch {
+		case dataio.IsExpired(deObj.Status.Conditions):
+			// Resolved BEFORE the delete, and never fatal. Everything needed to rebuild the
+			// export has to be in hand before the existing one is destroyed: failing between the
+			// two would leave the user with neither, and this object is theirs, not ours.
+			group := recreateTargetGroup(deObj, log)
+
+			if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
+				return nil, err
 			}
 
-			switch {
-			case condition.Status == "False" && condition.Reason == "Expired":
-				if err := DeleteDataExport(ctx, deName, namespace, rtClient); err != nil {
-					return nil, err
-				}
-
-				if err := CreateDataExport(
-					ctx,
-					deName, namespace, "",
-					deObj.Spec.TargetRef.Group,
-					deObj.Spec.TargetRef.Kind,
-					deObj.Spec.TargetRef.Name,
-					deObj.Spec.Publish, rtClient,
-				); err != nil {
-					return nil, err
-				}
-				// Recreated: keep retrying until the fresh export becomes Ready.
-				returnErr = fmt.Errorf("DataExport %s/%s expired; recreated, waiting for the new export to become Ready",
-					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
-			case condition.Status != "True":
+			if err := CreateDataExport(
+				ctx,
+				deName, namespace, "",
+				group,
+				deObj.Spec.TargetRef.Kind,
+				deObj.Spec.TargetRef.Name,
+				deObj.Spec.Publish, rtClient,
+			); err != nil {
+				return nil, err
+			}
+			// Recreated: keep retrying until the fresh export becomes Ready.
+			returnErr = fmt.Errorf("DataExport %s/%s expired; recreated, waiting for the new export to become Ready",
+				deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name)
+		default:
+			if notReady := dataio.NotReady(deObj.Status.Conditions); notReady != nil {
 				returnErr = fmt.Errorf("DataExport %s/%s is not Ready: %s (%s)",
 					deObj.ObjectMeta.Namespace, deObj.ObjectMeta.Name,
-					condition.Message, condition.Reason)
+					notReady.Message, notReady.Reason)
 			}
 		}
 		// check DataExport Url
@@ -148,6 +175,31 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 	}
 
 	return deObj, nil
+}
+
+// recreateTargetGroup picks the API group to stamp on an export being rebuilt after expiry.
+//
+// The group is derived from the kind rather than read back off the object, because
+// storage-volume-data-manager's schema has no targetRef.group property and prunes the one the CLI
+// sent: an export read from that producer never carries a group, and copying the empty value would
+// retarget the rebuilt export at the core group.
+//
+// An unrecognised kind is not an error here. storage-foundation puts no enum on targetRef.kind and
+// documents that any snapshot kind is resolved generically, so a DataExport may legitimately target
+// a kind this CLI has never heard of. For those, whatever group the server already recorded is the
+// best available answer — and far better than refusing, which at this point in the recreate would
+// destroy an object the user still owns.
+func recreateTargetGroup(deObj *v1alpha1.DataExport, log *slog.Logger) string {
+	group, err := dataio.KindToGroup(deObj.Spec.TargetRef.Kind)
+	if err == nil {
+		return group
+	}
+
+	log.Warn("Rebuilding an expired DataExport for a target kind this CLI does not know; keeping the group recorded on the object",
+		slog.String("kind", deObj.Spec.TargetRef.Kind),
+		slog.String("group", deObj.Spec.TargetRef.Group))
+
+	return deObj.Spec.TargetRef.Group
 }
 
 func CreateDataExporterIfNeeded(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, ttl string, rtClient ctrlrtclient.Client) (string, error) {
@@ -223,12 +275,11 @@ func CreateDataExport(ctx context.Context, deName, namespace, ttl, group, kind, 
 		ttl = dataio.DefaultTTL
 	}
 
-	// Create dataexport object
+	// Create dataexport object. TypeMeta is left empty on purpose: the client stamps the
+	// apiVersion from the scheme it was built with, which is the group resolved for this run —
+	// a literal here would name one producer's group on every request, including requests to
+	// the other one.
 	deCfg := &v1alpha1.DataExport{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "deckhouse.io/v1alpha1",
-			Kind:       "DataExport",
-		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deName,
 			Namespace: namespace,
@@ -321,14 +372,18 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 	return podURL, volumeMode, internalCAData, nil
 }
 
-func PrepareDownload(ctx context.Context, log *slog.Logger, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
+// PrepareDownload waits for the export to be usable and returns the data-plane URL, the volume
+// mode and a client trusting the exporter's CA. backend is the group resolved for this run; it
+// builds this function's own control-plane client, which would otherwise default to
+// storage-foundation's group regardless of what the cluster serves.
+func PrepareDownload(ctx context.Context, log *slog.Logger, backend dataapi.Backend, deName, namespace string, publish bool, sClient *safeClient.SafeClient) (string, string, *safeClient.SafeClient, error) {
 	var (
 		url, volumeMode string
 		subClient       *safeClient.SafeClient
 		decodedBytes    []byte
 	)
 
-	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
+	rtClient, err := sClient.NewRTClient(v1alpha1.AddToSchemeFor(backend.GroupVersion))
 	if err != nil {
 		return "", "", nil, err
 	}

@@ -32,9 +32,22 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
+
+// foundationBackend is the storage-foundation answer a resolution would return. Tests that do
+// not exercise the older producer use it so the shape assertions stay about one producer at a time.
+func foundationBackend() dataapi.Backend {
+	return dataapi.Backend{GroupVersion: dataapi.FoundationGroupVersion, Module: "storage-foundation"}
+}
+
+// legacyBackend is the storage-volume-data-manager answer, used by the tests that pin that
+// producer's request shape.
+func legacyBackend() dataapi.Backend {
+	return dataapi.Backend{GroupVersion: dataapi.LegacyGroupVersion, Module: "storage-volume-data-manager"}
+}
 
 // readyCond builds a Ready condition with the given status/reason/message.
 func readyCond(status metav1.ConditionStatus, reason, message string) metav1.Condition {
@@ -61,7 +74,7 @@ func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
 	}
 
-	require.NoError(t, CreateDataImport(ctx, "import-into-pvc", "my-ns", "15m", false, true, pvcTpl, c))
+	require.NoError(t, CreateDataImport(ctx, foundationBackend(), "import-into-pvc", "my-ns", "15m", false, true, pvcTpl, c))
 
 	var stored v1alpha1.DataImport
 	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "import-into-pvc", Namespace: "my-ns"}, &stored))
@@ -89,7 +102,7 @@ func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
 		// as an explicit key. If it is ever dropped as a zero value, the server flips it back to
 		// true and `--wffc=false` becomes silently inoperative.
 		cWithoutWFFC := fake.NewClientBuilder().WithScheme(scheme).Build()
-		require.NoError(t, CreateDataImport(ctx, "no-wffc", "my-ns", "15m", false, false, pvcTpl, cWithoutWFFC))
+		require.NoError(t, CreateDataImport(ctx, foundationBackend(), "no-wffc", "my-ns", "15m", false, false, pvcTpl, cWithoutWFFC))
 
 		var withoutWFFC v1alpha1.DataImport
 		require.NoError(t, cWithoutWFFC.Get(ctx, ctrlclient.ObjectKey{Name: "no-wffc", Namespace: "my-ns"}, &withoutWFFC))
@@ -99,6 +112,52 @@ func TestCreateDataImport_BuildsCreatePVCSpec(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(rawWithoutWFFC), `"waitForFirstConsumer":false`)
 	})
+}
+
+// TestCreateDataImport_BuildsLegacyTargetRefSpec pins the wire shape the CLI must produce for
+// storage-volume-data-manager, which is not a subset or superset of the storage-foundation shape
+// but a different one: its schema requires spec.targetRef and declares no spec.mode or root
+// spec.pvcTemplate, so a body written for storage-foundation is rejected outright for a missing
+// required field.
+//
+// The negative assertions carry as much weight as the positive ones. Sending mode alongside
+// targetRef would be accepted today only because the structural schema prunes it, and would start
+// meaning something the day either producer grows the other's key.
+func TestCreateDataImport_BuildsLegacyTargetRefSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToSchemeFor(dataapi.LegacyGroupVersion)(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	pvcTpl := &v1alpha1.PersistentVolumeClaimTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
+	}
+
+	require.NoError(t, CreateDataImport(ctx, legacyBackend(), "import-into-pvc", "my-ns", "15m", false, true, pvcTpl, c))
+
+	var stored v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "import-into-pvc", Namespace: "my-ns"}, &stored))
+
+	require.NotNil(t, stored.Spec.TargetRef)
+	assert.Equal(t, v1alpha1.PersistentVolumeClaimKind, stored.Spec.TargetRef.Kind)
+	require.NotNil(t, stored.Spec.TargetRef.PvcTemplate)
+	assert.Equal(t, "restored-pvc", stored.Spec.TargetRef.PvcTemplate.Name)
+	assert.Equal(t, "15m", stored.Spec.TTL)
+	assert.True(t, stored.Spec.WaitForFirstConsumer)
+
+	assert.Empty(t, stored.Spec.Mode, "mode belongs to the other producer's schema")
+	assert.Nil(t, stored.Spec.PvcTemplate, "the root pvcTemplate belongs to the other producer's schema")
+
+	// Guard the serialised shape as well as the Go fields: a wrong json tag would keep the
+	// assertions above passing while changing what the apiserver receives. Same scope as the
+	// sibling storage-foundation test — this covers this package's json tags only, not
+	// server-side pruning or CEL.
+	raw, err := json.Marshal(stored.Spec)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"targetRef"`)
+	assert.Contains(t, string(raw), `"kind":"PersistentVolumeClaim"`)
+	assert.NotContains(t, string(raw), `"mode"`)
 }
 
 func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
@@ -115,7 +174,7 @@ func TestCreateDataImport_RejectsTemplateWithoutName(t *testing.T) {
 
 	for name, tpl := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := CreateDataImport(ctx, "di", "my-ns", "15m", false, false, tpl, c)
+			err := CreateDataImport(ctx, foundationBackend(), "di", "my-ns", "15m", false, false, tpl, c)
 			require.Error(t, err)
 
 			var stored v1alpha1.DataImport
@@ -308,7 +367,7 @@ func TestGetDataImportWithRestart_ExpiredRecreates(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
 
-	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	_, err := GetDataImportWithRestart(ctx, foundationBackend(), "test-di", "test-ns", c, logger)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expired; recreated, waiting")
 
@@ -403,7 +462,7 @@ func TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(expired).Build()
 
-	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	_, err := GetDataImportWithRestart(ctx, foundationBackend(), "test-di", "test-ns", c, logger)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expired; recreated, waiting")
 
@@ -426,14 +485,20 @@ func TestGetDataImportWithRestart_RecreatesFromServerEncodedSpec(t *testing.T) {
 	assert.Contains(t, string(recreatedRaw), `"waitForFirstConsumer":false`)
 }
 
-// TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed asserts the contract change: a
-// legacy standalone Type=="Expired" condition (the old, now version-skewed, detection signal) must
-// not trigger a recreate anymore. Only the current controller's Ready=False/Reason=Expired signal
-// does.
+// TestGetDataImportWithRestart_StandaloneExpiredConditionRecreates covers the other producer's
+// spelling of expiry: a standalone Type=="Expired" condition must trigger the same recreate as
+// storage-foundation's Ready=False/Reason=Expired.
+//
+// The fixture pairs Expired=True with a still-True Ready deliberately, because that is the state a
+// real storage-volume-data-manager cluster passes through rather than an invented one: its importer
+// pod raises the standalone Expired condition, and only the next controller reconcile mirrors it
+// onto Ready. A client that waited for the Ready spelling would keep polling a dead importer for
+// however long that reconcile takes, and then for the producer's whole retention TTL if the mirror
+// never lands.
 //
 // Deliberately NOT t.Parallel: it overrides the package-level maxRetryAttempts (see the note on
 // TestGetDataImportWithRestart_ExpiredRecreates).
-func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) {
+func TestGetDataImportWithRestart_StandaloneExpiredConditionRecreates(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 
@@ -446,11 +511,22 @@ func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) 
 
 	di := &v1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-di", Namespace: "test-ns"},
+		Spec: v1alpha1.DataImportSpec{
+			TTL:                  "15m",
+			WaitForFirstConsumer: true,
+			// Written in the older producer's shape, as an object read back from it would be.
+			TargetRef: &v1alpha1.DataImportTargetRefSpec{
+				Kind: v1alpha1.PersistentVolumeClaimKind,
+				PvcTemplate: &v1alpha1.PersistentVolumeClaimTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc"},
+				},
+			},
+		},
 		Status: v1alpha1.DataExportImportStatus{
 			URL:        "https://10.0.0.1:8085/",
 			VolumeMode: "Filesystem",
 			Conditions: []metav1.Condition{
-				// Legacy signal: a standalone Expired condition, distinct from Ready.
+				// The standalone Expired condition, raised before Ready is mirrored.
 				{Type: "Expired", Status: metav1.ConditionTrue},
 				readyCond(metav1.ConditionTrue, "PodReady", "Pod is ready and import completed"),
 			},
@@ -459,14 +535,26 @@ func TestGetDataImportWithRestart_LegacyExpiredConditionIsNotUsed(t *testing.T) 
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(di).Build()
 
-	got, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
-	require.NoError(t, err)
-	assert.Equal(t, "https://10.0.0.1:8085/", got.Status.URL)
+	_, err := GetDataImportWithRestart(ctx, legacyBackend(), "test-di", "test-ns", c, logger)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired; recreated, waiting")
 
-	// Confirm no delete+recreate happened: the object in the store is still the original.
-	var stored v1alpha1.DataImport
-	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &stored))
-	assert.Len(t, stored.Status.Conditions, 2, "legacy Expired condition must not trigger a recreate")
+	var recreated v1alpha1.DataImport
+	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &recreated))
+	assert.Empty(t, recreated.Status.Conditions, "the stale status must be gone after the recreate")
+
+	// The template has to survive a round trip through the older producer's nesting: reading
+	// Spec.PvcTemplate directly would find nothing here and abort the recreate with "requires a
+	// PVC template with metadata.name set".
+	require.NotNil(t, recreated.Spec.TargetRef, "the recreate must keep addressing the older producer")
+	require.NotNil(t, recreated.Spec.TargetRef.PvcTemplate)
+	assert.Equal(t, "restored-pvc", recreated.Spec.TargetRef.PvcTemplate.Name)
+	assert.Empty(t, recreated.Spec.Mode, "mode must not be sent to a producer whose schema has no such property")
+
+	recreatedRaw, marshalErr := json.Marshal(recreated.Spec)
+	require.NoError(t, marshalErr)
+	assert.Contains(t, string(recreatedRaw), `"targetRef"`)
+	assert.NotContains(t, string(recreatedRaw), `"mode"`)
 }
 
 // TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired guards against too broad a predicate:
@@ -496,7 +584,7 @@ func TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired(t *testing.T) {
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(di).Build()
 
-	_, err := GetDataImportWithRestart(ctx, "test-di", "test-ns", c, logger)
+	_, err := GetDataImportWithRestart(ctx, foundationBackend(), "test-di", "test-ns", c, logger)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not Ready")
 	assert.Contains(t, err.Error(), "(Completed)")

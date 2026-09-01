@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	v1alpha1 "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	client "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -92,8 +91,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		}
 	}
 
-	// Create runtime client for publish auto-detection and reconciliation.
-	rtClient, err := httpClient.NewRTClient(v1alpha1.AddToScheme)
+	// Resolve the producer that serves DataImport here, and build the runtime client bound to
+	// it for publish auto-detection and reconciliation.
+	backend, rtClient, err := util.ResolveClientFunc(ctx, httpClient, namespace, log)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	podUrl, baseUrl, _, subClient, err := util.PrepareUpload(ctx, diName, namespace, publish, httpClient, log)
+	podUrl, baseUrl, _, subClient, err := util.PrepareUpload(ctx, backend, diName, namespace, publish, httpClient, log)
 	if err != nil {
 		return err
 	}

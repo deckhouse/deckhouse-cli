@@ -206,3 +206,16 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 func (c *SafeClient) Copy() *SafeClient {
 	return &SafeClient{rest.CopyConfig(c.restConfig)}
 }
+
+// RESTConfig returns a copy of the client's Kubernetes configuration, for callers that need a
+// client-go client this type does not build itself (discovery, SelfSubjectAccessReview). A copy
+// rather than the original: the caller's client must not be able to retarget or re-authenticate
+// every other client derived from this one, the way SetProbeEndpoint deliberately does.
+// Returns nil when the client holds no configuration.
+func (c *SafeClient) RESTConfig() *rest.Config {
+	if c == nil || c.restConfig == nil {
+		return nil
+	}
+
+	return rest.CopyConfig(c.restConfig)
+}

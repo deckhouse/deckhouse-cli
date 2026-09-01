@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
-	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -91,12 +91,13 @@ func parseArgs(args []string) ( /*deName*/ string /*srcPath*/, string, error) {
 func downloadFunc(
 	ctx context.Context,
 	log *slog.Logger,
+	backend dataapi.Backend,
 	namespace, deName, srcPath string,
 	publish bool,
 	sClient *safeClient.SafeClient,
 	foo func(body io.Reader) error,
 ) error {
-	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, deName, namespace, publish, sClient)
+	url, volumeMode, subClient, err := util.PrepareDownloadFunc(ctx, log, backend, deName, namespace, publish, sClient)
 	if err != nil {
 		return err
 	}
@@ -187,7 +188,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	rtClient, err := sClient.NewRTClient(v1alpha1.AddToScheme)
+	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {
 		return err
 	}
@@ -209,7 +210,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	log.Info("DataExport created", slog.String("name", deName), slog.String("namespace", namespace))
 
-	err = downloadFunc(ctx, log, namespace, deName, srcPath, publish, sClient, func(body io.Reader) error {
+	err = downloadFunc(ctx, log, backend, namespace, deName, srcPath, publish, sClient, func(body io.Reader) error {
 		_, err := io.Copy(os.Stdout, body)
 		if err == io.EOF {
 			err = nil

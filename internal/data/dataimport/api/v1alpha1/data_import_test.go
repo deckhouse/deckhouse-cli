@@ -47,10 +47,12 @@ func newCreatePVCTemplate() *PersistentVolumeClaimTemplateSpec {
 
 // TestDataImportSpec_JSONWireShape pins the exact set of spec keys this type puts on the wire,
 // because the CRD's behaviour differs per key and the difference is invisible in Go: the schema is
-// non-preserving (an unknown key such as the removed spec.targetRef is pruned without an error),
-// and waitForFirstConsumer is defaulted to true (so an absent key is NOT the same as false).
-// A stray omitempty on the wrong field therefore changes what the server does while every
-// struct-level assertion keeps passing.
+// non-preserving (a key it does not declare is pruned without an error), and waitForFirstConsumer
+// is defaulted to true (so an absent key is NOT the same as false). A stray omitempty on the wrong
+// field therefore changes what the server does while every struct-level assertion keeps passing.
+//
+// Every row here builds the storage-foundation shape. The other producer's shape is pinned
+// separately by TestDataImportSpec_ShapesAreMutuallyExclusiveOnTheWire.
 func TestDataImportSpec_JSONWireShape(t *testing.T) {
 	t.Parallel()
 
@@ -120,12 +122,127 @@ func TestDataImportSpec_JSONWireShape(t *testing.T) {
 			assert.ElementsMatch(t, tt.wantKeys, gotKeys, "exact set of spec keys sent to the apiserver")
 			assert.Equal(t, tt.wantWaitForFirstConsumer, string(decoded["waitForFirstConsumer"]))
 
-			// The discriminator is spec.mode; spec.targetRef was removed from the CRD and would be
-			// pruned silently, so it must never reappear here under any input.
+			// Every row above builds the storage-foundation shape, whose discriminator is
+			// spec.mode and whose schema declares no targetRef. This says nothing about the
+			// other producer, which requires targetRef and has no mode — that shape is pinned by
+			// TestDataImportSpec_ShapesAreMutuallyExclusiveOnTheWire.
 			assert.NotContains(t, decoded, "targetRef")
 			assert.Equal(t, `"CreatePVC"`, string(decoded["mode"]))
 		})
 	}
+}
+
+// TestDataImportSpec_DestinationTemplate covers the read side of the two-shaped spec: a caller
+// that has fetched an object must find the PVC template regardless of which module wrote it.
+//
+// The recreate-on-expiry path depends on this. Reading Spec.PvcTemplate directly finds nothing in
+// an object written by storage-volume-data-manager, and the recreate then aborts with "requires a
+// PVC template with metadata.name set" — an error that names the template rather than the shape,
+// and so points the reader at the wrong thing.
+func TestDataImportSpec_DestinationTemplate(t *testing.T) {
+	t.Parallel()
+
+	tpl := newCreatePVCTemplate()
+
+	tests := []struct {
+		name string
+		spec *DataImportSpec
+		want *PersistentVolumeClaimTemplateSpec
+	}{
+		{
+			name: "storage-foundation shape: root pvcTemplate",
+			spec: &DataImportSpec{Mode: DataImportModeCreatePVC, PvcTemplate: tpl},
+			want: tpl,
+		},
+		{
+			name: "storage-volume-data-manager shape: nested under targetRef",
+			spec: &DataImportSpec{TargetRef: &DataImportTargetRefSpec{
+				Kind:        PersistentVolumeClaimKind,
+				PvcTemplate: tpl,
+			}},
+			want: tpl,
+		},
+		{
+			name: "neither shape filled",
+			spec: &DataImportSpec{},
+			want: nil,
+		},
+		{
+			name: "targetRef present but carrying no template",
+			spec: &DataImportSpec{TargetRef: &DataImportTargetRefSpec{Kind: PersistentVolumeClaimKind}},
+			want: nil,
+		},
+		{
+			name: "nil receiver",
+			spec: nil,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.spec.DestinationTemplate())
+		})
+	}
+}
+
+// TestDataImportSpec_ShapesAreMutuallyExclusiveOnTheWire pins that each shape leaves the other
+// key off the wire entirely.
+//
+// Sending both would be accepted today only because each CRD prunes what it does not declare, and
+// relying on that means the request stops being correct the moment either producer grows the
+// other's key — at which point the CLI would be writing a field it never meant to set.
+func TestDataImportSpec_ShapesAreMutuallyExclusiveOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	foundation, err := json.Marshal(DataImportSpec{
+		TTL:         "15m",
+		Mode:        DataImportModeCreatePVC,
+		PvcTemplate: newCreatePVCTemplate(),
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(foundation), `"mode":"CreatePVC"`)
+	assert.Contains(t, string(foundation), `"pvcTemplate"`)
+	assert.NotContains(t, string(foundation), `"targetRef"`)
+
+	legacy, err := json.Marshal(DataImportSpec{
+		TTL: "15m",
+		TargetRef: &DataImportTargetRefSpec{
+			Kind:        PersistentVolumeClaimKind,
+			PvcTemplate: newCreatePVCTemplate(),
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(legacy), `"targetRef"`)
+	assert.Contains(t, string(legacy), `"kind":"PersistentVolumeClaim"`)
+	assert.NotContains(t, string(legacy), `"mode"`)
+}
+
+// TestDataImportSpec_DeepCopyCarriesTargetRef guards the hand-written deepcopy against the field
+// added for the older producer. A deepcopy that skips it silently shares the template between the
+// original and the copy, so a mutation through one is visible through the other.
+func TestDataImportSpec_DeepCopyCarriesTargetRef(t *testing.T) {
+	t.Parallel()
+
+	original := &DataImportSpec{TargetRef: &DataImportTargetRefSpec{
+		Kind:        PersistentVolumeClaimKind,
+		PvcTemplate: newCreatePVCTemplate(),
+	}}
+
+	copied := original.DeepCopy()
+
+	require.NotNil(t, copied.TargetRef)
+	require.NotNil(t, copied.TargetRef.PvcTemplate)
+	assert.Equal(t, original.TargetRef.PvcTemplate.Name, copied.TargetRef.PvcTemplate.Name)
+
+	assert.NotSame(t, original.TargetRef, copied.TargetRef, "targetRef must not be shared with the copy")
+	assert.NotSame(t, original.TargetRef.PvcTemplate, copied.TargetRef.PvcTemplate,
+		"the nested template must not be shared with the copy")
+
+	copied.TargetRef.PvcTemplate.Name = "mutated"
+	assert.Equal(t, "restored-pvc", original.TargetRef.PvcTemplate.Name,
+		"mutating the copy must not reach the original")
 }
 
 // TestDataImportSpec_DeepCopy_DoesNotAliasPvcTemplate is not redundant boilerplate: the deepcopy

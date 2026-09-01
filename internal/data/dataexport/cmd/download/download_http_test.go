@@ -13,7 +13,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataexport/util"
 	safereq "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -43,7 +45,7 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 	// stub PrepareDownload / CreateDataExporterIfNeeded
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Filesystem", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -78,7 +80,7 @@ func TestDownloadFilesystem_BadPath(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Block", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -102,7 +104,7 @@ func TestDownloadBlock_OK(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Block", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -155,7 +157,7 @@ func TestDownloadFilesystem_SocketInDirIsSkipped(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Filesystem", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -218,7 +220,7 @@ func TestDownloadFilesystem_RecursiveWithSocketsCompletes(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/files", "Filesystem", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -256,7 +258,7 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 
 	origPrep := util.PrepareDownloadFunc
 	origCreate := util.CreateDataExporterIfNeededFunc
-	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
+	util.PrepareDownloadFunc = func(_ context.Context, _ *slog.Logger, _ dataapi.Backend, _, _ string, _ bool, _ *safereq.SafeClient) (string, string, *safereq.SafeClient, error) {
 		return srv.URL + "/api/v1/block", "Filesystem", newNoAuthSafe(), nil
 	}
 	util.CreateDataExporterIfNeededFunc = func(_ context.Context, _ *slog.Logger, de, _ string, _ bool, _ string, _ ctrlclient.Client) (string, error) {
@@ -269,4 +271,21 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
 	require.NoError(t, cmd.Execute())
+}
+
+// TestMain stubs the API-group resolution for every test in this package.
+//
+// Resolution is the one step of Run that talks to a real API server, and it now runs before any
+// of the behaviour these tests cover. Left unstubbed, each test would dial whatever cluster the
+// developer's kubeconfig happens to point at — which is how these tests started failing against a
+// live stand rather than against their own httptest server. The decision table resolution
+// implements is covered in internal/data/dataapi instead.
+func TestMain(m *testing.M) {
+	util.ResolveClientFunc = func(_ context.Context, _ *safereq.SafeClient, _ string, _ *slog.Logger) (dataapi.Backend, ctrlclient.Client, error) {
+		return dataapi.Backend{GroupVersion: dataapi.FoundationGroupVersion, Module: "storage-foundation"},
+			fakeclient.NewClientBuilder().Build(),
+			nil
+	}
+
+	os.Exit(m.Run())
 }

@@ -20,30 +20,50 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/deckhouse/deckhouse-cli/internal/data/dataapi"
 )
 
 const (
-	APIGroup   = "storage-foundation.deckhouse.io"
-	APIVersion = "v1alpha1"
+	// APIGroup is the group storage-foundation serves DataImport under. It is the default this
+	// package registers, not the only group these types are ever addressed through: a cluster
+	// running storage-volume-data-manager instead serves the same kind under
+	// dataapi.LegacyGroup, and callers reach it with AddToSchemeFor.
+	APIGroup   = dataapi.FoundationGroup
+	APIVersion = dataapi.Version
 )
 
 // SchemeGroupVersion is group version used to register these objects
 var (
-	SchemeGroupVersion = schema.GroupVersion{
-		Group:   APIGroup,
-		Version: APIVersion,
-	}
-	SchemeBuilder = runtime.NewSchemeBuilder(AddKnownTypes)
-	AddToScheme   = SchemeBuilder.AddToScheme
+	SchemeGroupVersion = dataapi.FoundationGroupVersion
+	SchemeBuilder      = runtime.NewSchemeBuilder(AddKnownTypes)
+	AddToScheme        = SchemeBuilder.AddToScheme
 )
 
-// Adds the list of known types to Scheme.
+// AddKnownTypes registers the DataImport types under SchemeGroupVersion (storage-foundation).
+// Callers that resolved the served group at runtime use AddToSchemeFor instead.
 func AddKnownTypes(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(SchemeGroupVersion,
+	return addKnownTypesFor(SchemeGroupVersion, scheme)
+}
+
+// AddToSchemeFor returns a scheme builder that registers the DataImport types under gv.
+//
+// One Go type serves both producers: the spec carries both destination shapes and fills the one
+// the resolved backend understands (see DataImportSpec). Registering one scheme per resolved
+// group keeps exactly one GroupVersionKind mapped to each type, which is what the
+// controller-runtime client requires to address the object at all.
+func AddToSchemeFor(gv schema.GroupVersion) func(*runtime.Scheme) error {
+	return func(scheme *runtime.Scheme) error {
+		return addKnownTypesFor(gv, scheme)
+	}
+}
+
+func addKnownTypesFor(gv schema.GroupVersion, scheme *runtime.Scheme) error {
+	scheme.AddKnownTypes(gv,
 		&DataImport{},
 		&DataImportList{},
 	)
-	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+	metav1.AddToGroupVersion(scheme, gv)
 
 	return nil
 }
