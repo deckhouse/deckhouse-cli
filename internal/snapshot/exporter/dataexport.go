@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
@@ -56,6 +57,19 @@ var ErrTargetUIDMismatch = errors.New("existing DataExport targets a different o
 // lifecycle without the exact Snapshot CR UID.
 var ErrTargetUIDRequired = errors.New("snapshot target UID is required")
 
+// ErrPublishForeignOwner is returned when --publish requires enabling
+// spec.publish on a DataExport that ANOTHER live download run owns. Adoption of a
+// foreign CR is read-only by contract, so this run refuses to mutate it and fails
+// fast instead of waiting out the full readiness timeout for a status.publicURL
+// that will never appear.
+var ErrPublishForeignOwner = errors.New("DataExport owned by another download run has publish disabled")
+
+// errDataExportRecheck signals that the adopted DataExport changed under our feet
+// while alignDataExportPublish was aligning spec.publish — it vanished, started
+// terminating, or expired. EnsureDataExport falls through to its create path
+// instead of returning the object it can no longer vouch for.
+var errDataExportRecheck = errors.New("DataExport changed during publish alignment")
+
 // defaultDataExportTTL is the fallback TTL used for DataExport when the caller
 // passes an empty string. Snapshot transfers can be large, so we use a longer
 // default than the 2-minute interactive default.
@@ -78,6 +92,20 @@ const (
 func dataExportExpired(conds []metav1.Condition) bool {
 	c := meta.FindStatusCondition(conds, conditionTypeReady)
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == reasonExpired
+}
+
+// exportBaseURL returns the base URL this run must talk to: the
+// storage-foundation-published Ingress URL when the public endpoint was
+// requested, otherwise the in-cluster exporter URL. The public URL carries a
+// path prefix (https://<host>/<namespace>/<kind-short>/<name>/) while the
+// internal one does not, so callers must join request paths onto THIS value and
+// never re-derive them from the origin alone.
+func exportBaseURL(de *deapi.DataExport, publicEndpoint bool) string {
+	if publicEndpoint {
+		return de.Status.PublicURL
+	}
+
+	return de.Status.URL
 }
 
 // dataExportGonePollInterval is the poll cadence EnsureDataExport uses while waiting
@@ -219,6 +247,7 @@ type ensureOptions struct {
 	log                *slog.Logger
 	terminatingTimeout time.Duration
 	acquisition        **DataExportAcquisition
+	publish            bool
 }
 
 // EnsureOption configures optional behavior of EnsureDataExport.
@@ -322,6 +351,16 @@ func WithRunOwner(runID string, log *slog.Logger) EnsureOption {
 	}
 }
 
+// WithPublish makes EnsureDataExport request the storage-foundation-published
+// (Ingress) endpoint for this DataExport: spec.publish is set on any CR this call
+// CREATES, and an adopted CR that still has spec.publish=false is upgraded in place
+// (see alignDataExportPublish). Publish is never downgraded back to false.
+func WithPublish(publish bool) EnsureOption {
+	return func(o *ensureOptions) {
+		o.publish = publish
+	}
+}
+
 func (o ensureOptions) recordAcquisition(de *deapi.DataExport) error {
 	if o.acquisition == nil {
 		return nil
@@ -361,6 +400,117 @@ func (o ensureOptions) warnIfForeign(de *deapi.DataExport, deName string) {
 		slog.String("name", deName),
 		slog.String("owner", owner),
 		slog.String("run_id", o.runID))
+}
+
+// alignDataExportPublish upgrades an ADOPTED DataExport's spec.publish from false
+// to true so this run gets a status.publicURL. It never writes false: downgrading
+// makes the storage-foundation controller DELETE the public Service and Ingress
+// (reconcilePublishResources), which would tear the endpoint out from under a
+// concurrent run still streaming through it. Returns the up-to-date object.
+//
+// The patch carries an OPTIMISTIC LOCK. spec.publish is the first spec field this
+// client writes on a CR it did not necessarily create, and the deterministic CR
+// name means two concurrent download runs resolve to the SAME object; the
+// storage-foundation controller also writes conditions, status.url and finalizers
+// on it continuously. The lock guarantees the write lands on the EXACT revision
+// whose identity was validated in this same attempt.
+//
+// A conflict is never re-sent from a stale base: retry.RetryOnConflict drops the
+// cached object, re-Gets it and re-runs EVERY identity check before patching
+// again. Once retry.DefaultRetry is exhausted the conflict is returned to the
+// caller, which fails the leaf so the operator's next resume run recomputes the
+// target from scratch.
+//
+// This deliberately diverges from the older, already-shipped one-way publish
+// upgrade in internal/data/dataexport/util/util.go (EnsureDataExportPublish,
+// used by "d8 data export download"): that helper patches with plain
+// client.MergeFrom and no identity re-validation. That path predates the
+// deterministic-name, multi-run-adoption model this package documents (see
+// runOwnerAnnotation), so a stale write there is far less likely to collide
+// with a concurrent, identity-distinct owner. Here it is not — hence the lock
+// and the re-validation. EnsureDataExportPublish is intentionally left as-is;
+// this function does not replace or call it.
+func (o ensureOptions) alignDataExportPublish(
+	ctx context.Context,
+	c client.Client,
+	existing *deapi.DataExport,
+	group, resource, kind, leafName string,
+) (*deapi.DataExport, error) {
+	current := existing
+	didPatch := false
+	deName := existing.Name
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if current == nil {
+			latest := new(deapi.DataExport)
+
+			getErr := c.Get(ctx, client.ObjectKey{Namespace: existing.Namespace, Name: deName}, latest)
+			if kubeerrors.IsNotFound(getErr) {
+				return errDataExportRecheck
+			}
+
+			if getErr != nil {
+				return fmt.Errorf("get DataExport %q after conflict: %w", deName, getErr)
+			}
+
+			current = latest
+		}
+
+		if !targetRefMatches(current.Spec.TargetRef, group, resource, kind, leafName) {
+			return targetRefMismatchError(deName, current.Spec.TargetRef, group, resource, kind, leafName)
+		}
+
+		if current.Annotations[targetUIDAnnotation] != string(o.targetUID) {
+			return targetUIDMismatchError(deName, current.Annotations[targetUIDAnnotation], o.targetUID)
+		}
+
+		if current.DeletionTimestamp != nil || dataExportExpired(current.Status.Conditions) {
+			return errDataExportRecheck
+		}
+
+		if current.Spec.Publish {
+			return nil
+		}
+
+		owner := current.Annotations[runOwnerAnnotation]
+		if o.runID != "" && owner != "" && owner != o.runID {
+			return fmt.Errorf(
+				"%w: DataExport %q is owned by download run %q and has spec.publish=false; "+
+					"wait for that run to finish, or rerun without --publish to use the in-cluster endpoint",
+				ErrPublishForeignOwner, deName, owner)
+		}
+
+		base := current.DeepCopy()
+		current.Spec.Publish = true
+
+		if patchErr := c.Patch(ctx, current,
+			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); patchErr != nil {
+			current = nil
+			return patchErr
+		}
+
+		didPatch = true
+
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, errDataExportRecheck) ||
+			errors.Is(err, ErrPublishForeignOwner) ||
+			errors.Is(err, ErrTargetRefMismatch) ||
+			errors.Is(err, ErrTargetUIDMismatch) {
+			return nil, err
+		}
+
+		return nil, fmt.Errorf("patch DataExport %q spec.publish: %w", deName, err)
+	}
+
+	if didPatch && o.log != nil {
+		o.log.Info("enabled publish on adopted DataExport",
+			slog.String("name", deName),
+			slog.String("run_id", o.runID))
+	}
+
+	return current, nil
 }
 
 // lifecycleAnnotations always stamps the target Snapshot UID and additionally
@@ -461,6 +611,30 @@ func EnsureDataExport(
 			// Ownership is intentionally NOT changed on adoption.
 			o.warnIfForeign(existing, deName)
 
+			if o.publish {
+				aligned, alignErr := o.alignDataExportPublish(ctx, c, existing, group, resource, kind, leafName)
+				if alignErr != nil {
+					if !errors.Is(alignErr, errDataExportRecheck) {
+						return nil, alignErr
+					}
+
+					// The object started terminating mid-retry (observed inside
+					// alignDataExportPublish, not here). Falling through to Create
+					// below without an explicit waitForDataExportGone is deliberate,
+					// not an oversight: Create already swallows AlreadyExists and every
+					// fallthrough path re-fetches and re-validates identity (see the
+					// comment above the Create call), so at worst this run adopts the
+					// still-terminating object for one pass and converges to a fresh,
+					// this-run-owned CR on the next resume attempt — the same
+					// "one-run delay, not a regression" the Expired branch below
+					// already accepts. Adding a wait here would just duplicate that
+					// case's handling for a narrower trigger.
+					break
+				}
+
+				existing = aligned
+			}
+
 			if err := o.recordAcquisition(existing); err != nil {
 				return nil, err
 			}
@@ -503,6 +677,11 @@ func EnsureDataExport(
 		},
 		Spec: deapi.DataexportSpec{
 			TTL: ttl,
+			// Always set explicitly, including false: alignDataExportPublish compares this
+			// field against the server's returned value, and the CRD declares no default:
+			// for spec.publish, so an implicit value would make that comparison depend on
+			// something we never sent.
+			Publish: o.publish,
 			TargetRef: deapi.TargetRefSpec{
 				Group:    group,
 				Resource: resource,
@@ -667,8 +846,30 @@ func readyConditionStatus(conds []metav1.Condition, hasURL bool) string {
 	return "waiting"
 }
 
+// waitReadyOptions carries optional readiness criteria for WaitReady.
+type waitReadyOptions struct {
+	publicEndpoint bool
+}
+
+// WaitReadyOption customizes what WaitReady treats as ready.
+type WaitReadyOption func(*waitReadyOptions)
+
+// WithPublicEndpoint makes WaitReady additionally require a non-empty
+// status.publicURL. The controller can flip Ready=True BEFORE it has finished
+// creating the public Service/Ingress and written status.publicURL, so returning
+// on Ready alone would hand the caller an empty base URL.
+//
+// Named after the endpoint, not "published": in this codebase "published" already
+// means an atomically committed on-disk artifact (archive.PublicationPublished).
+func WithPublicEndpoint() WaitReadyOption {
+	return func(o *waitReadyOptions) {
+		o.publicEndpoint = true
+	}
+}
+
 // WaitReady polls the DataExport named deName until:
-//   - its Ready condition is True and Status.URL is populated → returns the DE,
+//   - its Ready condition is True and its base URL (status.url, or
+//     status.publicURL when WithPublicEndpoint is passed) is populated → returns the DE,
 //   - it is Ready=False with reason Expired → returns a wrapped ErrExpired,
 //   - ctx is cancelled or its deadline is exceeded → returns a wrapped ctx.Err()
 //     that includes the last observed DataExport status and an inspection hint.
@@ -682,8 +883,17 @@ func WaitReady(
 	log *slog.Logger,
 	namespace,
 	deName string,
+	opts ...WaitReadyOption,
 ) (*deapi.DataExport, error) {
+	var o waitReadyOptions
+
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	var lastStatus string
+
+	var lastPublicURL string
 
 	for attempt := 0; ; attempt++ {
 		de := new(deapi.DataExport)
@@ -696,7 +906,10 @@ func WaitReady(
 			return nil, fmt.Errorf("DataExport %s/%s: %w", namespace, deName, ErrExpired)
 		}
 
-		if de.Status.URL != "" {
+		lastPublicURL = de.Status.PublicURL
+
+		hasURL := exportBaseURL(de, o.publicEndpoint) != ""
+		if hasURL {
 			for _, cond := range de.Status.Conditions {
 				if cond.Type == "Ready" && cond.Status == metav1.ConditionTrue {
 					return de, nil
@@ -704,7 +917,7 @@ func WaitReady(
 			}
 		}
 
-		lastStatus = readyConditionStatus(de.Status.Conditions, de.Status.URL != "")
+		lastStatus = readyConditionStatus(de.Status.Conditions, hasURL)
 
 		if attempt == 0 || attempt%logEveryN == 0 {
 			attrs := make([]slog.Attr, 0, 5)
@@ -724,9 +937,16 @@ func WaitReady(
 
 		select {
 		case <-ctx.Done():
+			hint := ""
+			if o.publicEndpoint && lastPublicURL == "" {
+				hint = "\n\nspec.publish is set but status.publicURL is still empty: the storage-foundation " +
+					"controller has not finished creating the public Service/Ingress. Check the module's " +
+					"ingress configuration, or rerun without --publish to use the in-cluster endpoint."
+			}
+
 			return nil, fmt.Errorf(
-				"%w; DataExport status: %s\n\nTo inspect DataExport status, run:\n  d8 k -n %s get dataexport %s -o yaml",
-				ctx.Err(), lastStatus, namespace, deName,
+				"%w; DataExport status: %s\n\nTo inspect DataExport status, run:\n  d8 k -n %s get dataexport %s -o yaml%s",
+				ctx.Err(), lastStatus, namespace, deName, hint,
 			)
 		case <-time.After(3 * time.Second):
 		}

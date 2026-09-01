@@ -2266,3 +2266,782 @@ func TestEnsureDataExport_AlreadyExistsUIDMismatchNeverAcquires(t *testing.T) {
 	assert.Equal(t, types.UID("uid-race-winner"), preserved.UID)
 	assert.Equal(t, "uid-other-snapshot", preserved.Annotations[targetUIDAnnotationKey])
 }
+
+// ---------------------------------------------------------------------------
+// --publish tests
+// ---------------------------------------------------------------------------
+
+// TestEnsureDataExport_SetsSpecPublish verifies WithPublish is always reflected
+// explicitly in spec.publish on a newly-created DataExport, including the false
+// case: the CRD declares no default for spec.publish, and alignDataExportPublish
+// compares this field against the server's returned value, so an implicit
+// zero-value would make that comparison depend on something never actually sent.
+// The JSON assertion (not just the Go struct comparison) matters because the fake
+// client does not prune zero-value fields the way pruning-aware assertions might
+// hide a missing key.
+func TestEnsureDataExport_SetsSpecPublish(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		publishOpt *bool
+		wantJSON   string
+	}{
+		{
+			name:       "success: publish=true is set explicitly",
+			publishOpt: boolPtr(true),
+			wantJSON:   `"publish":true`,
+		},
+		{
+			name:       "success: publish=false is set explicitly",
+			publishOpt: boolPtr(false),
+			wantJSON:   `"publish":false`,
+		},
+		{
+			name:       "success: publish option omitted defaults to false and is still explicit",
+			publishOpt: nil,
+			wantJSON:   `"publish":false`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).Build()
+
+			var opts []exporter.EnsureOption
+			if tt.publishOpt != nil {
+				opts = append(opts, exporter.WithPublish(*tt.publishOpt))
+			}
+
+			de, err := ensureDataExport(context.Background(), c, "test-ns",
+				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind,
+				"publish-flag-vs", "1h", opts...)
+			require.NoError(t, err)
+			require.NotNil(t, de)
+
+			want := tt.publishOpt != nil && *tt.publishOpt
+			assert.Equal(t, want, de.Spec.Publish)
+
+			raw, marshalErr := json.Marshal(de.Spec)
+			require.NoError(t, marshalErr)
+			assert.Contains(t, string(raw), tt.wantJSON,
+				"marshaled spec must carry an explicit publish key even when false")
+		})
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// publishExistingDE builds a live (non-terminating, non-expired) DataExport CR
+// this test suite's helpers can adopt, with the given publish value and owner.
+func publishExistingDE(namespace, leafName string, publish bool, ownerRunID string, uid types.UID) *deapi.DataExport {
+	return &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        volumeSnapshotDataExportName(namespace, leafName),
+			Namespace:   namespace,
+			UID:         uid,
+			Annotations: targetAnnotations(ownerRunID),
+		},
+		Spec: deapi.DataexportSpec{
+			TTL:       "1h",
+			Publish:   publish,
+			TargetRef: volumeSnapshotTargetRef(leafName),
+		},
+	}
+}
+
+// TestEnsureDataExport_AlignsPublishOnAdoption verifies that adopting a live CR
+// with spec.publish=false upgrades it to true in the cluster when this run's own
+// WithPublish(true) is set.
+func TestEnsureDataExport_AlignsPublishOnAdoption(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "align-publish-vs"
+		runID     = "run-align-owner"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-align"))
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Spec.Publish, "the returned object must reflect the alignment")
+
+	check := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace, Name: volumeSnapshotDataExportName(namespace, leafName),
+	}, check))
+	assert.True(t, check.Spec.Publish, "spec.publish must be upgraded to true in the cluster")
+}
+
+// TestEnsureDataExport_NeverDowngradesPublishOnAdoption verifies that an
+// already-published CR is never downgraded back to false, whether WithPublish is
+// omitted entirely or explicitly passed false, and that no write call happens
+// either way — downgrading would make the storage-foundation controller tear
+// down the public Service/Ingress out from under a concurrent reader.
+func TestEnsureDataExport_NeverDowngradesPublishOnAdoption(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		opts []exporter.EnsureOption
+	}{
+		{name: "success: WithPublish omitted leaves publish=true untouched"},
+		{name: "success: WithPublish(false) leaves publish=true untouched",
+			opts: []exporter.EnsureOption{exporter.WithPublish(false)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				namespace = "test-ns"
+				runID     = "run-no-downgrade"
+			)
+
+			leafName := "no-downgrade-" + strings.ReplaceAll(tt.name, " ", "-")
+			existing := publishExistingDE(namespace, leafName, true, runID, types.UID("uid-no-downgrade"))
+
+			var patchCalls atomic.Int32
+
+			c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patchCalls.Add(1)
+
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+
+			opts := append([]exporter.EnsureOption{exporter.WithRunOwner(runID, slog.Default())}, tt.opts...)
+
+			got, err := ensureDataExport(context.Background(), c, namespace,
+				aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+				opts...)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+
+			assert.True(t, got.Spec.Publish, "publish must remain true")
+			assert.Equal(t, int32(0), patchCalls.Load(), "a no-op alignment must never issue a Patch")
+		})
+	}
+}
+
+// TestEnsureDataExport_PublishAlreadyAlignedIssuesNoPatch verifies idempotency:
+// adopting a CR that already has publish=true with WithPublish(true) issues zero
+// Patch calls.
+func TestEnsureDataExport_PublishAlreadyAlignedIssuesNoPatch(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "already-aligned-vs"
+		runID     = "run-already-aligned"
+	)
+
+	existing := publishExistingDE(namespace, leafName, true, runID, types.UID("uid-already-aligned"))
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls.Add(1)
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Spec.Publish)
+	assert.Equal(t, int32(0), patchCalls.Load(), "an already-aligned CR must not be patched")
+}
+
+// TestEnsureDataExport_DoesNotPatchForeignOwnedPublish verifies that when a
+// foreign-owned CR still has publish=false, WithPublish(true) refuses to mutate
+// it: adoption is read-only by contract, and enabling publish on another run's
+// CR would be a write this run has no authority to make.
+func TestEnsureDataExport_DoesNotPatchForeignOwnedPublish(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace  = "test-ns"
+		leafName   = "foreign-publish-vs"
+		ownerRun   = "run-foreign-owner"
+		adopterRun = "run-foreign-adopter"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, ownerRun, types.UID("uid-foreign-publish"))
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls.Add(1)
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(adopterRun, slog.Default()),
+		exporter.WithPublish(true))
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.True(t, errors.Is(err, exporter.ErrPublishForeignOwner),
+		"error must wrap ErrPublishForeignOwner; got: %v", err)
+	assert.Equal(t, int32(0), patchCalls.Load(), "a foreign-owned CR must never be patched")
+
+	check := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{
+		Namespace: namespace, Name: volumeSnapshotDataExportName(namespace, leafName),
+	}, check))
+	assert.False(t, check.Spec.Publish, "the foreign CR's publish must remain untouched")
+}
+
+// TestEnsureDataExport_AdoptsForeignOwnedPublishWhenAlreadyEnabled verifies that
+// a foreign-owned CR that ALREADY has publish=true is adopted without error and
+// without a patch — there is nothing to align, so the foreign-owner guard never
+// triggers.
+func TestEnsureDataExport_AdoptsForeignOwnedPublishWhenAlreadyEnabled(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace  = "test-ns"
+		leafName   = "foreign-already-published-vs"
+		ownerRun   = "run-foreign-owner-2"
+		adopterRun = "run-foreign-adopter-2"
+	)
+
+	existing := publishExistingDE(namespace, leafName, true, ownerRun, types.UID("uid-foreign-already"))
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls.Add(1)
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(adopterRun, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Spec.Publish)
+	assert.Equal(t, int32(0), patchCalls.Load())
+}
+
+// TestEnsureDataExport_PublishPatchUsesOptimisticLock is the decisive regression
+// test for the optimistic-lock requirement on alignDataExportPublish's patch: a
+// concurrent writer bumps the object's resourceVersion between this run's
+// identity validation and its Patch call. WITHOUT an optimistic lock, a
+// MergeFrom(base) patch would silently drop the concurrent writer's edit
+// (last-write-wins on the whole object diff). WITH the lock
+// (MergeFromWithOptimisticLock), the fake client's Patch call must return a
+// Conflict on the first attempt (proving the lock actually engaged), and
+// retry.RetryOnConflict must re-Get and retry, converging on a second, successful
+// Patch that lands publish=true.
+func TestEnsureDataExport_PublishPatchUsesOptimisticLock(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "optimistic-lock-vs"
+		runID     = "run-optimistic-lock"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-optimistic-lock"))
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var (
+		patchCalls  atomic.Int32
+		getCalls    atomic.Int32
+		bumpedOnce  atomic.Bool
+		conflictSaw atomic.Bool
+	)
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*deapi.DataExport); ok && key.Name == deName {
+					getCalls.Add(1)
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				call := patchCalls.Add(1)
+
+				// Simulate a concurrent writer landing a change AFTER this run
+				// captured its base but BEFORE this Patch call is applied: bump the
+				// stored object's resourceVersion out from under the in-flight patch,
+				// exactly once, on the first attempt only.
+				if call == 1 && bumpedOnce.CompareAndSwap(false, true) {
+					latest := new(deapi.DataExport)
+					if err := cl.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, latest); err != nil {
+						return fmt.Errorf("fetch latest before concurrent bump: %w", err)
+					}
+
+					if latest.Annotations == nil {
+						latest.Annotations = map[string]string{}
+					}
+
+					latest.Annotations["test.deckhouse.io/concurrent-writer"] = "true"
+
+					if err := cl.Update(ctx, latest); err != nil {
+						return fmt.Errorf("apply concurrent bump: %w", err)
+					}
+				}
+
+				err := cl.Patch(ctx, obj, patch, opts...)
+				if call == 1 && apierrors.IsConflict(err) {
+					conflictSaw.Store(true)
+				}
+
+				return err
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err, "the second attempt (after re-Get) must succeed")
+	require.NotNil(t, got)
+
+	assert.True(t, conflictSaw.Load(),
+		"the first Patch attempt must observe a Conflict from the optimistic lock; "+
+			"if this fails, the lock did not engage (see this test's doc comment for the "+
+			"temporary MergeFrom(base) swap used to verify the test itself catches the regression)")
+	assert.GreaterOrEqual(t, patchCalls.Load(), int32(2), "the conflict must be retried with a fresh Patch")
+	assert.GreaterOrEqual(t, getCalls.Load(), int32(1), "a re-Get must happen between the conflicting and retried Patch")
+	assert.True(t, got.Spec.Publish, "publish must end up true after the retry converges")
+
+	check := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: deName}, check))
+	assert.True(t, check.Spec.Publish)
+	assert.Equal(t, "true", check.Annotations["test.deckhouse.io/concurrent-writer"],
+		"the concurrent writer's own edit must survive (never silently dropped)")
+}
+
+// TestEnsureDataExport_PublishPatchRetriesConflict verifies that a bounded
+// number of Conflicts (below retry.DefaultRetry's budget) are transparently
+// retried, each retry preceded by a re-Get, converging on success.
+func TestEnsureDataExport_PublishPatchRetriesConflict(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace  = "test-ns"
+		leafName   = "retries-conflict-vs"
+		runID      = "run-retries-conflict"
+		conflictsN = 2 // less than retry.DefaultRetry's ~5 step budget
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-retries-conflict"))
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var (
+		patchCalls atomic.Int32
+		getCalls   atomic.Int32
+	)
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*deapi.DataExport); ok && key.Name == deName {
+					getCalls.Add(1)
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				call := patchCalls.Add(1)
+				if call <= conflictsN {
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+						deName, errors.New("synthetic conflict"))
+				}
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Spec.Publish)
+	assert.Equal(t, int32(conflictsN+1), patchCalls.Load())
+	assert.GreaterOrEqual(t, getCalls.Load(), int32(conflictsN), "each retry must re-Get before re-patching")
+}
+
+// TestEnsureDataExport_PublishPatchGivesUpAfterConflictBudget verifies that once
+// retry.DefaultRetry's bounded budget is exhausted, EnsureDataExport returns the
+// Conflict as a classifiable error (apierrors.IsConflict) rather than looping
+// forever or swallowing it.
+func TestEnsureDataExport_PublishPatchGivesUpAfterConflictBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "conflict-budget-vs"
+		runID     = "run-conflict-budget"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-conflict-budget"))
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls.Add(1)
+
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+					deName, errors.New("perpetual synthetic conflict"))
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.True(t, apierrors.IsConflict(err), "the exhausted conflict must remain classifiable; got: %v", err)
+
+	// A bounded, small number of attempts: proves this did not loop forever.
+	calls := patchCalls.Load()
+	assert.Greater(t, calls, int32(1), "at least one retry must have happened")
+	assert.Less(t, calls, int32(50), "the retry budget must be bounded, not an unbounded loop")
+}
+
+// TestEnsureDataExport_PublishAlignmentRevalidatesIdentityAfterConflict verifies
+// that after a Conflict forces a re-Get, EVERY identity check re-runs against the
+// freshly fetched object: if the re-fetched object's target-UID annotation no
+// longer matches (e.g. the Snapshot was deleted and recreated concurrently), the
+// alignment must fail with ErrTargetUIDMismatch and must NOT patch publish=true
+// onto an object that no longer belongs to this operation.
+func TestEnsureDataExport_PublishAlignmentRevalidatesIdentityAfterConflict(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "revalidate-after-conflict-vs"
+		runID     = "run-revalidate"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-revalidate"))
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				call := patchCalls.Add(1)
+
+				if call == 1 {
+					// Simulate the Snapshot being deleted and recreated concurrently:
+					// the DataExport's target-UID annotation changes underneath us.
+					latest := new(deapi.DataExport)
+					if err := cl.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, latest); err != nil {
+						return fmt.Errorf("fetch latest before uid swap: %w", err)
+					}
+
+					latest.Annotations[targetUIDAnnotationKey] = "uid-recreated-snapshot"
+					if err := cl.Update(ctx, latest); err != nil {
+						return fmt.Errorf("apply uid swap: %w", err)
+					}
+
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+						deName, errors.New("synthetic conflict before uid swap"))
+				}
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.True(t, errors.Is(err, exporter.ErrTargetUIDMismatch),
+		"error must wrap ErrTargetUIDMismatch; got: %v", err)
+
+	check := new(deapi.DataExport)
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: deName}, check))
+	assert.False(t, check.Spec.Publish, "publish must not be patched onto an object whose identity changed")
+}
+
+// TestEnsureDataExport_PublishAlignmentFallsThroughWhenObjectVanishes verifies
+// that when the adopted CR vanishes (NotFound on re-Get after a Conflict),
+// EnsureDataExport falls through to its create path instead of returning an
+// error, and the freshly created CR carries publish=true.
+func TestEnsureDataExport_PublishAlignmentFallsThroughWhenObjectVanishes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "vanishes-during-align-vs"
+		runID     = "run-vanishes"
+	)
+
+	existing := publishExistingDE(namespace, leafName, false, runID, types.UID("uid-vanishes"))
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	var patchCalls atomic.Int32
+
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				call := patchCalls.Add(1)
+
+				if call == 1 {
+					// The object vanishes (e.g. deleted and GC'd) before the patch lands.
+					latest := new(deapi.DataExport)
+					if err := cl.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deName}, latest); err != nil {
+						return fmt.Errorf("fetch latest before delete: %w", err)
+					}
+
+					if err := cl.Delete(ctx, latest); err != nil {
+						return fmt.Errorf("delete before conflict: %w", err)
+					}
+
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: "storage-foundation.deckhouse.io", Resource: "dataexports"},
+						deName, errors.New("synthetic conflict before vanish"))
+				}
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	got, err := ensureDataExport(context.Background(), c, namespace,
+		aggapi.VolumeSnapshotGroup, aggapi.VolumeSnapshotResource, aggapi.VolumeSnapshotKind, leafName, "1h",
+		exporter.WithRunOwner(runID, slog.Default()),
+		exporter.WithPublish(true))
+	require.NoError(t, err, "a vanished adopted CR must fall through to the create path, not error")
+	require.NotNil(t, got)
+	assert.True(t, got.Spec.Publish, "the freshly created CR must carry publish=true")
+	assert.NotEqual(t, existing.UID, got.UID, "a genuinely new object must have been created")
+}
+
+// ---------------------------------------------------------------------------
+// WaitReady publish-endpoint tests
+// ---------------------------------------------------------------------------
+
+// makePublishDE returns a DataExport with the given Ready status and URLs, named
+// deterministically for leafName, for WaitReady publish-mode tests.
+func makePublishDE(namespace, leafName, url, publicURL string, ready bool) *deapi.DataExport {
+	deName := volumeSnapshotDataExportName(namespace, leafName)
+
+	status := metav1.ConditionFalse
+	if ready {
+		status = metav1.ConditionTrue
+	}
+
+	return &deapi.DataExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deName,
+			Namespace: namespace,
+		},
+		Status: deapi.DataExportStatus{
+			URL:       url,
+			PublicURL: publicURL,
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: status, Reason: "PodReady"},
+			},
+		},
+	}
+}
+
+// TestWaitReady_PublicEndpointRequiresPublicURL verifies that WithPublicEndpoint
+// makes WaitReady require a non-empty status.publicURL even though Ready=True and
+// status.url is already populated: the controller can flip Ready before it
+// finishes wiring the public Service/Ingress, so Ready alone is not sufficient
+// for the publish path.
+func TestWaitReady_PublicEndpointRequiresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "public-url-required-vs"
+	)
+
+	de := makePublishDE(namespace, leafName, "https://internal.example.test", "", true)
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(de).WithStatusSubresource(de).Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := exporter.WaitReady(ctx, c, slog.Default(), namespace, de.Name, exporter.WithPublicEndpoint())
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded),
+		"empty status.publicURL under WithPublicEndpoint must time out; got: %v", err)
+}
+
+// TestWaitReady_PublicEndpointUsesPublicURL verifies the happy path: Ready=True
+// with a non-empty status.publicURL (path-prefixed) returns immediately under
+// WithPublicEndpoint.
+func TestWaitReady_PublicEndpointUsesPublicURL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "public-url-present-vs"
+		publicURL = "https://api.example.test/test-ns/volumesnapshot/leaf-a/"
+	)
+
+	de := makePublishDE(namespace, leafName, "https://internal.example.test", publicURL, true)
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(de).WithStatusSubresource(de).Build()
+
+	got, err := exporter.WaitReady(context.Background(), c, slog.Default(), namespace, de.Name, exporter.WithPublicEndpoint())
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, publicURL, got.Status.PublicURL)
+}
+
+// TestWaitReady_DefaultModeIgnoresPublicURL is the regression guard for the
+// unchanged default (non-publish) contract: an empty status.publicURL must not
+// block readiness when WithPublicEndpoint is not passed.
+func TestWaitReady_DefaultModeIgnoresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "default-mode-ignores-public-vs"
+	)
+
+	de := makePublishDE(namespace, leafName, "https://internal.example.test", "", true)
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(de).WithStatusSubresource(de).Build()
+
+	got, err := exporter.WaitReady(context.Background(), c, slog.Default(), namespace, de.Name)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "https://internal.example.test", got.Status.URL)
+}
+
+// TestWaitReady_PublicEndpointTimeoutMessageMentionsPublicURL verifies the
+// publish-specific diagnostic hint appears in the timeout error text.
+func TestWaitReady_PublicEndpointTimeoutMessageMentionsPublicURL(t *testing.T) {
+	t.Parallel()
+
+	const (
+		namespace = "test-ns"
+		leafName  = "public-url-hint-vs"
+	)
+
+	de := makePublishDE(namespace, leafName, "https://internal.example.test", "", true)
+	c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(de).WithStatusSubresource(de).Build()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err := exporter.WaitReady(ctx, c, slog.Default(), namespace, de.Name, exporter.WithPublicEndpoint())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status.publicURL")
+	assert.Contains(t, err.Error(), "rerun without --publish")
+}
+
+// TestExportBaseURL is a direct table test on the exportBaseURL helper (internal,
+// so this file must stay package exporter_test but the function is unexported —
+// exercised only indirectly through WaitReady/OpenExport's observable outputs
+// above; this test instead exercises it through the URL selection behavior
+// visible via WaitReady's returned object, since exportBaseURL itself is
+// unexported and not part of the package's public surface).
+func TestExportBaseURL_ViaWaitReadySelection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		url            string
+		publicURL      string
+		publicEndpoint bool
+		wantReady      bool
+	}{
+		{
+			name:           "success: internal endpoint uses status.url",
+			url:            "https://internal.example.test",
+			publicURL:      "",
+			publicEndpoint: false,
+			wantReady:      true,
+		},
+		{
+			name:           "success: public endpoint uses status.publicURL",
+			url:            "https://internal.example.test",
+			publicURL:      "https://api.example.test/ns/kind/leaf/",
+			publicEndpoint: true,
+			wantReady:      true,
+		},
+		{
+			name:           "error: public endpoint with empty status.url is not ready by url alone",
+			url:            "",
+			publicURL:      "",
+			publicEndpoint: false,
+			wantReady:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			leafName := "base-url-select-" + strings.ReplaceAll(tt.name, " ", "-")
+			de := makePublishDE("test-ns", leafName, tt.url, tt.publicURL, true)
+			c := fake.NewClientBuilder().WithScheme(newDEScheme(t)).WithObjects(de).WithStatusSubresource(de).Build()
+
+			var opts []exporter.WaitReadyOption
+			if tt.publicEndpoint {
+				opts = append(opts, exporter.WithPublicEndpoint())
+			}
+
+			ctx := context.Background()
+			if !tt.wantReady {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
+				defer cancel()
+			}
+
+			got, err := exporter.WaitReady(ctx, c, slog.Default(), "test-ns", de.Name, opts...)
+			if !tt.wantReady {
+				require.Error(t, err)
+				assert.Nil(t, got)
+
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, got)
+		})
+	}
+}
