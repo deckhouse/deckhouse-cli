@@ -26,6 +26,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/debugtar"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/virtualizationtar"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -78,6 +79,8 @@ func NewCommand() *cobra.Command {
 	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
 	collectDebugInfoCmd.Flags().DurationVar(&commandTimeout, "command-timeout", 2*time.Minute, "Timeout for each individual debug command execution")
 	collectDebugInfoCmd.Flags().DurationVar(&requestInterval, "request-interval", 0, "Minimum interval between debug command executions to avoid overloading the cluster (e.g. 200ms, 500ms, 1s). Zero disables rate limiting (default 0s)")
+
+	collectDebugInfoCmd.AddCommand(virtualizationtar.NewCommand())
 
 	return collectDebugInfoCmd
 }

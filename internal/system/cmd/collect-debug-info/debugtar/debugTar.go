@@ -186,14 +186,14 @@ var debugCommands = []Command{
 		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=cluster-autoscaler", "--tail=5000", "-c", "cluster-autoscaler", "--ignore-errors=true"},
 	},
 	{
-		File:            "core-cert-manager-logs.txt",
+		File:            "d8-cert-manager-logs.txt",
 		Cmd:             "kubectl",
 		Args:            []string{"-n", "d8-cert-manager", "logs", "-l", "app=cert-manager", "--tail=3000", "--ignore-errors=true"},
 		RequiredModule:  "cert-manager",
 		ExpandPerModule: false,
 	},
 	{
-		File:            "core-certificate-cert-manager.json",
+		File:            "d8-cert-manager-all-certificate.json",
 		Cmd:             "kubectl",
 		Args:            []string{"get", "certificate", "-A", "-o", "json", "--ignore-not-found=true"},
 		RequiredModule:  "cert-manager",
@@ -404,6 +404,35 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		excludeMap[file] = true
 	}
 
+	gzipWriter := gzip.NewWriter(os.Stdout)
+	defer gzipWriter.Close()
+
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
+
+	if err = runCommands(tarWriter, config, kubeCl, podName, namespace, containerName, commands, excludeMap, commandTimeout, requestInterval); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
+
+	return nil
+}
+
+// runCommands executes each command inside the Deckhouse pod and streams its
+// output into the tar archive, honoring the exclude list and the optional
+// rate limit between command executions.
+func runCommands(
+	tarWriter *tar.Writer,
+	config *rest.Config,
+	kubeCl kubernetes.Interface,
+	podName, namespace, containerName string,
+	commands []Command,
+	excludeMap map[string]bool,
+	commandTimeout, requestInterval time.Duration,
+) error {
 	var tickCh <-chan time.Time
 
 	if requestInterval > 0 {
@@ -414,14 +443,6 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 	}
 
 	var stdout, stderr bytes.Buffer
-
-	gzipWriter := gzip.NewWriter(os.Stdout)
-	defer gzipWriter.Close()
-
-	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
-
-	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
 
 	for _, cmd := range commands {
 		if isFileExcluded(cmd.File, excludeMap) {
@@ -463,8 +484,6 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		stdout.Reset()
 		stderr.Reset()
 	}
-
-	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
 
 	return nil
 }
