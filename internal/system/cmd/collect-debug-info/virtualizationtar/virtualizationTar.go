@@ -32,12 +32,7 @@ import (
 var (
 	virtualizationCmdLong = templates.LongDesc(`
 		Collect a separate debug archive with detailed data from the d8-virtualization namespace.
-
-		Pods are discovered dynamically, so the collected set always matches
-		the current cluster state. Logs are collected from the default
-		container of each pod.
-
-		© Flant JSC 2025`)
+	`)
 
 	virtualizationCmdExample = templates.Examples(`
 		# Collect the virtualization debug archive:
