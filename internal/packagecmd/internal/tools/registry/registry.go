@@ -24,7 +24,8 @@ type options struct {
 	insecure bool
 }
 
-// Option customizes how a registry request authenticates.
+// Option customizes a registry request: authentication, transport security
+// and the URL scheme of reference parsing.
 type Option func(*options)
 
 // WithBasicAuth authenticates requests with username and password instead of the
@@ -62,6 +63,8 @@ func resolve(opts ...Option) options {
 // Auth resolves opts into the authentication option for a remote request, defaulting
 // to the ambient Docker keychain. It is exported for packages that issue their own
 // registry requests instead of going through this one, such as imagefs.
+// Non-auth options such as WithInsecure are dropped here: a caller that needs
+// them must consume RemoteOptions and NameOptions instead.
 func Auth(opts ...Option) remote.Option {
 	return resolve(opts...).auth
 }
@@ -95,7 +98,8 @@ func insecureTransport() http.RoundTripper {
 	return t
 }
 
-// Copy copies a container image from srcRef to destRef using credentials from the default keychain.
+// Copy copies a container image from srcRef to destRef. By default it authenticates
+// with the ambient Docker keychain; opts can override credentials and transport.
 func Copy(ctx context.Context, srcRef, destRef string, opts ...Option) error {
 	nameOpts := NameOptions(opts...)
 	remoteOpts := RemoteOptions(ctx, opts...)

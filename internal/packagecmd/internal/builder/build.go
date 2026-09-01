@@ -263,9 +263,9 @@ func login(ctx context.Context, registry, username, token string, insecure bool)
 		execute.Arg(token),
 	}
 
-	// Only plain HTTP is available here: delivery-kit's cr login does not
-	// register --skip-tls-verify-registry, so a self-signed HTTPS registry
-	// still fails at this step.
+	// The flag marks the registry insecure in the docker sense: HTTPS without
+	// certificate verification first, plain HTTP as a fallback. Self-signed
+	// HTTPS registries therefore work here too.
 	if insecure {
 		args = append(args, flagInsecureRegistry)
 	}

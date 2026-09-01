@@ -3,6 +3,7 @@ package build
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -95,7 +96,7 @@ Environment Variables:
 	cmd.Flags().StringVarP(&packageVersion, "version", "v", "", "Package version")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "force update version in registry")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
-	cmd.Flags().BoolVar(&insecure, "insecure", false, "Allow plain HTTP and skip TLS verification when accessing the registry (env: PACKAGE_BUILD_INSECURE)")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "Allow plain HTTP and skip TLS verification for every registry used by the build, including the final repository and base-image pulls (env: PACKAGE_BUILD_INSECURE)")
 
 	cmd.Flags().StringVar(&signCert, "sign-cert", "", "sign certificate path or base64 string (env: PACKAGE_BUILD_SIGN_CERT)")
 	cmd.Flags().StringVar(&signKey, "sign-key", "", "sign key path or base64 string or vault url (env: PACKAGE_BUILD_SIGN_KEY)")
@@ -145,8 +146,10 @@ func build(cmd *cobra.Command, _ []string) error {
 		signKey = os.Getenv("PACKAGE_BUILD_SIGN_KEY")
 	}
 
-	if !insecure {
-		insecure = os.Getenv("PACKAGE_BUILD_INSECURE") == "true" || os.Getenv("PACKAGE_BUILD_INSECURE") == "1"
+	// The env var is a fallback for an unset flag only: an explicit
+	// --insecure=false must win over PACKAGE_BUILD_INSECURE=true.
+	if !cmd.Flags().Changed("insecure") {
+		insecure, _ = strconv.ParseBool(os.Getenv("PACKAGE_BUILD_INSECURE"))
 	}
 
 	if sign {

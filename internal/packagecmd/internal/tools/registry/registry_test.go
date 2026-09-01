@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,4 +37,7 @@ func TestInsecureTransport(t *testing.T) {
 	transport, ok := insecureTransport().(*http.Transport)
 	require.True(t, ok)
 	require.True(t, transport.TLSClientConfig.InsecureSkipVerify)
+
+	// The shared ggcr default transport must stay untouched.
+	require.NotSame(t, remote.DefaultTransport, transport)
 }
