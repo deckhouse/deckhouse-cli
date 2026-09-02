@@ -27,7 +27,18 @@ machinery/commands split `internal/selfupdate` / `internal/dist/cmd` uses.
 | `d8 dist plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 dist versions`) |
 | `d8 dist plugins contract <name>` | show a plugin's contract |
 | `d8 dist plugins remove <name>` | remove an installed plugin |
-| `d8 <plugin> ...` *(wrapper, with `DECKHOUSE_PLUGINS_ENABLED=true`)* | run an installed plugin; auto-installs it on first use |
+| `d8 <plugin> ...` *(wrapper)* | run an installed plugin; auto-installs it on first use |
+
+## Overriding a built-in command
+
+A handful of top-level commands are **overridable**: `delivery-kit`, `data`, `snapshot`, `iam`, `network`, `v`, `stronghold`, `package` and `system`. Install a plugin named exactly like one of them and it takes the command over; with no such plugin installed, the built-in implementation serves it. The table lives in `overridableCommands` (`cmd/d8/root.go`).
+
+Details worth knowing:
+
+- **Already-installed only.** The override never reaches the registry: a plugin that exists upstream but is not installed locally does not displace a built-in, so `d8` starts with no network access and no surprises. Auto-install on first use therefore applies only to plugins that are *not* shadowing a built-in.
+- **Canonical names only.** A plugin must match the command's own name, never one of its aliases - there is no `dk` plugin, only `delivery-kit`. The built-in's aliases carry over to the wrapper, so `d8 dk` and `d8 s` keep working after an override.
+- **Resolved before flag parsing.** Which commands get registered is decided at startup, so `--plugins-dir` cannot influence it; only the `DECKHOUSE_CLI_PATH` env var can. Both the configured root and the `~/.deckhouse-cli` fallback are searched.
+- **Dependency bookkeeping.** `delivery-kit` and `package` satisfy a plugin's dependency on that name while they ship as built-ins. Once a plugin takes one over, the name drops off that list and the dependency resolves against the real plugin, version constraints included.
 
 ## Plugin source
 

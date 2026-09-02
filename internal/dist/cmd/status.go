@@ -254,16 +254,8 @@ func latestCell(p pluginRow) string {
 
 // installedPluginsRoot reports the plugins root that actually holds an
 // install: the configured root, or the home fallback (~/.deckhouse-cli) -
-// the same resolution `plugins update all` uses. ok=false means no plugins
-// are installed anywhere.
+// the same resolution `plugins update all` and the root command's plugin
+// override use. ok=false means no plugins are installed anywhere.
 func installedPluginsRoot() (string, bool) {
-	if layout.RootHasInstall(pluginflags.DeckhousePluginsDir) {
-		return pluginflags.DeckhousePluginsDir, true
-	}
-
-	if fallback, err := layout.HomeFallbackPath(); err == nil && layout.RootHasInstall(fallback) {
-		return fallback, true
-	}
-
-	return "", false
+	return layout.ResolveInstallRoot(pluginflags.DeckhousePluginsDir)
 }

@@ -605,7 +605,7 @@ func NewKubectlCommand() *cobra.Command {
 		// Restore default OS signal handling for the kubectl subtree.
 		//
 		// The d8 root command installs a graceful-termination signal handler
-		// (see graceful.WithTermination in NewDeliveryCommand) that intercepts
+		// (see graceful.WithTermination in NewRootContext) that intercepts
 		// SIGINT/SIGTERM, cancels the root context and then resets the signal
 		// handlers. The kubectl subcommands (notably long-running ones such as
 		// `proxy`, `port-forward`, `exec`, `attach`, `logs -f`) do not observe

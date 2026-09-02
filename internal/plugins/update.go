@@ -95,24 +95,5 @@ func (m *Manager) switchToFallbackRoot() bool {
 // failed install has no symlink and is excluded, so it cannot become an install
 // target for a plugin the user never had.
 func (m *Manager) InstalledPluginNames() ([]string, error) {
-	entries, err := os.ReadDir(layout.PluginsRoot(m.pluginDirectory))
-	if err != nil {
-		return nil, err
-	}
-
-	names := make([]string, 0, len(entries))
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		if _, err := os.Lstat(layout.CurrentLinkPath(m.pluginDirectory, entry.Name())); err != nil {
-			continue
-		}
-
-		names = append(names, entry.Name())
-	}
-
-	return names, nil
+	return layout.InstalledNames(m.pluginDirectory)
 }
