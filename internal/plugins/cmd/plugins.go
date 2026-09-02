@@ -50,7 +50,6 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 			"  " + rppflags.EnvEndpoint + "                   registry-packages-proxy base URL\n" +
 			"  " + rppflags.EnvCAFile + "                    PEM CA bundle for proxy TLS verification\n" +
 			"  KUBECONFIG                        path to the kubeconfig file",
-		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			// The plugins directory was captured at registration time, BEFORE flag
 			// parsing - re-read it here so --plugins-dir is honored (the env
