@@ -50,47 +50,65 @@ var (
 	}
 )
 
-// platformFromPrerelease reads a prerelease as an "<os>-<arch>" pair and returns it
-// as "os/arch". Only that exact shape is recognized: a prerelease carrying anything
-// else - including a real prerelease that also names a platform, like
-// "rc.1-linux-amd64" - is left alone rather than half-parsed.
-func platformFromPrerelease(prerelease string) (string, bool) {
-	os, arch, found := strings.Cut(prerelease, "-")
-	if !found {
-		return "", false
+// splitPlatformSuffix reads the platform off the END of a prerelease and returns
+// what precedes it plus the platform as "os/arch".
+//
+// The platform is the last two hyphen-separated tokens, not the whole prerelease: a
+// plugin is published one image per platform, and that suffix is appended to
+// whatever prerelease the release already carried. So a stable release yields
+// "linux-amd64" with nothing before it, while a release named "test" yields
+// "test-windows-amd64" - and only the "windows-amd64" tail is the platform.
+func splitPlatformSuffix(prerelease string) (string, string, bool) {
+	archAt := strings.LastIndex(prerelease, "-")
+	if archAt <= 0 {
+		return "", "", false
 	}
 
-	if _, ok := knownGOOS[os]; !ok {
-		return "", false
+	arch := prerelease[archAt+1:]
+	head := prerelease[:archAt]
+
+	// With no further dash the whole head is the OS and nothing precedes the
+	// platform; otherwise the OS is the last token and the rest is the prerelease.
+	osName, remainder := head, ""
+	if osAt := strings.LastIndex(head, "-"); osAt >= 0 {
+		osName, remainder = head[osAt+1:], head[:osAt]
+	}
+
+	if _, ok := knownGOOS[osName]; !ok {
+		return "", "", false
 	}
 
 	if _, ok := knownGOARCH[arch]; !ok {
-		return "", false
+		return "", "", false
 	}
 
-	return os + "/" + arch, true
+	return remainder, osName + "/" + arch, true
 }
 
 // SplitPlatform separates a version's platform suffix from the version itself.
 // Plugin images are published one tag per platform, so a single release reaches the
 // registry as v0.0.34-linux-amd64, v0.0.34-darwin-arm64 and so on - the os-arch pair
-// riding in the semver prerelease slot. It returns the version without that suffix
-// and the platform as "os/arch"; a version whose prerelease is a genuine prerelease
-// comes back untouched with an empty platform.
+// riding at the end of the semver prerelease slot.
+//
+// A release that is itself a pre-release keeps that identity: v0.0.1-test-linux-amd64
+// splits into v0.0.1-test and linux/amd64, so its per-platform tags collapse onto the
+// pre-release rather than onto the stable version of the same number. A version whose
+// prerelease carries no platform tail comes back untouched with an empty platform.
 func SplitPlatform(version *semver.Version) (*semver.Version, string) {
 	prerelease := version.Prerelease()
 	if prerelease == "" {
 		return version, ""
 	}
 
-	platform, ok := platformFromPrerelease(prerelease)
+	_, platform, ok := splitPlatformSuffix(prerelease)
 	if !ok {
 		return version, ""
 	}
 
 	// Trim the suffix off the original text rather than rebuilding the version, so
-	// the "v" prefix and any other original formatting survive into the output.
-	clean, err := semver.NewVersion(strings.TrimSuffix(version.Original(), "-"+prerelease))
+	// the "v" prefix and any surviving prerelease keep their original formatting.
+	clean, err := semver.NewVersion(
+		strings.TrimSuffix(version.Original(), "-"+strings.ReplaceAll(platform, "/", "-")))
 	if err != nil {
 		return version, ""
 	}

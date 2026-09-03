@@ -48,9 +48,14 @@ func TestSplitPlatform(t *testing.T) {
 		{raw: "v1.2.3-foo-bar", version: "v1.2.3", platform: ""},
 		{raw: "v1.2.3-linux-pentium", version: "v1.2.3", platform: ""},
 
-		// A prerelease that also carries a platform is left alone rather than
-		// half-parsed - the documented limit of the shape this recognizes.
-		{raw: "v1.2.3-rc.1-linux-amd64", version: "v1.2.3", platform: ""},
+		// A pre-release that also carries a platform keeps its pre-release identity:
+		// only the os-arch tail is the platform.
+		{raw: "v1.2.3-rc.1-linux-amd64", version: "v1.2.3-rc.1", platform: "linux/amd64"},
+		{raw: "v0.0.1-test-windows-amd64", version: "v0.0.1-test", platform: "windows/amd64"},
+		{raw: "v0.0.1-test-darwin-arm64", version: "v0.0.1-test", platform: "darwin/arm64"},
+
+		// A two-token prerelease whose head is not a GOOS is not a platform.
+		{raw: "v1.2.3-beta-1", version: "v1.2.3-beta-1", platform: ""},
 	}
 
 	for _, tc := range cases {
@@ -69,9 +74,9 @@ func TestSplitPlatform(t *testing.T) {
 				return
 			}
 
-			// Stripped: the suffix is gone and the original "v" prefix survives.
+			// Stripped: only the platform tail is gone, and the original "v" prefix
+			// and any real prerelease survive.
 			assert.Equal(t, tc.version, clean.Original())
-			assert.Empty(t, clean.Prerelease())
 		})
 	}
 }
@@ -98,22 +103,44 @@ func TestCollapsePlatformTags(t *testing.T) {
 }
 
 // TestCollapsePlatformTagsKeepsPrereleasesDistinct: a release candidate is its own
-// release, never merged into the stable version that shares its numbers.
+// release, never merged into the stable version that shares its numbers - even
+// though both are published per platform.
 func TestCollapsePlatformTagsKeepsPrereleasesDistinct(t *testing.T) {
 	collapsed := collapsePlatformTags(sortedSemverDesc([]string{
 		"v2.0.0-linux-amd64",
+		"v2.0.0-darwin-arm64",
+		"v2.0.0-rc.1-linux-amd64",
 		"v2.0.0-rc.1",
 	}))
 
-	// Descending semver puts "rc.1" above "linux-amd64" (both are prerelease
-	// identifiers, compared as ASCII), so the candidate leads.
+	// Descending semver puts "rc.1..." above "linux-amd64"/"darwin-arm64" (all are
+	// prerelease identifiers, compared as ASCII), so the candidate leads.
 	require.Len(t, collapsed, 2)
 
 	assert.Equal(t, "v2.0.0-rc.1", collapsed[0].Version.Original())
-	assert.Empty(t, collapsed[0].Platforms)
+	assert.Equal(t, []string{"linux/amd64"}, collapsed[0].Platforms)
 
 	assert.Equal(t, "v2.0.0", collapsed[1].Version.Original())
-	assert.Equal(t, []string{"linux/amd64"}, collapsed[1].Platforms)
+	assert.ElementsMatch(t, []string{"linux/amd64", "darwin/arm64"}, collapsed[1].Platforms)
+}
+
+// TestCollapsePlatformTagsPrereleaseWithIndex reproduces the reported listing: a
+// pre-release published as an index plus one tag per platform must fold into a
+// single "v0.0.1-test" row, not five.
+func TestCollapsePlatformTagsPrereleaseWithIndex(t *testing.T) {
+	collapsed := collapsePlatformTags(sortedSemverDesc([]string{
+		"v0.0.1-test-windows-amd64",
+		"v0.0.1-test-linux-amd64",
+		"v0.0.1-test-darwin-arm64",
+		"v0.0.1-test-darwin-amd64",
+		"v0.0.1-test",
+	}))
+
+	require.Len(t, collapsed, 1)
+	assert.Equal(t, "v0.0.1-test", collapsed[0].Version.Original())
+	assert.ElementsMatch(t, []string{
+		"windows/amd64", "linux/amd64", "darwin/arm64", "darwin/amd64",
+	}, collapsed[0].Platforms)
 }
 
 // TestCollapsePlatformTagsPlatformlessTag: a plugin published as one
