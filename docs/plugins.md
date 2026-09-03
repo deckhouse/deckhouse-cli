@@ -10,8 +10,8 @@ Plugins are versioned binaries distributed through the cluster registry.
 [Troubleshooting](#troubleshooting) · [Advanced](#advanced-hidden-flags)
 
 > [!NOTE]
-> The `d8 dist plugins` command group is hidden from `d8 dist --help` while
-> the plugin ecosystem rolls out. The commands below are fully functional.
+> Installing a plugin that is already present updates it. There is no separate
+> `update` command; `d8 dist plugins install --all` updates every installed plugin.
 
 ## Plugin source
 
@@ -126,7 +126,16 @@ modules) are only *verified* - d8 never changes the cluster for you.
 `d8 mirror pull` mirrors plugins into the images bundle automatically: every
 plugin whose contract names a mirrored module is selected (per bundled module
 version, newest compatible), along with its mandatory plugin dependencies;
-`--include-plugin <name>[@constraint]` adds more. After `d8 mirror push`, the
+`--include-plugin <name>[@constraint]` adds more.
+
+Mirroring the platform additionally pulls the plugins that ship with it -
+**`package`** and **`system`** - unconditionally, with no module pairing. A
+version still has to be one the mirrored platform can run, and a registry that
+does not publish them yields a warning rather than a failed pull.
+
+Their dependencies come along as usual, including ones named after a built-in d8
+command (`package` depends on **`delivery-kit`**): the plugin is mirrored when the
+registry has it, and the built-in command covers the dependency when it does not. After `d8 mirror push`, the
 plugins live at `<target>/deckhouse-cli/plugins/<name>` - exactly where the
 in-cluster registry-packages-proxy looks - so `d8 plugins install <name>`
 works in the air-gapped cluster with no extra setup. See
@@ -147,7 +156,7 @@ is not supported. To see what a registry offers, use
 | `--rpp-ca-file` | `D8_RPP_CA_FILE` | PEM CA bundle to verify the proxy TLS certificate |
 | `--insecure-skip-tls-verify` | - | skip TLS verification of both the API server and the proxy (debugging only) |
 | `--version X` *(install only)* | - | install an exact version; may be a pre-release |
-| `--use-major N` *(install, update)* | - | cross to major `N`; by default operations stay within the installed major |
+| `--use-major N` *(install only)* | - | cross to major `N`; by default operations stay within the installed major |
 | `--force` *(install only)* | - | reinstall even if already current (re-pull and re-verify) |
 
 The persistent flags above are shared by every `d8 dist plugins` subcommand

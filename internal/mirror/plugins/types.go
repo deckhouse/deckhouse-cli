@@ -60,8 +60,10 @@ type ResolveInput struct {
 	// additive: they are pulled on top of the module-driven selection.
 	Filter *modules.Filter
 	// Builtins are d8 built-in command names (e.g. delivery-kit, package)
-	// that satisfy a same-named plugin dependency by presence. They are
-	// never pulled.
+	// that satisfy a same-named plugin dependency by presence, so such a
+	// dependency never blocks the bundle. The plugin is still mirrored when
+	// the registry publishes it - once installed it takes the command over,
+	// and an air-gapped cluster has no other way to obtain it.
 	Builtins map[string]struct{}
 	// NoCatalog means the registry serves no plugin version listing
 	// (--proxy-registry). Dependencies then resolve only against versions
@@ -82,6 +84,10 @@ const (
 	// ReasonExplicit marks a plugin named by --include-plugin.
 	// Reason.Subject is the flag expression.
 	ReasonExplicit
+	// ReasonPlatform marks a plugin that ships with the platform and is
+	// therefore pulled whenever the platform is mirrored, with no module
+	// pairing. Reason.Subject is PlatformSubject.
+	ReasonPlatform
 )
 
 // String returns the stable lowercase label of the kind, used by the pull
@@ -94,6 +100,8 @@ func (k ReasonKind) String() string {
 		return "dependency"
 	case ReasonExplicit:
 		return "explicit"
+	case ReasonPlatform:
+		return "platform"
 	default:
 		return "unknown"
 	}
