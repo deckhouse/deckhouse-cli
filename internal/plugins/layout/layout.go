@@ -118,25 +118,69 @@ func InstallLockPath(installRoot, pluginName string) string {
 	return path.Join(installRoot, pluginsDirName, pluginName, "install"+lockFileSuffix)
 }
 
-// RootHasInstall reports whether <root>/plugins holds at least one installed
-// plugin - a directory with a `current` symlink. Requiring the symlink (not just
-// any subdir) means a leftover empty v<major> dir from a failed install does not
-// count as an install. The cache dir is a sibling, never miscounted.
-func RootHasInstall(root string) bool {
+// InstalledNames returns the names of the plugins installed under <root>/plugins -
+// the directories carrying a `current` symlink. Requiring the symlink (not just any
+// subdir) means a leftover empty v<major> dir from a failed install does not count
+// as an install. The cache dir is a sibling, never miscounted.
+func InstalledNames(root string) ([]string, error) {
 	entries, err := os.ReadDir(PluginsRoot(root))
 	if err != nil {
-		return false
+		return nil, err
 	}
+
+	names := make([]string, 0, len(entries))
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 
-		if _, err := os.Lstat(CurrentLinkPath(root, entry.Name())); err == nil {
-			return true
+		if _, err := os.Lstat(CurrentLinkPath(root, entry.Name())); err != nil {
+			continue
 		}
+
+		names = append(names, entry.Name())
 	}
 
-	return false
+	return names, nil
+}
+
+// RootHasInstall reports whether <root>/plugins holds at least one installed plugin.
+func RootHasInstall(root string) bool {
+	names, err := InstalledNames(root)
+
+	return err == nil && len(names) > 0
+}
+
+// ResolveInstalled reports the plugins root that actually holds an install, the
+// plugin names in it, and whether one was found: the configured root, or the home
+// fallback (~/.deckhouse-cli) that EnsureInstallRoot switches to when the configured
+// one is not writable. The final result is false when no plugins are installed
+// anywhere, and the root is then empty and the names nil.
+//
+// Callers resolving a plugin by name must use this rather than the configured root
+// alone: with an unwritable default root the installs live in the fallback, and
+// looking only at the configured root would miss every one of them.
+func ResolveInstalled(configured string) (string, []string, bool) {
+	if names, err := InstalledNames(configured); err == nil && len(names) > 0 {
+		return configured, names, true
+	}
+
+	fallback, err := HomeFallbackPath()
+	if err != nil || fallback == configured {
+		return "", nil, false
+	}
+
+	if names, err := InstalledNames(fallback); err == nil && len(names) > 0 {
+		return fallback, names, true
+	}
+
+	return "", nil, false
+}
+
+// ResolveInstallRoot reports just the root resolved by ResolveInstalled.
+func ResolveInstallRoot(configured string) (string, bool) {
+	root, _, ok := ResolveInstalled(configured)
+
+	return root, ok
 }

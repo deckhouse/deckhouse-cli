@@ -49,6 +49,19 @@ type multiPluginSource struct {
 	tagErrors map[string]error
 }
 
+// multiPluginSource stands in for the registry transport: it can enumerate, so it
+// satisfies pluginCatalog as well as pluginSource.
+func (s *multiPluginSource) Transport() Transport { return TransportRegistry }
+
+func (s *multiPluginSource) ListPluginNames(context.Context) ([]string, error) {
+	names := make([]string, 0, len(s.tags))
+	for name := range s.tags {
+		names = append(names, name)
+	}
+
+	return names, nil
+}
+
 func (s *multiPluginSource) ListPluginTags(_ context.Context, name string) ([]string, error) {
 	if err, ok := s.tagErrors[name]; ok {
 		return nil, err

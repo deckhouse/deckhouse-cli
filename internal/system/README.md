@@ -56,7 +56,7 @@ d8 system  (aliases: s, p, platform)
 
 The `s` alias is the recommended short form (`d8 s module list`). `p` and `platform` are legacy aliases kept for backward compatibility with older documentation.
 
-> **Availability:** the built-in `system` command is registered only when the environment variable `DECKHOUSE_PLUGINS_ENABLED` is **not** `true`. When plugins are enabled, `d8 system` is served by a plugin shim instead, and the exact surface may differ from what is documented here.
+> **Availability:** the built-in `system` command documented here is registered only when no plugin named `system` is installed. When one is, `d8 system` is served by that plugin instead and the exact surface may differ. Check with `d8 dist plugins list`; `d8 dist plugins remove system` restores the built-in.
 
 ---
 

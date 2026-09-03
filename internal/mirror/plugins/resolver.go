@@ -39,6 +39,20 @@ import (
 // planner: deeper chains are a contract-authoring error, not a real graph.
 const maxResolveDepth = 16
 
+// PlatformSubject is the Reason.Subject of a ReasonPlatform edge - the plugin was
+// pulled because the platform was mirrored, not because any module asked for it.
+const PlatformSubject = "platform"
+
+// PlatformPlugins ship with the Deckhouse platform rather than with a module, so
+// mirroring the platform mirrors them too - unconditionally, with no module pairing
+// and regardless of --include-plugin. Without them a bundle can install the platform
+// but not operate it.
+//
+// The names match the built-in commands of the same name (see SystemPluginName and
+// PackagePluginName in internal/plugins/cmd): a plugin takes the command over once
+// installed, so the bundle must carry it.
+var PlatformPlugins = []string{"package", "system"}
+
 // resolver implements Resolver: for every bundled version of every mirrored
 // module it picks the newest plugin version the bundle satisfies, resolves
 // transitive mandatory plugin dependencies, and applies --include-plugin on
@@ -68,6 +82,15 @@ func (r *resolver) Resolve(ctx context.Context, in ResolveInput) (*Resolution, e
 
 	for _, module := range in.Modules {
 		st.bundle[module.Name] = module.Versions
+	}
+
+	// Platform plugins first: they are unconditional, so a later module- or
+	// dependency-driven edge lands on an already-selected version as extra
+	// provenance rather than selecting a second one.
+	if len(in.PlatformVersions) > 0 {
+		if err := st.resolvePlatform(ctx); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(st.bundle) > 0 {
@@ -148,6 +171,118 @@ func (w *warningLog) add(msg string) {
 
 	w.seen[msg] = struct{}{}
 	w.messages = append(w.messages, msg)
+}
+
+// resolvePlatform selects the plugins that ship with the platform. It runs whenever
+// the platform phase mirrored something, independently of whether any module was
+// mirrored: these plugins belong to the platform itself.
+//
+// A platform plugin missing from the registry is a warning, not a failure. The
+// platform mirrored fine, older registries predate these plugins, and failing the
+// whole pull over one absent repository would be worse than an incomplete bundle the
+// operator is told about.
+func (st *resolveState) resolvePlatform(ctx context.Context) error {
+	for _, name := range PlatformPlugins {
+		if st.in.NoCatalog {
+			// No version listing to select from (--proxy-registry). An exact
+			// --include-plugin pin is the only way in.
+			st.warnings.add(fmt.Sprintf(
+				"plugin %s ships with the platform but cannot be selected without a version listing; pin it with --include-plugin %s@=<version>",
+				name, name))
+
+			continue
+		}
+
+		versions, err := st.catalog.PluginVersions(ctx, name)
+		if err != nil {
+			if isUnavailable(err) {
+				st.warnings.add(fmt.Sprintf(
+					"plugin %s ships with the platform but is not available in this registry; the bundle will not contain it", name))
+
+				continue
+			}
+
+			return fmt.Errorf("list versions of platform plugin %q: %w", name, err)
+		}
+
+		if len(versions) == 0 {
+			st.warnings.add(fmt.Sprintf(
+				"plugin %s ships with the platform but has no published versions; the bundle will not contain it", name))
+
+			continue
+		}
+
+		failure, err := st.selectForPlatform(ctx, name, versions)
+		if err != nil {
+			return err
+		}
+
+		if failure != "" {
+			st.skipped = append(st.skipped, SkippedPlugin{Name: name, Reason: failure})
+		}
+	}
+
+	return nil
+}
+
+// selectForPlatform picks the newest version of a platform plugin the bundle
+// satisfies and commits it with its dependency closure. It mirrors
+// selectForModuleVersion, except the gate is the bundle alone: a platform plugin is
+// paired with no module, so there is no pairingGate to pass.
+func (st *resolveState) selectForPlatform(ctx context.Context, name string, versions []*semver.Version) (string, error) {
+	var firstReject string
+
+	for _, candidate := range versions {
+		contract, err := st.catalog.Contract(ctx, name, candidate)
+		if err != nil {
+			if errors.Is(err, ErrInvalidContract) {
+				noteReject(&firstReject, fmt.Sprintf("%s: broken published contract", candidate.Original()))
+
+				continue
+			}
+
+			return "", err
+		}
+
+		if why := st.bundleGate(contract, ""); why != "" {
+			noteReject(&firstReject, fmt.Sprintf("%s: %s", candidate.Original(), why))
+
+			continue
+		}
+
+		reason := Reason{Kind: ReasonPlatform, Subject: PlatformSubject}
+
+		if sv := st.selected.version(name, candidate); sv != nil {
+			addReason(sv, reason)
+
+			return "", nil
+		}
+
+		delta := &selectionDelta{}
+
+		why, err := st.resolveDeps(ctx, contract, delta,
+			map[pluginName]bool{name: true}, []string{name + "@" + candidate.Original()}, 0, true)
+		if err != nil {
+			return "", err
+		}
+
+		if why != "" {
+			noteReject(&firstReject, fmt.Sprintf("%s: %s", candidate.Original(), why))
+
+			continue
+		}
+
+		st.selected.commit(name, candidate, contract, reason)
+		st.applyDelta(delta)
+
+		return "", nil
+	}
+
+	if firstReject == "" {
+		firstReject = "no published versions"
+	}
+
+	return firstReject, nil
 }
 
 // resolveAuto selects plugins for the bundle's modules: every plugin in the
@@ -557,51 +692,71 @@ func (st *resolveState) resolveDeps(ctx context.Context, contract *internal.Plug
 	}
 
 	for _, req := range contract.Requirements.Plugins.Mandatory {
+		reject, err := st.resolveDep(ctx, req, delta, visited, path, depth, enforceGate)
+		if err != nil {
+			return "", err
+		}
+
+		if reject == "" {
+			continue
+		}
+
+		// A built-in d8 command of the same name satisfies the dependency by its
+		// mere presence, so it can never block the bundle. Mirroring the real
+		// plugin is still preferred - once installed it takes the command over,
+		// and an air-gapped cluster has no other way to get it - so the pull is
+		// attempted first and only its failure degrades to a note.
 		if _, builtin := st.in.Builtins[req.Name]; builtin {
-			// Built-in d8 commands satisfy a same-named dependency by
-			// presence; there is nothing to pull.
-			continue
-		}
-
-		// The dependency name comes from a published contract - external
-		// data with no grammar of its own - and becomes a registry route
-		// and a filesystem path.
-		if err := pluginlayout.ValidatePluginName(req.Name); err != nil {
-			return fmt.Sprintf("dependency of %s: %v", path[len(path)-1], err), nil
-		}
-
-		if visited[req.Name] {
-			return fmt.Sprintf("dependency cycle: %s -> %s", strings.Join(path, " -> "), req.Name), nil
-		}
-
-		var constraint *semver.Constraints
-
-		if req.Constraint != "" {
-			parsed, err := semver.NewConstraint(req.Constraint)
-			if err != nil {
-				return fmt.Sprintf("invalid constraint %q for dependency %q", req.Constraint, req.Name), nil
-			}
-
-			constraint = parsed
-		}
-
-		reason := Reason{Kind: ReasonDependency, Subject: path[len(path)-1], Constraint: req.Constraint}
-
-		// Union-reuse: a version already picked for the bundle that satisfies
-		// this constraint is shared instead of adding another one.
-		if reused := st.findSatisfying(delta, req.Name, constraint); reused != "" {
-			delta.reasons = append(delta.reasons, deltaReason{name: req.Name, version: reused, reason: reason})
+			st.warnings.add(fmt.Sprintf(
+				"%s depends on %s, which was not mirrored (%s); the built-in d8 command satisfies it",
+				path[len(path)-1], req.Name, reject))
 
 			continue
 		}
 
-		reject, err := st.resolveDepFresh(ctx, req, constraint, reason, delta, visited, path, depth, enforceGate)
-		if reject != "" || err != nil {
-			return reject, err
-		}
+		return reject, nil
 	}
 
 	return "", nil
+}
+
+// resolveDep resolves one mandatory dependency: guard the name and the cycle,
+// reuse an already-picked satisfying version, otherwise pick a fresh one. A
+// non-empty return is the reason this dependency could not be satisfied from the
+// registry; the caller decides whether that is fatal.
+func (st *resolveState) resolveDep(ctx context.Context, req internal.PluginRequirement, delta *selectionDelta, visited map[pluginName]bool, path []string, depth int, enforceGate bool) (string, error) {
+	// The dependency name comes from a published contract - external data with
+	// no grammar of its own - and becomes a registry route and a filesystem path.
+	if err := pluginlayout.ValidatePluginName(req.Name); err != nil {
+		return fmt.Sprintf("dependency of %s: %v", path[len(path)-1], err), nil
+	}
+
+	if visited[req.Name] {
+		return fmt.Sprintf("dependency cycle: %s -> %s", strings.Join(path, " -> "), req.Name), nil
+	}
+
+	var constraint *semver.Constraints
+
+	if req.Constraint != "" {
+		parsed, err := semver.NewConstraint(req.Constraint)
+		if err != nil {
+			return fmt.Sprintf("invalid constraint %q for dependency %q", req.Constraint, req.Name), nil
+		}
+
+		constraint = parsed
+	}
+
+	reason := Reason{Kind: ReasonDependency, Subject: path[len(path)-1], Constraint: req.Constraint}
+
+	// Union-reuse: a version already picked for the bundle that satisfies this
+	// constraint is shared instead of adding another one.
+	if reused := st.findSatisfying(delta, req.Name, constraint); reused != "" {
+		delta.reasons = append(delta.reasons, deltaReason{name: req.Name, version: reused, reason: reason})
+
+		return "", nil
+	}
+
+	return st.resolveDepFresh(ctx, req, constraint, reason, delta, visited, path, depth, enforceGate)
 }
 
 // resolveDepFresh picks the newest version of one dependency that satisfies

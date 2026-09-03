@@ -23,15 +23,17 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// PublishedVersions lists the plugin's published tags and returns them as
-// semver versions, newest first (unparseable tags are dropped).
-func (m *Manager) PublishedVersions(ctx context.Context, pluginName string) ([]*semver.Version, error) {
+// PublishedVersions lists the plugin's published releases, newest first
+// (unparseable tags are dropped). A plugin is published one tag per platform, so
+// the per-platform tags of a release are collapsed into a single entry carrying
+// the platforms it was built for.
+func (m *Manager) PublishedVersions(ctx context.Context, pluginName string) ([]PluginVersion, error) {
 	tags, err := m.service.ListPluginTags(ctx, pluginName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list plugin tags: %w", err)
 	}
 
-	return sortedSemverDesc(tags), nil
+	return collapsePlatformTags(sortedSemverDesc(tags)), nil
 }
 
 // InstalledVersionOrNil returns the active installed version of the
@@ -47,5 +49,10 @@ func (m *Manager) InstalledVersionOrNil(pluginName string) *semver.Version {
 		return nil
 	}
 
-	return current
+	// A plugin binary reports the version of its own per-platform build, so the
+	// suffix rides along here too; drop it so the value compares against the
+	// collapsed releases PublishedVersions returns.
+	clean, _ := SplitPlatform(current)
+
+	return clean
 }

@@ -398,10 +398,11 @@ If the source registry has no `packages` repository (some public/CE registries),
 
 d8 CLI plugins are standalone binaries the CLI installs through the in-cluster registry-packages-proxy. A plugin declares its requirements (Deckhouse modules, other plugins, platform versions) in a contract - a base64-JSON annotation on its image manifest. The plugins phase runs **last**, after modules and packages, because it resolves against what the earlier phases actually put into the bundle.
 
-Selection principle: **nothing extra**. A plugin enters the bundle only when:
+Selection principle: **nothing extra**, with one standing exception. A plugin enters the bundle when:
 
+- **the platform is mirrored** - `package` and `system` ship with the platform rather than with any module, so mirroring the platform mirrors them too, unconditionally and regardless of `--include-plugin`. A bundle without them can install the platform but not operate it. The version still has to be one the bundled platform can run (its `deckhouse` constraint is checked like any other), and a registry that does not publish them, or denies access, yields a warning rather than a failed pull. The list lives in `PlatformPlugins` (`internal/mirror/plugins/resolver.go`);
 - a mirrored module needs it - the plugin's contract names that module in its `mandatory` or `anyOf` requirements. For **each bundled version** of the module, the newest plugin version whose contract the bundle satisfies is picked (so a bundle carrying module v1.0.0 and v1.5.0 may get two plugin versions, deduplicated);
-- it is a mandatory plugin dependency of another selected plugin (resolved recursively; a version already picked is shared when it satisfies the constraint);
+- it is a mandatory plugin dependency of another selected plugin (resolved recursively; a version already picked is shared when it satisfies the constraint). A dependency whose name matches a **built-in d8 command** (`delivery-kit`, `package`) is mirrored too when the registry publishes it - the built-in is only the fallback, because an air-gapped cluster cannot fetch the plugin later and, once installed, it takes the command over. When it is not published the built-in satisfies the dependency and only a note is recorded, so the dependent is never dropped over it;
 - the user names it with `--include-plugin` (additive; an unmet explicit include fails the pull, unlike the automatic selection which skips with a reason in the summary).
 
 Registry layout (at the **bare root**, outside the edition segment - like the installer):

@@ -27,8 +27,16 @@ limitations under the License.
 // manifest. Reading a contract is a single manifest fetch, so deciding WHAT
 // to mirror needs no layer downloads.
 //
-// Selection principle: nothing extra. A plugin enters the bundle only when a
-// mirrored module needs it (its contract names that module), when another
-// selected plugin requires it, or when the user asks for it explicitly with
-// --include-plugin.
+// Selection principle: nothing extra, with one standing exception. A plugin
+// enters the bundle when a mirrored module needs it (its contract names that
+// module), when another selected plugin requires it, or when the user asks for
+// it explicitly with --include-plugin.
+//
+// The exception is PlatformPlugins: they ship with the platform rather than
+// with any module, so mirroring the platform mirrors them too, unconditionally.
+// A bundle without them can install the platform but not operate it.
+//
+// A dependency whose name matches a built-in d8 command is mirrored when it is
+// published and falls back to the built-in when it is not, so it can never block
+// the bundle - see ResolveInput.Builtins.
 package plugins

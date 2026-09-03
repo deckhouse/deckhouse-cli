@@ -33,25 +33,39 @@ import (
 // while it ships as a built-in command rather than a standalone plugin.
 const DeliveryKitCommandName = "delivery-kit"
 
-func NewDeliveryCommand() (*cobra.Command, context.Context) {
+// NewRootContext returns the process-wide graceful-termination context that the
+// whole d8 command tree runs under: it installs the SIGINT/SIGTERM handler that
+// Execute's graceful.Terminate and telemetry shutdown depend on, and carries the
+// werf logger.
+//
+// It is separate from NewDeliveryCommand because the context is root
+// infrastructure, still required when an installed plugin serves `delivery-kit`
+// and the built-in werf tree is never constructed.
+func NewRootContext() context.Context {
+	return logging.WithLogger(graceful.WithTermination(context.Background()))
+}
+
+// NewDeliveryCommand builds the built-in werf re-skin under the root context.
+// It returns nil only on a path that has already asked for termination, which
+// onShutdown turns into a process exit before the caller sees the nil.
+func NewDeliveryCommand(ctx context.Context) *cobra.Command {
 	server.DefaultAddress = "https://delivery-sync.deckhouse.ru"
 
-	terminationCtx := graceful.WithTermination(context.Background())
-	defer graceful.Shutdown(terminationCtx, onShutdown)
-
-	ctx := logging.WithLogger(terminationCtx)
+	// Drains a termination requested below - or a signal caught while werf builds
+	// its command tree - into the os.Exit that onShutdown performs.
+	defer graceful.Shutdown(ctx, onShutdown)
 
 	const werfAlias = "dk"
 
 	if err := setWerfSelfInvocationCommand(werfAlias); err != nil {
 		graceful.Terminate(ctx, err, 1)
-		return nil, ctx
+		return nil
 	}
 
 	werfRootCmd, err := werfroot.ConstructRootCmd(ctx)
 	if err != nil {
 		graceful.Terminate(ctx, err, 1)
-		return nil, ctx
+		return nil
 	}
 
 	werfRootCmd.Use = DeliveryKitCommandName
@@ -67,7 +81,7 @@ LICENSE NOTE: The Deckhouse Delivery Kit functionality is exclusively available 
 
 	removeKubectlCmd(werfRootCmd)
 
-	return werfRootCmd, ctx
+	return werfRootCmd
 }
 
 // setWerfSelfInvocationCommand sets environment variables to ensure werf knows how to call itself

@@ -343,9 +343,9 @@ func TestResolve_DisjointDependencyConstraints(t *testing.T) {
 		"disjoint constraints require two bundled versions of the dependency")
 }
 
-// TestResolve_BuiltinDependency: a dependency on a built-in d8 command is
-// satisfied by presence - nothing is pulled and the catalog is not asked. The
-// stub has no "package" entry, so any lookup would fail the dependent.
+// TestResolve_BuiltinDependency: a dependency on a built-in d8 command that the
+// registry does not publish. The lookup fails, but the built-in satisfies the
+// dependency, so the dependent still enters the bundle with only a note.
 func TestResolve_BuiltinDependency(t *testing.T) {
 	stub := newStub().
 		add("packer", "v1.0.0", needsPlugin(needsModule(plug("packer", "v1.0.0"), "m1", ""), "package", ""))
@@ -356,8 +356,9 @@ func TestResolve_BuiltinDependency(t *testing.T) {
 	})
 
 	assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "packer"))
-	assert.Nil(t, selectedVersions(res, "package"), "built-ins are never pulled")
-	assert.Empty(t, res.Skipped)
+	assert.Nil(t, selectedVersions(res, "package"), "nothing to pull: it is not published")
+	assert.Empty(t, res.Skipped, "the built-in command satisfies it, so the dependent is not skipped")
+	assert.Contains(t, res.Warnings[0], "built-in d8 command satisfies it")
 }
 
 // TestResolve_DependencyCycleSkips: a cycle in mandatory dependencies rejects
@@ -1012,4 +1013,214 @@ func TestResolve_DeniedExplicitIncludeFails(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "UNAUTHORIZED")
+}
+
+// ---- platform plugins ----
+
+// TestResolve_PlatformPullsItsPlugins is the requirement: mirroring the platform
+// mirrors the plugins that ship with it, with no module involved at all.
+func TestResolve_PlatformPullsItsPlugins(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", plug("package", "v0.0.34")).
+		add("system", "v1.2.0", plug("system", "v1.2.0"))
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0")})
+
+	assert.Equal(t, []string{"v0.0.34"}, selectedVersions(res, "package"))
+	assert.Equal(t, []string{"v1.2.0"}, selectedVersions(res, "system"))
+	assert.Empty(t, res.Skipped)
+
+	sv := selectedVersion(t, res, "package", "v0.0.34")
+	assert.Contains(t, sv.Reasons, Reason{Kind: ReasonPlatform, Subject: PlatformSubject})
+}
+
+// TestResolve_PlatformPluginsNeedThePlatform: without a mirrored platform there is
+// nothing to ship them with, so they are not pulled just for existing.
+func TestResolve_PlatformPluginsNeedThePlatform(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", plug("package", "v0.0.34")).
+		add("system", "v1.2.0", plug("system", "v1.2.0"))
+
+	res := resolve(t, stub, ResolveInput{Modules: []ModuleInBundle{mod("postgresql", "v1.0.0")}})
+
+	assert.Empty(t, selectedVersions(res, "package"))
+	assert.Empty(t, selectedVersions(res, "system"))
+}
+
+// TestResolve_PlatformPluginHonoursDeckhouseConstraint: "always pulled" still means
+// a version the mirrored platform can run, so a too-new one is passed over.
+func TestResolve_PlatformPluginHonoursDeckhouseConstraint(t *testing.T) {
+	stub := newStub().
+		add("package", "v2.0.0", needsDeckhouse(plug("package", "v2.0.0"), ">=1.70.0")).
+		add("package", "v1.0.0", needsDeckhouse(plug("package", "v1.0.0"), ">=1.60.0")).
+		add("system", "v1.0.0", plug("system", "v1.0.0"))
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0")})
+
+	assert.Equal(t, []string{"v1.0.0"}, selectedVersions(res, "package"),
+		"v2.0.0 requires a newer platform than the bundle carries")
+}
+
+// TestResolve_PlatformPluginMissingIsWarnedNotFatal: an older registry may not
+// publish these plugins at all. The platform still mirrored, so the pull continues
+// and the operator is told what the bundle lacks.
+func TestResolve_PlatformPluginMissingIsWarnedNotFatal(t *testing.T) {
+	stub := newStub().add("system", "v1.2.0", plug("system", "v1.2.0"))
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0")})
+
+	assert.Equal(t, []string{"v1.2.0"}, selectedVersions(res, "system"), "the available one is still pulled")
+	assert.Empty(t, selectedVersions(res, "package"))
+	assert.Contains(t, res.Warnings[0], "package")
+	assert.Contains(t, res.Warnings[0], "not available in this registry")
+}
+
+// TestResolve_PlatformPluginDeniedIsWarnedNotFatal: a token-auth registry refusing
+// the repository is indistinguishable from an absent one and must not fail the pull.
+func TestResolve_PlatformPluginDeniedIsWarnedNotFatal(t *testing.T) {
+	stub := newStub().
+		add("system", "v1.2.0", plug("system", "v1.2.0")).
+		denyRepository("package")
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0")})
+
+	assert.Equal(t, []string{"v1.2.0"}, selectedVersions(res, "system"))
+	assert.Contains(t, res.Warnings[0], "package")
+}
+
+// TestResolve_PlatformPluginPullsDependencies: a platform plugin drags its mandatory
+// plugin dependencies in, exactly like a module-driven one.
+func TestResolve_PlatformPluginPullsDependencies(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", needsPlugin(plug("package", "v0.0.34"), "db-connector", ">=0.9.0")).
+		add("system", "v1.2.0", plug("system", "v1.2.0")).
+		add("db-connector", "v0.9.1", plug("db-connector", "v0.9.1"))
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0")})
+
+	assert.Equal(t, []string{"v0.9.1"}, selectedVersions(res, "db-connector"))
+
+	sv := selectedVersion(t, res, "db-connector", "v0.9.1")
+	assert.Equal(t, ReasonDependency, sv.Reasons[0].Kind)
+}
+
+// TestResolve_PlatformAndModuleReasonsMerge: when a module also pulls a platform
+// plugin, the bundle carries one version with both provenance edges, not two entries.
+func TestResolve_PlatformAndModuleReasonsMerge(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", plug("package", "v0.0.34")).
+		add("system", "v1.2.0", needsModule(plug("system", "v1.2.0"), "postgresql", ">=1.0.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		PlatformVersions: semvers("v1.66.0"),
+		Modules:          []ModuleInBundle{mod("postgresql", "v1.5.0")},
+	})
+
+	assert.Equal(t, []string{"v1.2.0"}, selectedVersions(res, "system"), "one version, not one per reason")
+
+	sv := selectedVersion(t, res, "system", "v1.2.0")
+	assert.Contains(t, sv.Reasons, Reason{Kind: ReasonPlatform, Subject: PlatformSubject})
+	assert.Contains(t, sv.Reasons, Reason{Kind: ReasonModule, Subject: "postgresql", Constraint: ">=1.0.0"})
+}
+
+// TestResolve_PlatformPluginsNeedAVersionListing: --proxy-registry serves none, so
+// the selection cannot run and the operator is pointed at the exact-pin escape.
+func TestResolve_PlatformPluginsNeedAVersionListing(t *testing.T) {
+	stub := newStub().add("package", "v0.0.34", plug("package", "v0.0.34"))
+
+	res := resolve(t, stub, ResolveInput{PlatformVersions: semvers("v1.66.0"), NoCatalog: true})
+
+	assert.Empty(t, selectedVersions(res, "package"))
+	assert.Contains(t, res.Warnings[0], "--include-plugin package@=<version>")
+}
+
+// TestReasonKindPlatformString keeps the summary label stable.
+func TestReasonKindPlatformString(t *testing.T) {
+	assert.Equal(t, "platform", ReasonPlatform.String())
+}
+
+// TestResolve_BuiltinDependencyIsMirroredWhenPublished: a built-in command is only
+// the fallback. When the registry publishes the plugin, the bundle gets it - an
+// air-gapped cluster cannot fetch it later, and once installed it takes the command
+// over from the built-in.
+func TestResolve_BuiltinDependencyIsMirroredWhenPublished(t *testing.T) {
+	stub := newStub().
+		add("packer", "v1.0.0", needsPlugin(needsModule(plug("packer", "v1.0.0"), "m1", ""), "delivery-kit", ">=2.0.0")).
+		add("delivery-kit", "v2.1.0", plug("delivery-kit", "v2.1.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		Modules:  []ModuleInBundle{mod("m1", "v1.0.0")},
+		Builtins: map[string]struct{}{"delivery-kit": {}},
+	})
+
+	assert.Equal(t, []string{"v2.1.0"}, selectedVersions(res, "delivery-kit"))
+	assert.Empty(t, res.Warnings, "it was mirrored, so there is nothing to note")
+
+	sv := selectedVersion(t, res, "delivery-kit", "v2.1.0")
+	assert.Equal(t, ReasonDependency, sv.Reasons[0].Kind)
+}
+
+// TestResolve_PlatformPullsPackageSystemAndDeliveryKit is the end-to-end shape the
+// bundle must have: mirroring the platform brings package and system, and package's
+// own delivery-kit dependency comes along even though a built-in command of that
+// name exists.
+func TestResolve_PlatformPullsPackageSystemAndDeliveryKit(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", needsPlugin(plug("package", "v0.0.34"), "delivery-kit", ">=2.0.0")).
+		add("system", "v1.2.0", plug("system", "v1.2.0")).
+		add("delivery-kit", "v2.1.0", plug("delivery-kit", "v2.1.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		PlatformVersions: semvers("v1.66.0"),
+		Builtins:         map[string]struct{}{"delivery-kit": {}, "package": {}},
+	})
+
+	assert.Equal(t, []string{"v0.0.34"}, selectedVersions(res, "package"))
+	assert.Equal(t, []string{"v1.2.0"}, selectedVersions(res, "system"))
+	assert.Equal(t, []string{"v2.1.0"}, selectedVersions(res, "delivery-kit"))
+	assert.Empty(t, res.Skipped)
+	assert.Empty(t, res.Warnings)
+
+	assert.Contains(t, selectedVersion(t, res, "package", "v0.0.34").Reasons,
+		Reason{Kind: ReasonPlatform, Subject: PlatformSubject})
+	assert.Contains(t, selectedVersion(t, res, "delivery-kit", "v2.1.0").Reasons,
+		Reason{Kind: ReasonDependency, Subject: "package@v0.0.34", Constraint: ">=2.0.0"})
+}
+
+// TestResolve_PlatformPluginKeepsGoingWithoutDeliveryKit: "if it is available" cuts
+// both ways - an unpublished delivery-kit must not cost the bundle its package
+// plugin, because the built-in command still satisfies the dependency.
+func TestResolve_PlatformPluginKeepsGoingWithoutDeliveryKit(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", needsPlugin(plug("package", "v0.0.34"), "delivery-kit", ">=2.0.0")).
+		add("system", "v1.2.0", plug("system", "v1.2.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		PlatformVersions: semvers("v1.66.0"),
+		Builtins:         map[string]struct{}{"delivery-kit": {}, "package": {}},
+	})
+
+	assert.Equal(t, []string{"v0.0.34"}, selectedVersions(res, "package"), "still mirrored")
+	assert.Empty(t, selectedVersions(res, "delivery-kit"))
+	assert.Empty(t, res.Skipped)
+	assert.Contains(t, res.Warnings[0], "delivery-kit")
+	assert.Contains(t, res.Warnings[0], "built-in d8 command satisfies it")
+}
+
+// TestResolve_NonBuiltinDependencyStillFatal: the fallback is for built-ins only.
+// An ordinary missing dependency still rejects its dependent.
+func TestResolve_NonBuiltinDependencyStillFatal(t *testing.T) {
+	stub := newStub().
+		add("package", "v0.0.34", needsPlugin(plug("package", "v0.0.34"), "db-connector", ">=1.0.0")).
+		add("system", "v1.2.0", plug("system", "v1.2.0"))
+
+	res := resolve(t, stub, ResolveInput{
+		PlatformVersions: semvers("v1.66.0"),
+		Builtins:         map[string]struct{}{"delivery-kit": {}},
+	})
+
+	assert.Empty(t, selectedVersions(res, "package"))
+	require.Len(t, res.Skipped, 1)
+	assert.Equal(t, "package", res.Skipped[0].Name)
+	assert.Contains(t, res.Skipped[0].Reason, "db-connector")
 }

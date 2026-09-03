@@ -398,6 +398,10 @@ func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 	parts := []string{cCount(fmt.Sprint(len(p.Plugins)))}
 
 	counts := countPluginProvenance(p.Plugins)
+	if counts.withPlatform > 0 {
+		parts = append(parts, cDim(fmt.Sprintf("%d with the platform", counts.withPlatform)))
+	}
+
 	if counts.forModules > 0 {
 		parts = append(parts, cDim(fmt.Sprintf("%d for modules", counts.forModules)))
 	}
@@ -432,14 +436,15 @@ func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 
 // pluginProvenanceCounts is the per-category tally of the aggregate line.
 type pluginProvenanceCounts struct {
+	withPlatform int
 	forModules   int
 	dependencies int
 	explicit     int
 }
 
 // countPluginProvenance counts each plugin once by its strongest provenance:
-// serving a mirrored module beats an explicit include, which beats being
-// someone's dependency.
+// shipping with the platform beats serving a mirrored module, which beats an
+// explicit include, which beats being someone's dependency.
 func countPluginProvenance(plugins []mirror.PluginStat) pluginProvenanceCounts {
 	var counts pluginProvenanceCounts
 
@@ -447,6 +452,8 @@ func countPluginProvenance(plugins []mirror.PluginStat) pluginProvenanceCounts {
 		provenance := pluginProvenance(plugin)
 
 		switch {
+		case provenance.platform:
+			counts.withPlatform++
 		case len(provenance.modules) > 0:
 			counts.forModules++
 		case provenance.explicit:
@@ -466,6 +473,9 @@ type pluginProvenanceInfo struct {
 	modules    []string
 	dependents []string
 	explicit   bool
+	// platform marks a plugin that ships with the platform, pulled because the
+	// platform was mirrored rather than because anything asked for it.
+	platform bool
 }
 
 func pluginProvenance(plugin mirror.PluginStat) pluginProvenanceInfo {
@@ -491,6 +501,8 @@ func pluginProvenance(plugin mirror.PluginStat) pluginProvenanceInfo {
 				}
 			case "explicit":
 				info.explicit = true
+			case "platform":
+				info.platform = true
 			}
 		}
 	}
@@ -512,6 +524,9 @@ type pluginTreeNode struct {
 // dependency plugins nested under their dependents and explicitly included
 // plugins in their own group. e.g.:
 //
+//	║     platform
+//	║       package                     [v0.0.34]
+//	║       system                      [v1.2.0]
 //	║     postgresql
 //	║       postgresql-mgr              [v1.1.0, v1.2.0]
 //	║       └ db-connector              [v0.9.1]  (dependency)
@@ -543,6 +558,8 @@ func writePluginsTree(b *strings.Builder, plugins []mirror.PluginStat) {
 		provenance := pluginProvenance(plugin)
 
 		switch {
+		case provenance.platform:
+			addToGroup("platform", node)
 		case len(provenance.modules) > 0:
 			if len(provenance.modules) > 1 {
 				node.note = cDim("(also for " + strings.Join(provenance.modules[1:], ", ") + ")")
@@ -564,9 +581,10 @@ func writePluginsTree(b *strings.Builder, plugins []mirror.PluginStat) {
 		}
 	}
 
-	// Module groups sort alphabetically; the pseudo-groups (explicit,
-	// dependency orphans) always render after them.
-	pseudo := map[string]int{"dependencies": 1, "explicit": 2, "other": 3}
+	// Module groups sort alphabetically between the pseudo-groups: "platform"
+	// leads (those plugins are in every bundle that carries the platform), the
+	// rest (explicit, dependency orphans) always render after the modules.
+	pseudo := map[string]int{"platform": -1, "dependencies": 1, "explicit": 2, "other": 3}
 
 	sort.Slice(groupNames, func(i, j int) bool {
 		pi, pj := pseudo[groupNames[i]], pseudo[groupNames[j]]
