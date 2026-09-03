@@ -36,6 +36,9 @@ func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 		Short: "List all versions of a plugin",
 		Long: "List all published versions of a plugin, newest first. The installed version is\n" +
 			"marked, versions newer than it are highlighted.\n\n" +
+			"A plugin is published one image per platform, so a release reaches the registry as\n" +
+			"several tags. They are collapsed into one line per version, listing the platforms\n" +
+			"that version was built for.\n\n" +
 			"Versions are fetched by the plugin's name through the registry-packages-proxy, so no\n" +
 			"catalog access is needed. Install a specific version with\n" +
 			"'d8 dist plugins install <name> --version X' - a version already on disk is switched to\n" +
@@ -47,8 +50,8 @@ func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 			}
 
 			// Completion must stay instant and offline, so it offers the installed
-			// plugins (read from disk); the remote catalog is not available through
-			// the rpp source anyway.
+			// plugins (read from disk) rather than reaching the registry for the
+			// published set.
 			names, err := manager.InstalledPluginNames()
 			if err != nil {
 				return nil, cobra.ShellCompDirectiveNoFileComp
@@ -95,12 +98,17 @@ func newVersionsCommand(manager *plugins.Manager) *cobra.Command {
 	}
 }
 
+// groupColumnWidth is the width of the trailing group word ("current"/"newer"),
+// held fixed so the platform lists that follow it line up into a column.
+const groupColumnWidth = len("current")
+
 // formatPluginVersionList renders the version list newest-first: versions newer
 // than the installed one are green, the installed one is starred and cyan,
 // older ones are dimmed - the same grouping `d8 dist versions` uses. A nil
 // current (plugin not installed, version unknown) produces a plain uncolored
-// list. Reports whether current appeared in the list.
-func formatPluginVersionList(versions []*semver.Version, current *semver.Version) ([]string, bool) {
+// list. Each line carries the platforms that version was published for.
+// Reports whether current appeared in the list.
+func formatPluginVersionList(versions []plugins.PluginVersion, current *semver.Version) ([]string, bool) {
 	var (
 		newer  = color.New(color.FgGreen)
 		actual = color.New(color.FgCyan, color.Bold)
@@ -109,32 +117,49 @@ func formatPluginVersionList(versions []*semver.Version, current *semver.Version
 		widest int
 	)
 
-	for _, v := range versions {
-		if len(v.Original()) > widest {
-			widest = len(v.Original())
+	for _, version := range versions {
+		if len(version.Version.Original()) > widest {
+			widest = len(version.Version.Original())
 		}
 	}
 
 	lines := make([]string, 0, len(versions))
 
-	for _, v := range versions {
-		var entry string
+	for _, version := range versions {
+		var (
+			tint   *color.Color
+			group  string
+			marker = " "
+		)
 
 		switch {
 		case current == nil:
-			entry = fmt.Sprintf("  %-*s", widest, v.Original())
-		case v.Equal(current):
-			listed = true
-			entry = actual.Sprintf("* %-*s  current", widest, v.Original())
-		case v.GreaterThan(current):
-			entry = newer.Sprintf("  %-*s  newer", widest, v.Original())
+			// Left uncolored and ungrouped: with no installed version to compare
+			// against, no entry is newer, older or current.
+		case version.Version.Equal(current):
+			listed, tint, group, marker = true, actual, "current", "*"
+		case version.Version.GreaterThan(current):
+			tint, group = newer, "newer"
 		default:
-			entry = older.Sprintf("  %-*s", widest, v.Original())
+			tint = older
 		}
 
-		// The padding is for the trailing group word; entries without one would
-		// otherwise carry invisible trailing spaces.
-		lines = append(lines, strings.TrimRight(entry, " "))
+		entry := fmt.Sprintf("%s %-*s  %-*s  %s",
+			marker, widest, version.Version.Original(),
+			groupColumnWidth, group, strings.Join(version.Platforms, ", "))
+
+		// Both columns are padded to a fixed width so the platform lists line up;
+		// a row missing the group word or the platforms would otherwise carry
+		// invisible trailing spaces. A plugin published without platform suffixes
+		// has every platform list empty, and the output collapses back to the bare
+		// version plus its group word.
+		entry = strings.TrimRight(entry, " ")
+
+		if tint != nil {
+			entry = tint.Sprint(entry)
+		}
+
+		lines = append(lines, entry)
 	}
 
 	return lines, listed

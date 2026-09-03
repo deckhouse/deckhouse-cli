@@ -38,6 +38,8 @@ type fakeSelectSource struct {
 	contractCalls map[string]int
 }
 
+func (f *fakeSelectSource) Transport() Transport { return TransportRPP }
+
 func (f *fakeSelectSource) ListPluginTags(context.Context, string) ([]string, error) {
 	return f.tags, nil
 }

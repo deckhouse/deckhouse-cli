@@ -155,6 +155,22 @@ func (s *registryPluginSource) pluginClient(pluginName string) dkpreg.Client {
 	return s.client.WithSegment(legacyPluginsSegment, pluginName)
 }
 
+// Transport reports that this source talks to the registry directly.
+func (s *registryPluginSource) Transport() Transport { return TransportRegistry }
+
+// ListPluginNames enumerates the published plugins from the tags of the plugins
+// repository, where each plugin has an image tagged with its name. Direct registry
+// access reaches that repository, so this transport - and only this one - satisfies
+// pluginCatalog.
+func (s *registryPluginSource) ListPluginNames(ctx context.Context) ([]string, error) {
+	names, err := s.client.WithSegment(legacyPluginsSegment).ListTags(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list plugin names: %w", err)
+	}
+
+	return names, nil
+}
+
 func (s *registryPluginSource) ListPluginTags(ctx context.Context, pluginName string) ([]string, error) {
 	tags, err := s.pluginClient(pluginName).ListTags(ctx)
 	if err != nil {

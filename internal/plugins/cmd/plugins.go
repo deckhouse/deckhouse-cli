@@ -75,7 +75,7 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 		},
 	}
 
-	cmd.AddCommand(newListCommand(manager))
+	cmd.AddCommand(newListCommand(manager, logger))
 	cmd.AddCommand(newVersionsCommand(manager))
 	cmd.AddCommand(newContractCommand(manager, logger))
 	cmd.AddCommand(newInstallCommand(manager))
