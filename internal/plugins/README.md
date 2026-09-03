@@ -20,9 +20,8 @@ machinery/commands split `internal/selfupdate` / `internal/dist/cmd` uses.
 
 | Command | What it does |
 |---|---|
-| `d8 dist plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
-| `d8 dist plugins update <name> [--use-major N]` | update to the newest cluster-compatible version within the current major |
-| `d8 dist plugins update all` | the same for every installed plugin |
+| `d8 dist plugins install <name> [--version X] [--use-major N] [--force]` | install a plugin, switch its version, or update it - installing one that is already present updates it to the newest cluster-compatible version within its current major |
+| `d8 dist plugins install --all [--force]` | the same for every installed plugin at once, each within its own major. Rejects `--version` and `--use-major`, which pin a single plugin |
 | `d8 dist plugins list` | the plugins installed on disk, plus - only on a transport that can enumerate, i.e. `--source` - those published in the registry and ready to install |
 | `d8 dist plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 dist versions`). A release is published one tag per platform; those are collapsed into one line per version listing the platforms it was built for |
 | `d8 dist plugins contract <name>` | show a plugin's contract |
@@ -224,7 +223,7 @@ them - install/update work as usual. See `internal/mirror/README.MD`
 | `install.go` | the install pipeline: lock, staged download, smoke, atomic swap, idempotency |
 | `select.go` | newest-compatible version selection, contract memoization |
 | `planner.go` | plugin-to-plugin dependency resolution: constraint-aware planning, conflict/cycle/depth guards, upgrade-only |
-| `update.go` | `UpdateAll`, installed-plugin discovery, home-fallback switch |
+| `update.go` | `UpdateAll` (behind `install --all`), installed-plugin discovery, home-fallback switch |
 | `remove.go` | `Remove` / `RemoveAll` |
 | `validators.go` | plugin-to-plugin requirement checks + the Manager glue over `requirements/` (snapshot cache, kubeconfig clients, `--skip-cluster-checks`) |
 | `requirements/` | cluster-side requirements: the one-shot cluster snapshot (k8s / Deckhouse / modules) and the named checks against it |

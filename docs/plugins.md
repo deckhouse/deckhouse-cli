@@ -54,8 +54,8 @@ as described in
 | `d8 dist plugins install <name>` | installs the newest version compatible with your cluster |
 | `d8 dist plugins install <name> --version X` | installs an exact version |
 | `d8 dist plugins install <name> --use-major N` | switches majors explicitly |
-| `d8 dist plugins update <name>` / `update all` | updates within the current major |
-| `d8 dist plugins list` | shows installed plugins (the proxy serves no catalog, so available plugins are not listed) |
+| `d8 dist plugins install --all` | updates every installed plugin, each within its own major |
+| `d8 dist plugins list` | shows installed plugins, plus the published ones when the transport can enumerate them (`--source`) |
 | `d8 dist plugins contract <name>` | shows a plugin's contract: version, description, requirements |
 | `d8 dist plugins remove <name>` / `remove all` | removes plugins |
 
@@ -83,8 +83,9 @@ active one:
 
 Rules that follow from this layout:
 
-- `d8 dist plugins update` stays **within the installed major**. Crossing
-  majors is always an explicit decision: `--use-major N` or `--version X`.
+- Installing a plugin that is already present **updates** it, staying **within
+  the installed major**. Crossing majors is always an explicit decision:
+  `--use-major N` or `--version X`.
 - Installing a version that is already on disk just repoints the symlink - no
   download.
 - Installing the active version says so and does nothing; `--force`

@@ -239,7 +239,7 @@ func writePluginsSection(b *strings.Builder, d summaryData) {
 	}
 
 	if outdated {
-		fmt.Fprintf(b, "%s\n", sumDim("Update a plugin with 'd8 dist plugins update <name>' or 'd8 dist plugins update all'."))
+		fmt.Fprintf(b, "%s\n", sumDim("Update a plugin with 'd8 dist plugins install <name>' or 'd8 dist plugins install --all'."))
 	}
 }
 
@@ -254,7 +254,7 @@ func latestCell(p pluginRow) string {
 
 // installedPluginsRoot reports the plugins root that actually holds an
 // install: the configured root, or the home fallback (~/.deckhouse-cli) -
-// the same resolution `plugins update all` and the root command's plugin
+// the same resolution `plugins install --all` and the root command's plugin
 // override use. ok=false means no plugins are installed anywhere.
 func installedPluginsRoot() (string, bool) {
 	return layout.ResolveInstallRoot(pluginflags.DeckhousePluginsDir)
