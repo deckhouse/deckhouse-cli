@@ -55,6 +55,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 	// isLegacyModule is true by default if we unpacking module-<name>.tar
 	isLegacyModule := strings.HasPrefix(pkgName, "module-")
 	moduleName := strings.TrimPrefix(pkgName, "module-")
+	tmpDir := filepath.Join(targetPath, "tmp")
 
 	for {
 		if err = ctx.Err(); err != nil {
@@ -66,6 +67,10 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			break
 		}
 
+		if err != nil {
+			return fmt.Errorf("read tar: %w", err)
+		}
+
 		if tarHdr.Typeflag != tar.TypeReg {
 			continue
 		}
@@ -74,7 +79,11 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			isLegacyModule = false
 		}
 
-		writePath := filepath.Join(targetPath, "tmp", filepath.Clean(tarHdr.Name))
+		writePath, err := safeJoin(tmpDir, tarHdr.Name)
+		if err != nil {
+			return err
+		}
+
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
@@ -97,8 +106,6 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		}
 	}
 
-	from := filepath.Join(targetPath, "tmp")
-
 	to := targetPath
 	if isLegacyModule {
 		to = filepath.Join(targetPath, "modules", moduleName)
@@ -107,7 +114,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
 
-		err = moveFiles(from, to)
+		err = moveFiles(tmpDir, to)
 		if err != nil {
 			return fmt.Errorf("move module from tmp: %w", err)
 		}
@@ -119,12 +126,12 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		return fmt.Errorf("setup dir tree: %w", err)
 	}
 
-	err = moveFiles(from, to)
+	err = moveFiles(tmpDir, to)
 	if err != nil {
 		return fmt.Errorf("move module from tmp to '%s': %w", to, err)
 	}
 
-	_ = os.RemoveAll(filepath.Join(targetPath, "tmp"))
+	_ = os.RemoveAll(tmpDir)
 
 	return nil
 }
@@ -292,6 +299,19 @@ func moveFiles(from, to string) error {
 	}
 
 	return nil
+}
+
+// safeJoin joins name under root and rejects a result that escapes root (CWE-22).
+// The check is lexical: it holds because Unpack materializes regular files only, never symlinks.
+func safeJoin(root, name string) (string, error) {
+	target := filepath.Join(root, name)
+
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the target directory", name)
+	}
+
+	return target, nil
 }
 
 // ociIndex is a minimal representation of an OCI image index (index.json)
