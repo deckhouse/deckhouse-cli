@@ -33,6 +33,8 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+
+	"github.com/deckhouse/deckhouse-cli/internal/safepath"
 )
 
 const (
@@ -55,6 +57,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 	// isLegacyModule is true by default if we unpacking module-<name>.tar
 	isLegacyModule := strings.HasPrefix(pkgName, "module-")
 	moduleName := strings.TrimPrefix(pkgName, "module-")
+	tmpDir := filepath.Join(targetPath, "tmp")
 
 	for {
 		if err = ctx.Err(); err != nil {
@@ -66,6 +69,10 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			break
 		}
 
+		if err != nil {
+			return fmt.Errorf("read tar: %w", err)
+		}
+
 		if tarHdr.Typeflag != tar.TypeReg {
 			continue
 		}
@@ -74,7 +81,11 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			isLegacyModule = false
 		}
 
-		writePath := filepath.Join(targetPath, "tmp", filepath.Clean(tarHdr.Name))
+		writePath, err := safepath.Join(tmpDir, tarHdr.Name)
+		if err != nil {
+			return err
+		}
+
 		if err = os.MkdirAll(filepath.Dir(writePath), 0o755); err != nil {
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
@@ -97,8 +108,6 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		}
 	}
 
-	from := filepath.Join(targetPath, "tmp")
-
 	to := targetPath
 	if isLegacyModule {
 		to = filepath.Join(targetPath, "modules", moduleName)
@@ -107,7 +116,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			return fmt.Errorf("setup dir tree: %w", err)
 		}
 
-		err = moveFiles(from, to)
+		err = moveFiles(tmpDir, to)
 		if err != nil {
 			return fmt.Errorf("move module from tmp: %w", err)
 		}
@@ -119,12 +128,12 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 		return fmt.Errorf("setup dir tree: %w", err)
 	}
 
-	err = moveFiles(from, to)
+	err = moveFiles(tmpDir, to)
 	if err != nil {
 		return fmt.Errorf("move module from tmp to '%s': %w", to, err)
 	}
 
-	_ = os.RemoveAll(filepath.Join(targetPath, "tmp"))
+	_ = os.RemoveAll(tmpDir)
 
 	return nil
 }
