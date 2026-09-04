@@ -33,8 +33,6 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
-
-	"github.com/deckhouse/deckhouse-cli/internal/safepath"
 )
 
 const (
@@ -81,7 +79,7 @@ func Unpack(ctx context.Context, source io.Reader, targetPath string, pkgName st
 			isLegacyModule = false
 		}
 
-		writePath, err := safepath.Join(tmpDir, tarHdr.Name)
+		writePath, err := safeJoin(tmpDir, tarHdr.Name)
 		if err != nil {
 			return err
 		}
@@ -301,6 +299,19 @@ func moveFiles(from, to string) error {
 	}
 
 	return nil
+}
+
+// safeJoin joins name under root and rejects a result that escapes root (CWE-22).
+// The check is lexical: it holds because Unpack materializes regular files only, never symlinks.
+func safeJoin(root, name string) (string, error) {
+	target := filepath.Join(root, name)
+
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the target directory", name)
+	}
+
+	return target, nil
 }
 
 // ociIndex is a minimal representation of an OCI image index (index.json)

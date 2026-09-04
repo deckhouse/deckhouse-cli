@@ -169,6 +169,37 @@ func TestUnpackRejectsCorruptArchive(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestSafeJoin(t *testing.T) {
+	root := filepath.Join("base", "root")
+
+	tests := []struct {
+		give    string
+		want    string
+		wantErr bool
+	}{
+		{give: "a/b", want: filepath.Join(root, "a", "b")},
+		{give: "dir/foo..bar", want: filepath.Join(root, "dir", "foo..bar")},
+		{give: "a/../b", want: filepath.Join(root, "b")},
+		{give: "/abs/x", want: filepath.Join(root, "abs", "x")},
+		{give: "..", wantErr: true},
+		{give: "../x", wantErr: true},
+		{give: "a/../../x", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.give, func(t *testing.T) {
+			got, err := safeJoin(root, tt.give)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestMergeIndexJSON(t *testing.T) {
 	t.Run("union deduplicates identical descriptors", func(t *testing.T) {
 		dir := t.TempDir()
