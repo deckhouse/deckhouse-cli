@@ -540,6 +540,9 @@ type fsTarScan struct {
 	unsupportedEntryCount       uint64
 	unsupportedEntrySummary     string
 	removeAll                   func(string) error
+	// rawTotal is the exact sum of every regular entry's PAX raw size, computed by this
+	// preflight pass — the upload's true total, known before any HEAD or PUT.
+	rawTotal int64
 }
 
 func (s *fsTarScan) Close() error {
@@ -1055,7 +1058,7 @@ func readFSTarRecord(reader io.Reader) (fsTarRecord, error) {
 // codec-geometry checks without activating a transfer.
 //
 // setTotal, when non-nil (nil disables reporting, matching onProgress's convention), is
-// called with a running sum of exact PAX raw sizes as entries are walked.
+// called exactly once, before any HEAD/PUT, with the exact sum of every regular entry's PAX raw size.
 //
 // activate, when non-nil, is called once per entry that actually needs a real PUT (the
 // NOT-done branch), never inside the `if done` server-side-skip branch above it. This is
@@ -1276,6 +1279,12 @@ func uploadFSTarFromScanWithDependencies(
 			slog.Int("directory_count", scan.ReservedEmptyDirectoryCount))
 	}
 
+	// scan.rawTotal was computed by the preflight pass; report it once, up front, so the
+	// bar's denominator is complete before the upload pass sends its first byte.
+	if setTotal != nil {
+		setTotal(scan.rawTotal)
+	}
+
 	info, err := source.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect %s: %w", tarPath, err)
@@ -1391,16 +1400,14 @@ func uploadFSTarFromScanWithDependencies(
 			)
 		}
 
+		// runningTotal is no longer reported via setTotal (see the up-front call above); it
+		// only lets the post-loop check prove sizes didn't change since the preflight pass.
 		runningTotal, err = addRawSize(runningTotal, metadata.RawSize)
 		if err != nil {
 			return errors.Join(
 				fmt.Errorf("account tar entry %s: %w", relPath, err),
 				closeFSTarSequence(sequence),
 			)
-		}
-
-		if setTotal != nil {
-			setTotal(runningTotal)
 		}
 
 		fileURL, err := fileUploadURL(baseURL, relPath)
@@ -1462,6 +1469,16 @@ func uploadFSTarFromScanWithDependencies(
 		return errors.Join(
 			fmt.Errorf("%w: tar entry count changed after preflight (entries %d/%d, regular entries %d/%d)",
 				archive.ErrInvalidFSMetadata, entryIndex, scan.entryCount, regularIndex, scan.regularCount),
+			closeFSTarSequence(sequence),
+		)
+	}
+
+	// Extends the entry-count check above to bytes: the total already reported via setTotal
+	// must match what this pass actually walked, proving sizes didn't change since preflight.
+	if runningTotal != scan.rawTotal {
+		return errors.Join(
+			fmt.Errorf("%w: tar raw size total changed after preflight (%d/%d bytes)",
+				archive.ErrInvalidFSMetadata, runningTotal, scan.rawTotal),
 			closeFSTarSequence(sequence),
 		)
 	}
@@ -1660,6 +1677,7 @@ func scanFSTarReaderWithOptions(
 	var (
 		entryCount   uint64
 		regularCount uint64
+		rawTotal     int64
 	)
 
 	for {
@@ -1742,6 +1760,13 @@ func scanFSTarReaderWithOptions(
 				return cleanup(fmt.Errorf("entry %q: %w", hdr.Name, err))
 			}
 
+			rawTotal, err = addRawSize(rawTotal, metadata.RawSize)
+			if err != nil {
+				_ = sequence.Close()
+
+				return cleanup(fmt.Errorf("account tar entry %q: %w", hdr.Name, err))
+			}
+
 			record.Kind = fsTarRecordRegular
 			record.Path = path.Clean(metadata.OriginalPath)
 			regularCount++
@@ -1803,6 +1828,7 @@ func scanFSTarReaderWithOptions(
 		unsupportedEntryCount:       diagnostics.count,
 		unsupportedEntrySummary:     diagnostics.summary(),
 		removeAll:                   options.removeAll,
+		rawTotal:                    rawTotal,
 	}, nil
 }
 

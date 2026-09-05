@@ -644,19 +644,9 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 			slog.String("namespace", namespace),
 			slog.String("dataimport", diName))
 
-		// The FS-upload total is reported PROGRESSIVELY, not as a single a-priori value
-		// like the block path's setTotal(totalSize) below: a tar header only records a
-		// compressed entry's STORED length, so the true (decompressed) size of a LATER
-		// file is not knowable until importFSFromTar has walked every entry before it.
-		// Computing a full total up front would mean decompressing every entry just to
-		// measure it -- exactly the extra work the two-pass streaming design exists to
-		// avoid when a resume never needs it (see importFSFromTar). Instead, setTotal is
-		// threaded straight through: importFSFromTar calls it with a running sum each
-		// time a new file's exact size becomes known (a skipped/already-done file's size
-		// from HEAD's Content-Length, or a not-done file's exact size from its measure
-		// step / hdr.Size), so the bar's denominator grows as work is discovered rather
-		// than staying at zero for the whole upload. Honest limitation: the total is not
-		// complete until the LAST entry in the tar has been processed.
+		// The FS-upload total, like the block path's setTotal(totalSize) below, is reported
+		// up front: importFSFromTar's header-only preflight pass already knows every entry's
+		// exact PAX raw size, so it sums them and calls setTotal once, before any HEAD/PUT.
 		var err error
 		if handle == nil {
 			err = importFSFromTarWithDependencies(
@@ -690,9 +680,9 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 		)
 
 		if handle == nil {
-			totalSize, err = blockTotalSize(leaf.DataFile, leaf.Size, ext)
+			totalSize, err = resolveBlockPayloadSize(ctx, leaf, nil)
 		} else {
-			totalSize, err = blockTotalSizeFromSource(leaf.DataFile, leaf.Size, ext, handle)
+			totalSize, err = resolveBlockPayloadSize(ctx, leaf, handle)
 		}
 
 		if err != nil {
@@ -709,9 +699,9 @@ func (c *clusterVolumeImporter) sendVolumeDataFromSource(
 			slog.String("dataimport", diName),
 			slog.Int64("bytes", totalSize))
 
-		// totalSize is known up front (blockTotalSize never decompresses to measure it)
-		// and matches the onProgress increments (validated durable offsets advance the bar),
-		// so report it as the total before any bytes are sent.
+		// totalSize is known up front — trusted from the archive's recorded measurement, or
+		// else measured by resolveBlockPayloadSize without a full decode — and matches the
+		// onProgress increments, so report it as the total before any bytes are sent.
 		if setTotal != nil {
 			setTotal(totalSize)
 		}
@@ -1138,74 +1128,75 @@ func drainAndCloseResponseBody(resp *http.Response) error {
 	return errors.Join(drainErr, closeErr)
 }
 
-// ErrRawBlockSizeMismatch is returned by blockTotalSize when a raw (codec
-// none) data.bin file's on-disk size does not match the size captured in the
-// archive's VolumeInfo. Unlike a compressed payload, a raw payload has no
-// separate decompressed size to fall back on — stat size and captured size
-// are the SAME quantity — so any disagreement means a truncated, corrupted, or
-// mismatched archive. Checking this before any HEAD/PUT keeps the failure
-// deterministic and sends zero HTTP requests, instead of streaming a wrong
-// byte count to the importer and only discovering the mismatch mid-transfer.
+// ErrRawBlockSizeMismatch is returned by resolveBlockPayloadSize when a raw (codec none)
+// data.bin's on-disk size disagrees with the archive's recorded StoredSizeBytes — for raw
+// payloads the two are definitionally equal, so any mismatch means a corrupted archive.
+// Checked before any HEAD/PUT. Never fires for an archive older than
+// SnapshotFormatVersionPayloadSizes (nothing recorded to cross-check).
 var ErrRawBlockSizeMismatch = errors.New("raw block size mismatch")
 
 var errFailedBlockDecoderClose = errors.New("failed to close block decoder")
 
-// blockTotalSize returns the exact decompressed byte count of a node's block-volume data
-// file without decompressing it. size (a resource.Quantity string like "10Gi", sourced from
-// VolumeSnapshotContent.status.restoreSize — see archive.VolumeInfo.Size) is parsed for
-// EVERY codec, including raw: a block-volume capture always reads exactly the device's
-// provisioned byte size, so the captured size is the total regardless of codec. Parsing
-// size instead of decompressing avoids a full decompression pass purely to learn a byte
-// count, which is the whole point of the streaming upload path.
+// resolveBlockPayloadSize determines a block leaf's exact upload size (totalSize).
 //
-// For a raw file (ext==""), the parsed size is additionally cross-checked against the
-// file's actual on-disk size (os.Stat) — see ErrRawBlockSizeMismatch — because a raw
-// payload's stat size and its captured size are definitionally the same number, so any
-// difference is a corrupt/mismatched archive rather than a codec-driven size difference.
-// A compressed file's on-disk (compressed) size is not comparable to the captured
-// (decompressed) size at all, so no such check is possible or meaningful for ext != "".
-func blockTotalSize(dataFile, size, ext string) (int64, error) {
-	return blockTotalSizeFromSource(dataFile, size, ext, nil)
+// For a non-raw codec on a current-format archive (FormatVersion >= SnapshotFormatVersionPayloadSizes
+// and PayloadRawSizeBytes > 0), it trusts the recorded measurement outright rather than
+// re-decoding a possibly-huge file. A zero or legacy value always falls back to measuring
+// (cheap header read for zstd, full decode otherwise).
+//
+// A raw (ext == "") payload is always measured — its on-disk length IS its decoded length,
+// a cheap Seek — which also lets a current-format archive cross-check StoredSizeBytes
+// (see ErrRawBlockSizeMismatch).
+//
+// source is the leaf's already-open reader when the caller holds one; nil means
+// resolveBlockPayloadSize opens leaf.DataFile itself.
+func resolveBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.ReadSeeker) (int64, error) {
+	if leaf.Ext != "" && leaf.FormatVersion >= archive.SnapshotFormatVersionPayloadSizes && leaf.PayloadRawSizeBytes > 0 {
+		return leaf.PayloadRawSizeBytes, nil
+	}
+
+	if source != nil {
+		return measureBlockPayloadSize(ctx, leaf, source)
+	}
+
+	file, err := os.Open(leaf.DataFile)
+	if err != nil {
+		return 0, fmt.Errorf("open volume data %s: %w", leaf.DataFile, err)
+	}
+
+	size, measureErr := measureBlockPayloadSize(ctx, leaf, file)
+	closeErr := file.Close()
+
+	if err := errors.Join(measureErr, closeErr); err != nil {
+		return 0, err
+	}
+
+	return size, nil
 }
 
-func blockTotalSizeFromSource(dataFile, size, ext string, source interface {
-	Stat() (os.FileInfo, error)
-}) (int64, error) {
-	q, err := resource.ParseQuantity(size)
+// measureBlockPayloadSize measures leaf's block payload size from an already-open source.
+// For ext == "" it also cross-checks the result against StoredSizeBytes, but only when that
+// value is strictly positive — zero is ambiguous between "empty" and "never recorded".
+func measureBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.ReadSeeker) (int64, error) {
+	size, err := compress.DecodedSize(ctx, leaf.Ext, source)
 	if err != nil {
-		return 0, fmt.Errorf("parsing captured volume size %q for %s: %w", size, dataFile, err)
+		return 0, fmt.Errorf("determine block payload size for %s: %w", leaf.DataFile, err)
 	}
 
-	captured := q.Value()
-
-	if ext != "" {
-		return captured, nil
+	if leaf.Ext == "" && leaf.FormatVersion >= archive.SnapshotFormatVersionPayloadSizes &&
+		leaf.PayloadStoredSizeBytes > 0 && size != leaf.PayloadStoredSizeBytes {
+		return 0, fmt.Errorf("%s: on-disk size %d does not match archive-recorded size %d: %w",
+			leaf.DataFile, size, leaf.PayloadStoredSizeBytes, ErrRawBlockSizeMismatch)
 	}
 
-	var info os.FileInfo
-	if source == nil {
-		info, err = os.Stat(dataFile)
-	} else {
-		info, err = source.Stat()
-	}
-
-	if err != nil {
-		return 0, fmt.Errorf("stat volume data %s: %w", dataFile, err)
-	}
-
-	if info.Size() != captured {
-		return 0, fmt.Errorf("%s: on-disk size %d does not match captured volume size %d (%q): %w",
-			dataFile, info.Size(), captured, size, ErrRawBlockSizeMismatch)
-	}
-
-	return captured, nil
+	return size, nil
 }
 
 // putBlock streams the block-volume payload at dataFile to the importer's block
 // endpoint, honouring the server-reported X-Next-Offset for resumable progress. ext
 // selects the decode codec via compress.NewReader ("" for raw/no codec, matching
 // Codec.Ext); totalSize is the volume's exact decompressed byte count (see
-// blockTotalSize). onProgress, when non-nil, is called as validated server offsets make
+// resolveBlockPayloadSize). onProgress, when non-nil, is called as validated server offsets make
 // raw bytes known durable, including the initial HEAD prefix. activate, when non-nil, is called at the start of every
 // real transfer iteration (never when offset==totalSize short-circuits before any PUT is
 // attempted), so the caller's progress stream is activated only on a genuine transfer.
@@ -2139,6 +2130,10 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 			return 0, fmt.Errorf("invalid X-Next-Offset %q from %s: %w", next, url, err)
 		}
 
+		if err := verifyDeviceCapacity(resp.Header.Get("X-Device-Size"), totalSize, url); err != nil {
+			return 0, err
+		}
+
 		return off, nil
 	case http.StatusNotFound:
 		if err := validateBlockOffset(0, totalSize); err != nil {
@@ -2149,6 +2144,33 @@ func headBlockOffset(ctx context.Context, httpClient httpDoer, url string, total
 	default:
 		return 0, fmt.Errorf("HEAD %s returned status %d (%s)", url, resp.StatusCode, resp.Status)
 	}
+}
+
+// verifyDeviceCapacity fails BEFORE the first PUT when the importer's HEAD response
+// (deviceSizeHeader, i.e. X-Device-Size) proves the target device is smaller than totalSize
+// — otherwise this would only surface as a mid-transfer failure.
+//
+// A missing, empty, or unparsable header fails OPEN (returns nil): its absence isn't
+// evidence the device is too small, only a proven shortfall is.
+func verifyDeviceCapacity(deviceSizeHeader string, totalSize int64, url string) error {
+	if deviceSizeHeader == "" {
+		return nil
+	}
+
+	deviceSize, err := strconv.ParseInt(deviceSizeHeader, 10, 64)
+	if err != nil {
+		return nil
+	}
+
+	if deviceSize < totalSize {
+		return fmt.Errorf(
+			"target device size %d bytes is smaller than payload %d bytes (HEAD %s); "+
+				"the target storage class may round up volumes differently than the source — check storageClassName",
+			deviceSize, totalSize, url,
+		)
+	}
+
+	return nil
 }
 
 // doBlockChunk performs one bounded PUT. Successful producer responses must acknowledge

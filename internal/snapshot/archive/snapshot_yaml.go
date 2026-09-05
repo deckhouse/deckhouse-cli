@@ -40,9 +40,14 @@ const (
 	// SnapshotFormatVersionLegacy identifies archives written before explicit envelope versioning.
 	// Version zero is accepted only through an explicit unauthenticated compatibility option.
 	SnapshotFormatVersionLegacy = 0
-	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal. Version 2 adds
-	// the mandatory authenticated direct-child commitment (ChildrenChecksum).
-	SnapshotFormatVersionCurrent = 2
+	// SnapshotFormatVersionAuthenticatedChildren adds the mandatory ChildrenChecksum. An archive
+	// at this version has no RawSizeBytes/StoredSizeBytes; readers measure the payload instead.
+	SnapshotFormatVersionAuthenticatedChildren = 2
+	// SnapshotFormatVersionPayloadSizes adds VolumeInfo.RawSizeBytes/StoredSizeBytes, the
+	// measured on-disk payload footprint (as opposed to Size's nominal restoreSize).
+	SnapshotFormatVersionPayloadSizes = 3
+	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal.
+	SnapshotFormatVersionCurrent = SnapshotFormatVersionPayloadSizes
 )
 
 // sha256HexLen is the length of a hex-encoded SHA-256 digest (32 bytes → 64 hex chars).
@@ -211,7 +216,7 @@ func validateSnapshotEnvelope(sy SnapshotYAML, options SnapshotYAMLReadOptions) 
 		}
 
 		return validateChildrenChecksumPresent(sy)
-	case SnapshotFormatVersionCurrent:
+	case SnapshotFormatVersionAuthenticatedChildren, SnapshotFormatVersionCurrent:
 	default:
 		return fmt.Errorf("%d: %w", sy.FormatVersion, ErrUnsupportedSnapshotFormat)
 	}
@@ -319,10 +324,20 @@ type VolumeInfo struct {
 	// StorageClassName records the source StorageClass of the captured volume. On re-import it
 	// is sent as the PopulateData DataImport's spec.storageParams.storageClassName (required).
 	StorageClassName string `json:"storageClassName,omitempty"`
-	// Size records the real allocated size of the captured volume (e.g. "10Gi"), taken from
-	// VolumeSnapshotContent.status.restoreSize. On re-import it is sent as the PopulateData
-	// DataImport's spec.storageParams.size (required).
+	// Size records the NOMINAL captured-volume quantity (e.g. "10Gi"), taken from
+	// VolumeSnapshotContent.status.restoreSize. Used only to size the scratch volume on
+	// re-import (spec.storageParams.size, required) — NOT the payload's real byte size, since
+	// a thin-provisioning backend can round the device up from it. See RawSizeBytes/StoredSizeBytes.
 	Size string `json:"size,omitempty"`
+	// RawSizeBytes is the exact decoded byte count of the captured payload: for Block, the
+	// decoded length of data.bin[.<ext>]; for Filesystem, the sum of data.tar's regular-entry
+	// raw sizes. Unlike Size, this can exceed the nominal PVC quantity (thin-provisioning
+	// round-up). Recorded from SnapshotFormatVersionPayloadSizes onward; zero on an older
+	// archive means "not recorded", not "empty".
+	RawSizeBytes int64 `json:"rawSizeBytes,omitempty"`
+	// StoredSizeBytes is the on-disk size of the payload artifact (data.bin[.<ext>] or
+	// data.tar). Informational plus a corruption preflight; same presence rules as RawSizeBytes.
+	StoredSizeBytes int64 `json:"storedSizeBytes,omitempty"`
 }
 
 // NodeChecksum is a locally-computed integrity digest. SnapshotYAML.Checksum covers the node's

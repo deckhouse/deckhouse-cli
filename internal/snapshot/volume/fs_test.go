@@ -2669,15 +2669,15 @@ func TestDownloadFilesystemVolume_ResumeSkip_MismatchedBlobRestaged(t *testing.T
 	}
 }
 
-// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn verifies that
-// an already-staged blob for a listing item with no hash.md5 attribute is
-// skipped WITHOUT verification (matching the fresh-path convention): the blob
-// is not re-downloaded even though its bytes differ from the server's, its
-// declared size is credited once, and a single WARN is logged.
-func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T) {
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches verifies that, with no
+// source MD5, an already-staged blob whose measured raw size matches the fresh listing's
+// declared size is skipped without content verification: no file GET, the sentinel content
+// survives in the tar, a single "verifying size only" WARN fires, and the size is credited
+// to onProgress once.
+func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches(t *testing.T) {
 	t.Parallel()
 
-	content := []byte("server content that must never be fetched on an empty-md5 skip")
+	content := []byte("server content that must never be fetched on a size-only skip!")
 	codec := mustCodec(t, "none")
 	srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, "")
 
@@ -2689,9 +2689,9 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// Sentinel differs from the server content: with no advertised MD5 the skip
-	// branch must NOT verify it and must NOT re-download it.
-	sentinel := []byte("sentinel-not-server-content")
+	// Sentinel is the SAME length as the server content but differs byte for byte: content
+	// still can't be verified without MD5, but the size matches so the skip stands.
+	sentinel := bytes.Repeat([]byte("X"), len(content))
 	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2718,28 +2718,116 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T)
 	}
 
 	if getCount() != 0 {
-		t.Errorf("empty-md5 staged file was re-downloaded: %d file GET(s), want 0", getCount())
+		t.Errorf("size-matched empty-md5 staged file was re-downloaded: %d file GET(s), want 0", getCount())
 	}
 
 	warnCount := 0
 
 	for _, msg := range lh.warnMessages() {
-		if msg == "no source MD5 available for file, skipping integrity verification" {
+		if msg == "no source MD5 available for file, verifying size only" {
 			warnCount++
 		}
 	}
 
 	if warnCount != 1 {
-		t.Errorf("expected exactly 1 missing-digest WARN, got %d: %v", warnCount, lh.warnMessages())
+		t.Errorf("expected exactly 1 verifying-size-only WARN, got %d: %v", warnCount, lh.warnMessages())
 	}
 
 	entries := readTarContents(t, tarPath)
 	if !bytes.Equal(entries["file.bin"], sentinel) {
-		t.Errorf("file.bin content = %q; want sentinel %q (skipped without verification)", entries["file.bin"], sentinel)
+		t.Errorf("file.bin content = %q; want sentinel %q (skipped, content unverifiable without MD5)", entries["file.bin"], sentinel)
 	}
 
 	if credited != int64(len(content)) {
 		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+	}
+}
+
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers verifies that, with no
+// source MD5, an already-staged blob whose measured size does NOT match the fresh listing
+// is treated as stale and re-staged in the same run: at least one file GET fires, the tar
+// carries the true server content, the "re-staging" WARN fires, progress reaches the
+// declared size, and the resulting tar's PAX metadata stays consistent (SumTarRawSizes).
+func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("resume-skip true source content for the size-mismatched blob")
+	codec := mustCodec(t, "none")
+	srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, "")
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sentinel differs in LENGTH from the server content: with no MD5, the skip branch
+	// still catches this via the size check and re-fetches rather than trusting it.
+	sentinel := []byte("short-stale-blob")
+	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lh := &warnCapture{}
+	log := slog.New(lh)
+
+	var (
+		progMu   sync.Mutex
+		credited int64
+	)
+
+	onProgress := func(n int) {
+		progMu.Lock()
+		credited += int64(n)
+		progMu.Unlock()
+	}
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, onProgress,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	if getCount() < 1 {
+		t.Errorf("size-mismatched empty-md5 staged file was not re-downloaded: %d file GET(s), want >= 1", getCount())
+	}
+
+	warnCount := 0
+
+	for _, msg := range lh.warnMessages() {
+		if msg == "staged file failed source MD5 re-check on resume, re-staging" {
+			warnCount++
+		}
+	}
+
+	if warnCount != 1 {
+		t.Errorf("expected exactly 1 re-staging WARN, got %d: %v", warnCount, lh.warnMessages())
+	}
+
+	entries := readTarContents(t, tarPath)
+	if !bytes.Equal(entries["file.bin"], content) {
+		t.Errorf("file.bin content = %q; want true source content %q (re-staged)", entries["file.bin"], content)
+	}
+
+	if credited != int64(len(content)) {
+		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+	}
+
+	// The tar's PAX rawSize records must be honest: ParseFSMetadata rejects an entry whose
+	// stored byte count disagrees with its declared rawSize. A stale skip that never
+	// re-fetched would leave rawSize describing the listing's size while the tar stored the
+	// shorter sentinel, tripping exactly this check downstream.
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	if _, err := archive.SumTarRawSizes(context.Background(), f); err != nil {
+		t.Errorf("SumTarRawSizes: %v", err)
 	}
 }
 
