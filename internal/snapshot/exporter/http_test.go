@@ -1257,3 +1257,192 @@ func TestFilesURL(t *testing.T) {
 		t.Errorf("FilesURL: got %q, want %q", got, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ErrExportUnauthorized classification and publish-hint tests
+// ---------------------------------------------------------------------------
+
+func TestExportStatusError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		code    int
+		wantErr bool
+	}{
+		{name: "error: 401 wraps ErrExportUnauthorized", code: http.StatusUnauthorized, wantErr: true},
+		{name: "error: 403 wraps ErrExportUnauthorized", code: http.StatusForbidden, wantErr: true},
+		{name: "success: 404 is returned unwrapped", code: http.StatusNotFound},
+		{name: "success: 500 is returned unwrapped", code: http.StatusInternalServerError},
+		{name: "success: 200 is returned unwrapped", code: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			base := errors.New("underlying status error")
+			got := exportStatusError(tt.code, base)
+
+			if tt.wantErr {
+				if !errors.Is(got, ErrExportUnauthorized) {
+					t.Fatalf("exportStatusError(%d, ...) = %v, want wrapped ErrExportUnauthorized", tt.code, got)
+				}
+
+				if !errors.Is(got, base) {
+					t.Fatalf("exportStatusError(%d, ...) lost the underlying error", tt.code)
+				}
+
+				return
+			}
+
+			if errors.Is(got, ErrExportUnauthorized) {
+				t.Fatalf("exportStatusError(%d, ...) unexpectedly wraps ErrExportUnauthorized", tt.code)
+			}
+
+			if got != base {
+				t.Fatalf("exportStatusError(%d, ...) = %v, want the base error returned unchanged", tt.code, got)
+			}
+		})
+	}
+}
+
+// unauthorizedServer returns an httptest.Server that answers every request
+// (whatever method or path) with a 401, for exercising every Fetcher method's
+// unauthorized-classification path uniformly.
+func unauthorizedServer(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// TestFetcher_ClassifiesUnauthorized verifies that all five Fetcher methods
+// classify a 401 response as ErrExportUnauthorized.
+func TestFetcher_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		call func(f *Fetcher, ctx context.Context, srv *httptest.Server) error
+	}{
+		{
+			name: "success: HeadVolume classifies 401",
+			call: func(f *Fetcher, ctx context.Context, srv *httptest.Server) error {
+				blockURL, err := BlockURL(srv.URL)
+				if err != nil {
+					return err
+				}
+
+				_, err = f.HeadVolume(ctx, blockURL)
+
+				return err
+			},
+		},
+		{
+			name: "success: RangeGet classifies 401",
+			call: func(f *Fetcher, ctx context.Context, srv *httptest.Server) error {
+				blockURL, err := BlockURL(srv.URL)
+				if err != nil {
+					return err
+				}
+
+				_, err = f.RangeGet(ctx, blockURL, 0, 1)
+
+				return err
+			},
+		},
+		{
+			name: "success: ListDir classifies 401",
+			call: func(f *Fetcher, ctx context.Context, srv *httptest.Server) error {
+				filesURL, err := FilesURL(srv.URL)
+				if err != nil {
+					return err
+				}
+
+				return f.ListDir(ctx, filesURL, func(Item) error { return nil })
+			},
+		},
+		{
+			name: "success: SourceMD5 classifies 401",
+			call: func(f *Fetcher, ctx context.Context, srv *httptest.Server) error {
+				_, err := f.SourceMD5(ctx, srv.URL+"/api/v1/files/data.txt", 4)
+
+				return err
+			},
+		},
+		{
+			name: "success: GetFile classifies 401",
+			call: func(f *Fetcher, ctx context.Context, srv *httptest.Server) error {
+				_, err := f.GetFile(ctx, srv.URL+"/api/v1/files/data.txt")
+
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := unauthorizedServer(t)
+			f := NewFetcher(srv.Client())
+
+			err := tt.call(f, context.Background(), srv)
+			if !errors.Is(err, ErrExportUnauthorized) {
+				t.Fatalf("error = %v, want wrapped ErrExportUnauthorized", err)
+			}
+		})
+	}
+}
+
+// TestFetcher_PublishHintOnlyWhenEnabled verifies the actionable bearer-token
+// hint is appended to ErrExportUnauthorized only when the Fetcher was built with
+// WithPublishUnauthorizedHint, and absent otherwise (the in-cluster path must
+// never advertise an Ingress-specific remedy).
+func TestFetcher_PublishHintOnlyWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	const hintSubstring = "--publish streams through the Ingress endpoint"
+
+	tests := []struct {
+		name     string
+		opts     []FetcherOption
+		wantHint bool
+	}{
+		{name: "success: hint absent by default"},
+		{
+			name:     "success: hint present when WithPublishUnauthorizedHint is set",
+			opts:     []FetcherOption{WithPublishUnauthorizedHint()},
+			wantHint: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := unauthorizedServer(t)
+			f := NewFetcher(srv.Client(), tt.opts...)
+
+			blockURL, err := BlockURL(srv.URL)
+			if err != nil {
+				t.Fatalf("BlockURL: %v", err)
+			}
+
+			_, err = f.HeadVolume(context.Background(), blockURL)
+			if !errors.Is(err, ErrExportUnauthorized) {
+				t.Fatalf("error = %v, want wrapped ErrExportUnauthorized", err)
+			}
+
+			gotHint := strings.Contains(err.Error(), hintSubstring)
+			if gotHint != tt.wantHint {
+				t.Fatalf("hint present = %v, want %v (error: %v)", gotHint, tt.wantHint, err)
+			}
+		})
+	}
+}
