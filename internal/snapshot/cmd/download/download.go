@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
@@ -46,6 +47,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -61,6 +63,7 @@ const (
 	flagVolumeCompression      = "volume-compression"
 	flagVolumeCompressionLevel = "volume-compression-level"
 	flagCleanup                = "cleanup"
+	flagPublish                = "publish"
 )
 
 // snapshotClientQPS/snapshotClientBurst raise the kube client's rate limiter
@@ -86,6 +89,22 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 		Short:         "Download a snapshot to a local directory tree",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Long: `Download a Snapshot CR's manifest tree and volume data into a local directory tree
+(consumed by 'd8 snapshot upload' or 'd8 snapshot restore').
+
+--publish selects how each data leaf's volume bytes are streamed from its DataExport
+exporter pod. With --publish=false (or when autodetection picks it), bytes come straight
+from the exporter's in-cluster service, trusting only its internal CA (status.ca). With
+--publish=true, bytes come through the storage-foundation-published Ingress endpoint
+(status.publicURL) instead, so a kubeconfig without direct network access to the cluster's
+internal service network can still download. If --publish is not given, the command probes
+whether the in-cluster exporter endpoint is reachable and picks accordingly. Reusing an
+existing DataExport upgrades its spec.publish from false to true when --publish=true is
+requested, but never downgrades it back to false, so a concurrent run streaming through the
+public endpoint is never torn down. IMPORTANT: the publish path works only with a kubeconfig
+authenticated by a bearer token. Ingress terminates TLS with its own certificate and does not
+forward the client's TLS certificate to the exporter pod, so a certificate-based kubeconfig
+receives a 401 when --publish=true.`,
 		Example: `  # Download snapshot "my-snap" from namespace "default" into directory ./out
   d8 snapshot download my-snap -n default -o out
 
@@ -98,7 +117,10 @@ func NewCommand(log *slog.Logger) *cobra.Command {
   d8 snapshot download my-snap -n default -o out --node DemoVirtualDisk/bk-disk-a
 
   # Download only the root snapshot (equivalent to a full download)
-  d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap`,
+  d8 snapshot download my-snap -n default -o out --node Snapshot/my-snap
+
+  # Download through the published Ingress endpoint (requires a bearer-token kubeconfig)
+  d8 snapshot download my-snap -n default -o out --publish=true`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(cmd.Context(), log, cmd, args)
@@ -112,7 +134,8 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 	cmd.Flags().String(flagNode, "", "restrict download to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a, --node Snapshot/my-snap); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc) is still accepted")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
-	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
+	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume; "+
+		"lower to 1 on a distant or flaky link if long-lived streams keep breaking")
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.UserSelectableNames(), ", ")+
@@ -122,6 +145,9 @@ func NewCommand(log *slog.Logger) *cobra.Command {
 
 	cmd.Flags().Bool(flagCleanup, true,
 		"delete the per-volume DataExport (and its server-side export chain) after each volume completes; --cleanup=false leaves them in the cluster for debugging")
+
+	cmd.Flags().Bool(flagPublish, false, "download volume data through the published (ingress) exporter endpoint instead of the in-cluster service; "+
+		"if unset, the in-cluster endpoint's reachability is auto-detected")
 
 	return cmd
 }
@@ -274,6 +300,21 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return fmt.Errorf("resolving --%s: %w", flagPublish, err)
+	}
+
+	// Probe from the command's already-resolved restConfig, not a fresh parse of
+	// --kubeconfig/--context: reparsing could target a different cluster than the one this
+	// command is actually downloading from.
+	probeClient := safeClient.NewSafeClientForConfig(restConfig)
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, kubeClient, probeClient, log)
+	if err != nil {
+		return fmt.Errorf("resolving --%s: %w", flagPublish, err)
+	}
+
 	tty := term.IsTerminal(int(os.Stdout.Fd()))
 	// progress.New defaults to progress.DirectionDownload when WithDirection is
 	// omitted, so download intentionally relies on that default rather than
@@ -302,6 +343,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		PerVolumeConcurrency: perVolume,
 		MaxParallelDownloads: maxParallel,
 		TTL:                  ttl,
+		Publish:              publish,
 		KeepExports:          !cleanup,
 		Compression:          codec,
 		KubeClient:           kubeClient,
