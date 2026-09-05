@@ -7,7 +7,7 @@ require (
 	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9
-	github.com/deckhouse/virtualization/src/cli v0.0.0-20260411164351-43c8e331b69d //  fix/cli/mute-warnings-during-cobra-init-release-1-6-2 (Change to version 1.8.0 after updating Kubernetes to 0.34)
+	github.com/deckhouse/virtualization/src/cli v0.0.0-20260826084353-6bd3a583bc4e // release-1.11 branch head; no src/cli/v1.11.x tag yet, api pinned to the same commit
 	github.com/fatih/color v1.19.0
 	github.com/fluxcd/flagger v1.36.1
 	github.com/go-logr/logr v1.4.3
@@ -41,7 +41,7 @@ require (
 	github.com/werf/werf/v2 v2.69.0
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.15.0
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
 	golang.org/x/image v0.44.0
 	golang.org/x/term v0.45.0
@@ -200,7 +200,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/deckhouse/delivery-kit-sdk v1.2.0 // indirect
-	github.com/deckhouse/virtualization/api v1.5.1 // indirect
+	github.com/deckhouse/virtualization/api v0.15.1-0.20260826084353-6bd3a583bc4e // indirect; release-1.11, must match src/cli
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
 	github.com/denverdino/aliyungo v0.0.0-20190125010748-a747050bb1ba // indirect
@@ -521,7 +521,6 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/posener/complete v1.2.3 // indirect
-	github.com/povsister/scp v0.0.0-20250504051308-e467f71ea63c // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/pquerna/otp v1.2.1-0.20191009055518-468c2dd2b58d // indirect
 	github.com/proglottis/gpgme v0.1.3 // indirect
@@ -644,13 +643,13 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/api v0.271.0 // indirect
 	google.golang.org/genproto v0.0.0-20260217215200-42d3e9bedb6d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
