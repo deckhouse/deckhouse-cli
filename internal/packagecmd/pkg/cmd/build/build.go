@@ -3,6 +3,7 @@ package build
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -29,6 +30,8 @@ var (
 	force bool
 	// debug enables verbose build output and keeps rendered Werf templates.
 	debug bool
+	// insecure allows plain HTTP registries and skips TLS certificate verification.
+	insecure bool
 	// sign controls whether the built package is signed.
 	sign bool
 	// signCert stores a signing certificate path or base64-encoded certificate.
@@ -58,6 +61,7 @@ Environment Variables:
   PACKAGE_BUILD_FINAL_REPOSITORY          Final registry URL for the published artifact
   PACKAGE_BUILD_FINAL_REPOSITORY_USER     Final registry username for authentication
   PACKAGE_BUILD_FINAL_REPOSITORY_TOKEN    Final registry token for authentication
+  PACKAGE_BUILD_INSECURE                  Allow plain HTTP and skip TLS verification
 `,
 		Example: `
   # Build with explicit registry
@@ -74,7 +78,10 @@ Environment Variables:
   package build --version=v1.0.0 --force
 
   # Build with debug mode (keeps rendered werf templates)
-  package build --version=v1.0.0 --debug`,
+  package build --version=v1.0.0 --debug
+
+  # Build against a registry without valid TLS
+  package build -r 10.0.0.5:5000/packages --version=v1.0.0 --insecure`,
 		Args:         cobra.ExactArgs(0),
 		SilenceUsage: true,
 		RunE:         build,
@@ -89,6 +96,7 @@ Environment Variables:
 	cmd.Flags().StringVarP(&packageVersion, "version", "v", "", "Package version")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "force update version in registry")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "Allow plain HTTP and skip TLS verification for every registry used by the build, including the final repository and base-image pulls (env: PACKAGE_BUILD_INSECURE)")
 
 	cmd.Flags().StringVar(&signCert, "sign-cert", "", "sign certificate path or base64 string (env: PACKAGE_BUILD_SIGN_CERT)")
 	cmd.Flags().StringVar(&signKey, "sign-key", "", "sign key path or base64 string or vault url (env: PACKAGE_BUILD_SIGN_KEY)")
@@ -138,6 +146,12 @@ func build(cmd *cobra.Command, _ []string) error {
 		signKey = os.Getenv("PACKAGE_BUILD_SIGN_KEY")
 	}
 
+	// The env var is a fallback for an unset flag only: an explicit
+	// --insecure=false must win over PACKAGE_BUILD_INSECURE=true.
+	if !cmd.Flags().Changed("insecure") {
+		insecure, _ = strconv.ParseBool(os.Getenv("PACKAGE_BUILD_INSECURE"))
+	}
+
 	if sign {
 		if signCert == "" || signKey == "" {
 			return fmt.Errorf("--sign-cert and --sign-key are required with --sign")
@@ -149,8 +163,9 @@ func build(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := builder.Options{
-		Force: force,
-		Debug: debug,
+		Force:    force,
+		Debug:    debug,
+		Insecure: insecure,
 		RepositoryCredentials: builder.Credentials{
 			Repository: repository,
 			Username:   repositoryUser,
