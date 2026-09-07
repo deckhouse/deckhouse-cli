@@ -50,7 +50,7 @@ type podList struct {
 // plus per-pod logs, optionally skipping pods owned by a DaemonSet
 // (virt-handler, virtualization-dra, vm-route-forge, ...) since their log
 // volume scales with the number of nodes.
-func VirtualizationTarball(config *rest.Config, kubeCl kubernetes.Interface, commandTimeout, requestInterval time.Duration, skipDsLogs bool) error {
+func VirtualizationTarball(config *rest.Config, kubeCl kubernetes.Interface, commandTimeout, requestInterval time.Duration, skipDsLogs bool) (err error) {
 	const (
 		namespace     = "d8-system"
 		containerName = "deckhouse"
@@ -71,10 +71,17 @@ func VirtualizationTarball(config *rest.Config, kubeCl kubernetes.Interface, com
 	commands := buildVirtualizationCommands(pods, skipDsLogs)
 
 	gzipWriter := gzip.NewWriter(os.Stdout)
-	defer gzipWriter.Close()
-
 	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
+
+	defer func() {
+		if closeErr := tarWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize tar archive: %w", closeErr)
+		}
+
+		if closeErr := gzipWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize gzip stream: %w", closeErr)
+		}
+	}()
 
 	fmt.Fprintf(os.Stderr, "Collecting virtualization debug info from Deckhouse...\n")
 
@@ -146,8 +153,8 @@ func fetchVirtualizationPods(
 	return pods, nil
 }
 
-// buildVirtualizationCommands turns the discovered pod list into the final
-// the static commands first, then one log-collection command per pod (skipping DaemonSet-owned pods when skipDsLogs is set).
+// buildVirtualizationCommands transforms the discovered list of pods into a final list.
+// first the static commands, then one log collection command for each pod (skipping pods belonging to DaemonSet if skipDsLogs is set).
 func buildVirtualizationCommands(pods []virtualizationPod, skipDsLogs bool) []Command {
 	commands := make([]Command, 0, len(virtualizationCommands)+len(pods))
 	commands = append(commands, virtualizationCommands...)

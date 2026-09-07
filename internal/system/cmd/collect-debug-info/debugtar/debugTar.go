@@ -25,6 +25,10 @@ type Command struct {
 	Args []string
 	File string
 
+	// ExcludeKey overrides the identifier used in the --exclude/--list-exclude flags.
+	// Leave blank to get it from the "File" field. This is set explicitly if {module-name} is not the final "File" segment, as the default output only processes this pattern.
+	ExcludeKey string
+
 	// RequiredModule is the module prefix (status.phase == "Ready"). If the module is enabled, data from it will be collected. An empty string means always run.
 	RequiredModule string
 	// ExpandPerModule — If true, the command is duplicated for each active module matching RequiredModule. The {module-name} placeholder is accepted in File and Args, and is replaced with the actual module name.
@@ -168,6 +172,7 @@ var debugCommands = []Command{
 	},
 	{
 		File:            "{module-name}-ccm-logs.txt",
+		ExcludeKey:      "ccm-logs",
 		Cmd:             "kubectl",
 		Args:            []string{"-n", "d8-{module-name}", "logs", "-l", "app=cloud-controller-manager", "--tail=3000"},
 		RequiredModule:  "cloud-provider",
@@ -175,6 +180,7 @@ var debugCommands = []Command{
 	},
 	{
 		File:            "{module-name}-csi-controller-logs.txt",
+		ExcludeKey:      "csi-controller-logs",
 		Cmd:             "kubectl",
 		Args:            []string{"-n", "d8-{module-name}", "logs", "-l", "app=csi-controller", "--tail=3000"},
 		RequiredModule:  "cloud-provider",
@@ -381,7 +387,7 @@ var debugCommands = []Command{
 	},
 }
 
-func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) error {
+func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) (err error) {
 	const (
 		namespace     = "d8-system"
 		containerName = "deckhouse"
@@ -405,10 +411,17 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 	}
 
 	gzipWriter := gzip.NewWriter(os.Stdout)
-	defer gzipWriter.Close()
-
 	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
+
+	defer func() {
+		if closeErr := tarWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize tar archive: %w", closeErr)
+		}
+
+		if closeErr := gzipWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize gzip stream: %w", closeErr)
+		}
+	}()
 
 	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
 
@@ -445,7 +458,7 @@ func runCommands(
 	var stdout, stderr bytes.Buffer
 
 	for _, cmd := range commands {
-		if isFileExcluded(cmd.File, excludeMap) {
+		if isFileExcluded(cmd, excludeMap) {
 			continue
 		}
 
@@ -545,9 +558,10 @@ func filterAndExpandCommands(commands []Command, activeModules map[string]bool) 
 			matchedModules := matchingModules(activeModules, cmd.RequiredModule)
 			for _, moduleName := range matchedModules {
 				result = append(result, Command{
-					Cmd:  cmd.Cmd,
-					File: strings.ReplaceAll(cmd.File, "{module-name}", moduleName),
-					Args: replaceModuleName(cmd.Args, moduleName),
+					Cmd:        cmd.Cmd,
+					File:       strings.ReplaceAll(cmd.File, "{module-name}", moduleName),
+					Args:       replaceModuleName(cmd.Args, moduleName),
+					ExcludeKey: cmd.ExcludeKey,
 				})
 			}
 		} else {
@@ -608,20 +622,28 @@ func (c *Command) writeToTar(tarWriter *tar.Writer, fileContent []byte) error {
 	return nil
 }
 
-func excludeBaseName(file string) string {
-	name := strings.TrimSuffix(file, ".json")
+func excludeBaseName(cmd Command) string {
+	if cmd.ExcludeKey != "" {
+		return cmd.ExcludeKey
+	}
+
+	name := strings.TrimSuffix(cmd.File, ".json")
 	name = strings.TrimSuffix(name, ".txt")
 	name = strings.TrimSuffix(name, "-{module-name}")
 
 	return name
 }
 
-func isFileExcluded(fileName string, excludeMap map[string]bool) bool {
-	if excludeMap[fileName] {
+func isFileExcluded(cmd Command, excludeMap map[string]bool) bool {
+	if excludeMap[cmd.File] {
 		return true
 	}
 
-	base := strings.TrimSuffix(fileName, ".json")
+	if cmd.ExcludeKey != "" {
+		return excludeMap[cmd.ExcludeKey]
+	}
+
+	base := strings.TrimSuffix(cmd.File, ".json")
 
 	base = strings.TrimSuffix(base, ".txt")
 	if excludeMap[base] {
@@ -642,7 +664,7 @@ func GetExcludableFiles() []string {
 
 	files := make([]string, 0, len(debugCommands))
 	for _, cmd := range debugCommands {
-		name := excludeBaseName(cmd.File)
+		name := excludeBaseName(cmd)
 		if !seen[name] {
 			seen[name] = true
 			files = append(files, name)
