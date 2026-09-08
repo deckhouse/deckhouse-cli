@@ -18,88 +18,101 @@ package image_test
 
 import (
 	"context"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	regsrv "github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+
+	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
+	dkpclient "github.com/deckhouse/deckhouse/pkg/registry/client"
+	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
 	"github.com/deckhouse/deckhouse-cli/internal/cr/internal/image"
 	"github.com/deckhouse/deckhouse-cli/internal/cr/internal/registry"
 )
 
-// resolveTestEnv stands up an in-memory registry with a single-arch image and
-// a multi-arch index already pushed under fixed tags.
+const resolveHost = "registry.example.com"
+
+// resolveTestEnv holds an in-memory registry with a single-arch image and a
+// multi-arch index under fixed tags, plus Options wired to reach it.
+//
+// The fake replaces the HTTP registry these tests used to stand up: Resolve is
+// classification and cache-wrapping logic, so the wire adds seconds per test
+// and, as the completion suite records, timeout flake under parallel
+// `go test ./...` load. The layer that does need real HTTP is covered by
+// cmd/integration_test.go.
 type resolveTestEnv struct {
-	imageRef string // host/app:single - simple manifest
-	indexRef string // host/app:multi  - OCI index with linux/amd64 + linux/arm64
+	opts     *registry.Options
+	imageRef string // single-manifest image
+	indexRef string // OCI index with linux/amd64 + linux/arm64
 }
 
 func setupResolveEnv(t *testing.T) *resolveTestEnv {
 	t.Helper()
-	srv := httptest.NewServer(regsrv.New())
-	t.Cleanup(srv.Close)
-	host := strings.TrimPrefix(srv.URL, "http://")
 
-	img, err := random.Image(64, 1)
-	if err != nil {
-		t.Fatalf("random.Image: %v", err)
-	}
-	imgRef, err := name.ParseReference(host+"/app:single", name.Insecure)
-	if err != nil {
-		t.Fatalf("parse image ref: %v", err)
-	}
-	if err := remote.Write(imgRef, img); err != nil {
-		t.Fatalf("push image: %v", err)
-	}
+	reg := upfake.NewRegistry(resolveHost)
+	reg.MustAddImage("app", "single", randomImage(t, 64))
+	reg.MustAddIndex("app", "multi", multiArchIndex(t))
 
-	imgAmd, err := random.Image(32, 1)
-	if err != nil {
-		t.Fatalf("random.Image amd64: %v", err)
-	}
-	imgArm, err := random.Image(32, 1)
-	if err != nil {
-		t.Fatalf("random.Image arm64: %v", err)
-	}
-	idx := mutate.AppendManifests(
-		mutate.IndexMediaType(empty.Index, types.OCIImageIndex),
-		mutate.IndexAddendum{
-			Add: imgAmd,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: "linux", Architecture: "amd64"},
-			},
-		},
-		mutate.IndexAddendum{
-			Add: imgArm,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: "linux", Architecture: "arm64"},
-			},
-		},
-	)
-	idxRef, err := name.ParseReference(host+"/app:multi", name.Insecure)
-	if err != nil {
-		t.Fatalf("parse index ref: %v", err)
-	}
-	if err := remote.WriteIndex(idxRef, idx); err != nil {
-		t.Fatalf("push index: %v", err)
+	opts := registry.New()
+	opts.ClientFactory = func(string, ...dkpclient.Option) dkpreg.Client {
+		return upfake.NewClient(reg)
 	}
 
 	return &resolveTestEnv{
-		imageRef: host + "/app:single",
-		indexRef: host + "/app:multi",
+		opts:     opts,
+		imageRef: resolveHost + "/app:single",
+		indexRef: resolveHost + "/app:multi",
 	}
 }
 
-func newOpts() *registry.Options {
-	return registry.New().WithInsecure()
+func randomImage(t *testing.T, size int64) v1.Image {
+	t.Helper()
+
+	img, err := random.Image(size, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+
+	return img
+}
+
+// multiArchIndex builds an index whose children carry real platform
+// descriptors, so --platform has something to match on.
+func multiArchIndex(t *testing.T) v1.ImageIndex {
+	t.Helper()
+
+	idx := mutate.IndexMediaType(empty.Index, types.OCIImageIndex)
+
+	for _, arch := range []string{"amd64", "arm64"} {
+		img := randomImage(t, 32)
+
+		cfg, err := img.ConfigFile()
+		if err != nil {
+			t.Fatalf("ConfigFile: %v", err)
+		}
+
+		cfg.OS, cfg.Architecture = "linux", arch
+
+		img, err = mutate.ConfigFile(img, cfg)
+		if err != nil {
+			t.Fatalf("mutate.ConfigFile: %v", err)
+		}
+
+		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
+			Add: img,
+			Descriptor: v1.Descriptor{
+				Platform: &v1.Platform{OS: "linux", Architecture: arch},
+			},
+		})
+	}
+
+	return idx
 }
 
 func mapKeys[V any](m map[string]V) []string {
@@ -112,7 +125,7 @@ func mapKeys[V any](m map[string]V) []string {
 
 func TestResolve_SingleImage(t *testing.T) {
 	env := setupResolveEnv(t)
-	out, err := image.Resolve(context.Background(), []string{env.imageRef}, false, "", newOpts())
+	out, err := image.Resolve(context.Background(), []string{env.imageRef}, false, "", env.opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -126,7 +139,7 @@ func TestResolve_SingleImage(t *testing.T) {
 
 func TestResolve_IndexKeptWhenNoPlatform(t *testing.T) {
 	env := setupResolveEnv(t)
-	out, err := image.Resolve(context.Background(), []string{env.indexRef}, true, "", newOpts())
+	out, err := image.Resolve(context.Background(), []string{env.indexRef}, true, "", env.opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -138,7 +151,7 @@ func TestResolve_IndexKeptWhenNoPlatform(t *testing.T) {
 
 func TestResolve_IndexFlattenedWhenPlatformPinned(t *testing.T) {
 	env := setupResolveEnv(t)
-	opts := newOpts().WithPlatform(&v1.Platform{OS: "linux", Architecture: "amd64"})
+	opts := env.opts.WithPlatform(&v1.Platform{OS: "linux", Architecture: "amd64"})
 	out, err := image.Resolve(context.Background(), []string{env.indexRef}, true, "", opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -154,7 +167,7 @@ func TestResolve_IndexFlattenedWhenPlatformPinned(t *testing.T) {
 
 func TestResolve_IndexFlattenedWhenKeepFalse(t *testing.T) {
 	env := setupResolveEnv(t)
-	out, err := image.Resolve(context.Background(), []string{env.indexRef}, false, "", newOpts())
+	out, err := image.Resolve(context.Background(), []string{env.indexRef}, false, "", env.opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -167,7 +180,7 @@ func TestResolve_IndexFlattenedWhenKeepFalse(t *testing.T) {
 func TestResolve_CachePathWrapsImage(t *testing.T) {
 	env := setupResolveEnv(t)
 	cacheDir := t.TempDir()
-	out, err := image.Resolve(context.Background(), []string{env.imageRef}, false, cacheDir, newOpts())
+	out, err := image.Resolve(context.Background(), []string{env.imageRef}, false, cacheDir, env.opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -209,7 +222,7 @@ func TestResolve_CachePathWrapsImage(t *testing.T) {
 func TestResolve_CachePathWrapsIndex(t *testing.T) {
 	env := setupResolveEnv(t)
 	cacheDir := t.TempDir()
-	out, err := image.Resolve(context.Background(), []string{env.indexRef}, true, cacheDir, newOpts())
+	out, err := image.Resolve(context.Background(), []string{env.indexRef}, true, cacheDir, env.opts)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -257,7 +270,7 @@ func TestResolve_MultipleSources(t *testing.T) {
 	env := setupResolveEnv(t)
 	out, err := image.Resolve(context.Background(),
 		[]string{env.imageRef, env.indexRef},
-		true, "", newOpts(),
+		true, "", env.opts,
 	)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -277,7 +290,7 @@ func TestResolve_DuplicateRefsAreRejected(t *testing.T) {
 	env := setupResolveEnv(t)
 	_, err := image.Resolve(context.Background(),
 		[]string{env.imageRef, env.imageRef},
-		false, "", newOpts(),
+		false, "", env.opts,
 	)
 	if err == nil {
 		t.Fatalf("expected duplicate-ref error, got nil")

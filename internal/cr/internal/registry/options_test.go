@@ -17,166 +17,150 @@ limitations under the License.
 package registry
 
 import (
-	"context"
+	"os"
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 func TestNew_HasDefaults(t *testing.T) {
 	o := New()
+
 	if o.Keychain == nil {
-		t.Errorf("New() should seed a default keychain")
+		t.Errorf("New() should seed the Docker keychain so commands authenticate without a prior login")
 	}
-	if o.Context == nil {
-		t.Errorf("New() should seed a background context")
+
+	if o.Auth != nil {
+		t.Errorf("New() should leave Auth unset; got %+v", o.Auth)
 	}
+
 	if o.Platform != nil {
 		t.Errorf("New() should leave Platform nil; got %+v", o.Platform)
 	}
-	// Keychain / platform / context are finalized lazily by remoteWithContext;
-	// New() must not pre-bake them into o.Remote, otherwise repeat builder
-	// calls would silently stack duplicate upstream options.
-	if len(o.Remote) != 0 {
-		t.Errorf("New() must leave Remote empty; got %d entries", len(o.Remote))
-	}
-}
 
-func TestWithContext_ReplacesCtx(t *testing.T) {
-	o := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	o.WithContext(ctx)
-	if o.Context != ctx {
-		t.Errorf("WithContext did not replace Context")
-	}
-}
-
-func TestWithContext_DoesNotMutateRemote(t *testing.T) {
-	// remote.WithContext is produced exclusively by remoteWithContext at fetch
-	// time. Pre-baking it into o.Remote would stack a second WithContext when
-	// callers pass a derived ctx, relying on go-containerregistry's last-wins
-	// semantics - fragile. Guard the contract here.
-	o := New()
-	before := len(o.Remote)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	o.WithContext(ctx)
-	if len(o.Remote) != before {
-		t.Errorf("WithContext should not append to o.Remote; len before=%d after=%d", before, len(o.Remote))
-	}
-}
-
-func TestRemoteWithContext_FinalizesLazily(t *testing.T) {
-	// Default Options + ctx => keychain + ctx are appended at finalize time;
-	// o.Remote stays empty (it gets stuff only via WithTransport / WithNondistributable).
-	o := New()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	got := o.remoteWithContext(ctx)
-	if len(got) != 2 {
-		t.Errorf("expected 2 finalized options (keychain + ctx); got %d", len(got))
-	}
-	if len(o.Remote) != 0 {
-		t.Errorf("remoteWithContext mutated o.Remote: got len=%d", len(o.Remote))
-	}
-	// Calling again must not stack more options - finalize is pure of o.Remote.
-	got2 := o.remoteWithContext(ctx)
-	if len(got2) != len(got) {
-		t.Errorf("second call to remoteWithContext returned different length: %d vs %d", len(got2), len(got))
-	}
-}
-
-func TestWithPlatform_NilIsNoop(t *testing.T) {
-	o := New()
-	before := len(o.Remote)
-	o.WithPlatform(nil)
-	if o.Platform != nil {
-		t.Errorf("nil platform should not be stored; got %+v", o.Platform)
-	}
-	if len(o.Remote) != before {
-		t.Errorf("nil platform should not append remote options")
-	}
-}
-
-func TestWithPlatform_Stores(t *testing.T) {
-	o := New()
-	p, err := v1.ParsePlatform("linux/arm64")
-	if err != nil {
-		t.Fatalf("ParsePlatform: %v", err)
-	}
-	o.WithPlatform(p)
-	if o.Platform == nil || o.Platform.OS != "linux" || o.Platform.Architecture != "arm64" {
-		t.Errorf("Platform not stored: %+v", o.Platform)
+	if o.PlainHTTP || o.TLSSkipVerify || o.Nondistributable || o.Verbose {
+		t.Errorf("New() should leave every flag off; got %+v", o)
 	}
 }
 
 func TestChainableBuilders(t *testing.T) {
-	ctx := context.Background()
-	o := New().WithContext(ctx).WithInsecure().WithNondistributable()
+	platform := &v1.Platform{OS: "linux", Architecture: "arm64"}
+	auth := authn.FromConfig(authn.AuthConfig{Username: "u", Password: "p"})
 
-	if o.Context != ctx {
-		t.Errorf("WithContext did not propagate")
+	o := New().
+		WithInsecure().
+		WithNondistributable().
+		WithVerbose().
+		WithPlatform(platform).
+		WithAuth(auth)
+
+	if !o.PlainHTTP || !o.TLSSkipVerify {
+		t.Errorf("WithInsecure must set both plain HTTP and TLS skip-verify; got %+v", o)
 	}
-	if len(o.Name) == 0 {
-		t.Errorf("WithInsecure should have appended a name.Option")
+
+	if !o.Nondistributable || !o.Verbose {
+		t.Errorf("builders did not set their flags; got %+v", o)
+	}
+
+	if o.Platform != platform {
+		t.Errorf("WithPlatform did not take; got %+v", o.Platform)
+	}
+
+	if o.Auth != auth {
+		t.Errorf("WithAuth did not take")
 	}
 }
 
-// stubKeychain is a sentinel implementation - we only need pointer identity
-// for the anti-duplication tests below.
-type stubKeychain struct{ tag string }
+// A flag-driven caller passes the parsed result straight through, so a nil
+// platform has to mean "unset" rather than clearing a previous value.
+func TestWithPlatform_NilIsNoOp(t *testing.T) {
+	platform := &v1.Platform{OS: "linux", Architecture: "amd64"}
 
-func (stubKeychain) Resolve(_ authn.Resource) (authn.Authenticator, error) {
-	return authn.Anonymous, nil
-}
-
-func TestWithKeychain_LastWriteReplaces(t *testing.T) {
-	custom := stubKeychain{tag: "custom"}
-	o := New().WithKeychain(custom)
-	if _, ok := o.Keychain.(stubKeychain); !ok {
-		t.Errorf("Keychain not replaced; got %T", o.Keychain)
-	}
-	// Pre-fix behaviour appended a second WithAuthFromKeychain to o.Remote;
-	// finalize-on-read makes that impossible by construction.
-	if len(o.Remote) != 0 {
-		t.Errorf("WithKeychain must not stack options on o.Remote; got %d", len(o.Remote))
-	}
-	// Finalized output must still carry exactly one keychain option (no dupes
-	// across repeated finalize calls) plus a ctx.
-	got := o.remoteWithContext(context.Background())
-	if len(got) != 2 {
-		t.Errorf("expected 2 finalized options (keychain + ctx), got %d", len(got))
+	o := New().WithPlatform(platform).WithPlatform(nil)
+	if o.Platform != platform {
+		t.Errorf("WithPlatform(nil) must not clear the pinned platform; got %+v", o.Platform)
 	}
 }
 
-func TestWithPlatform_RepeatedCallsDoNotStack(t *testing.T) {
-	p1, _ := v1.ParsePlatform("linux/amd64")
-	p2, _ := v1.ParsePlatform("linux/arm64")
-	o := New().WithPlatform(p1).WithPlatform(p2)
+// --insecure must reach reference parsing too: without name.Insecure a
+// plain-HTTP reference is rejected before any request is made.
+func TestNameOptions_TracksPlainHTTP(t *testing.T) {
+	if got := len(New().nameOptions()); got != 0 {
+		t.Errorf("secure options should add no name options; got %d", got)
+	}
 
-	if o.Platform == nil || o.Platform.Architecture != "arm64" {
-		t.Errorf("last WithPlatform must win; got %+v", o.Platform)
+	if got := len(New().WithInsecure().nameOptions()); got != 1 {
+		t.Errorf("--insecure should permit plain-HTTP references; got %d name options", got)
 	}
-	if len(o.Remote) != 0 {
-		t.Errorf("WithPlatform must not stack options on o.Remote; got %d", len(o.Remote))
-	}
-	got := o.remoteWithContext(context.Background())
-	// keychain + platform + ctx
-	if len(got) != 3 {
-		t.Errorf("expected 3 finalized options (keychain + platform + ctx), got %d", len(got))
+
+	if _, err := name.ParseReference("localhost:5000/app:v1", New().WithInsecure().nameOptions()...); err != nil {
+		t.Errorf("plain-HTTP reference should parse under --insecure: %v", err)
 	}
 }
 
-func TestInsecureTransport_Cloned(t *testing.T) {
-	t1 := InsecureTransport()
-	t2 := InsecureTransport()
-	if t1 == nil || t2 == nil {
-		t.Fatalf("InsecureTransport returned nil")
+func TestPushOptions_TrackNondistributable(t *testing.T) {
+	if got := len(New().pushOptions()); got != 0 {
+		t.Errorf("foreign layers are skipped by default; got %d push options", got)
 	}
-	if t1 == t2 {
-		t.Errorf("InsecureTransport should return distinct clones, got the same instance")
+
+	if got := len(New().WithNondistributable().pushOptions()); got != 1 {
+		t.Errorf("--allow-nondistributable-artifacts should reach the client; got %d push options", got)
+	}
+}
+
+func TestGetOptions_TrackPlatform(t *testing.T) {
+	o := New()
+	if len(o.imageGetOptions()) != 0 || len(o.manifestGetOptions()) != 0 {
+		t.Errorf("no platform pinned means no platform option")
+	}
+
+	o.WithPlatform(&v1.Platform{OS: "linux", Architecture: "arm64"})
+	if len(o.imageGetOptions()) != 1 || len(o.manifestGetOptions()) != 1 {
+		t.Errorf("--platform must reach both the image and the manifest call")
+	}
+}
+
+// The registry client logs at debug on every operation and its own default
+// logger writes to stdout. Several commands exist to put exact bytes there -
+// "cr manifest ref | jq", "cr export ref - | tar tf -" - so anything landing on
+// stdout corrupts the output the user asked for.
+func TestLogger_NeverWritesToStdout(t *testing.T) {
+	for _, verbose := range []bool{false, true} {
+		o := New()
+		if verbose {
+			o.WithVerbose()
+		}
+
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+
+		saved := os.Stdout
+		os.Stdout = w
+
+		logger := o.logger()
+		logger.Error("error level")
+		logger.Info("info level")
+		logger.Debug("debug level")
+
+		os.Stdout = saved
+
+		if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		buf := make([]byte, 1024)
+		n, _ := r.Read(buf)
+
+		if err := r.Close(); err != nil {
+			t.Fatalf("close read end: %v", err)
+		}
+
+		if n > 0 {
+			t.Errorf("verbose=%v: client logger wrote %d bytes to stdout: %q", verbose, n, buf[:n])
+		}
 	}
 }
