@@ -301,7 +301,7 @@ func TestResolve_DuplicateRefsAreRejected(t *testing.T) {
 }
 
 // nil opts is a programmer error - explicit early failure beats a panic
-// inside FetchDescriptor's name.ParseReference.
+// inside the reference parsing that clientForRef does.
 func TestResolve_NilOptsReturnsError(t *testing.T) {
 	_, err := image.Resolve(context.Background(), []string{"alpine:3.19"}, false, "", nil)
 	if err == nil {
