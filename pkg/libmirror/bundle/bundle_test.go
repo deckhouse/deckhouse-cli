@@ -145,6 +145,61 @@ func TestUnpackNoCollisionKeepsSingleIndex(t *testing.T) {
 	require.ElementsMatch(t, tags, gotTags)
 }
 
+// TestUnpackRejectsPathTraversal: an escaping entry name fails the unpack before anything is written.
+func TestUnpackRejectsPathTraversal(t *testing.T) {
+	sandbox := t.TempDir()
+	unpackDir := filepath.Join(sandbox, "unpack")
+	require.NoError(t, os.MkdirAll(unpackDir, 0o755))
+
+	evil := makeFileTar(t, "../../escaped", []byte("pwned"))
+	err := Unpack(context.TODO(), bytes.NewReader(evil), unpackDir, "module-evil")
+	require.Error(t, err)
+
+	require.NoFileExists(t, filepath.Join(sandbox, "escaped"))
+
+	leftovers, err := os.ReadDir(unpackDir)
+	require.NoError(t, err)
+	require.Empty(t, leftovers)
+}
+
+func TestUnpackRejectsCorruptArchive(t *testing.T) {
+	garbage := bytes.Repeat([]byte("A"), 1024)
+
+	err := Unpack(context.TODO(), bytes.NewReader(garbage), t.TempDir(), "module-broken")
+	require.Error(t, err)
+}
+
+func TestSafeJoin(t *testing.T) {
+	root := filepath.Join("base", "root")
+
+	tests := []struct {
+		give    string
+		want    string
+		wantErr bool
+	}{
+		{give: "a/b", want: filepath.Join(root, "a", "b")},
+		{give: "dir/foo..bar", want: filepath.Join(root, "dir", "foo..bar")},
+		{give: "a/../b", want: filepath.Join(root, "b")},
+		{give: "/abs/x", want: filepath.Join(root, "abs", "x")},
+		{give: "..", wantErr: true},
+		{give: "../x", wantErr: true},
+		{give: "a/../../x", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.give, func(t *testing.T) {
+			got, err := safeJoin(root, tt.give)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestMergeIndexJSON(t *testing.T) {
 	t.Run("union deduplicates identical descriptors", func(t *testing.T) {
 		dir := t.TempDir()
@@ -316,15 +371,21 @@ func makeIndexTar(t *testing.T, indexPath string, tags []string) []byte {
 	raw, err := json.MarshalIndent(index, "", "  ")
 	require.NoError(t, err)
 
+	return makeFileTar(t, indexPath, raw)
+}
+
+func makeFileTar(t *testing.T, name string, content []byte) []byte {
+	t.Helper()
+
 	buf := &bytes.Buffer{}
 	tw := tar.NewWriter(buf)
 	require.NoError(t, tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
-		Name:     indexPath,
-		Size:     int64(len(raw)),
+		Name:     name,
+		Size:     int64(len(content)),
 		Mode:     0o644,
 	}))
-	_, err = tw.Write(raw)
+	_, err := tw.Write(content)
 	require.NoError(t, err)
 	require.NoError(t, tw.Close())
 
