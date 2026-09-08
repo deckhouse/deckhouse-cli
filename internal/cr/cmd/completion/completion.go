@@ -21,13 +21,13 @@ limitations under the License.
 // Completion-time network calls (ListCatalog/ListTags) are bounded by
 // completionTimeout and degrade silently to an empty result on any
 // failure - completion must never surface a stack trace into the
-// user's terminal.
+// user's terminal. The suggestion list itself is never truncated: what
+// the registry holds is what the shell is offered.
 package completion
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -47,15 +47,11 @@ import (
 // from the same source of truth.
 func PullFormats() []string { return imageio.PullFormats() }
 
-const (
-	// Shell typically aborts a completion at ~2-3s. We cap shorter so a
-	// slow registry returns an empty list instead of a truncated frame.
-	completionTimeout = 2 * time.Second
-
-	// Cap on the suggestion list. ListTags for a popular repo (e.g. nginx)
-	// can return thousands of pages - more than the user can scan anyway.
-	completionMaxItems = 200
-)
+// Shell typically aborts a completion at ~2-3s. We cap shorter so a slow
+// registry returns an empty list instead of a truncated frame. This timeout
+// is the only bound on completion-time work: neither the registry walk nor
+// the suggestion list is capped by item count.
+const completionTimeout = 2 * time.Second
 
 // Indirection layer for the two registry calls completion makes. Production
 // uses the real registry package; tests substitute upfake-backed adapters
@@ -67,10 +63,6 @@ var (
 	listCatalogFn = registry.ListCatalog
 	listTagsFn    = registry.ListTags
 )
-
-// errStopPagination breaks ListTags/ListCatalog iteration once we have
-// enough items. Treated as a clean stop, not an error.
-var errStopPagination = errors.New("stop pagination")
 
 // refKind classifies what the user is currently typing in an IMAGE/REPO
 // argument so the completer knows what to suggest.
@@ -271,56 +263,31 @@ func completeRefValue(cmd *cobra.Command, toComplete string, withTags bool) ([]s
 // tryListCatalog calls ListCatalog with a bounded context. Errors (404 from
 // registries that do not implement /v2/_catalog, timeouts, auth failures)
 // turn into an empty list - completion stays silent.
+//
+// The full catalog is offered to the shell. On a registry with very many
+// repositories completionTimeout is what stops the work, so TAB either
+// suggests everything or nothing - it never silently shows a subset.
 func tryListCatalog(cmd *cobra.Command, host string) []string {
 	ctx, cancel := completionContext(cmd)
 	defer cancel()
 
-	opts := buildCompletionOpts(cmd)
-
-	var items []string
-
-	err := listCatalogFn(ctx, host, opts, func(repos []string) error {
-		items = append(items, repos...)
-		if len(items) >= completionMaxItems {
-			return errStopPagination
-		}
-
+	items, err := listCatalogFn(ctx, host, buildCompletionOpts(cmd))
+	if err != nil {
 		return nil
-	})
-	if err != nil && !errors.Is(err, errStopPagination) {
-		return nil
-	}
-
-	if len(items) > completionMaxItems {
-		items = items[:completionMaxItems]
 	}
 
 	return items
 }
 
-// tryListTags is the ListTags counterpart to tryListCatalog.
+// tryListTags is the ListTags counterpart to tryListCatalog, with the same
+// all-or-nothing behaviour.
 func tryListTags(cmd *cobra.Command, repoRef string) []string {
 	ctx, cancel := completionContext(cmd)
 	defer cancel()
 
-	opts := buildCompletionOpts(cmd)
-
-	var items []string
-
-	err := listTagsFn(ctx, repoRef, opts, func(tags []string) error {
-		items = append(items, tags...)
-		if len(items) >= completionMaxItems {
-			return errStopPagination
-		}
-
+	items, err := listTagsFn(ctx, repoRef, buildCompletionOpts(cmd))
+	if err != nil {
 		return nil
-	})
-	if err != nil && !errors.Is(err, errStopPagination) {
-		return nil
-	}
-
-	if len(items) > completionMaxItems {
-		items = items[:completionMaxItems]
 	}
 
 	return items

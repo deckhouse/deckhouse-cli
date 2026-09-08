@@ -115,6 +115,11 @@ platform on disk; pass it and you narrow down to one.
   calls are bounded by a short timeout and degrade silently on failure.
 - **Crashes-safe sinks**: `export` removes a half-written file on error so
   downstream `tar tf` cannot mistakenly consume a truncated archive.
+- **All-or-nothing listings**: `ls` and `catalog` print nothing until the
+  full result is in hand, so a failure part-way through the registry's
+  paging cannot leave `d8 cr ls repo > tags.txt` looking complete. The
+  registry's page-by-page protocol is never exposed: there is no page or
+  limit flag, and no partial list - you get every tag or an error.
 - **Resumable OCI pulls**: re-running `pull --format oci` skips intact
   blobs and cleans up in-flight temp files left over from a `Ctrl+C`.
 

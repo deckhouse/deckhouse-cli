@@ -64,22 +64,28 @@ func runLs(ctx context.Context, w io.Writer, src string, fullRef, omitDigestTags
 		repo = r
 	}
 
-	return registry.ListTags(ctx, src, opts, func(tags []string) error {
-		for _, tag := range tags {
-			if omitDigestTags && strings.HasPrefix(tag, digestTagPrefix) {
-				continue
-			}
+	// The complete tag list is collected before anything is printed, so a
+	// failure part-way through the registry's cursor walk cannot leave a
+	// half-written `d8 cr ls repo > tags.txt` behind looking complete.
+	tags, err := registry.ListTags(ctx, src, opts)
+	if err != nil {
+		return err
+	}
 
-			line := tag
-			if fullRef {
-				line = repo.Tag(tag).String()
-			}
-
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				return err
-			}
+	for _, tag := range tags {
+		if omitDigestTags && strings.HasPrefix(tag, digestTagPrefix) {
+			continue
 		}
 
-		return nil
-	})
+		line := tag
+		if fullRef {
+			line = repo.Tag(tag).String()
+		}
+
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

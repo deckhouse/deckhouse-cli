@@ -174,35 +174,27 @@ func installFakeRegistry(t *testing.T, host string, repoTags map[string][]string
 	origTags := listTagsFn
 	origCat := listCatalogFn
 
-	listTagsFn = func(ctx context.Context, repoRef string, _ *registry.Options, visit func([]string) error) error {
+	listTagsFn = func(ctx context.Context, repoRef string, _ *registry.Options) ([]string, error) {
 		h.mu.Lock()
 		h.tagRefs = append(h.tagRefs, repoRef)
 		h.mu.Unlock()
 
 		scoped, err := h.scope(repoRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		tags, err := scoped.ListTags(ctx)
-		if err != nil {
-			return err
-		}
-		return visit(tags)
+		return scoped.ListTags(ctx)
 	}
-	listCatalogFn = func(ctx context.Context, regRef string, _ *registry.Options, visit func([]string) error) error {
+	listCatalogFn = func(ctx context.Context, regRef string, _ *registry.Options) ([]string, error) {
 		h.mu.Lock()
 		h.catRefs = append(h.catRefs, regRef)
 		h.mu.Unlock()
 
 		scoped, err := h.scope(regRef)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		repos, err := scoped.ListRepositories(ctx)
-		if err != nil {
-			return err
-		}
-		return visit(repos)
+		return scoped.ListRepositories(ctx)
 	}
 
 	t.Cleanup(func() {
@@ -257,13 +249,13 @@ func installForbidNetwork(t *testing.T) {
 	t.Helper()
 	origTags := listTagsFn
 	origCat := listCatalogFn
-	listTagsFn = func(_ context.Context, repoRef string, _ *registry.Options, _ func([]string) error) error {
+	listTagsFn = func(_ context.Context, repoRef string, _ *registry.Options) ([]string, error) {
 		t.Errorf("listTagsFn must not be called for this case (got repoRef=%q)", repoRef)
-		return errors.New("listTagsFn called unexpectedly")
+		return nil, errors.New("listTagsFn called unexpectedly")
 	}
-	listCatalogFn = func(_ context.Context, regRef string, _ *registry.Options, _ func([]string) error) error {
+	listCatalogFn = func(_ context.Context, regRef string, _ *registry.Options) ([]string, error) {
 		t.Errorf("listCatalogFn must not be called for this case (got regRef=%q)", regRef)
-		return errors.New("listCatalogFn called unexpectedly")
+		return nil, errors.New("listCatalogFn called unexpectedly")
 	}
 	t.Cleanup(func() {
 		listTagsFn = origTags
