@@ -69,9 +69,16 @@ type RegistryClientMock struct {
 	beforeGetImageConfigCounter uint64
 	GetImageConfigMock          mRegistryClientMockGetImageConfig
 
-	funcGetManifest          func(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error)
+	funcGetIndex          func(ctx context.Context, tag string) (i1 v1.ImageIndex, err error)
+	funcGetIndexOrigin    string
+	inspectFuncGetIndex   func(ctx context.Context, tag string)
+	afterGetIndexCounter  uint64
+	beforeGetIndexCounter uint64
+	GetIndexMock          mRegistryClientMockGetIndex
+
+	funcGetManifest          func(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption) (m1 mm_registry.ManifestResult, err error)
 	funcGetManifestOrigin    string
-	inspectFuncGetManifest   func(ctx context.Context, tag string)
+	inspectFuncGetManifest   func(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption)
 	afterGetManifestCounter  uint64
 	beforeGetManifestCounter uint64
 	GetManifestMock          mRegistryClientMockGetManifest
@@ -110,6 +117,20 @@ type RegistryClientMock struct {
 	afterPushIndexCounter  uint64
 	beforePushIndexCounter uint64
 	PushIndexMock          mRegistryClientMockPushIndex
+
+	funcStreamRepositories          func(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption) (err error)
+	funcStreamRepositoriesOrigin    string
+	inspectFuncStreamRepositories   func(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption)
+	afterStreamRepositoriesCounter  uint64
+	beforeStreamRepositoriesCounter uint64
+	StreamRepositoriesMock          mRegistryClientMockStreamRepositories
+
+	funcStreamTags          func(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption) (err error)
+	funcStreamTagsOrigin    string
+	inspectFuncStreamTags   func(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption)
+	afterStreamTagsCounter  uint64
+	beforeStreamTagsCounter uint64
+	StreamTagsMock          mRegistryClientMockStreamTags
 
 	funcTagImage          func(ctx context.Context, sourceTag string, destTag string) (err error)
 	funcTagImageOrigin    string
@@ -155,6 +176,9 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 	m.GetImageConfigMock = mRegistryClientMockGetImageConfig{mock: m}
 	m.GetImageConfigMock.callArgs = []*RegistryClientMockGetImageConfigParams{}
 
+	m.GetIndexMock = mRegistryClientMockGetIndex{mock: m}
+	m.GetIndexMock.callArgs = []*RegistryClientMockGetIndexParams{}
+
 	m.GetManifestMock = mRegistryClientMockGetManifest{mock: m}
 	m.GetManifestMock.callArgs = []*RegistryClientMockGetManifestParams{}
 
@@ -171,6 +195,12 @@ func NewRegistryClientMock(t minimock.Tester) *RegistryClientMock {
 
 	m.PushIndexMock = mRegistryClientMockPushIndex{mock: m}
 	m.PushIndexMock.callArgs = []*RegistryClientMockPushIndexParams{}
+
+	m.StreamRepositoriesMock = mRegistryClientMockStreamRepositories{mock: m}
+	m.StreamRepositoriesMock.callArgs = []*RegistryClientMockStreamRepositoriesParams{}
+
+	m.StreamTagsMock = mRegistryClientMockStreamTags{mock: m}
+	m.StreamTagsMock.callArgs = []*RegistryClientMockStreamTagsParams{}
 
 	m.TagImageMock = mRegistryClientMockTagImage{mock: m}
 	m.TagImageMock.callArgs = []*RegistryClientMockTagImageParams{}
@@ -2673,6 +2703,349 @@ func (m *RegistryClientMock) MinimockGetImageConfigInspect() {
 	}
 }
 
+type mRegistryClientMockGetIndex struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockGetIndexExpectation
+	expectations       []*RegistryClientMockGetIndexExpectation
+
+	callArgs []*RegistryClientMockGetIndexParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockGetIndexExpectation specifies expectation struct of the Client.GetIndex
+type RegistryClientMockGetIndexExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockGetIndexParams
+	paramPtrs          *RegistryClientMockGetIndexParamPtrs
+	expectationOrigins RegistryClientMockGetIndexExpectationOrigins
+	results            *RegistryClientMockGetIndexResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockGetIndexParams contains parameters of the Client.GetIndex
+type RegistryClientMockGetIndexParams struct {
+	ctx context.Context
+	tag string
+}
+
+// RegistryClientMockGetIndexParamPtrs contains pointers to parameters of the Client.GetIndex
+type RegistryClientMockGetIndexParamPtrs struct {
+	ctx *context.Context
+	tag *string
+}
+
+// RegistryClientMockGetIndexResults contains results of the Client.GetIndex
+type RegistryClientMockGetIndexResults struct {
+	i1  v1.ImageIndex
+	err error
+}
+
+// RegistryClientMockGetIndexOrigins contains origins of expectations of the Client.GetIndex
+type RegistryClientMockGetIndexExpectationOrigins struct {
+	origin    string
+	originCtx string
+	originTag string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmGetIndex *mRegistryClientMockGetIndex) Optional() *mRegistryClientMockGetIndex {
+	mmGetIndex.optional = true
+	return mmGetIndex
+}
+
+// Expect sets up expected params for Client.GetIndex
+func (mmGetIndex *mRegistryClientMockGetIndex) Expect(ctx context.Context, tag string) *mRegistryClientMockGetIndex {
+	if mmGetIndex.mock.funcGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Set")
+	}
+
+	if mmGetIndex.defaultExpectation == nil {
+		mmGetIndex.defaultExpectation = &RegistryClientMockGetIndexExpectation{}
+	}
+
+	if mmGetIndex.defaultExpectation.paramPtrs != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by ExpectParams functions")
+	}
+
+	mmGetIndex.defaultExpectation.params = &RegistryClientMockGetIndexParams{ctx, tag}
+	mmGetIndex.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmGetIndex.expectations {
+		if minimock.Equal(e.params, mmGetIndex.defaultExpectation.params) {
+			mmGetIndex.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmGetIndex.defaultExpectation.params)
+		}
+	}
+
+	return mmGetIndex
+}
+
+// ExpectCtxParam1 sets up expected param ctx for Client.GetIndex
+func (mmGetIndex *mRegistryClientMockGetIndex) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockGetIndex {
+	if mmGetIndex.mock.funcGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Set")
+	}
+
+	if mmGetIndex.defaultExpectation == nil {
+		mmGetIndex.defaultExpectation = &RegistryClientMockGetIndexExpectation{}
+	}
+
+	if mmGetIndex.defaultExpectation.params != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Expect")
+	}
+
+	if mmGetIndex.defaultExpectation.paramPtrs == nil {
+		mmGetIndex.defaultExpectation.paramPtrs = &RegistryClientMockGetIndexParamPtrs{}
+	}
+	mmGetIndex.defaultExpectation.paramPtrs.ctx = &ctx
+	mmGetIndex.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmGetIndex
+}
+
+// ExpectTagParam2 sets up expected param tag for Client.GetIndex
+func (mmGetIndex *mRegistryClientMockGetIndex) ExpectTagParam2(tag string) *mRegistryClientMockGetIndex {
+	if mmGetIndex.mock.funcGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Set")
+	}
+
+	if mmGetIndex.defaultExpectation == nil {
+		mmGetIndex.defaultExpectation = &RegistryClientMockGetIndexExpectation{}
+	}
+
+	if mmGetIndex.defaultExpectation.params != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Expect")
+	}
+
+	if mmGetIndex.defaultExpectation.paramPtrs == nil {
+		mmGetIndex.defaultExpectation.paramPtrs = &RegistryClientMockGetIndexParamPtrs{}
+	}
+	mmGetIndex.defaultExpectation.paramPtrs.tag = &tag
+	mmGetIndex.defaultExpectation.expectationOrigins.originTag = minimock.CallerInfo(1)
+
+	return mmGetIndex
+}
+
+// Inspect accepts an inspector function that has same arguments as the Client.GetIndex
+func (mmGetIndex *mRegistryClientMockGetIndex) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetIndex {
+	if mmGetIndex.mock.inspectFuncGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetIndex")
+	}
+
+	mmGetIndex.mock.inspectFuncGetIndex = f
+
+	return mmGetIndex
+}
+
+// Return sets up results that will be returned by Client.GetIndex
+func (mmGetIndex *mRegistryClientMockGetIndex) Return(i1 v1.ImageIndex, err error) *RegistryClientMock {
+	if mmGetIndex.mock.funcGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Set")
+	}
+
+	if mmGetIndex.defaultExpectation == nil {
+		mmGetIndex.defaultExpectation = &RegistryClientMockGetIndexExpectation{mock: mmGetIndex.mock}
+	}
+	mmGetIndex.defaultExpectation.results = &RegistryClientMockGetIndexResults{i1, err}
+	mmGetIndex.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmGetIndex.mock
+}
+
+// Set uses given function f to mock the Client.GetIndex method
+func (mmGetIndex *mRegistryClientMockGetIndex) Set(f func(ctx context.Context, tag string) (i1 v1.ImageIndex, err error)) *RegistryClientMock {
+	if mmGetIndex.defaultExpectation != nil {
+		mmGetIndex.mock.t.Fatalf("Default expectation is already set for the Client.GetIndex method")
+	}
+
+	if len(mmGetIndex.expectations) > 0 {
+		mmGetIndex.mock.t.Fatalf("Some expectations are already set for the Client.GetIndex method")
+	}
+
+	mmGetIndex.mock.funcGetIndex = f
+	mmGetIndex.mock.funcGetIndexOrigin = minimock.CallerInfo(1)
+	return mmGetIndex.mock
+}
+
+// When sets expectation for the Client.GetIndex which will trigger the result defined by the following
+// Then helper
+func (mmGetIndex *mRegistryClientMockGetIndex) When(ctx context.Context, tag string) *RegistryClientMockGetIndexExpectation {
+	if mmGetIndex.mock.funcGetIndex != nil {
+		mmGetIndex.mock.t.Fatalf("RegistryClientMock.GetIndex mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockGetIndexExpectation{
+		mock:               mmGetIndex.mock,
+		params:             &RegistryClientMockGetIndexParams{ctx, tag},
+		expectationOrigins: RegistryClientMockGetIndexExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmGetIndex.expectations = append(mmGetIndex.expectations, expectation)
+	return expectation
+}
+
+// Then sets up Client.GetIndex return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockGetIndexExpectation) Then(i1 v1.ImageIndex, err error) *RegistryClientMock {
+	e.results = &RegistryClientMockGetIndexResults{i1, err}
+	return e.mock
+}
+
+// Times sets number of times Client.GetIndex should be invoked
+func (mmGetIndex *mRegistryClientMockGetIndex) Times(n uint64) *mRegistryClientMockGetIndex {
+	if n == 0 {
+		mmGetIndex.mock.t.Fatalf("Times of RegistryClientMock.GetIndex mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmGetIndex.expectedInvocations, n)
+	mmGetIndex.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmGetIndex
+}
+
+func (mmGetIndex *mRegistryClientMockGetIndex) invocationsDone() bool {
+	if len(mmGetIndex.expectations) == 0 && mmGetIndex.defaultExpectation == nil && mmGetIndex.mock.funcGetIndex == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmGetIndex.mock.afterGetIndexCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmGetIndex.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// GetIndex implements mm_registry.Client
+func (mmGetIndex *RegistryClientMock) GetIndex(ctx context.Context, tag string) (i1 v1.ImageIndex, err error) {
+	mm_atomic.AddUint64(&mmGetIndex.beforeGetIndexCounter, 1)
+	defer mm_atomic.AddUint64(&mmGetIndex.afterGetIndexCounter, 1)
+
+	mmGetIndex.t.Helper()
+
+	if mmGetIndex.inspectFuncGetIndex != nil {
+		mmGetIndex.inspectFuncGetIndex(ctx, tag)
+	}
+
+	mm_params := RegistryClientMockGetIndexParams{ctx, tag}
+
+	// Record call args
+	mmGetIndex.GetIndexMock.mutex.Lock()
+	mmGetIndex.GetIndexMock.callArgs = append(mmGetIndex.GetIndexMock.callArgs, &mm_params)
+	mmGetIndex.GetIndexMock.mutex.Unlock()
+
+	for _, e := range mmGetIndex.GetIndexMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.i1, e.results.err
+		}
+	}
+
+	if mmGetIndex.GetIndexMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmGetIndex.GetIndexMock.defaultExpectation.Counter, 1)
+		mm_want := mmGetIndex.GetIndexMock.defaultExpectation.params
+		mm_want_ptrs := mmGetIndex.GetIndexMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockGetIndexParams{ctx, tag}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmGetIndex.t.Errorf("RegistryClientMock.GetIndex got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetIndex.GetIndexMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
+				mmGetIndex.t.Errorf("RegistryClientMock.GetIndex got unexpected parameter tag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetIndex.GetIndexMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmGetIndex.t.Errorf("RegistryClientMock.GetIndex got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmGetIndex.GetIndexMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmGetIndex.GetIndexMock.defaultExpectation.results
+		if mm_results == nil {
+			mmGetIndex.t.Fatal("No results are set for the RegistryClientMock.GetIndex")
+		}
+		return (*mm_results).i1, (*mm_results).err
+	}
+	if mmGetIndex.funcGetIndex != nil {
+		return mmGetIndex.funcGetIndex(ctx, tag)
+	}
+	mmGetIndex.t.Fatalf("Unexpected call to RegistryClientMock.GetIndex. %v %v", ctx, tag)
+	return
+}
+
+// GetIndexAfterCounter returns a count of finished RegistryClientMock.GetIndex invocations
+func (mmGetIndex *RegistryClientMock) GetIndexAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetIndex.afterGetIndexCounter)
+}
+
+// GetIndexBeforeCounter returns a count of RegistryClientMock.GetIndex invocations
+func (mmGetIndex *RegistryClientMock) GetIndexBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmGetIndex.beforeGetIndexCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.GetIndex.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmGetIndex *mRegistryClientMockGetIndex) Calls() []*RegistryClientMockGetIndexParams {
+	mmGetIndex.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockGetIndexParams, len(mmGetIndex.callArgs))
+	copy(argCopy, mmGetIndex.callArgs)
+
+	mmGetIndex.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockGetIndexDone returns true if the count of the GetIndex invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockGetIndexDone() bool {
+	if m.GetIndexMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.GetIndexMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.GetIndexMock.invocationsDone()
+}
+
+// MinimockGetIndexInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockGetIndexInspect() {
+	for _, e := range m.GetIndexMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.GetIndex at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterGetIndexCounter := mm_atomic.LoadUint64(&m.afterGetIndexCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.GetIndexMock.defaultExpectation != nil && afterGetIndexCounter < 1 {
+		if m.GetIndexMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.GetIndex at\n%s", m.GetIndexMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.GetIndex at\n%s with params: %#v", m.GetIndexMock.defaultExpectation.expectationOrigins.origin, *m.GetIndexMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcGetIndex != nil && afterGetIndexCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.GetIndex at\n%s", m.funcGetIndexOrigin)
+	}
+
+	if !m.GetIndexMock.invocationsDone() && afterGetIndexCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.GetIndex at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.GetIndexMock.expectedInvocations), m.GetIndexMock.expectedInvocationsOrigin, afterGetIndexCounter)
+	}
+}
+
 type mRegistryClientMockGetManifest struct {
 	optional           bool
 	mock               *RegistryClientMock
@@ -2699,14 +3072,16 @@ type RegistryClientMockGetManifestExpectation struct {
 
 // RegistryClientMockGetManifestParams contains parameters of the Client.GetManifest
 type RegistryClientMockGetManifestParams struct {
-	ctx context.Context
-	tag string
+	ctx  context.Context
+	tag  string
+	opts []mm_registry.ManifestGetOption
 }
 
 // RegistryClientMockGetManifestParamPtrs contains pointers to parameters of the Client.GetManifest
 type RegistryClientMockGetManifestParamPtrs struct {
-	ctx *context.Context
-	tag *string
+	ctx  *context.Context
+	tag  *string
+	opts *[]mm_registry.ManifestGetOption
 }
 
 // RegistryClientMockGetManifestResults contains results of the Client.GetManifest
@@ -2717,9 +3092,10 @@ type RegistryClientMockGetManifestResults struct {
 
 // RegistryClientMockGetManifestOrigins contains origins of expectations of the Client.GetManifest
 type RegistryClientMockGetManifestExpectationOrigins struct {
-	origin    string
-	originCtx string
-	originTag string
+	origin     string
+	originCtx  string
+	originTag  string
+	originOpts string
 }
 
 // Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
@@ -2733,7 +3109,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Optional() *mRegistryClient
 }
 
 // Expect sets up expected params for Client.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context, tag string) *mRegistryClientMockGetManifest {
+func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption) *mRegistryClientMockGetManifest {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
@@ -2746,7 +3122,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Expect(ctx context.Context,
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by ExpectParams functions")
 	}
 
-	mmGetManifest.defaultExpectation.params = &RegistryClientMockGetManifestParams{ctx, tag}
+	mmGetManifest.defaultExpectation.params = &RegistryClientMockGetManifestParams{ctx, tag, opts}
 	mmGetManifest.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
 	for _, e := range mmGetManifest.expectations {
 		if minimock.Equal(e.params, mmGetManifest.defaultExpectation.params) {
@@ -2803,8 +3179,31 @@ func (mmGetManifest *mRegistryClientMockGetManifest) ExpectTagParam2(tag string)
 	return mmGetManifest
 }
 
+// ExpectOptsParam3 sets up expected param opts for Client.GetManifest
+func (mmGetManifest *mRegistryClientMockGetManifest) ExpectOptsParam3(opts ...mm_registry.ManifestGetOption) *mRegistryClientMockGetManifest {
+	if mmGetManifest.mock.funcGetManifest != nil {
+		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
+	}
+
+	if mmGetManifest.defaultExpectation == nil {
+		mmGetManifest.defaultExpectation = &RegistryClientMockGetManifestExpectation{}
+	}
+
+	if mmGetManifest.defaultExpectation.params != nil {
+		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Expect")
+	}
+
+	if mmGetManifest.defaultExpectation.paramPtrs == nil {
+		mmGetManifest.defaultExpectation.paramPtrs = &RegistryClientMockGetManifestParamPtrs{}
+	}
+	mmGetManifest.defaultExpectation.paramPtrs.opts = &opts
+	mmGetManifest.defaultExpectation.expectationOrigins.originOpts = minimock.CallerInfo(1)
+
+	return mmGetManifest
+}
+
 // Inspect accepts an inspector function that has same arguments as the Client.GetManifest
-func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.Context, tag string)) *mRegistryClientMockGetManifest {
+func (mmGetManifest *mRegistryClientMockGetManifest) Inspect(f func(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption)) *mRegistryClientMockGetManifest {
 	if mmGetManifest.mock.inspectFuncGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.GetManifest")
 	}
@@ -2829,7 +3228,7 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Return(m1 mm_registry.Manif
 }
 
 // Set uses given function f to mock the Client.GetManifest method
-func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error)) *RegistryClientMock {
+func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption) (m1 mm_registry.ManifestResult, err error)) *RegistryClientMock {
 	if mmGetManifest.defaultExpectation != nil {
 		mmGetManifest.mock.t.Fatalf("Default expectation is already set for the Client.GetManifest method")
 	}
@@ -2845,14 +3244,14 @@ func (mmGetManifest *mRegistryClientMockGetManifest) Set(f func(ctx context.Cont
 
 // When sets expectation for the Client.GetManifest which will trigger the result defined by the following
 // Then helper
-func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, tag string) *RegistryClientMockGetManifestExpectation {
+func (mmGetManifest *mRegistryClientMockGetManifest) When(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption) *RegistryClientMockGetManifestExpectation {
 	if mmGetManifest.mock.funcGetManifest != nil {
 		mmGetManifest.mock.t.Fatalf("RegistryClientMock.GetManifest mock is already set by Set")
 	}
 
 	expectation := &RegistryClientMockGetManifestExpectation{
 		mock:               mmGetManifest.mock,
-		params:             &RegistryClientMockGetManifestParams{ctx, tag},
+		params:             &RegistryClientMockGetManifestParams{ctx, tag, opts},
 		expectationOrigins: RegistryClientMockGetManifestExpectationOrigins{origin: minimock.CallerInfo(1)},
 	}
 	mmGetManifest.expectations = append(mmGetManifest.expectations, expectation)
@@ -2887,17 +3286,17 @@ func (mmGetManifest *mRegistryClientMockGetManifest) invocationsDone() bool {
 }
 
 // GetManifest implements mm_registry.Client
-func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string) (m1 mm_registry.ManifestResult, err error) {
+func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag string, opts ...mm_registry.ManifestGetOption) (m1 mm_registry.ManifestResult, err error) {
 	mm_atomic.AddUint64(&mmGetManifest.beforeGetManifestCounter, 1)
 	defer mm_atomic.AddUint64(&mmGetManifest.afterGetManifestCounter, 1)
 
 	mmGetManifest.t.Helper()
 
 	if mmGetManifest.inspectFuncGetManifest != nil {
-		mmGetManifest.inspectFuncGetManifest(ctx, tag)
+		mmGetManifest.inspectFuncGetManifest(ctx, tag, opts...)
 	}
 
-	mm_params := RegistryClientMockGetManifestParams{ctx, tag}
+	mm_params := RegistryClientMockGetManifestParams{ctx, tag, opts}
 
 	// Record call args
 	mmGetManifest.GetManifestMock.mutex.Lock()
@@ -2916,7 +3315,7 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag st
 		mm_want := mmGetManifest.GetManifestMock.defaultExpectation.params
 		mm_want_ptrs := mmGetManifest.GetManifestMock.defaultExpectation.paramPtrs
 
-		mm_got := RegistryClientMockGetManifestParams{ctx, tag}
+		mm_got := RegistryClientMockGetManifestParams{ctx, tag, opts}
 
 		if mm_want_ptrs != nil {
 
@@ -2928,6 +3327,11 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag st
 			if mm_want_ptrs.tag != nil && !minimock.Equal(*mm_want_ptrs.tag, mm_got.tag) {
 				mmGetManifest.t.Errorf("RegistryClientMock.GetManifest got unexpected parameter tag, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
 					mmGetManifest.GetManifestMock.defaultExpectation.expectationOrigins.originTag, *mm_want_ptrs.tag, mm_got.tag, minimock.Diff(*mm_want_ptrs.tag, mm_got.tag))
+			}
+
+			if mm_want_ptrs.opts != nil && !minimock.Equal(*mm_want_ptrs.opts, mm_got.opts) {
+				mmGetManifest.t.Errorf("RegistryClientMock.GetManifest got unexpected parameter opts, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmGetManifest.GetManifestMock.defaultExpectation.expectationOrigins.originOpts, *mm_want_ptrs.opts, mm_got.opts, minimock.Diff(*mm_want_ptrs.opts, mm_got.opts))
 			}
 
 		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
@@ -2942,9 +3346,9 @@ func (mmGetManifest *RegistryClientMock) GetManifest(ctx context.Context, tag st
 		return (*mm_results).m1, (*mm_results).err
 	}
 	if mmGetManifest.funcGetManifest != nil {
-		return mmGetManifest.funcGetManifest(ctx, tag)
+		return mmGetManifest.funcGetManifest(ctx, tag, opts...)
 	}
-	mmGetManifest.t.Fatalf("Unexpected call to RegistryClientMock.GetManifest. %v %v", ctx, tag)
+	mmGetManifest.t.Fatalf("Unexpected call to RegistryClientMock.GetManifest. %v %v %v", ctx, tag, opts)
 	return
 }
 
@@ -4696,6 +5100,752 @@ func (m *RegistryClientMock) MinimockPushIndexInspect() {
 	}
 }
 
+type mRegistryClientMockStreamRepositories struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockStreamRepositoriesExpectation
+	expectations       []*RegistryClientMockStreamRepositoriesExpectation
+
+	callArgs []*RegistryClientMockStreamRepositoriesParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockStreamRepositoriesExpectation specifies expectation struct of the Client.StreamRepositories
+type RegistryClientMockStreamRepositoriesExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockStreamRepositoriesParams
+	paramPtrs          *RegistryClientMockStreamRepositoriesParamPtrs
+	expectationOrigins RegistryClientMockStreamRepositoriesExpectationOrigins
+	results            *RegistryClientMockStreamRepositoriesResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockStreamRepositoriesParams contains parameters of the Client.StreamRepositories
+type RegistryClientMockStreamRepositoriesParams struct {
+	ctx   context.Context
+	visit func(repos []string) error
+	opts  []mm_registry.ListRepositoriesOption
+}
+
+// RegistryClientMockStreamRepositoriesParamPtrs contains pointers to parameters of the Client.StreamRepositories
+type RegistryClientMockStreamRepositoriesParamPtrs struct {
+	ctx   *context.Context
+	visit *func(repos []string) error
+	opts  *[]mm_registry.ListRepositoriesOption
+}
+
+// RegistryClientMockStreamRepositoriesResults contains results of the Client.StreamRepositories
+type RegistryClientMockStreamRepositoriesResults struct {
+	err error
+}
+
+// RegistryClientMockStreamRepositoriesOrigins contains origins of expectations of the Client.StreamRepositories
+type RegistryClientMockStreamRepositoriesExpectationOrigins struct {
+	origin      string
+	originCtx   string
+	originVisit string
+	originOpts  string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Optional() *mRegistryClientMockStreamRepositories {
+	mmStreamRepositories.optional = true
+	return mmStreamRepositories
+}
+
+// Expect sets up expected params for Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Expect(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption) *mRegistryClientMockStreamRepositories {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	if mmStreamRepositories.defaultExpectation == nil {
+		mmStreamRepositories.defaultExpectation = &RegistryClientMockStreamRepositoriesExpectation{}
+	}
+
+	if mmStreamRepositories.defaultExpectation.paramPtrs != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by ExpectParams functions")
+	}
+
+	mmStreamRepositories.defaultExpectation.params = &RegistryClientMockStreamRepositoriesParams{ctx, visit, opts}
+	mmStreamRepositories.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmStreamRepositories.expectations {
+		if minimock.Equal(e.params, mmStreamRepositories.defaultExpectation.params) {
+			mmStreamRepositories.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmStreamRepositories.defaultExpectation.params)
+		}
+	}
+
+	return mmStreamRepositories
+}
+
+// ExpectCtxParam1 sets up expected param ctx for Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockStreamRepositories {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	if mmStreamRepositories.defaultExpectation == nil {
+		mmStreamRepositories.defaultExpectation = &RegistryClientMockStreamRepositoriesExpectation{}
+	}
+
+	if mmStreamRepositories.defaultExpectation.params != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Expect")
+	}
+
+	if mmStreamRepositories.defaultExpectation.paramPtrs == nil {
+		mmStreamRepositories.defaultExpectation.paramPtrs = &RegistryClientMockStreamRepositoriesParamPtrs{}
+	}
+	mmStreamRepositories.defaultExpectation.paramPtrs.ctx = &ctx
+	mmStreamRepositories.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmStreamRepositories
+}
+
+// ExpectVisitParam2 sets up expected param visit for Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) ExpectVisitParam2(visit func(repos []string) error) *mRegistryClientMockStreamRepositories {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	if mmStreamRepositories.defaultExpectation == nil {
+		mmStreamRepositories.defaultExpectation = &RegistryClientMockStreamRepositoriesExpectation{}
+	}
+
+	if mmStreamRepositories.defaultExpectation.params != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Expect")
+	}
+
+	if mmStreamRepositories.defaultExpectation.paramPtrs == nil {
+		mmStreamRepositories.defaultExpectation.paramPtrs = &RegistryClientMockStreamRepositoriesParamPtrs{}
+	}
+	mmStreamRepositories.defaultExpectation.paramPtrs.visit = &visit
+	mmStreamRepositories.defaultExpectation.expectationOrigins.originVisit = minimock.CallerInfo(1)
+
+	return mmStreamRepositories
+}
+
+// ExpectOptsParam3 sets up expected param opts for Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) ExpectOptsParam3(opts ...mm_registry.ListRepositoriesOption) *mRegistryClientMockStreamRepositories {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	if mmStreamRepositories.defaultExpectation == nil {
+		mmStreamRepositories.defaultExpectation = &RegistryClientMockStreamRepositoriesExpectation{}
+	}
+
+	if mmStreamRepositories.defaultExpectation.params != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Expect")
+	}
+
+	if mmStreamRepositories.defaultExpectation.paramPtrs == nil {
+		mmStreamRepositories.defaultExpectation.paramPtrs = &RegistryClientMockStreamRepositoriesParamPtrs{}
+	}
+	mmStreamRepositories.defaultExpectation.paramPtrs.opts = &opts
+	mmStreamRepositories.defaultExpectation.expectationOrigins.originOpts = minimock.CallerInfo(1)
+
+	return mmStreamRepositories
+}
+
+// Inspect accepts an inspector function that has same arguments as the Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Inspect(f func(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption)) *mRegistryClientMockStreamRepositories {
+	if mmStreamRepositories.mock.inspectFuncStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.StreamRepositories")
+	}
+
+	mmStreamRepositories.mock.inspectFuncStreamRepositories = f
+
+	return mmStreamRepositories
+}
+
+// Return sets up results that will be returned by Client.StreamRepositories
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Return(err error) *RegistryClientMock {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	if mmStreamRepositories.defaultExpectation == nil {
+		mmStreamRepositories.defaultExpectation = &RegistryClientMockStreamRepositoriesExpectation{mock: mmStreamRepositories.mock}
+	}
+	mmStreamRepositories.defaultExpectation.results = &RegistryClientMockStreamRepositoriesResults{err}
+	mmStreamRepositories.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmStreamRepositories.mock
+}
+
+// Set uses given function f to mock the Client.StreamRepositories method
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Set(f func(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption) (err error)) *RegistryClientMock {
+	if mmStreamRepositories.defaultExpectation != nil {
+		mmStreamRepositories.mock.t.Fatalf("Default expectation is already set for the Client.StreamRepositories method")
+	}
+
+	if len(mmStreamRepositories.expectations) > 0 {
+		mmStreamRepositories.mock.t.Fatalf("Some expectations are already set for the Client.StreamRepositories method")
+	}
+
+	mmStreamRepositories.mock.funcStreamRepositories = f
+	mmStreamRepositories.mock.funcStreamRepositoriesOrigin = minimock.CallerInfo(1)
+	return mmStreamRepositories.mock
+}
+
+// When sets expectation for the Client.StreamRepositories which will trigger the result defined by the following
+// Then helper
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) When(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption) *RegistryClientMockStreamRepositoriesExpectation {
+	if mmStreamRepositories.mock.funcStreamRepositories != nil {
+		mmStreamRepositories.mock.t.Fatalf("RegistryClientMock.StreamRepositories mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockStreamRepositoriesExpectation{
+		mock:               mmStreamRepositories.mock,
+		params:             &RegistryClientMockStreamRepositoriesParams{ctx, visit, opts},
+		expectationOrigins: RegistryClientMockStreamRepositoriesExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmStreamRepositories.expectations = append(mmStreamRepositories.expectations, expectation)
+	return expectation
+}
+
+// Then sets up Client.StreamRepositories return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockStreamRepositoriesExpectation) Then(err error) *RegistryClientMock {
+	e.results = &RegistryClientMockStreamRepositoriesResults{err}
+	return e.mock
+}
+
+// Times sets number of times Client.StreamRepositories should be invoked
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Times(n uint64) *mRegistryClientMockStreamRepositories {
+	if n == 0 {
+		mmStreamRepositories.mock.t.Fatalf("Times of RegistryClientMock.StreamRepositories mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmStreamRepositories.expectedInvocations, n)
+	mmStreamRepositories.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmStreamRepositories
+}
+
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) invocationsDone() bool {
+	if len(mmStreamRepositories.expectations) == 0 && mmStreamRepositories.defaultExpectation == nil && mmStreamRepositories.mock.funcStreamRepositories == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmStreamRepositories.mock.afterStreamRepositoriesCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmStreamRepositories.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// StreamRepositories implements mm_registry.Client
+func (mmStreamRepositories *RegistryClientMock) StreamRepositories(ctx context.Context, visit func(repos []string) error, opts ...mm_registry.ListRepositoriesOption) (err error) {
+	mm_atomic.AddUint64(&mmStreamRepositories.beforeStreamRepositoriesCounter, 1)
+	defer mm_atomic.AddUint64(&mmStreamRepositories.afterStreamRepositoriesCounter, 1)
+
+	mmStreamRepositories.t.Helper()
+
+	if mmStreamRepositories.inspectFuncStreamRepositories != nil {
+		mmStreamRepositories.inspectFuncStreamRepositories(ctx, visit, opts...)
+	}
+
+	mm_params := RegistryClientMockStreamRepositoriesParams{ctx, visit, opts}
+
+	// Record call args
+	mmStreamRepositories.StreamRepositoriesMock.mutex.Lock()
+	mmStreamRepositories.StreamRepositoriesMock.callArgs = append(mmStreamRepositories.StreamRepositoriesMock.callArgs, &mm_params)
+	mmStreamRepositories.StreamRepositoriesMock.mutex.Unlock()
+
+	for _, e := range mmStreamRepositories.StreamRepositoriesMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.err
+		}
+	}
+
+	if mmStreamRepositories.StreamRepositoriesMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.Counter, 1)
+		mm_want := mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.params
+		mm_want_ptrs := mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockStreamRepositoriesParams{ctx, visit, opts}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmStreamRepositories.t.Errorf("RegistryClientMock.StreamRepositories got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.visit != nil && !minimock.Equal(*mm_want_ptrs.visit, mm_got.visit) {
+				mmStreamRepositories.t.Errorf("RegistryClientMock.StreamRepositories got unexpected parameter visit, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.expectationOrigins.originVisit, *mm_want_ptrs.visit, mm_got.visit, minimock.Diff(*mm_want_ptrs.visit, mm_got.visit))
+			}
+
+			if mm_want_ptrs.opts != nil && !minimock.Equal(*mm_want_ptrs.opts, mm_got.opts) {
+				mmStreamRepositories.t.Errorf("RegistryClientMock.StreamRepositories got unexpected parameter opts, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.expectationOrigins.originOpts, *mm_want_ptrs.opts, mm_got.opts, minimock.Diff(*mm_want_ptrs.opts, mm_got.opts))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmStreamRepositories.t.Errorf("RegistryClientMock.StreamRepositories got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmStreamRepositories.StreamRepositoriesMock.defaultExpectation.results
+		if mm_results == nil {
+			mmStreamRepositories.t.Fatal("No results are set for the RegistryClientMock.StreamRepositories")
+		}
+		return (*mm_results).err
+	}
+	if mmStreamRepositories.funcStreamRepositories != nil {
+		return mmStreamRepositories.funcStreamRepositories(ctx, visit, opts...)
+	}
+	mmStreamRepositories.t.Fatalf("Unexpected call to RegistryClientMock.StreamRepositories. %v %v %v", ctx, visit, opts)
+	return
+}
+
+// StreamRepositoriesAfterCounter returns a count of finished RegistryClientMock.StreamRepositories invocations
+func (mmStreamRepositories *RegistryClientMock) StreamRepositoriesAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmStreamRepositories.afterStreamRepositoriesCounter)
+}
+
+// StreamRepositoriesBeforeCounter returns a count of RegistryClientMock.StreamRepositories invocations
+func (mmStreamRepositories *RegistryClientMock) StreamRepositoriesBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmStreamRepositories.beforeStreamRepositoriesCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.StreamRepositories.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmStreamRepositories *mRegistryClientMockStreamRepositories) Calls() []*RegistryClientMockStreamRepositoriesParams {
+	mmStreamRepositories.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockStreamRepositoriesParams, len(mmStreamRepositories.callArgs))
+	copy(argCopy, mmStreamRepositories.callArgs)
+
+	mmStreamRepositories.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockStreamRepositoriesDone returns true if the count of the StreamRepositories invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockStreamRepositoriesDone() bool {
+	if m.StreamRepositoriesMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.StreamRepositoriesMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.StreamRepositoriesMock.invocationsDone()
+}
+
+// MinimockStreamRepositoriesInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockStreamRepositoriesInspect() {
+	for _, e := range m.StreamRepositoriesMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamRepositories at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterStreamRepositoriesCounter := mm_atomic.LoadUint64(&m.afterStreamRepositoriesCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.StreamRepositoriesMock.defaultExpectation != nil && afterStreamRepositoriesCounter < 1 {
+		if m.StreamRepositoriesMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamRepositories at\n%s", m.StreamRepositoriesMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamRepositories at\n%s with params: %#v", m.StreamRepositoriesMock.defaultExpectation.expectationOrigins.origin, *m.StreamRepositoriesMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcStreamRepositories != nil && afterStreamRepositoriesCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.StreamRepositories at\n%s", m.funcStreamRepositoriesOrigin)
+	}
+
+	if !m.StreamRepositoriesMock.invocationsDone() && afterStreamRepositoriesCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.StreamRepositories at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.StreamRepositoriesMock.expectedInvocations), m.StreamRepositoriesMock.expectedInvocationsOrigin, afterStreamRepositoriesCounter)
+	}
+}
+
+type mRegistryClientMockStreamTags struct {
+	optional           bool
+	mock               *RegistryClientMock
+	defaultExpectation *RegistryClientMockStreamTagsExpectation
+	expectations       []*RegistryClientMockStreamTagsExpectation
+
+	callArgs []*RegistryClientMockStreamTagsParams
+	mutex    sync.RWMutex
+
+	expectedInvocations       uint64
+	expectedInvocationsOrigin string
+}
+
+// RegistryClientMockStreamTagsExpectation specifies expectation struct of the Client.StreamTags
+type RegistryClientMockStreamTagsExpectation struct {
+	mock               *RegistryClientMock
+	params             *RegistryClientMockStreamTagsParams
+	paramPtrs          *RegistryClientMockStreamTagsParamPtrs
+	expectationOrigins RegistryClientMockStreamTagsExpectationOrigins
+	results            *RegistryClientMockStreamTagsResults
+	returnOrigin       string
+	Counter            uint64
+}
+
+// RegistryClientMockStreamTagsParams contains parameters of the Client.StreamTags
+type RegistryClientMockStreamTagsParams struct {
+	ctx   context.Context
+	visit func(tags []string) error
+	opts  []mm_registry.ListTagsOption
+}
+
+// RegistryClientMockStreamTagsParamPtrs contains pointers to parameters of the Client.StreamTags
+type RegistryClientMockStreamTagsParamPtrs struct {
+	ctx   *context.Context
+	visit *func(tags []string) error
+	opts  *[]mm_registry.ListTagsOption
+}
+
+// RegistryClientMockStreamTagsResults contains results of the Client.StreamTags
+type RegistryClientMockStreamTagsResults struct {
+	err error
+}
+
+// RegistryClientMockStreamTagsOrigins contains origins of expectations of the Client.StreamTags
+type RegistryClientMockStreamTagsExpectationOrigins struct {
+	origin      string
+	originCtx   string
+	originVisit string
+	originOpts  string
+}
+
+// Marks this method to be optional. The default behavior of any method with Return() is '1 or more', meaning
+// the test will fail minimock's automatic final call check if the mocked method was not called at least once.
+// Optional() makes method check to work in '0 or more' mode.
+// It is NOT RECOMMENDED to use this option unless you really need it, as default behaviour helps to
+// catch the problems when the expected method call is totally skipped during test run.
+func (mmStreamTags *mRegistryClientMockStreamTags) Optional() *mRegistryClientMockStreamTags {
+	mmStreamTags.optional = true
+	return mmStreamTags
+}
+
+// Expect sets up expected params for Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) Expect(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption) *mRegistryClientMockStreamTags {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	if mmStreamTags.defaultExpectation == nil {
+		mmStreamTags.defaultExpectation = &RegistryClientMockStreamTagsExpectation{}
+	}
+
+	if mmStreamTags.defaultExpectation.paramPtrs != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by ExpectParams functions")
+	}
+
+	mmStreamTags.defaultExpectation.params = &RegistryClientMockStreamTagsParams{ctx, visit, opts}
+	mmStreamTags.defaultExpectation.expectationOrigins.origin = minimock.CallerInfo(1)
+	for _, e := range mmStreamTags.expectations {
+		if minimock.Equal(e.params, mmStreamTags.defaultExpectation.params) {
+			mmStreamTags.mock.t.Fatalf("Expectation set by When has same params: %#v", *mmStreamTags.defaultExpectation.params)
+		}
+	}
+
+	return mmStreamTags
+}
+
+// ExpectCtxParam1 sets up expected param ctx for Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) ExpectCtxParam1(ctx context.Context) *mRegistryClientMockStreamTags {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	if mmStreamTags.defaultExpectation == nil {
+		mmStreamTags.defaultExpectation = &RegistryClientMockStreamTagsExpectation{}
+	}
+
+	if mmStreamTags.defaultExpectation.params != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Expect")
+	}
+
+	if mmStreamTags.defaultExpectation.paramPtrs == nil {
+		mmStreamTags.defaultExpectation.paramPtrs = &RegistryClientMockStreamTagsParamPtrs{}
+	}
+	mmStreamTags.defaultExpectation.paramPtrs.ctx = &ctx
+	mmStreamTags.defaultExpectation.expectationOrigins.originCtx = minimock.CallerInfo(1)
+
+	return mmStreamTags
+}
+
+// ExpectVisitParam2 sets up expected param visit for Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) ExpectVisitParam2(visit func(tags []string) error) *mRegistryClientMockStreamTags {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	if mmStreamTags.defaultExpectation == nil {
+		mmStreamTags.defaultExpectation = &RegistryClientMockStreamTagsExpectation{}
+	}
+
+	if mmStreamTags.defaultExpectation.params != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Expect")
+	}
+
+	if mmStreamTags.defaultExpectation.paramPtrs == nil {
+		mmStreamTags.defaultExpectation.paramPtrs = &RegistryClientMockStreamTagsParamPtrs{}
+	}
+	mmStreamTags.defaultExpectation.paramPtrs.visit = &visit
+	mmStreamTags.defaultExpectation.expectationOrigins.originVisit = minimock.CallerInfo(1)
+
+	return mmStreamTags
+}
+
+// ExpectOptsParam3 sets up expected param opts for Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) ExpectOptsParam3(opts ...mm_registry.ListTagsOption) *mRegistryClientMockStreamTags {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	if mmStreamTags.defaultExpectation == nil {
+		mmStreamTags.defaultExpectation = &RegistryClientMockStreamTagsExpectation{}
+	}
+
+	if mmStreamTags.defaultExpectation.params != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Expect")
+	}
+
+	if mmStreamTags.defaultExpectation.paramPtrs == nil {
+		mmStreamTags.defaultExpectation.paramPtrs = &RegistryClientMockStreamTagsParamPtrs{}
+	}
+	mmStreamTags.defaultExpectation.paramPtrs.opts = &opts
+	mmStreamTags.defaultExpectation.expectationOrigins.originOpts = minimock.CallerInfo(1)
+
+	return mmStreamTags
+}
+
+// Inspect accepts an inspector function that has same arguments as the Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) Inspect(f func(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption)) *mRegistryClientMockStreamTags {
+	if mmStreamTags.mock.inspectFuncStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("Inspect function is already set for RegistryClientMock.StreamTags")
+	}
+
+	mmStreamTags.mock.inspectFuncStreamTags = f
+
+	return mmStreamTags
+}
+
+// Return sets up results that will be returned by Client.StreamTags
+func (mmStreamTags *mRegistryClientMockStreamTags) Return(err error) *RegistryClientMock {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	if mmStreamTags.defaultExpectation == nil {
+		mmStreamTags.defaultExpectation = &RegistryClientMockStreamTagsExpectation{mock: mmStreamTags.mock}
+	}
+	mmStreamTags.defaultExpectation.results = &RegistryClientMockStreamTagsResults{err}
+	mmStreamTags.defaultExpectation.returnOrigin = minimock.CallerInfo(1)
+	return mmStreamTags.mock
+}
+
+// Set uses given function f to mock the Client.StreamTags method
+func (mmStreamTags *mRegistryClientMockStreamTags) Set(f func(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption) (err error)) *RegistryClientMock {
+	if mmStreamTags.defaultExpectation != nil {
+		mmStreamTags.mock.t.Fatalf("Default expectation is already set for the Client.StreamTags method")
+	}
+
+	if len(mmStreamTags.expectations) > 0 {
+		mmStreamTags.mock.t.Fatalf("Some expectations are already set for the Client.StreamTags method")
+	}
+
+	mmStreamTags.mock.funcStreamTags = f
+	mmStreamTags.mock.funcStreamTagsOrigin = minimock.CallerInfo(1)
+	return mmStreamTags.mock
+}
+
+// When sets expectation for the Client.StreamTags which will trigger the result defined by the following
+// Then helper
+func (mmStreamTags *mRegistryClientMockStreamTags) When(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption) *RegistryClientMockStreamTagsExpectation {
+	if mmStreamTags.mock.funcStreamTags != nil {
+		mmStreamTags.mock.t.Fatalf("RegistryClientMock.StreamTags mock is already set by Set")
+	}
+
+	expectation := &RegistryClientMockStreamTagsExpectation{
+		mock:               mmStreamTags.mock,
+		params:             &RegistryClientMockStreamTagsParams{ctx, visit, opts},
+		expectationOrigins: RegistryClientMockStreamTagsExpectationOrigins{origin: minimock.CallerInfo(1)},
+	}
+	mmStreamTags.expectations = append(mmStreamTags.expectations, expectation)
+	return expectation
+}
+
+// Then sets up Client.StreamTags return parameters for the expectation previously defined by the When method
+func (e *RegistryClientMockStreamTagsExpectation) Then(err error) *RegistryClientMock {
+	e.results = &RegistryClientMockStreamTagsResults{err}
+	return e.mock
+}
+
+// Times sets number of times Client.StreamTags should be invoked
+func (mmStreamTags *mRegistryClientMockStreamTags) Times(n uint64) *mRegistryClientMockStreamTags {
+	if n == 0 {
+		mmStreamTags.mock.t.Fatalf("Times of RegistryClientMock.StreamTags mock can not be zero")
+	}
+	mm_atomic.StoreUint64(&mmStreamTags.expectedInvocations, n)
+	mmStreamTags.expectedInvocationsOrigin = minimock.CallerInfo(1)
+	return mmStreamTags
+}
+
+func (mmStreamTags *mRegistryClientMockStreamTags) invocationsDone() bool {
+	if len(mmStreamTags.expectations) == 0 && mmStreamTags.defaultExpectation == nil && mmStreamTags.mock.funcStreamTags == nil {
+		return true
+	}
+
+	totalInvocations := mm_atomic.LoadUint64(&mmStreamTags.mock.afterStreamTagsCounter)
+	expectedInvocations := mm_atomic.LoadUint64(&mmStreamTags.expectedInvocations)
+
+	return totalInvocations > 0 && (expectedInvocations == 0 || expectedInvocations == totalInvocations)
+}
+
+// StreamTags implements mm_registry.Client
+func (mmStreamTags *RegistryClientMock) StreamTags(ctx context.Context, visit func(tags []string) error, opts ...mm_registry.ListTagsOption) (err error) {
+	mm_atomic.AddUint64(&mmStreamTags.beforeStreamTagsCounter, 1)
+	defer mm_atomic.AddUint64(&mmStreamTags.afterStreamTagsCounter, 1)
+
+	mmStreamTags.t.Helper()
+
+	if mmStreamTags.inspectFuncStreamTags != nil {
+		mmStreamTags.inspectFuncStreamTags(ctx, visit, opts...)
+	}
+
+	mm_params := RegistryClientMockStreamTagsParams{ctx, visit, opts}
+
+	// Record call args
+	mmStreamTags.StreamTagsMock.mutex.Lock()
+	mmStreamTags.StreamTagsMock.callArgs = append(mmStreamTags.StreamTagsMock.callArgs, &mm_params)
+	mmStreamTags.StreamTagsMock.mutex.Unlock()
+
+	for _, e := range mmStreamTags.StreamTagsMock.expectations {
+		if minimock.Equal(*e.params, mm_params) {
+			mm_atomic.AddUint64(&e.Counter, 1)
+			return e.results.err
+		}
+	}
+
+	if mmStreamTags.StreamTagsMock.defaultExpectation != nil {
+		mm_atomic.AddUint64(&mmStreamTags.StreamTagsMock.defaultExpectation.Counter, 1)
+		mm_want := mmStreamTags.StreamTagsMock.defaultExpectation.params
+		mm_want_ptrs := mmStreamTags.StreamTagsMock.defaultExpectation.paramPtrs
+
+		mm_got := RegistryClientMockStreamTagsParams{ctx, visit, opts}
+
+		if mm_want_ptrs != nil {
+
+			if mm_want_ptrs.ctx != nil && !minimock.Equal(*mm_want_ptrs.ctx, mm_got.ctx) {
+				mmStreamTags.t.Errorf("RegistryClientMock.StreamTags got unexpected parameter ctx, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamTags.StreamTagsMock.defaultExpectation.expectationOrigins.originCtx, *mm_want_ptrs.ctx, mm_got.ctx, minimock.Diff(*mm_want_ptrs.ctx, mm_got.ctx))
+			}
+
+			if mm_want_ptrs.visit != nil && !minimock.Equal(*mm_want_ptrs.visit, mm_got.visit) {
+				mmStreamTags.t.Errorf("RegistryClientMock.StreamTags got unexpected parameter visit, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamTags.StreamTagsMock.defaultExpectation.expectationOrigins.originVisit, *mm_want_ptrs.visit, mm_got.visit, minimock.Diff(*mm_want_ptrs.visit, mm_got.visit))
+			}
+
+			if mm_want_ptrs.opts != nil && !minimock.Equal(*mm_want_ptrs.opts, mm_got.opts) {
+				mmStreamTags.t.Errorf("RegistryClientMock.StreamTags got unexpected parameter opts, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+					mmStreamTags.StreamTagsMock.defaultExpectation.expectationOrigins.originOpts, *mm_want_ptrs.opts, mm_got.opts, minimock.Diff(*mm_want_ptrs.opts, mm_got.opts))
+			}
+
+		} else if mm_want != nil && !minimock.Equal(*mm_want, mm_got) {
+			mmStreamTags.t.Errorf("RegistryClientMock.StreamTags got unexpected parameters, expected at\n%s:\nwant: %#v\n got: %#v%s\n",
+				mmStreamTags.StreamTagsMock.defaultExpectation.expectationOrigins.origin, *mm_want, mm_got, minimock.Diff(*mm_want, mm_got))
+		}
+
+		mm_results := mmStreamTags.StreamTagsMock.defaultExpectation.results
+		if mm_results == nil {
+			mmStreamTags.t.Fatal("No results are set for the RegistryClientMock.StreamTags")
+		}
+		return (*mm_results).err
+	}
+	if mmStreamTags.funcStreamTags != nil {
+		return mmStreamTags.funcStreamTags(ctx, visit, opts...)
+	}
+	mmStreamTags.t.Fatalf("Unexpected call to RegistryClientMock.StreamTags. %v %v %v", ctx, visit, opts)
+	return
+}
+
+// StreamTagsAfterCounter returns a count of finished RegistryClientMock.StreamTags invocations
+func (mmStreamTags *RegistryClientMock) StreamTagsAfterCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmStreamTags.afterStreamTagsCounter)
+}
+
+// StreamTagsBeforeCounter returns a count of RegistryClientMock.StreamTags invocations
+func (mmStreamTags *RegistryClientMock) StreamTagsBeforeCounter() uint64 {
+	return mm_atomic.LoadUint64(&mmStreamTags.beforeStreamTagsCounter)
+}
+
+// Calls returns a list of arguments used in each call to RegistryClientMock.StreamTags.
+// The list is in the same order as the calls were made (i.e. recent calls have a higher index)
+func (mmStreamTags *mRegistryClientMockStreamTags) Calls() []*RegistryClientMockStreamTagsParams {
+	mmStreamTags.mutex.RLock()
+
+	argCopy := make([]*RegistryClientMockStreamTagsParams, len(mmStreamTags.callArgs))
+	copy(argCopy, mmStreamTags.callArgs)
+
+	mmStreamTags.mutex.RUnlock()
+
+	return argCopy
+}
+
+// MinimockStreamTagsDone returns true if the count of the StreamTags invocations corresponds
+// the number of defined expectations
+func (m *RegistryClientMock) MinimockStreamTagsDone() bool {
+	if m.StreamTagsMock.optional {
+		// Optional methods provide '0 or more' call count restriction.
+		return true
+	}
+
+	for _, e := range m.StreamTagsMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			return false
+		}
+	}
+
+	return m.StreamTagsMock.invocationsDone()
+}
+
+// MinimockStreamTagsInspect logs each unmet expectation
+func (m *RegistryClientMock) MinimockStreamTagsInspect() {
+	for _, e := range m.StreamTagsMock.expectations {
+		if mm_atomic.LoadUint64(&e.Counter) < 1 {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamTags at\n%s with params: %#v", e.expectationOrigins.origin, *e.params)
+		}
+	}
+
+	afterStreamTagsCounter := mm_atomic.LoadUint64(&m.afterStreamTagsCounter)
+	// if default expectation was set then invocations count should be greater than zero
+	if m.StreamTagsMock.defaultExpectation != nil && afterStreamTagsCounter < 1 {
+		if m.StreamTagsMock.defaultExpectation.params == nil {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamTags at\n%s", m.StreamTagsMock.defaultExpectation.returnOrigin)
+		} else {
+			m.t.Errorf("Expected call to RegistryClientMock.StreamTags at\n%s with params: %#v", m.StreamTagsMock.defaultExpectation.expectationOrigins.origin, *m.StreamTagsMock.defaultExpectation.params)
+		}
+	}
+	// if func was set then invocations count should be greater than zero
+	if m.funcStreamTags != nil && afterStreamTagsCounter < 1 {
+		m.t.Errorf("Expected call to RegistryClientMock.StreamTags at\n%s", m.funcStreamTagsOrigin)
+	}
+
+	if !m.StreamTagsMock.invocationsDone() && afterStreamTagsCounter > 0 {
+		m.t.Errorf("Expected %d calls to RegistryClientMock.StreamTags at\n%s but found %d calls",
+			mm_atomic.LoadUint64(&m.StreamTagsMock.expectedInvocations), m.StreamTagsMock.expectedInvocationsOrigin, afterStreamTagsCounter)
+	}
+}
+
 type mRegistryClientMockTagImage struct {
 	optional           bool
 	mock               *RegistryClientMock
@@ -5398,6 +6548,8 @@ func (m *RegistryClientMock) MinimockFinish() {
 
 			m.MinimockGetImageConfigInspect()
 
+			m.MinimockGetIndexInspect()
+
 			m.MinimockGetManifestInspect()
 
 			m.MinimockGetRegistryInspect()
@@ -5409,6 +6561,10 @@ func (m *RegistryClientMock) MinimockFinish() {
 			m.MinimockPushImageInspect()
 
 			m.MinimockPushIndexInspect()
+
+			m.MinimockStreamRepositoriesInspect()
+
+			m.MinimockStreamTagsInspect()
 
 			m.MinimockTagImageInspect()
 
@@ -5443,12 +6599,15 @@ func (m *RegistryClientMock) minimockDone() bool {
 		m.MinimockGetDigestDone() &&
 		m.MinimockGetImageDone() &&
 		m.MinimockGetImageConfigDone() &&
+		m.MinimockGetIndexDone() &&
 		m.MinimockGetManifestDone() &&
 		m.MinimockGetRegistryDone() &&
 		m.MinimockListRepositoriesDone() &&
 		m.MinimockListTagsDone() &&
 		m.MinimockPushImageDone() &&
 		m.MinimockPushIndexDone() &&
+		m.MinimockStreamRepositoriesDone() &&
+		m.MinimockStreamTagsDone() &&
 		m.MinimockTagImageDone() &&
 		m.MinimockWithSegmentDone()
 }
