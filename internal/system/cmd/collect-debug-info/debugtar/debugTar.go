@@ -598,9 +598,7 @@ func isModuleMatch(moduleName, required string) bool {
 
 // needsModuleExpansion reports whether cmd must be duplicated once per active
 // module matching RequiredModule (with {module-name} substituted into File
-// and Args), rather than run once as-is. This is derived from the template
-// itself instead of a separate flag, so File/Args and the expansion behavior
-// can never drift apart.
+// and Args), rather than run once as-is.
 func needsModuleExpansion(cmd Command) bool {
 	if strings.Contains(cmd.File, "{module-name}") {
 		return true
