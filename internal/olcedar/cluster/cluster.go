@@ -71,6 +71,12 @@ func FetchTemplate(ctx context.Context, dyn dynamic.Interface, group string) (*u
 		return template, nil
 	}
 
+	// The cluster mints the group's bootstrap token itself, and until it has,
+	// the template is a "not yet" rather than a broken request.
+	if apierrors.IsServiceUnavailable(err) {
+		return nil, fmt.Errorf("read the node configuration template of %s: %w", group, err)
+	}
+
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("read the node configuration template of %s: %w. "+
 			"It is served by an aggregated API, so this read is proxied by the kube-apiserver to node-controller "+

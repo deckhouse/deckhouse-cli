@@ -36,6 +36,10 @@ const registryAuth = "ZGVja2hvdXNlOnBhc3N3b3Jk"
 
 const proxyToken = "cmVnaXN0cnktcGFja2FnZXMtcHJveHktdG9rZW4="
 
+// statusToken is minted on every read of the template and authorises the node's
+// :50000 status port afterwards.
+const statusToken = "9f2c1ab7e4d05836bc17a9e2f4d8c0135ae7b6291d3f8c4a0b5e6d7c8f9a0b1c"
+
 func inventory() *machine.Inventory {
 	return &machine.Inventory{
 		Disks: []machine.Disk{
@@ -60,6 +64,7 @@ func template() *unstructured.Unstructured {
 			"kubelet":                             map[string]any{"bootstrapToken": bootstrapToken, "maxPods": int64(120)},
 			"registry":                            map[string]any{"auth": registryAuth},
 			"registryPackagesProxyAccessTokenB64": proxyToken,
+			"statusToken":                         statusToken,
 			"network":                             map[string]any{},
 			"storage":                             map[string]any{},
 		},
@@ -284,6 +289,7 @@ func TestRedactHidesEverySecretTheTemplateCarries(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Contains(t, string(document), bootstrapToken)
+	require.Contains(t, string(document), statusToken)
 
 	redacted, err := Redact(document)
 	require.NoError(t, err)
@@ -291,7 +297,8 @@ func TestRedactHidesEverySecretTheTemplateCarries(t *testing.T) {
 	require.NotContains(t, string(redacted), bootstrapToken)
 	require.NotContains(t, string(redacted), registryAuth)
 	require.NotContains(t, string(redacted), proxyToken)
-	require.Equal(t, 3, strings.Count(string(redacted), Redacted))
+	require.NotContains(t, string(redacted), statusToken)
+	require.Equal(t, len(redactedPaths), strings.Count(string(redacted), Redacted))
 
 	// What is not a secret still has to be readable, or the redaction hid the
 	// document rather than its secrets.

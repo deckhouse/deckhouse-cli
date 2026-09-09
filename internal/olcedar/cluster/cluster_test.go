@@ -102,6 +102,19 @@ func TestFetchTemplateNamesTheAggregatedAPIOnFailure(t *testing.T) {
 	require.ErrorContains(t, err, "d8 k get apiservice")
 }
 
+// The cluster mints the group's bootstrap token itself; until it has, the
+// template read is a "not yet" and must not be dressed up as a broken backend.
+func TestFetchTemplatePassesAServiceUnavailableThrough(t *testing.T) {
+	client := dynamicClient()
+	client.PrependReactor("get", "nodeconfigtemplates", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("NodeGroup worker has no valid bootstrap token yet")
+	})
+
+	_, err := FetchTemplate(context.Background(), client, "worker")
+	require.ErrorContains(t, err, "no valid bootstrap token yet")
+	require.NotContains(t, err.Error(), "aggregated API")
+}
+
 func TestFetchTemplateExplainsAMissingGroup(t *testing.T) {
 	_, err := FetchTemplate(context.Background(), dynamicClient(), "worker")
 	require.ErrorContains(t, err, `there is no NodeGroup "worker"`)

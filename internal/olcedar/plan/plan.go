@@ -45,6 +45,11 @@ var redactedPaths = [][]string{
 	{"spec", "kubelet", "bootstrapToken"},
 	{"spec", "registry", "auth"},
 	{"spec", "registryPackagesProxyAccessTokenB64"},
+	// Minted fresh on every read of the template and pushed with the document;
+	// it is the bearer for the node's :50000 status port afterwards. Carried
+	// unmarked as sensitive on purpose (the apiserver would answer "<omitted>"
+	// and the carry-over would write that back), so nothing else hides it.
+	{"spec", "statusToken"},
 }
 
 // Redacted is what a secret reads as once it is not printed.
