@@ -19,12 +19,11 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	olcedar "github.com/deckhouse/deckhouse-cli/internal/olcedar/cmd"
 	collectdebuginfo "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/get"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/logs"
-
-	olcedar "github.com/deckhouse/deckhouse-cli/internal/olcedar/cmd"
 	module "github.com/deckhouse/deckhouse-cli/internal/system/cmd/module/cmd"
 	pkg "github.com/deckhouse/deckhouse-cli/internal/system/cmd/package/cmd"
 	queue "github.com/deckhouse/deckhouse-cli/internal/system/cmd/queue"

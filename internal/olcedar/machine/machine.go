@@ -179,6 +179,7 @@ func PushNodeConfig(ctx context.Context, address string, document []byte) error 
 	if err != nil {
 		return fmt.Errorf("push the node configuration to %s: %w", address, err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode == http.StatusUnauthorized {
@@ -202,6 +203,7 @@ func get(ctx context.Context, address, urlPath string, timeout time.Duration) ([
 	if err != nil {
 		return nil, fmt.Errorf("read %s%s: %w", address, urlPath, err)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode == http.StatusNotFound && urlPath == inventoryPath {

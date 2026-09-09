@@ -259,14 +259,16 @@ func clients(cmd *cobra.Command) (kubernetes.Interface, dynamic.Interface, error
 		return nil, nil, fmt.Errorf("read the context flag: %w", err)
 	}
 
-	restConfig, kube, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
+	restConfig, _, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("set up the Kubernetes client: %w", err)
 	}
 
+	// The clientset SetupK8sClientSet built carries no timeout, so it is rebuilt
+	// from the bounded config rather than used as it is.
 	restConfig.Timeout = clusterRequestTimeout
 
-	kube, err = kubernetes.NewForConfig(restConfig)
+	kube, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("set up the Kubernetes client: %w", err)
 	}

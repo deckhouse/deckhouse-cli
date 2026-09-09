@@ -233,6 +233,7 @@ func WaitForNode(
 
 		if time.Since(ticked) >= tickInterval {
 			ticked = time.Now()
+
 			tick(time.Since(started).Round(time.Second))
 		}
 
