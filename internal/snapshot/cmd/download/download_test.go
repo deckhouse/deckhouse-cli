@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 
@@ -935,6 +937,82 @@ func TestRun_ReleasesLockOnCancelledContext(t *testing.T) {
 	}
 
 	defer func() { _ = fl.Unlock() }()
+}
+
+// TestNewCommand_PublishFlagDefault verifies --publish defaults to false, so
+// autodetection (dataio.ResolvePublish) decides when the user does not opt in
+// explicitly.
+func TestNewCommand_PublishFlagDefault(t *testing.T) {
+	t.Parallel()
+
+	cmd := NewCommand(slog.Default())
+
+	got, err := cmd.Flags().GetBool(flagPublish)
+	require.NoError(t, err)
+	assert.False(t, got, "default --publish must be false")
+
+	flag := cmd.Flags().Lookup(flagPublish)
+	require.NotNil(t, flag, "flag --publish: not registered")
+	assert.False(t, flag.Changed, "--publish must not be marked Changed before the user sets it")
+}
+
+// TestNewCommand_PublishFlagExplicitlySet verifies --publish=true is parsed and
+// reflected via cmd.Flags().GetBool, and that dataio.ParsePublishFlag observes it
+// as explicitly set (Changed) rather than merely defaulted.
+func TestNewCommand_PublishFlagExplicitlySet(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "success: --publish=true is parsed", args: []string{"--publish=true"}, want: true},
+		{name: "success: --publish=false is parsed explicitly", args: []string{"--publish=false"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := NewCommand(slog.Default())
+			require.NoError(t, cmd.Flags().Parse(tt.args))
+
+			got, err := cmd.Flags().GetBool(flagPublish)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+
+			flag := cmd.Flags().Lookup(flagPublish)
+			require.NotNil(t, flag)
+			assert.True(t, flag.Changed, "--publish must be marked Changed once explicitly set")
+		})
+	}
+}
+
+// TestNewCommand_PublishDocumentation verifies the --publish contract is
+// actually documented in both the Long description and the Example block: the
+// bearer-token-only caveat and an example invocation must both be present, since
+// this is the only place a user learns why a certificate-based kubeconfig gets a
+// 401 with --publish=true.
+func TestNewCommand_PublishDocumentation(t *testing.T) {
+	t.Parallel()
+
+	cmd := NewCommand(slog.Default())
+
+	for _, want := range []string{
+		"--publish",
+		"bearer",
+		"401",
+	} {
+		assert.Contains(t, cmd.Long, want, "Long description must mention %q", want)
+	}
+
+	assert.Contains(t, cmd.Example, "--publish=true", "Example must show a --publish=true invocation")
+
+	flag := cmd.Flags().Lookup(flagPublish)
+	require.NotNil(t, flag, "flag --publish: not registered")
+	assert.NotEmpty(t, flag.Usage, "--publish usage text must not be empty")
+	assert.False(t, flag.Hidden, "--publish must be visible in help/completion")
 }
 
 func TestNewCommand_UsesExecutionContextInstalledAfterConstruction(t *testing.T) {
