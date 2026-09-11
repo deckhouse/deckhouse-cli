@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,10 +26,19 @@ type Command struct {
 	Args []string
 	File string
 
+	// ExcludeKey overrides the identifier used in the --exclude/--list-exclude flags.
+	// Leave blank to get it from the "File" field. This is set explicitly if {module-name} is not the final "File" segment, as the default output only processes this pattern.
+	ExcludeKey string
+
 	// RequiredModule is the module prefix (status.phase == "Ready"). If the module is enabled, data from it will be collected. An empty string means always run.
+	//
+	// If File or any Args element contains the {module-name} placeholder, it
+	// is only substituted (and the command duplicated once per matching
+	// module, see needsModuleExpansion) when RequiredModule is set — the
+	// module name to substitute comes from resolving RequiredModule against
+	// the active modules. Leaving RequiredModule empty while the placeholder
+	// is present means it is never resolved and stays literal in the output.
 	RequiredModule string
-	// ExpandPerModule — If true, the command is duplicated for each active module matching RequiredModule. The {module-name} placeholder is accepted in File and Args, and is replaced with the actual module name.
-	ExpandPerModule bool
 }
 
 type moduleList struct {
@@ -45,12 +55,12 @@ type moduleList struct {
 // debugCommands - a complete list of commands for collecting debug information.
 var debugCommands = []Command{
 	{
-		File: "queue.txt",
+		File: "deckhouse-queue.txt",
 		Cmd:  "deckhouse-controller",
 		Args: []string{"queue", "list"},
 	},
 	{
-		File: "global-values.json",
+		File: "cluster-global-values.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `deckhouse-controller global values -o json | jq '.internal.modules.kubeRBACProxyCA = "REDACTED" | .modulesImages.registry.dockercfg = "REDACTED"'`},
 	},
@@ -70,12 +80,17 @@ var debugCommands = []Command{
 		Args: []string{"-c", "kubectl get modulepulloverrides -o json | jq '.items[]'"},
 	},
 	{
+		File: "deckhouse-module-update-policies.json",
+		Cmd:  "bash",
+		Args: []string{"-c", "kubectl get moduleupdatepolicies -o json | jq '.items[]'"},
+	},
+	{
 		File: "deckhouse-maintenance-modules.txt",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get moduleconfig -ojson | jq -r '.items[] | select(.spec.maintenance == "NoResourceReconciliation") | .metadata.name'`},
 	},
 	{
-		File: "events.json",
+		File: "cluster-events.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "events", "--sort-by=.metadata.creationTimestamp", "-A", "-o", "json"},
 	},
@@ -85,48 +100,48 @@ var debugCommands = []Command{
 		Args: []string{"-c", `for ns in $(kubectl get ns -o go-template='{{range .items}}{{.metadata.name}}{{"\n"}}{{end}}{{"kube-system"}}' -l heritage=deckhouse); do kubectl -n $ns get all -o json; done | jq -s '[.[].items[]]'`},
 	},
 	{
-		File: "node-groups.json",
+		File: "cluster-node-groups.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "nodegroups", "-A", "-o", "json"},
 	},
 	{
-		File: "node-group-configuration.json",
+		File: "cluster-node-group-configuration.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "nodegroupconfiguration", "-A", "-o", "json"},
 	},
 	{
-		File: "nodes.json",
+		File: "cluster-nodes.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "nodes", "-A", "-o", "json"},
 	},
 	{
-		File: "namespace.json",
+		File: "cluster-namespace.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "namespaces", "-o", "json"},
 	},
 	{
-		File: "machines.json",
+		File: "instance-manager-capi-machines.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get machines.machine.sapcloud.io -A -o json | jq '.items[]'`},
+		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get machines.cluster.x-k8s.io -o json | jq '.items[]'`},
 	},
 	{
-		File: "instances.json",
+		File: "instance-manager-instances.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get instances.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
-		File: "staticinstances.json",
+		File: "instance-manager-staticinstances.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get staticinstances.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
-		File:           "cloud-machine-deployment.txt",
+		File:           "instance-manager-cloud-machine-deployment.txt",
 		Cmd:            "bash",
 		Args:           []string{"-c", `kubectl -n d8-cloud-instance-manager get machinedeployments.machine.sapcloud.io -o json | jq '.items[]'`},
 		RequiredModule: "cloud-provider",
 	},
 	{
-		File: "static-machine-deployment.txt",
+		File: "instance-manager-static-machine-deployment.txt",
 		Cmd:  "bash",
 		Args: []string{"-c", "kubectl -n d8-cloud-instance-manager get machinedeployments.cluster.x-k8s.io -o json --ignore-not-found | jq '.items[]'"},
 	},
@@ -146,155 +161,150 @@ var debugCommands = []Command{
 		Args: []string{"-n", "d8-system", "logs", "-l", "app=deckhouse", "--tail", "3000"},
 	},
 	{
-		File: "capi-controller-manager-logs.txt",
+		File: "instance-manager-capi-controller-manager-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=capi-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
-		File: "caps-controller-manager-logs.txt",
+		File: "instance-manager-caps-controller-manager-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=caps-controller-manager", "--tail", "3000", "--ignore-errors=true"},
 	},
 	{
-		File:           "machine-controller-manager.json",
-		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl -n d8-cloud-instance-manager get pods -l app=machine-controller-manager -o json | jq '.items[]'`},
-		RequiredModule: "cloud-provider",
+		File: "instance-manager-machine-controller-manager.json",
+		Cmd:  "bash",
+		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get pods -l app=machine-controller-manager -o json | jq '.items[]'`},
 	},
 	{
-		File: "mcm-logs.txt",
+		File: "instance-manager-mcm-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=machine-controller-manager", "--tail=3000", "-c", "controller", "--ignore-errors=true"},
 	},
 	{
-		File:            "ccm-logs-{module-name}.txt",
-		Cmd:             "kubectl",
-		Args:            []string{"-n", "d8-{module-name}", "logs", "-l", "app=cloud-controller-manager", "--tail=3000"},
-		RequiredModule:  "cloud-provider",
-		ExpandPerModule: true,
+		File: "instance-manager-mcm-cloud-machines.json",
+		Cmd:  "bash",
+		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get machines.machine.sapcloud.io -o json | jq '.items[]'`},
 	},
 	{
-		File:            "csi-controller-logs-{module-name}.txt",
-		Cmd:             "kubectl",
-		Args:            []string{"-n", "d8-{module-name}", "logs", "-l", "app=csi-controller", "--tail=3000"},
-		RequiredModule:  "cloud-provider",
-		ExpandPerModule: true,
+		File:           "d8-{module-name}-ccm-logs.txt",
+		ExcludeKey:     "ccm-logs",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-{module-name}", "logs", "-l", "app=cloud-controller-manager", "--tail=3000"},
+		RequiredModule: "cloud-provider",
 	},
 	{
-		File: "cluster-autoscaler-logs.txt",
+		File:           "d8-{module-name}-csi-controller-logs.txt",
+		ExcludeKey:     "csi-controller-logs",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-{module-name}", "logs", "-l", "app=csi-controller", "--tail=3000"},
+		RequiredModule: "cloud-provider",
+	},
+	{
+		File: "instance-manager-autoscaler-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "d8-cloud-instance-manager", "logs", "-l", "app=cluster-autoscaler", "--tail=5000", "-c", "cluster-autoscaler", "--ignore-errors=true"},
 	},
 	{
-		File:            "cert-manager-logs.txt",
-		Cmd:             "kubectl",
-		Args:            []string{"-n", "d8-cert-manager", "logs", "-l", "app=cert-manager", "--tail=3000", "--ignore-errors=true"},
-		RequiredModule:  "cert-manager",
-		ExpandPerModule: false,
+		File:           "d8-cert-manager-logs.txt",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-cert-manager", "logs", "-l", "app=cert-manager", "--tail=3000", "--ignore-errors=true"},
+		RequiredModule: "cert-manager",
 	},
 	{
-		File:            "certificate-cert-manager.json",
-		Cmd:             "kubectl",
-		Args:            []string{"get", "certificate", "-A", "-o", "json", "--ignore-not-found=true"},
-		RequiredModule:  "cert-manager",
-		ExpandPerModule: false,
+		File:           "d8-cert-manager-all-certificate.json",
+		Cmd:            "kubectl",
+		Args:           []string{"get", "certificate", "-A", "-o", "json", "--ignore-not-found=true"},
+		RequiredModule: "cert-manager",
 	},
 	{
-		File: "vpa-admission-controller-logs.txt",
+		File: "kube-system-vpa-admission-controller-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "kube-system", "logs", "-l", "app=vpa-admission-controller", "--tail=3000", "-c", "admission-controller", "--ignore-errors=true"},
 	},
 	{
-		File: "vpa-recommender-logs.txt",
+		File: "kube-system-vpa-recommender-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "kube-system", "logs", "-l", "app=vpa-recommender", "--tail=3000", "-c", "recommender", "--ignore-errors=true"},
 	},
 	{
-		File: "vpa-updater-logs.txt",
+		File: "kube-system-vpa-updater-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "kube-system", "logs", "-l", "app=vpa-updater", "--tail=3000", "-c", "updater", "--ignore-errors=true"},
 	},
 	{
-		File: "prometheus-logs.txt",
+		File: "monitoring-prometheus-logs.txt",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "d8-monitoring", "logs", "-l", "prometheus=main", "--tail=3000", "-c", "prometheus", "--ignore-errors=true"},
 	},
 	{
-		File: "alerts.json",
+		File: "cluster-alerts.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get clusteralerts.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
-		File: "bad-pods.txt",
+		File: "cluster-bad-pods.txt",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get pod -A -owide | grep -Pv '\s+([1-9]+[\d]*)\/\1\s+' | grep -v 'Completed\|Evicted' | grep -E "^(d8-|kube-system)" || true`},
 	},
 	{
-		File: "cluster-authorization-rules.json",
+		File: "security-cluster-authorization-rules.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get clusterauthorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
 	},
 	{
-		File: "authorization-rules.json",
+		File: "security-authorization-rules.json",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get authorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
 	},
 	{
-		File: "module-configs.json",
+		File: "deckhouse-module-configs.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "moduleconfig", "-o", "json"},
 	},
 	{
-		File:            "d8-istio-resources.json",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl -n d8-istio get all -o json | jq '.items[]'`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-resources.json",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl -n d8-istio get all -o json | jq '.items[]'`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "d8-istio-custom-resources.json",
-		Cmd:             "bash",
-		Args:            []string{"-c", `for crd in $(kubectl get crds | grep -E 'istio.io|gateway.networking.k8s.io' | awk '{print $1}'); do echo "Listing resources for CRD: $crd" && kubectl get $crd -A -o json; done`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-custom-resources.json",
+		Cmd:            "bash",
+		Args:           []string{"-c", `for crd in $(kubectl get crds | grep -E 'istio.io|gateway.networking.k8s.io' | awk '{print $1}'); do echo "Listing resources for CRD: $crd" && kubectl get $crd -A -o json; done`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "d8-istio-envoy-config.json",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl port-forward daemonset/ingressgateway -n d8-istio 15000:15000 & sleep 5; (curl http://localhost:15000/config_dump?include_eds=true | jq 'del(.configs[6].dynamic_active_secrets)' && kill $!) || { kill $!; exit 0; }`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-envoy-config.json",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl port-forward daemonset/ingressgateway -n d8-istio 15000:15000 & sleep 5; (curl http://localhost:15000/config_dump?include_eds=true | jq 'del(.configs[6].dynamic_active_secrets)' && kill $!) || { kill $!; exit 0; }`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "d8-istio-system-logs.txt",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl -n d8-istio logs -l app=istiod || true`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-system-logs.txt",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl -n d8-istio logs -l app=istiod || true`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "d8-istio-ingress-logs.txt",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl -n d8-istio logs daemonset/ingressgateway || true`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-ingress-logs.txt",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl -n d8-istio logs daemonset/ingressgateway || true`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "d8-istio-users-logs.txt",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.metadata.annotations.istio\.io/rev)]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.containers[*].name}{"\n"}{end}' | awk '/istio-proxy/ {print $0}' | shuf -n 1 | while read namespace pod_name containers; do echo "Collecting logs from istio-proxy in Pod $pod_name (Namespace: $namespace)"; kubectl logs "$pod_name" -n "$namespace" -c istio-proxy; done`},
-		RequiredModule:  "istio",
-		ExpandPerModule: false,
+		File:           "d8-istio-users-logs.txt",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.metadata.annotations.istio\.io/rev)]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.containers[*].name}{"\n"}{end}' | awk '/istio-proxy/ {print $0}' | shuf -n 1 | while read namespace pod_name containers; do echo "Collecting logs from istio-proxy in Pod $pod_name (Namespace: $namespace)"; kubectl logs "$pod_name" -n "$namespace" -c istio-proxy; done`},
+		RequiredModule: "istio",
 	},
 	{
-		File:            "cni-cilium-health-status.txt",
-		Cmd:             "bash",
-		Args:            []string{"-c", `kubectl -n d8-cni-cilium exec -it $(kubectl -n d8-cni-cilium get pod -o name | grep agent | head -n 1) -c cilium-agent -- cilium-health status`},
-		RequiredModule:  "cni-cilium",
-		ExpandPerModule: false,
+		File:           "network-cni-cilium-health-status.txt",
+		Cmd:            "bash",
+		Args:           []string{"-c", `kubectl -n d8-cni-cilium exec -it $(kubectl -n d8-cni-cilium get pod -o name | grep agent | head -n 1) -c cilium-agent -- cilium-health status`},
+		RequiredModule: "cni-cilium",
 	},
 	{
-		File: "audit-policy.json",
+		File: "kube-system-audit-policy.json",
 		Cmd:  "kubectl",
 		Args: []string{"-n", "kube-system", "get", "secrets", "audit-policy", "-o", "json", "--ignore-not-found=true"},
 	},
@@ -329,33 +339,56 @@ var debugCommands = []Command{
 		Args: []string{"-n", "kube-system", "logs", "-l", "k8s-app=kube-dns", "--tail=3000", "--ignore-errors=true"},
 	},
 	{
-		File: "prometheusremotewrites.json",
+		File: "monitoring-prometheusremotewrites.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "prometheusremotewrites", "-A", "-o", "json", "--ignore-not-found=true"},
 	},
 	{
-		File: "mutatingwebhookconfigurations.json",
+		File: "other-mutatingwebhookconfigurations.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "mutatingwebhookconfigurations.admissionregistration.k8s.io", "-o", "json"},
 	},
 	{
-		File: "validatingwebhookconfigurations.json",
+		File: "other-validatingwebhookconfigurations.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "validatingwebhookconfigurations.admissionregistration.k8s.io", "-o", "json"},
 	},
 	{
-		File: "storage-deckhouse-io-terminating.txt",
+		File: "other-storage-deckhouse-io-terminating.txt",
 		Cmd:  "bash",
 		Args: []string{"-c", `kubectl get $(kubectl api-resources --api-group=storage.deckhouse.io --verbs=list -o name | paste -sd, -) --ignore-not-found -A --chunk-size=200 -o json | jq -r '.items[] | select(.apiVersion == "storage.deckhouse.io/v1alpha1") | select(.metadata.deletionTimestamp != null) | "[\(.kind)] \(.metadata.namespace // "-")/\(.metadata.name)"'`},
 	},
 	{
-		File: "ingressnginxcontrollers.json",
+		File: "network-ingressnginxcontrollers.json",
 		Cmd:  "kubectl",
 		Args: []string{"get", "ingressnginxcontrollers.deckhouse.io", "-o", "json", "--ignore-not-found=true"},
 	},
+	{
+		File: "cluster-crd.json",
+		Cmd:  "kubectl",
+		Args: []string{"get", "customresourcedefinitions", "-o", "json", "--ignore-not-found=true"},
+	},
+	{
+		File:           "d8-virtualization-dvcr-logs.txt",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-virtualization", "logs", "-l", "app=dvcr", "--tail=3000", "--ignore-errors=true"},
+		RequiredModule: "virtualization",
+	},
+	{
+		File:           "d8-virtualization-virt-controller-logs.txt",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-virtualization", "logs", "-l", "kubevirt.internal.virtualization.deckhouse.io=virt-controller", "--tail=3000", "--ignore-errors=true"},
+		RequiredModule: "virtualization",
+	},
+	{
+		File:           "d8-virtualization-controller-logs.txt",
+		Cmd:            "kubectl",
+		Args:           []string{"-n", "d8-virtualization", "logs", "-l", "app=virtualization-controller", "--tail=3000", "--ignore-errors=true"},
+		RequiredModule: "virtualization",
+	},
 }
 
-func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) error {
+func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) (err error) {
 	const (
 		namespace     = "d8-system"
 		containerName = "deckhouse"
@@ -378,6 +411,42 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		excludeMap[file] = true
 	}
 
+	gzipWriter := gzip.NewWriter(os.Stdout)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	defer func() {
+		if closeErr := tarWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize tar archive: %w", closeErr)
+		}
+
+		if closeErr := gzipWriter.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("failed to finalize gzip stream: %w", closeErr)
+		}
+	}()
+
+	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
+
+	if err = runCommands(tarWriter, config, kubeCl, podName, namespace, containerName, commands, excludeMap, commandTimeout, requestInterval); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
+
+	return nil
+}
+
+// runCommands executes each command inside the Deckhouse pod and streams its
+// output into the tar archive, honoring the exclude list and the optional
+// rate limit between command executions.
+func runCommands(
+	tarWriter *tar.Writer,
+	config *rest.Config,
+	kubeCl kubernetes.Interface,
+	podName, namespace, containerName string,
+	commands []Command,
+	excludeMap map[string]bool,
+	commandTimeout, requestInterval time.Duration,
+) error {
 	var tickCh <-chan time.Time
 
 	if requestInterval > 0 {
@@ -389,16 +458,8 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 
 	var stdout, stderr bytes.Buffer
 
-	gzipWriter := gzip.NewWriter(os.Stdout)
-	defer gzipWriter.Close()
-
-	tarWriter := tar.NewWriter(gzipWriter)
-	defer tarWriter.Close()
-
-	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
-
 	for _, cmd := range commands {
-		if isFileExcluded(cmd.File, excludeMap) {
+		if isFileExcluded(cmd, excludeMap) {
 			continue
 		}
 
@@ -437,8 +498,6 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		stdout.Reset()
 		stderr.Reset()
 	}
-
-	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
 
 	return nil
 }
@@ -496,13 +555,14 @@ func filterAndExpandCommands(commands []Command, activeModules map[string]bool) 
 			continue
 		}
 
-		if cmd.ExpandPerModule {
+		if needsModuleExpansion(cmd) {
 			matchedModules := matchingModules(activeModules, cmd.RequiredModule)
 			for _, moduleName := range matchedModules {
 				result = append(result, Command{
-					Cmd:  cmd.Cmd,
-					File: strings.ReplaceAll(cmd.File, "{module-name}", moduleName),
-					Args: replaceModuleName(cmd.Args, moduleName),
+					Cmd:        cmd.Cmd,
+					File:       strings.ReplaceAll(cmd.File, "{module-name}", moduleName),
+					Args:       replaceModuleName(cmd.Args, moduleName),
+					ExcludeKey: cmd.ExcludeKey,
 				})
 			}
 		} else {
@@ -536,6 +596,19 @@ func isModuleMatch(moduleName, required string) bool {
 	return moduleName == required || strings.HasPrefix(moduleName, required)
 }
 
+// needsModuleExpansion reports whether cmd must be duplicated once per active
+// module matching RequiredModule (with {module-name} substituted into File
+// and Args), rather than run once as-is.
+func needsModuleExpansion(cmd Command) bool {
+	if strings.Contains(cmd.File, "{module-name}") {
+		return true
+	}
+
+	return slices.ContainsFunc(cmd.Args, func(arg string) bool {
+		return strings.Contains(arg, "{module-name}")
+	})
+}
+
 func replaceModuleName(args []string, moduleName string) []string {
 	expanded := make([]string, len(args))
 	for i, arg := range args {
@@ -563,20 +636,28 @@ func (c *Command) writeToTar(tarWriter *tar.Writer, fileContent []byte) error {
 	return nil
 }
 
-func excludeBaseName(file string) string {
-	name := strings.TrimSuffix(file, ".json")
+func excludeBaseName(cmd Command) string {
+	if cmd.ExcludeKey != "" {
+		return cmd.ExcludeKey
+	}
+
+	name := strings.TrimSuffix(cmd.File, ".json")
 	name = strings.TrimSuffix(name, ".txt")
 	name = strings.TrimSuffix(name, "-{module-name}")
 
 	return name
 }
 
-func isFileExcluded(fileName string, excludeMap map[string]bool) bool {
-	if excludeMap[fileName] {
+func isFileExcluded(cmd Command, excludeMap map[string]bool) bool {
+	if excludeMap[cmd.File] {
 		return true
 	}
 
-	base := strings.TrimSuffix(fileName, ".json")
+	if cmd.ExcludeKey != "" {
+		return excludeMap[cmd.ExcludeKey]
+	}
+
+	base := strings.TrimSuffix(cmd.File, ".json")
 
 	base = strings.TrimSuffix(base, ".txt")
 	if excludeMap[base] {
@@ -597,7 +678,7 @@ func GetExcludableFiles() []string {
 
 	files := make([]string, 0, len(debugCommands))
 	for _, cmd := range debugCommands {
-		name := excludeBaseName(cmd.File)
+		name := excludeBaseName(cmd)
 		if !seen[name] {
 			seen[name] = true
 			files = append(files, name)
