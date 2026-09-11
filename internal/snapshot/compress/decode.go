@@ -18,6 +18,7 @@ package compress
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,10 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/pierrec/lz4/v4"
 )
+
+// decodedSizeStreamBufferBytes bounds streamDecodedSize's read buffer (matches
+// volume.copyBufferSize elsewhere in the snapshot packages).
+const decodedSizeStreamBufferBytes = 32 << 10
 
 // NewReader returns a streaming decompressing io.ReadCloser for src, selecting
 // the codec by ext (the file-extension convention used by Codec.Ext: ".zst",
@@ -150,4 +155,108 @@ func (z *zstdReadCloser) Close() error {
 	z.dec.Close()
 
 	return nil
+}
+
+// DecodedSize returns the exact decoded byte length of source for codec ext. zstd reads it
+// from frame headers (no payload decode); "" is just the stream length; gzip/lz4 have no
+// decoded-size metadata, so they require a full streaming decode. source's position is restored.
+func DecodedSize(ctx context.Context, ext string, source io.ReadSeeker) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	switch ext {
+	case "":
+		size, err := rawStreamSize(source)
+		if err != nil {
+			return 0, fmt.Errorf("determine raw stream size: %w", err)
+		}
+
+		return size, nil
+	case ".zst":
+		size, err := ZstdDecodedSize(source)
+		if err != nil {
+			return 0, fmt.Errorf("determine zstd decoded size: %w", err)
+		}
+
+		return size, nil
+	default:
+		size, err := streamDecodedSize(ctx, ext, source)
+		if err != nil {
+			return 0, fmt.Errorf("determine %s decoded size: %w", ext, err)
+		}
+
+		return size, nil
+	}
+}
+
+// rawStreamSize returns the byte length remaining in source from its current position
+// through EOF, restoring that position before return.
+func rawStreamSize(source io.ReadSeeker) (int64, error) {
+	start, err := source.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("query current offset: %w", err)
+	}
+
+	end, err := source.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, fmt.Errorf("query end offset: %w", err)
+	}
+
+	if _, err := source.Seek(start, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("restore offset: %w", err)
+	}
+
+	return end - start, nil
+}
+
+// streamDecodedSize measures a non-zstd codec's decoded length by decoding the whole stream
+// and counting bytes (gzip/lz4 have no decoded-size header). Cancellable; position is restored.
+func streamDecodedSize(ctx context.Context, ext string, source io.ReadSeeker) (int64, error) {
+	start, err := source.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("query current offset: %w", err)
+	}
+
+	reader, err := NewReader(ext, source)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+
+	buf := make([]byte, decodedSizeStreamBufferBytes)
+
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = reader.Close()
+
+			return 0, err
+		}
+
+		n, readErr := reader.Read(buf)
+		total += int64(n)
+
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+
+			_ = reader.Close()
+
+			return 0, fmt.Errorf("decode stream: %w", readErr)
+		}
+	}
+
+	closeErr := reader.Close()
+
+	if _, seekErr := source.Seek(start, io.SeekStart); seekErr != nil {
+		return 0, errors.Join(closeErr, fmt.Errorf("restore offset: %w", seekErr))
+	}
+
+	if closeErr != nil {
+		return 0, fmt.Errorf("close decoder: %w", closeErr)
+	}
+
+	return total, nil
 }
