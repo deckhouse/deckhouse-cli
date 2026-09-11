@@ -1196,6 +1196,9 @@ func (c *Client) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error) (c
 // normal case on the publish path (the ingress does not expose the importer pod's
 // internal CA), and verification must stay on even then.
 func (c *Client) SetTLSCAData(caData []byte) {
+	// Keep in sync with the twin implementation in
+	// pkg/libsaferequest/client/http.go (SafeClient.SetTLSCAData); the two are
+	// deliberately separate copies.
 	sysPool, err := x509.SystemCertPool()
 	if err != nil || sysPool == nil {
 		sysPool = x509.NewCertPool()
