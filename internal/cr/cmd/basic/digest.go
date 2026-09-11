@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/cr/cmd/completion"
@@ -66,9 +65,9 @@ selects an entry by tag (the first entry is used if omitted).
 			}
 			// fullRef branch is reachable only when tarballPath == "" (rejected above)
 			// and len(args) > 0 (rejected above when tarballPath is also empty).
-			ref, err := name.ParseReference(args[0], opts.Name...)
+			ref, err := registry.ParseReference(args[0], opts)
 			if err != nil {
-				return fmt.Errorf("parse reference %q: %w", args[0], err)
+				return err
 			}
 
 			_, err = fmt.Fprintln(w, ref.Context().Digest(digest))

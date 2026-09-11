@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/logs"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/spf13/cobra"
@@ -65,11 +66,15 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 		// the same command, an embedder running PersistentPreRunE twice)
 		// can never double-append to opts.Remote / opts.Name.
 		*opts = *registry.New()
-		opts.WithContext(c.Context())
+
 		applyVerbose(verbose)
 
+		if verbose {
+			opts.WithVerbose()
+		}
+
 		if insecure {
-			opts.WithInsecure().WithTransport(registry.InsecureTransport())
+			opts.WithInsecure()
 		}
 
 		if ndLayers {
@@ -95,7 +100,14 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 		if c.Name() != "login" {
 			switch {
 			case username != "" && password != "":
-				opts.WithKeychain(registry.NewStaticKeychain(username, password))
+				// An authenticator rather than a keychain: the registry client
+				// is built per reference, so these credentials reach only the
+				// registry the user actually named. The old static keychain
+				// ignored the requested resource and answered for any host.
+				opts.WithAuth(authn.FromConfig(authn.AuthConfig{
+					Username: username,
+					Password: password,
+				}))
 			case username != "" || password != "":
 				return fmt.Errorf("--%s and --%s must be used together", rootflagnames.Username, rootflagnames.Password)
 			}
@@ -105,10 +117,13 @@ func setupRootFlags(cmd *cobra.Command, opts *registry.Options) {
 	}
 }
 
-// applyVerbose toggles go-containerregistry's debug logger. logs.Debug is a
-// package-level *log.Logger, so we must explicitly route to io.Discard when
-// verbose is off - otherwise a previous "-v" run in the same process would
-// keep leaking debug output.
+// applyVerbose toggles go-containerregistry's debug logger, which sits below
+// the registry client and logs redirects, retries and token exchanges.
+//
+// logs.Debug is a package-level *log.Logger, so we must explicitly route to
+// io.Discard when verbose is off - otherwise a previous "-v" run in the same
+// process would keep leaking debug output. The client's own structured log is
+// configured separately, via Options.WithVerbose.
 func applyVerbose(verbose bool) {
 	if verbose {
 		logs.Debug.SetOutput(os.Stderr)

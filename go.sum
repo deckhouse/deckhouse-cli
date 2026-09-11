@@ -440,8 +440,8 @@ github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5
 github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e/go.mod h1:LXzIV70U2qmIKPwLHqreCT8dbfYV1w6Qn2Tdb+jU5gY=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0 h1:6tmZQLwNb1o/hP1gzJQBjcwfA/bubbgObovXzxq+Exo=
 github.com/deckhouse/deckhouse/pkg/log v0.2.0/go.mod h1:pbAxTSDcPmwyl3wwKDcEB3qdxHnRxqTV+J0K+sha8bw=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9 h1:Il2d6wB6SdgjmD5ojC48qT9eQyITuANzIFjSd0DCdUI=
-github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9/go.mod h1:KDf44MqEif8jAKCehKJqOg0k4sJcnetKJKDGd0IFQjI=
+github.com/deckhouse/deckhouse/pkg/registry v0.0.1 h1:Ob6NpHRsVwHci1uK+6wLZ1NQxr5QS+e5ergFIkt7odI=
+github.com/deckhouse/deckhouse/pkg/registry v0.0.1/go.mod h1:KDf44MqEif8jAKCehKJqOg0k4sJcnetKJKDGd0IFQjI=
 github.com/deckhouse/delivery-kit-sdk v1.2.0 h1:EuaaWVVe5GEe1xkKMPHo1rT1dz+wkiQ78R6sBd6oXPs=
 github.com/deckhouse/delivery-kit-sdk v1.2.0/go.mod h1:HgPk8RNOxcy1FZ37pB9RMQRdYHa13pGYAmKnLJh0I9A=
 github.com/deckhouse/delivery-kit/v2 v2.69.0-dk h1:00PJzpfVObzurArl1oxy+/VYwFfMhxSa52n74l0efVw=

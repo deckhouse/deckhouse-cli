@@ -20,21 +20,22 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// Fetch resolves ref and returns a v1.Image. For multi-arch indices
-// remote.Image picks the current runtime platform unless opts.Platform pins
-// another one.
+// Fetch resolves ref to a single image.
+//
+// For a multi-arch index the platform pinned on Options wins; without one the
+// underlying library falls back to a hardcoded linux/amd64 rather than the
+// host's platform, so commands that must match the caller's architecture have
+// to pass --platform.
 func Fetch(ctx context.Context, ref string, opts *Options) (v1.Image, error) {
-	parsed, err := name.ParseReference(ref, opts.Name...)
+	client, id, err := clientForRef(ref, opts)
 	if err != nil {
-		return nil, fmt.Errorf("parse reference %q: %w", ref, err)
+		return nil, err
 	}
 
-	img, err := remote.Image(parsed, opts.remoteWithContext(ctx)...)
+	img, err := client.GetImage(ctx, id, opts.imageGetOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", ref, err)
 	}
@@ -42,47 +43,37 @@ func Fetch(ctx context.Context, ref string, opts *Options) (v1.Image, error) {
 	return img, nil
 }
 
-// FetchDescriptor returns the raw remote descriptor, leaving media-type
-// dispatch to the caller (pull uses it to tell an index from an image).
-func FetchDescriptor(ctx context.Context, ref string, opts *Options) (*remote.Descriptor, error) {
-	parsed, err := name.ParseReference(ref, opts.Name...)
+// FetchIndex resolves ref to a multi-arch index, resolving nothing. An image
+// reference is an error - the caller asked for an index.
+func FetchIndex(ctx context.Context, ref string, opts *Options) (v1.ImageIndex, error) {
+	client, id, err := clientForRef(ref, opts)
 	if err != nil {
-		return nil, fmt.Errorf("parse reference %q: %w", ref, err)
+		return nil, err
 	}
 
-	desc, err := remote.Get(parsed, opts.remoteWithContext(ctx)...)
+	idx, err := client.GetIndex(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("fetch descriptor %s: %w", ref, err)
+		return nil, fmt.Errorf("fetch index %s: %w", ref, err)
 	}
 
-	return desc, nil
+	return idx, nil
 }
 
-// remoteWithContext is the single point where Options is converted to a
-// []remote.Option. Keychain / platform / context are finalized here so that
-// repeated builder calls (e.g. WithPlatform twice) cannot stack duplicate
-// upstream options on o.Remote and rely on go-containerregistry's
-// last-write-wins semantics. o.Remote stays untouched, so the same Options
-// can be used to dispatch calls with different per-call contexts.
-func (o *Options) remoteWithContext(ctx context.Context) []remote.Option {
-	if ctx == nil {
-		ctx = o.Context
+// IsIndex reports whether ref is a multi-arch index rather than a single image,
+// which is what pull needs to know before deciding what to write to disk.
+func IsIndex(ctx context.Context, ref string, opts *Options) (bool, error) {
+	client, id, err := clientForRef(ref, opts)
+	if err != nil {
+		return false, err
 	}
 
-	out := make([]remote.Option, 0, len(o.Remote)+3)
-
-	out = append(out, o.Remote...)
-	if o.Keychain != nil {
-		out = append(out, remote.WithAuthFromKeychain(o.Keychain))
+	// No platform here on purpose: the question is what the registry serves for
+	// this reference, and resolving a platform first would answer "image" for
+	// every index.
+	res, err := client.GetManifest(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", ref, err)
 	}
 
-	if o.Platform != nil {
-		out = append(out, remote.WithPlatform(*o.Platform))
-	}
-
-	if ctx != nil {
-		out = append(out, remote.WithContext(ctx))
-	}
-
-	return out
+	return res.GetMediaType().IsIndex(), nil
 }

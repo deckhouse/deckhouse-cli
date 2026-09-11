@@ -310,7 +310,7 @@ func completionContext(cmd *cobra.Command) (context.Context, context.CancelFunc)
 func buildCompletionOpts(cmd *cobra.Command) *registry.Options {
 	opts := registry.New()
 	if insecure, err := cmd.Flags().GetBool(rootflagnames.Insecure); err == nil && insecure {
-		opts.WithInsecure().WithTransport(registry.InsecureTransport())
+		opts.WithInsecure()
 	}
 
 	if platform, err := cmd.Flags().GetString(rootflagnames.Platform); err == nil && platform != "" {

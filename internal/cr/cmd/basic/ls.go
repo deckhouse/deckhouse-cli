@@ -56,9 +56,9 @@ func runLs(ctx context.Context, w io.Writer, src string, fullRef, omitDigestTags
 	var repo name.Repository
 
 	if fullRef {
-		r, err := name.NewRepository(src, opts.Name...)
+		r, err := registry.ParseRepository(src, opts)
 		if err != nil {
-			return fmt.Errorf("parse repository %q: %w", src, err)
+			return err
 		}
 
 		repo = r
