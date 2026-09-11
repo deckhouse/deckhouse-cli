@@ -134,7 +134,8 @@ receives a 401 when --publish=true.`,
 	cmd.Flags().String(flagNode, "", "restrict download to a single node subtree; format '<Kind>/<name>' (e.g. --node DemoVirtualDisk/bk-disk-a, --node Snapshot/my-snap); the generated snapshot CR name form (e.g. DemoVirtualDiskSnapshot/nss-child-abc) is still accepted")
 	cmd.Flags().String(flagTTL, "2h", "DataExport TTL (e.g. 2h, 30m)")
 	cmd.Flags().Int(flagWorkers, 4, "maximum number of nodes downloaded concurrently")
-	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume")
+	cmd.Flags().Int(flagPerVolumeConcurrency, 4, "maximum parallel chunk/file downloads per volume; "+
+		"lower to 1 on a distant or flaky link if long-lived streams keep breaking")
 	cmd.Flags().Int(flagMaxParallelDownloads, 5, "global cap on concurrent whole-volume-stream downloads across all nodes (independent of --workers and --per-volume-concurrency)")
 	cmd.Flags().String(flagVolumeCompression, compress.DefaultCodecName,
 		"volume compression codec ("+strings.Join(compress.UserSelectableNames(), ", ")+

@@ -706,31 +706,38 @@ func TestDownloadBlockChunks_CorruptChunkMeta_PurgesAndRedownloads(t *testing.T)
 // without any real sleeps, timeouts, or network flakiness.
 var errSimulatedInterrupt = errors.New("simulated interrupt: connection dropped mid-chunk")
 
-// truncatingBody wraps an http response body and returns errSimulatedInterrupt
-// after delivering exactly budget bytes, deterministically simulating an
-// interrupt partway through a chunk's Range GET body.
+// truncatingBody wraps an http response body and returns cutErr (defaulting
+// to errSimulatedInterrupt when nil) after delivering exactly budget bytes,
+// deterministically simulating an interrupt partway through a chunk's Range
+// GET body.
 type truncatingBody struct {
 	r      io.ReadCloser
 	budget int64
+	cutErr error
 }
 
 func (b *truncatingBody) Read(p []byte) (int, error) {
+	err := b.cutErr
+	if err == nil {
+		err = errSimulatedInterrupt
+	}
+
 	if b.budget <= 0 {
-		return 0, errSimulatedInterrupt
+		return 0, err
 	}
 
 	if int64(len(p)) > b.budget {
 		p = p[:b.budget]
 	}
 
-	n, err := b.r.Read(p)
+	n, readErr := b.r.Read(p)
 	b.budget -= int64(n)
 
-	if err == nil && b.budget <= 0 {
-		err = errSimulatedInterrupt
+	if readErr == nil && b.budget <= 0 {
+		readErr = err
 	}
 
-	return n, err
+	return n, readErr
 }
 
 func (b *truncatingBody) Close() error {
@@ -740,11 +747,13 @@ func (b *truncatingBody) Close() error {
 // recordingDoer wraps a real exporter.Doer, recording every request's Range
 // header in call order and optionally truncating the response body of one
 // designated call (cutOnCall, 1-based; 0 disables truncation) after
-// cutBytes bytes to simulate a mid-transfer interrupt.
+// cutBytes bytes to simulate a mid-transfer interrupt. cutErr selects the
+// error the truncated body reports; nil defaults to errSimulatedInterrupt.
 type recordingDoer struct {
 	inner     exporter.Doer
 	cutOnCall int
 	cutBytes  int64
+	cutErr    error
 
 	mu     sync.Mutex
 	calls  int
@@ -764,7 +773,7 @@ func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	if callIdx == d.cutOnCall {
-		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes}
+		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: d.cutErr}
 	}
 
 	return resp, nil
@@ -1600,4 +1609,111 @@ func TestDownloadBlockChunks_StreamedFrameContract(t *testing.T) {
 				"%s: streamed-finalize merged output must match whole-buffer EncodeFrame reference byte-for-byte", name)
 		})
 	}
+}
+
+// onceFlakyDoer wraps a real exporter.Doer and cuts the response body of the
+// FIRST request whose Range header exactly matches trigger, standing in for
+// one broken connection mid-chunk. Every other request — including the
+// retried request that resumes from a later offset and so carries a
+// different Range value — passes through untouched.
+type onceFlakyDoer struct {
+	inner    exporter.Doer
+	trigger  string
+	cutBytes int64
+
+	mu        sync.Mutex
+	triggered bool
+	calls     int
+}
+
+func (d *onceFlakyDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.calls++
+
+	fireNow := !d.triggered && req.Header.Get("Range") == d.trigger
+	if fireNow {
+		d.triggered = true
+	}
+
+	d.mu.Unlock()
+
+	resp, err := d.inner.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if fireNow {
+		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: io.ErrUnexpectedEOF}
+	}
+
+	return resp, nil
+}
+
+func (d *onceFlakyDoer) callCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.calls
+}
+
+// TestDownloadBlockChunks_RetryIsPerChunk proves the in-run retry is scoped
+// to the one chunk that hits a transient failure: three chunks download
+// cleanly on the first attempt while a fourth is interrupted mid-stream and
+// must recover via a resumed retry, without disturbing the others or
+// corrupting the merged output. It deliberately exercises the DEFAULT retry
+// policy (via the public DownloadBlockChunks entry point, with no policy
+// override available) — the only test proving the production policy is
+// actually wired into downloadBlockChunks rather than merely reachable
+// through a hand-rolled test policy.
+func TestDownloadBlockChunks_RetryIsPerChunk(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 5
+	payload := []byte("ABCDEFGHIJKLMNOPQRST") // 20 bytes -> 4 chunks of 5
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	// Chunk 1 covers bytes [5,9]; its very first (unresumed) Range GET is cut
+	// after 2 bytes with a transient error. Every other chunk, and chunk 1's
+	// resumed retry, must succeed untouched.
+	doer := &onceFlakyDoer{inner: srv.Client(), trigger: "bytes=5-9", cutBytes: 2}
+	fetcher := exporter.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, int64(len(payload)), chunkSize, 4, fetcher, codec, nil)
+	require.NoError(t, err, "a single transient failure on one chunk must not fail the whole volume")
+
+	names := listChunkFiles(t, chunkDir)
+	require.Len(t, names, 4, "expected 4 chunks")
+
+	wantSlices := [][]byte{
+		payload[0:5],
+		payload[5:10],
+		payload[10:15],
+		payload[15:20],
+	}
+
+	for i, name := range names {
+		got := decodeAll(t, filepath.Join(chunkDir, name))
+		assert.Equal(t, wantSlices[i], got, "chunk %d content mismatch", i)
+	}
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(context.Background(), chunkDir, outPath, int64(len(payload)), chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must be byte-identical despite the mid-chunk retry")
+
+	// Each of the 3 clean chunks is fetched exactly once; the flaky chunk is
+	// fetched exactly twice (the interrupted attempt plus its resumed retry).
+	assert.Equal(t, 5, doer.callCount(), "expected exactly one retried request across all 4 chunks")
 }
