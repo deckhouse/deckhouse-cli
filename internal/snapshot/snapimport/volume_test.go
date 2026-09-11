@@ -20,11 +20,15 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"net"
 	"net/http"
@@ -46,6 +50,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	restclient "k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
 
 	diapi "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
@@ -1632,6 +1637,170 @@ func TestUploadControlEndpoints_PropagateResponseByteLimit(t *testing.T) {
 			err := tc.run(t, doer)
 			if !errors.Is(err, transport.ErrResponseBodyLimitExceeded) {
 				t.Fatalf("error = %v, want ErrResponseBodyLimitExceeded", err)
+			}
+		})
+	}
+}
+
+// TestUploadStatusError verifies the errUploadUnauthorized classifier: it wraps the sentinel
+// only for HTTP 401/403 status codes (by code, never by message text), leaving every other
+// status's error unwrapped so errors.Is(err, errUploadUnauthorized) stays false for them.
+func TestUploadStatusError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 404 does not wrap sentinel", statusCode: http.StatusNotFound, wantWrap: false},
+		{name: "success: 409 does not wrap sentinel", statusCode: http.StatusConflict, wantWrap: false},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			base := fmt.Errorf("status %d", tc.statusCode)
+
+			err := uploadStatusError(tc.statusCode, base)
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+
+			if !errors.Is(err, base) && tc.wantWrap {
+				t.Errorf("wrapped error lost the original base error: %v", err)
+			}
+		})
+	}
+}
+
+// TestHeadBlockOffset_ClassifiesUnauthorized verifies headBlockOffset's default (non-OK/
+// non-NotFound) branch wraps errUploadUnauthorized only for 401/403 responses.
+func TestHeadBlockOffset_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			_, err := headBlockOffset(context.Background(), doer, "https://importer.test/api/v1/block", 10)
+			if err == nil {
+				t.Fatal("headBlockOffset unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
+// TestDoBlockChunk_ClassifiesUnauthorized verifies doBlockChunk's non-Created/non-NoContent/
+// non-Conflict branch wraps errUploadUnauthorized only for 401/403 responses; the "want status
+// mismatch" branches below it can never see 401/403 (they only run once the status is already
+// Created or NoContent), so this exercises the only reachable wrap site.
+func TestDoBlockChunk_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.test/api/v1/block", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			_, _, err = doBlockChunk(doer, req, 0, 1, 1)
+			if err == nil {
+				t.Fatal("doBlockChunk unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
+// TestPostFinished_ClassifiesUnauthorized verifies postFinished's non-2xx branch wraps
+// errUploadUnauthorized only for 401/403 responses.
+func TestPostFinished_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			err := postFinished(context.Background(), doer, "https://importer.test")
+			if err == nil {
+				t.Fatal("postFinished unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
 			}
 		})
 	}
@@ -4466,6 +4635,130 @@ func readyDataImportObj(leaf PlannedNode, rawURL, volumeMode, ca string) *unstru
 	return obj
 }
 
+// readyDataImportObjWithPublicURL builds a Ready DataImport with BOTH status.url and
+// status.publicURL independently settable, for exercising uploadBaseURL/waitDataImportReady's
+// publish-vs-non-publish branch selection precisely.
+func readyDataImportObjWithPublicURL(leaf PlannedNode, url, publicURL, volumeMode, ca string) *unstructured.Unstructured {
+	obj := dataImportObjForLeaf(targetNS, leaf, false)
+	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionReady), "status", "conditions")
+	_ = unstructured.SetNestedField(obj.Object, volumeMode, "status", "volumeMode")
+	_ = unstructured.SetNestedField(obj.Object, ca, "status", "ca")
+
+	if url != "" {
+		_ = unstructured.SetNestedField(obj.Object, url, "status", "url")
+	}
+
+	if publicURL != "" {
+		_ = unstructured.SetNestedField(obj.Object, publicURL, "status", "publicURL")
+	}
+
+	return obj
+}
+
+// newTestVolumeImporterWithWait builds a clusterVolumeImporter like newTestVolumeImporter but
+// with an explicit (short) wait budget, for tests that must observe a timeout without paying
+// the default 2-second wait.
+func newTestVolumeImporterWithWait(dyn *dynamicfake.FakeDynamicClient, publish bool, wait time.Duration) *clusterVolumeImporter {
+	imp := newTestVolumeImporter(dyn)
+	imp.publish = publish
+	imp.wait = wait
+	imp.poll = time.Millisecond
+
+	return imp
+}
+
+// TestWaitDataImportReady_PublishRequiresPublicURL is the most important regression guard for
+// the publish readiness contract: the storage-foundation controller never lowers Ready back
+// to False once it is True, so a DataImport that is Ready=True with status.url populated but
+// status.publicURL still empty (Ingress wiring lagging behind the importer pod) must NOT be
+// treated as ready when publish=true -- it must keep waiting until it times out.
+func TestWaitDataImportReady_PublishRequiresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, true, 60*time.Millisecond)
+
+	start := time.Now()
+	_, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitDataImportReady returned nil, want a timeout error (Ready=True but publicURL empty must not satisfy publish readiness)")
+	}
+
+	if !strings.Contains(err.Error(), "publicURL") {
+		t.Errorf("error = %v, want it to mention publicURL", err)
+	}
+
+	if elapsed < imp.wait {
+		t.Errorf("waitDataImportReady returned after %v, want it to wait out the full %v budget", elapsed, imp.wait)
+	}
+}
+
+// TestWaitDataImportReady_PublishUsesPublicURL verifies that once status.publicURL is
+// populated, publish=true returns immediately using it (not status.url).
+func TestWaitDataImportReady_PublishUsesPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, true, time.Second)
+
+	got, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err != nil {
+		t.Fatalf("waitDataImportReady: %v", err)
+	}
+
+	if url := imp.uploadBaseURL(got); url != "https://published.test" {
+		t.Errorf("uploadBaseURL = %q, want the published URL https://published.test (not status.url)", url)
+	}
+}
+
+// TestWaitDataImportReady_NonPublishIgnoresPublicURL is the mirror regression guard: with
+// publish=false, a populated status.publicURL must never be mistaken for status.url. An empty
+// status.url with a populated publicURL must still time out.
+func TestWaitDataImportReady_NonPublishIgnoresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, false, 60*time.Millisecond)
+
+	_, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err == nil {
+		t.Fatal("waitDataImportReady returned nil, want a timeout error (publish=false must never use status.publicURL)")
+	}
+}
+
+// TestWaitDataImportReady_NonPublishUsesURLEvenWithPublicURLSet is a regression guard against
+// crossed branches: when both status.url and status.publicURL are populated, publish=false
+// must resolve to status.url.
+func TestWaitDataImportReady_NonPublishUsesURLEvenWithPublicURLSet(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, false, time.Second)
+
+	got, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err != nil {
+		t.Fatalf("waitDataImportReady: %v", err)
+	}
+
+	if url := imp.uploadBaseURL(got); url != "https://in-cluster.test" {
+		t.Errorf("uploadBaseURL = %q, want the in-cluster URL https://in-cluster.test (not publicURL)", url)
+	}
+}
+
 func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	// DataFile is set so the block-data preflight passes; the file is never opened because
 	// the completed-import short-circuit returns before any upload.
@@ -4542,6 +4835,85 @@ func TestUploadVolumeData_ClosesClientAfterRequestError(t *testing.T) {
 	}
 	if closes.Load() != 1 {
 		t.Fatalf("upload client closes = %d, want 1", closes.Load())
+	}
+}
+
+// TestUploadVolumeData_UnauthorizedHintDependsOnPublish verifies UploadVolumeData's error
+// wrapping around errUploadUnauthorized (a 401 from the importer's block HEAD probe): with
+// publish=true it appends the bearer-token/kubeconfig hint explaining why a certificate-based
+// kubeconfig fails through the published Ingress path; with publish=false the underlying
+// error is returned unchanged, since that hint would be misleading for the in-cluster path.
+func TestUploadVolumeData_UnauthorizedHintDependsOnPublish(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		publish  bool
+		wantHint bool
+	}{
+		{name: "success: publish=true appends the bearer-token hint", publish: true, wantHint: true},
+		{name: "success: publish=false leaves the error unchanged", publish: false, wantHint: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := []byte("unauthorized upload")
+			dataFile := filepath.Join(t.TempDir(), "data.bin")
+			if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+				t.Fatalf("write block payload: %v", err)
+			}
+
+			leaf := volumeSnapshotLeaf("pvc-unauthorized")
+			leaf.DataFile = dataFile
+			leaf.Size = strconv.Itoa(len(payload))
+			leaf.SizeBytes = int64(len(payload))
+			leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+			ca := testUploadCA(t)
+			di := readyDataImportObjWithPublicURL(leaf, "https://importer.test", "https://importer.test", volumeModeBlock, base64.StdEncoding.EncodeToString(ca))
+
+			importer := newTestVolumeImporter(newFakeDataImportDyn(di))
+			importer.publish = tc.publish
+
+			importer.newUploadClient = func([]byte, string) (uploadHTTPClient, error) {
+				return &testUploadHTTPClient{
+					do: func(*http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Status:     "401 Unauthorized",
+							Header:     http.Header{},
+							Body:       io.NopCloser(bytes.NewReader(nil)),
+						}, nil
+					},
+					close: func() {},
+				}, nil
+			}
+
+			err := importer.UploadVolumeData(
+				context.Background(),
+				leaf,
+				importer.DataImportName(leaf),
+				targetNS,
+				nil,
+				nil,
+				nil,
+			)
+			if err == nil {
+				t.Fatal("UploadVolumeData unexpectedly returned nil for a 401 response")
+			}
+
+			if !errors.Is(err, errUploadUnauthorized) {
+				t.Fatalf("UploadVolumeData error = %v, want errors.Is(errUploadUnauthorized)", err)
+			}
+
+			hasHint := strings.Contains(err.Error(), "bearer token")
+
+			if hasHint != tc.wantHint {
+				t.Errorf("error contains bearer-token hint = %v, want %v (err=%v)", hasHint, tc.wantHint, err)
+			}
+		})
 	}
 }
 
@@ -4682,6 +5054,248 @@ func testUploadCA(t *testing.T) []byte {
 	}
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+}
+
+// TestUploadClientPublish_ValidatesBeforeFactory mirrors
+// TestUploadClientRejectsInvalidIdentityBeforeFactory for the publish=true branch of
+// uploadClient: ValidateHTTPSURL still requires HTTPS, and a non-empty malformed CA is still
+// rejected (fail closed), but an EMPTY CA -- expected on the publish path, since Ingress
+// terminates TLS with its own certificate rather than the importer's internal CA -- must be
+// accepted and reach the client factory.
+func TestUploadClientPublish_ValidatesBeforeFactory(t *testing.T) {
+	t.Parallel()
+
+	validCA := base64.StdEncoding.EncodeToString(testUploadCA(t))
+
+	tests := []struct {
+		name        string
+		rawURL      string
+		ca          string
+		wantErr     bool
+		wantFactory bool
+	}{
+		{
+			name:    "error: plaintext URL rejected even under publish",
+			rawURL:  "http://127.0.0.1:8443",
+			ca:      validCA,
+			wantErr: true,
+		},
+		{
+			name:    "error: malformed non-empty CA is rejected fail-closed",
+			rawURL:  "https://127.0.0.1:8443",
+			ca:      base64.StdEncoding.EncodeToString([]byte("not PEM")),
+			wantErr: true,
+		},
+		{
+			name:    "error: invalid base64 CA is rejected",
+			rawURL:  "https://127.0.0.1:8443",
+			ca:      "%%%",
+			wantErr: true,
+		},
+		{
+			name:        "success: empty CA is accepted and reaches the factory",
+			rawURL:      "https://127.0.0.1:8443",
+			ca:          "",
+			wantFactory: true,
+		},
+		{
+			name:        "success: valid CA is still accepted and reaches the factory",
+			rawURL:      "https://127.0.0.1:8443",
+			ca:          validCA,
+			wantFactory: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var factoryCalls atomic.Int64
+
+			importer := &clusterVolumeImporter{
+				publish: true,
+				newUploadClient: func([]byte, string) (uploadHTTPClient, error) {
+					factoryCalls.Add(1)
+
+					return &testUploadHTTPClient{close: func() {}}, nil
+				},
+			}
+
+			_, err := importer.uploadClient(tc.ca, tc.rawURL)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("uploadClient unexpectedly accepted invalid identity/URL under publish")
+				}
+			} else if err != nil {
+				t.Fatalf("uploadClient: %v", err)
+			}
+
+			wantCalls := int64(0)
+			if tc.wantFactory {
+				wantCalls = 1
+			}
+
+			if got := factoryCalls.Load(); got != wantCalls {
+				t.Fatalf("upload client factory calls = %d, want %d", got, wantCalls)
+			}
+		})
+	}
+}
+
+// unrelatedCertificatePEM returns a PEM-encoded self-signed certificate generated with its
+// own independent key pair, standing in for a status.ca (or an operator-supplied CA) that does
+// not chain to the real upload origin's certificate -- exercising the "foreign CA" side of the
+// publish-vs-non-publish pinning tests below. It is deliberately NOT taken from a second
+// httptest.NewTLSServer: httptest servers share one built-in default certificate unless
+// explicitly configured otherwise, which would make the "unrelated" CA accidentally identical
+// to the real origin's and silently defeat the test.
+func unrelatedCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0x42}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(9999),
+		Subject:      pkix.Name{CommonName: "unrelated-test-ca"},
+		NotBefore:    time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"unrelated.invalid"},
+	}
+
+	der, err := x509.CreateCertificate(rand.New(rand.NewSource(1)), template, template, privateKey.Public(), privateKey)
+	if err != nil {
+		t.Fatalf("create unrelated test certificate: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// TestUploadClient_PinningDependsOnPublish is the critical regression guard for the
+// publish-path trust model: with publish=true, uploadClient merges status.ca into the
+// caller's already-configured (kubeconfig) trust pool via SetTLSCAData, so a request to the
+// real origin succeeds even though the supplied CA itself is unrelated to it. With
+// publish=false, uploadClient calls SetTLSIdentityCAData instead, which REPLACES trust with
+// exactly the supplied CA -- so the same unrelated CA must cause the request to the real
+// origin to fail. A regression here (e.g. always using SetTLSCAData) would silently widen the
+// in-cluster upload path's pinning.
+func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	certificate := srv.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server has no certificate")
+	}
+
+	trustedCA := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+	unrelatedCA := unrelatedCertificatePEM(t)
+
+	tests := []struct {
+		name     string
+		publish  bool
+		insecure bool
+		wantErr  bool
+	}{
+		{
+			name:    "success: publish merges the unrelated CA with the kubeconfig-trusted pool",
+			publish: true,
+		},
+		{
+			name:    "error: non-publish pins exclusively to the unrelated CA and rejects the real origin",
+			publish: false,
+			wantErr: true,
+		},
+		{
+			// Regression guard for the insecure-skip-tls-verify bypass: SetTLSCAData must force
+			// verification on even though the caller's kubeconfig inherited Insecure: true, so a
+			// server whose certificate is in NEITHER the system pool NOR the explicitly supplied
+			// CA must still be rejected -- and, crucially, the bearer token must never reach that
+			// untrusted server, since a failed handshake means the request body (headers
+			// included) was never sent.
+			name:     "error: publish with inherited insecure-skip-tls-verify still enforces verification and never leaks the bearer token",
+			publish:  true,
+			insecure: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			targetURL := srv.URL
+			configCAData := trustedCA
+
+			var receivedAuthHeader string
+
+			if tc.insecure {
+				// A dedicated server (rather than the shared srv above) guarantees its
+				// certificate is untrusted by construction, and lets this subtest read
+				// receivedAuthHeader without racing the other subtests' concurrent requests
+				// against the shared srv.
+				untrustedSrv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					receivedAuthHeader = r.Header.Get("Authorization")
+				}))
+				t.Cleanup(untrustedSrv.Close)
+
+				targetURL = untrustedSrv.URL
+				configCAData = nil
+			}
+
+			config := &restclient.Config{
+				Host:        targetURL,
+				BearerToken: "must-not-leak",
+				TLSClientConfig: restclient.TLSClientConfig{
+					Insecure: tc.insecure,
+					CAData:   configCAData,
+				},
+			}
+
+			importer := &clusterVolumeImporter{
+				sc:      transport.NewClientForConfig(config),
+				publish: tc.publish,
+			}
+
+			httpClient, err := importer.uploadClient(base64.StdEncoding.EncodeToString(unrelatedCA), targetURL)
+			if err != nil {
+				t.Fatalf("uploadClient: %v", err)
+			}
+			t.Cleanup(httpClient.CloseIdleConnections)
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			resp, doErr := httpClient.HTTPDo(req)
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+
+			if tc.wantErr {
+				if doErr == nil {
+					t.Fatal("request unexpectedly succeeded against an untrusted origin")
+				}
+
+				if tc.insecure && receivedAuthHeader != "" {
+					t.Fatalf("Authorization header leaked to an untrusted server: %q", receivedAuthHeader)
+				}
+
+				return
+			}
+
+			if doErr != nil {
+				t.Fatalf("request against the real origin unexpectedly failed under publish's merged trust pool: %v", doErr)
+			}
+		})
+	}
 }
 
 func TestUploadVolumeData_CompletedReuseRejectsChangedVerifiedPayload(t *testing.T) {
@@ -5032,7 +5646,7 @@ func TestEnsureDataImport_AlignsTTLRetryingConflict(t *testing.T) {
 
 // TestEnsureDataImport_TTLConflictRevalidatesFreshObject covers the race the retry loop must
 // close: if a concurrent writer replaces the DataImport with a foreign one in the window between
-// the conflicting Update and alignDataImportTTL's re-Get, the re-Get's result must be
+// the conflicting Update and alignDataImportSpec's re-Get, the re-Get's result must be
 // re-validated against leaf before any patch — never blindly reused from the pre-conflict
 // revision.
 func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
@@ -5054,7 +5668,7 @@ func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
 		updateCalls++
 		if updateCalls == 1 {
 			// Simulate a concurrent writer swapping in a foreign DataImport in the exact
-			// window the conflict forces alignDataImportTTL to re-Get.
+			// window the conflict forces alignDataImportSpec to re-Get.
 			if err := dyn.Tracker().Update(dataImportGVR, foreign, targetNS); err != nil {
 				return true, nil, fmt.Errorf("swap in foreign DataImport: %w", err)
 			}
@@ -5080,7 +5694,7 @@ func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
 }
 
 // TestEnsureDataImport_TTLTargetVanishedRecreates covers a conflict whose re-Get finds the
-// DataImport gone: alignDataImportTTL must surface errDataImportRecheck (not a hard failure) so
+// DataImport gone: alignDataImportSpec must surface errDataImportRecheck (not a hard failure) so
 // EnsureDataImport's outer loop re-evaluates from scratch and creates a fresh DataImport.
 func TestEnsureDataImport_TTLTargetVanishedRecreates(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
@@ -5135,7 +5749,7 @@ func TestEnsureDataImport_TTLTargetVanishedRecreates(t *testing.T) {
 
 // TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates mirrors
 // TestEnsureDataImport_RecreatesExpired for the conflict-retry path: if the re-Get after a
-// conflicting TTL Update finds the DataImport now Ready=False/Expired, alignDataImportTTL must
+// conflicting TTL Update finds the DataImport now Ready=False/Expired, alignDataImportSpec must
 // surface errDataImportRecheck so EnsureDataImport's outer loop deletes and recreates it instead
 // of patching a dying object.
 func TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates(t *testing.T) {
@@ -5191,7 +5805,7 @@ func TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates(t *testing.T)
 }
 
 // TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate is a regression anchor for the ordering
-// requirement in alignDataImportTTL: the ttl-equality check must run after any re-Get, but it
+// requirement in alignDataImportSpec: the ttl-equality check must run after any re-Get, but it
 // must still short-circuit to zero Updates on the common already-aligned path.
 func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
@@ -5205,6 +5819,232 @@ func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
 
 	if u := countDataImportActions(dyn, "update"); u != 0 {
 		t.Errorf("update calls = %d, want 0 (ttl already aligned)", u)
+	}
+}
+
+// TestEnsureDataImport_BuildsSpecPublishField verifies EnsureDataImport always sets
+// spec.publish explicitly (including false), matching the importer's own Publish option --
+// so alignDataImportSpec's later comparison against the server's returned value never depends
+// on an implicit server-side default.
+func TestEnsureDataImport_BuildsSpecPublishField(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		publish bool
+	}{
+		{name: "success: publish=false is explicitly set", publish: false},
+		{name: "success: publish=true is explicitly set", publish: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leaf := volumeSnapshotLeaf("pvc-1")
+
+			dyn := newFakeDataImportDyn()
+			imp := newTestVolumeImporter(dyn)
+			imp.publish = tc.publish
+
+			if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+				t.Fatalf("EnsureDataImport: %v", err)
+			}
+
+			diName := imp.DataImportName(leaf)
+
+			got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("created DataImport not found: %v", err)
+			}
+
+			publish, found, err := unstructured.NestedBool(got.Object, "spec", "publish")
+			if err != nil {
+				t.Fatalf("read spec.publish: %v", err)
+			}
+
+			if !found {
+				t.Fatal("spec.publish was not set, want explicit value")
+			}
+
+			if publish != tc.publish {
+				t.Errorf("spec.publish = %v, want %v", publish, tc.publish)
+			}
+		})
+	}
+}
+
+// TestEnsureDataImport_AlignsPublishOnReuse verifies alignDataImportSpec patches spec.publish
+// on a reused DataImport when it drifts from the current run's --publish, in exactly one
+// Update, leaving spec.ttl untouched when it already matched.
+func TestEnsureDataImport_AlignsPublishOnReuse(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	// dataImportObj never sets spec.publish, so it is absent (equivalent to false).
+	existing := dataImportObj(targetNS, "pvc-1", false)
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Errorf("update calls = %d, want exactly 1", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if !publish {
+		t.Error("spec.publish = false, want true (aligned to the current run's --publish)")
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want unchanged 1h", ttl)
+	}
+}
+
+// TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate is a regression anchor for
+// alignDataImportSpec's single-Update contract: when BOTH spec.ttl and spec.publish drift on
+// the same reused object, they must be patched together in exactly one Update, never two
+// separate ones (which would open a second, redundant conflict window).
+func TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+	_ = unstructured.SetNestedField(existing.Object, false, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Fatalf("update calls = %d, want exactly 1 (both fields patched together)", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want 1h", ttl)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if !publish {
+		t.Error("spec.publish = false, want true")
+	}
+}
+
+// TestEnsureDataImport_PublishDowngradeInOneUpdate mirrors
+// TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate for the true->false direction:
+// publish is aligned bidirectionally (unlike internal/data's upgrade-only semantics), so a
+// prior --publish=true run must not keep exposing the upload publicly once a later run asks
+// for the in-cluster path.
+func TestEnsureDataImport_PublishDowngradeInOneUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, true, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h", publish defaults false
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Fatalf("update calls = %d, want exactly 1", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if publish {
+		t.Error("spec.publish = true, want false (downgraded from a prior --publish=true run)")
+	}
+}
+
+// TestEnsureDataImport_PublishAndTTLAlignedIssuesNoUpdate is a regression anchor for the
+// ordering requirement in alignDataImportSpec: both the ttl- and publish-equality checks must
+// run after any re-Get, but must still short-circuit to zero Updates when both are already
+// aligned -- not just ttl alone, as covered by TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate.
+func TestEnsureDataImport_PublishAndTTLAlignedIssuesNoUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, true, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 0 {
+		t.Errorf("update calls = %d, want 0 (ttl and publish already aligned)", u)
+	}
+}
+
+// TestEnsureDataImport_PublishChangeNeverForeign verifies the deliberate exclusion of
+// spec.publish from dataImportAnnotations/validateDataImportSpec: reusing a DataImport whose
+// spec.publish differs from the current run's --publish must NOT be treated as
+// ErrForeignDataImport, since publish is a transport property of THIS run, not part of the
+// leaf's content identity.
+func TestEnsureDataImport_PublishChangeNeverForeign(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		existingPublish bool
+		runPublish      bool
+	}{
+		{name: "success: existing false, run requests true", existingPublish: false, runPublish: true},
+		{name: "success: existing true, run requests false", existingPublish: true, runPublish: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leaf := volumeSnapshotLeaf("pvc-1")
+			existing := dataImportObj(targetNS, "pvc-1", false)
+			_ = unstructured.SetNestedField(existing.Object, tc.existingPublish, "spec", "publish")
+
+			dyn := newFakeDataImportDyn(existing)
+			imp := newTestVolumeImporter(dyn)
+			imp.publish = tc.runPublish
+
+			if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+				t.Fatalf("EnsureDataImport must not fail with ErrForeignDataImport on a publish-only change: %v", err)
+			}
+		})
 	}
 }
 

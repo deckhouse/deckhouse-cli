@@ -621,6 +621,85 @@ func TestDoFileChunk_StrictStatusesAndOffsets(t *testing.T) {
 	}
 }
 
+// TestHeadFileOffset_ClassifiesUnauthorized verifies headFileOffset's default (non-OK/
+// non-NotFound) branch wraps errUploadUnauthorized only for 401/403 responses, mirroring
+// headBlockOffset's block-path classification.
+func TestHeadFileOffset_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := fileHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return fileHTTPResponse(tc.statusCode, http.Header{}), nil
+			})
+
+			_, _, _, err := headFileOffset(context.Background(), doer, "https://import.example/file", 10)
+			if err == nil {
+				t.Fatal("headFileOffset unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
+// TestDoFileChunk_ClassifiesUnauthorized verifies doFileChunk's non-Created/non-NoContent/
+// non-Conflict branch wraps errUploadUnauthorized only for 401/403 responses; the "want status
+// mismatch" branches below it can never observe 401/403 since they only run once the status is
+// already Created or NoContent.
+func TestDoFileChunk_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := fileHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return fileHTTPResponse(tc.statusCode, http.Header{}), nil
+			})
+
+			req, err := http.NewRequest(http.MethodPut, "https://import.example/file", bytes.NewReader([]byte("x")))
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			req.ContentLength = 1
+
+			_, _, err = doFileChunk(doer, req, 0, 1, 1)
+			if err == nil {
+				t.Fatal("doFileChunk unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
 func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
 	payload := []byte("hello, filesystem import")
 
