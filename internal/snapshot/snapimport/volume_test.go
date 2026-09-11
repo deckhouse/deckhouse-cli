@@ -20,11 +20,15 @@ import (
 	gotar "archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"math/rand"
 	"net"
 	"net/http"
@@ -46,6 +50,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	restclient "k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
 
 	diapi "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/api/v1alpha1"
@@ -1632,6 +1637,170 @@ func TestUploadControlEndpoints_PropagateResponseByteLimit(t *testing.T) {
 			err := tc.run(t, doer)
 			if !errors.Is(err, transport.ErrResponseBodyLimitExceeded) {
 				t.Fatalf("error = %v, want ErrResponseBodyLimitExceeded", err)
+			}
+		})
+	}
+}
+
+// TestUploadStatusError verifies the errUploadUnauthorized classifier: it wraps the sentinel
+// only for HTTP 401/403 status codes (by code, never by message text), leaving every other
+// status's error unwrapped so errors.Is(err, errUploadUnauthorized) stays false for them.
+func TestUploadStatusError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 404 does not wrap sentinel", statusCode: http.StatusNotFound, wantWrap: false},
+		{name: "success: 409 does not wrap sentinel", statusCode: http.StatusConflict, wantWrap: false},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			base := fmt.Errorf("status %d", tc.statusCode)
+
+			err := uploadStatusError(tc.statusCode, base)
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+
+			if !errors.Is(err, base) && tc.wantWrap {
+				t.Errorf("wrapped error lost the original base error: %v", err)
+			}
+		})
+	}
+}
+
+// TestHeadBlockOffset_ClassifiesUnauthorized verifies headBlockOffset's default (non-OK/
+// non-NotFound) branch wraps errUploadUnauthorized only for 401/403 responses.
+func TestHeadBlockOffset_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			_, err := headBlockOffset(context.Background(), doer, "https://importer.test/api/v1/block", 10)
+			if err == nil {
+				t.Fatal("headBlockOffset unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
+// TestDoBlockChunk_ClassifiesUnauthorized verifies doBlockChunk's non-Created/non-NoContent/
+// non-Conflict branch wraps errUploadUnauthorized only for 401/403 responses; the "want status
+// mismatch" branches below it can never see 401/403 (they only run once the status is already
+// Created or NoContent), so this exercises the only reachable wrap site.
+func TestDoBlockChunk_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, "https://importer.test/api/v1/block", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			_, _, err = doBlockChunk(doer, req, 0, 1, 1)
+			if err == nil {
+				t.Fatal("doBlockChunk unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
+			}
+		})
+	}
+}
+
+// TestPostFinished_ClassifiesUnauthorized verifies postFinished's non-2xx branch wraps
+// errUploadUnauthorized only for 401/403 responses.
+func TestPostFinished_ClassifiesUnauthorized(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		wantWrap   bool
+	}{
+		{name: "success: 401 wraps sentinel", statusCode: http.StatusUnauthorized, wantWrap: true},
+		{name: "success: 403 wraps sentinel", statusCode: http.StatusForbidden, wantWrap: true},
+		{name: "success: 500 does not wrap sentinel", statusCode: http.StatusInternalServerError, wantWrap: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tc.statusCode,
+					Status:     fmt.Sprintf("%d %s", tc.statusCode, http.StatusText(tc.statusCode)),
+					Header:     http.Header{},
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			err := postFinished(context.Background(), doer, "https://importer.test")
+			if err == nil {
+				t.Fatal("postFinished unexpectedly returned nil error")
+			}
+
+			if got := errors.Is(err, errUploadUnauthorized); got != tc.wantWrap {
+				t.Errorf("errors.Is(err, errUploadUnauthorized) = %v, want %v (err=%v)", got, tc.wantWrap, err)
 			}
 		})
 	}
@@ -3378,7 +3547,16 @@ func TestSendVolumeData_CompressedFullSkipRequiresExactDecodedSize(t *testing.T)
 				}, nil
 			})
 
-			leaf := PlannedNode{DataFile: dataFile, Ext: tc.ext, Size: strconv.FormatInt(tc.totalSize, 10)}
+			// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast
+			// path; setting them to a wrong tc.totalSize simulates a lying manifest, which the
+			// exact-decoded-size proof below must still catch.
+			leaf := PlannedNode{
+				DataFile:            dataFile,
+				Ext:                 tc.ext,
+				Size:                strconv.FormatInt(tc.totalSize, 10),
+				FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+				PayloadRawSizeBytes: tc.totalSize,
+			}
 			importer := &clusterVolumeImporter{log: discardLogger()}
 
 			err := importer.sendVolumeData(
@@ -3562,7 +3740,15 @@ func TestSendVolumeData_TwoRunCompressedUndercountNeverFinalizes(t *testing.T) {
 		}
 	})
 
-	leaf := PlannedNode{DataFile: dataFile, Ext: ".zst", Size: strconv.FormatInt(totalSize, 10)}
+	// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast path;
+	// an undercounted totalSize simulates a manifest that under-reports, which must never finalize.
+	leaf := PlannedNode{
+		DataFile:            dataFile,
+		Ext:                 ".zst",
+		Size:                strconv.FormatInt(totalSize, 10),
+		FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+		PayloadRawSizeBytes: totalSize,
+	}
 	importer := &clusterVolumeImporter{log: discardLogger()}
 
 	for run := 1; run <= 2; run++ {
@@ -3722,7 +3908,16 @@ func TestSendVolumeData_ConflictToTotalRequiresExactDecodedSize(t *testing.T) {
 				}
 			})
 
-			leaf := PlannedNode{DataFile: dataFile, Ext: ".zst", Size: strconv.FormatInt(tc.totalSize, 10)}
+			// FormatVersion/PayloadRawSizeBytes (not Size) drive resolveBlockPayloadSize's fast
+			// path; setting them to a wrong tc.totalSize simulates a lying manifest, which the
+			// exact-decoded-size proof below must still catch.
+			leaf := PlannedNode{
+				DataFile:            dataFile,
+				Ext:                 ".zst",
+				Size:                strconv.FormatInt(tc.totalSize, 10),
+				FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+				PayloadRawSizeBytes: tc.totalSize,
+			}
 			importer := &clusterVolumeImporter{log: discardLogger()}
 
 			err := importer.sendVolumeData(
@@ -4440,6 +4635,130 @@ func readyDataImportObj(leaf PlannedNode, rawURL, volumeMode, ca string) *unstru
 	return obj
 }
 
+// readyDataImportObjWithPublicURL builds a Ready DataImport with BOTH status.url and
+// status.publicURL independently settable, for exercising uploadBaseURL/waitDataImportReady's
+// publish-vs-non-publish branch selection precisely.
+func readyDataImportObjWithPublicURL(leaf PlannedNode, url, publicURL, volumeMode, ca string) *unstructured.Unstructured {
+	obj := dataImportObjForLeaf(targetNS, leaf, false)
+	_ = unstructured.SetNestedSlice(obj.Object, readyConditions(conditionReady), "status", "conditions")
+	_ = unstructured.SetNestedField(obj.Object, volumeMode, "status", "volumeMode")
+	_ = unstructured.SetNestedField(obj.Object, ca, "status", "ca")
+
+	if url != "" {
+		_ = unstructured.SetNestedField(obj.Object, url, "status", "url")
+	}
+
+	if publicURL != "" {
+		_ = unstructured.SetNestedField(obj.Object, publicURL, "status", "publicURL")
+	}
+
+	return obj
+}
+
+// newTestVolumeImporterWithWait builds a clusterVolumeImporter like newTestVolumeImporter but
+// with an explicit (short) wait budget, for tests that must observe a timeout without paying
+// the default 2-second wait.
+func newTestVolumeImporterWithWait(dyn *dynamicfake.FakeDynamicClient, publish bool, wait time.Duration) *clusterVolumeImporter {
+	imp := newTestVolumeImporter(dyn)
+	imp.publish = publish
+	imp.wait = wait
+	imp.poll = time.Millisecond
+
+	return imp
+}
+
+// TestWaitDataImportReady_PublishRequiresPublicURL is the most important regression guard for
+// the publish readiness contract: the storage-foundation controller never lowers Ready back
+// to False once it is True, so a DataImport that is Ready=True with status.url populated but
+// status.publicURL still empty (Ingress wiring lagging behind the importer pod) must NOT be
+// treated as ready when publish=true -- it must keep waiting until it times out.
+func TestWaitDataImportReady_PublishRequiresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, true, 60*time.Millisecond)
+
+	start := time.Now()
+	_, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitDataImportReady returned nil, want a timeout error (Ready=True but publicURL empty must not satisfy publish readiness)")
+	}
+
+	if !strings.Contains(err.Error(), "publicURL") {
+		t.Errorf("error = %v, want it to mention publicURL", err)
+	}
+
+	if elapsed < imp.wait {
+		t.Errorf("waitDataImportReady returned after %v, want it to wait out the full %v budget", elapsed, imp.wait)
+	}
+}
+
+// TestWaitDataImportReady_PublishUsesPublicURL verifies that once status.publicURL is
+// populated, publish=true returns immediately using it (not status.url).
+func TestWaitDataImportReady_PublishUsesPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, true, time.Second)
+
+	got, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err != nil {
+		t.Fatalf("waitDataImportReady: %v", err)
+	}
+
+	if url := imp.uploadBaseURL(got); url != "https://published.test" {
+		t.Errorf("uploadBaseURL = %q, want the published URL https://published.test (not status.url)", url)
+	}
+}
+
+// TestWaitDataImportReady_NonPublishIgnoresPublicURL is the mirror regression guard: with
+// publish=false, a populated status.publicURL must never be mistaken for status.url. An empty
+// status.url with a populated publicURL must still time out.
+func TestWaitDataImportReady_NonPublishIgnoresPublicURL(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, false, 60*time.Millisecond)
+
+	_, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err == nil {
+		t.Fatal("waitDataImportReady returned nil, want a timeout error (publish=false must never use status.publicURL)")
+	}
+}
+
+// TestWaitDataImportReady_NonPublishUsesURLEvenWithPublicURLSet is a regression guard against
+// crossed branches: when both status.url and status.publicURL are populated, publish=false
+// must resolve to status.url.
+func TestWaitDataImportReady_NonPublishUsesURLEvenWithPublicURLSet(t *testing.T) {
+	t.Parallel()
+
+	leaf := volumeSnapshotLeaf("pvc-1")
+	di := readyDataImportObjWithPublicURL(leaf, "https://in-cluster.test", "https://published.test", volumeModeBlock, "")
+
+	dyn := newFakeDataImportDyn(di)
+	imp := newTestVolumeImporterWithWait(dyn, false, time.Second)
+
+	got, err := imp.waitDataImportReady(context.Background(), leaf, imp.DataImportName(leaf), targetNS)
+	if err != nil {
+		t.Fatalf("waitDataImportReady: %v", err)
+	}
+
+	if url := imp.uploadBaseURL(got); url != "https://in-cluster.test" {
+		t.Errorf("uploadBaseURL = %q, want the in-cluster URL https://in-cluster.test (not publicURL)", url)
+	}
+}
+
 func TestUploadVolumeData_SkipsCompleted(t *testing.T) {
 	// DataFile is set so the block-data preflight passes; the file is never opened because
 	// the completed-import short-circuit returns before any upload.
@@ -4516,6 +4835,85 @@ func TestUploadVolumeData_ClosesClientAfterRequestError(t *testing.T) {
 	}
 	if closes.Load() != 1 {
 		t.Fatalf("upload client closes = %d, want 1", closes.Load())
+	}
+}
+
+// TestUploadVolumeData_UnauthorizedHintDependsOnPublish verifies UploadVolumeData's error
+// wrapping around errUploadUnauthorized (a 401 from the importer's block HEAD probe): with
+// publish=true it appends the bearer-token/kubeconfig hint explaining why a certificate-based
+// kubeconfig fails through the published Ingress path; with publish=false the underlying
+// error is returned unchanged, since that hint would be misleading for the in-cluster path.
+func TestUploadVolumeData_UnauthorizedHintDependsOnPublish(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		publish  bool
+		wantHint bool
+	}{
+		{name: "success: publish=true appends the bearer-token hint", publish: true, wantHint: true},
+		{name: "success: publish=false leaves the error unchanged", publish: false, wantHint: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := []byte("unauthorized upload")
+			dataFile := filepath.Join(t.TempDir(), "data.bin")
+			if err := os.WriteFile(dataFile, payload, 0o600); err != nil {
+				t.Fatalf("write block payload: %v", err)
+			}
+
+			leaf := volumeSnapshotLeaf("pvc-unauthorized")
+			leaf.DataFile = dataFile
+			leaf.Size = strconv.Itoa(len(payload))
+			leaf.SizeBytes = int64(len(payload))
+			leaf.DataImportIdentity = dataImportIdentity(leaf)
+
+			ca := testUploadCA(t)
+			di := readyDataImportObjWithPublicURL(leaf, "https://importer.test", "https://importer.test", volumeModeBlock, base64.StdEncoding.EncodeToString(ca))
+
+			importer := newTestVolumeImporter(newFakeDataImportDyn(di))
+			importer.publish = tc.publish
+
+			importer.newUploadClient = func([]byte, string) (uploadHTTPClient, error) {
+				return &testUploadHTTPClient{
+					do: func(*http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusUnauthorized,
+							Status:     "401 Unauthorized",
+							Header:     http.Header{},
+							Body:       io.NopCloser(bytes.NewReader(nil)),
+						}, nil
+					},
+					close: func() {},
+				}, nil
+			}
+
+			err := importer.UploadVolumeData(
+				context.Background(),
+				leaf,
+				importer.DataImportName(leaf),
+				targetNS,
+				nil,
+				nil,
+				nil,
+			)
+			if err == nil {
+				t.Fatal("UploadVolumeData unexpectedly returned nil for a 401 response")
+			}
+
+			if !errors.Is(err, errUploadUnauthorized) {
+				t.Fatalf("UploadVolumeData error = %v, want errors.Is(errUploadUnauthorized)", err)
+			}
+
+			hasHint := strings.Contains(err.Error(), "bearer token")
+
+			if hasHint != tc.wantHint {
+				t.Errorf("error contains bearer-token hint = %v, want %v (err=%v)", hasHint, tc.wantHint, err)
+			}
+		})
 	}
 }
 
@@ -4656,6 +5054,248 @@ func testUploadCA(t *testing.T) []byte {
 	}
 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+}
+
+// TestUploadClientPublish_ValidatesBeforeFactory mirrors
+// TestUploadClientRejectsInvalidIdentityBeforeFactory for the publish=true branch of
+// uploadClient: ValidateHTTPSURL still requires HTTPS, and a non-empty malformed CA is still
+// rejected (fail closed), but an EMPTY CA -- expected on the publish path, since Ingress
+// terminates TLS with its own certificate rather than the importer's internal CA -- must be
+// accepted and reach the client factory.
+func TestUploadClientPublish_ValidatesBeforeFactory(t *testing.T) {
+	t.Parallel()
+
+	validCA := base64.StdEncoding.EncodeToString(testUploadCA(t))
+
+	tests := []struct {
+		name        string
+		rawURL      string
+		ca          string
+		wantErr     bool
+		wantFactory bool
+	}{
+		{
+			name:    "error: plaintext URL rejected even under publish",
+			rawURL:  "http://127.0.0.1:8443",
+			ca:      validCA,
+			wantErr: true,
+		},
+		{
+			name:    "error: malformed non-empty CA is rejected fail-closed",
+			rawURL:  "https://127.0.0.1:8443",
+			ca:      base64.StdEncoding.EncodeToString([]byte("not PEM")),
+			wantErr: true,
+		},
+		{
+			name:    "error: invalid base64 CA is rejected",
+			rawURL:  "https://127.0.0.1:8443",
+			ca:      "%%%",
+			wantErr: true,
+		},
+		{
+			name:        "success: empty CA is accepted and reaches the factory",
+			rawURL:      "https://127.0.0.1:8443",
+			ca:          "",
+			wantFactory: true,
+		},
+		{
+			name:        "success: valid CA is still accepted and reaches the factory",
+			rawURL:      "https://127.0.0.1:8443",
+			ca:          validCA,
+			wantFactory: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var factoryCalls atomic.Int64
+
+			importer := &clusterVolumeImporter{
+				publish: true,
+				newUploadClient: func([]byte, string) (uploadHTTPClient, error) {
+					factoryCalls.Add(1)
+
+					return &testUploadHTTPClient{close: func() {}}, nil
+				},
+			}
+
+			_, err := importer.uploadClient(tc.ca, tc.rawURL)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("uploadClient unexpectedly accepted invalid identity/URL under publish")
+				}
+			} else if err != nil {
+				t.Fatalf("uploadClient: %v", err)
+			}
+
+			wantCalls := int64(0)
+			if tc.wantFactory {
+				wantCalls = 1
+			}
+
+			if got := factoryCalls.Load(); got != wantCalls {
+				t.Fatalf("upload client factory calls = %d, want %d", got, wantCalls)
+			}
+		})
+	}
+}
+
+// unrelatedCertificatePEM returns a PEM-encoded self-signed certificate generated with its
+// own independent key pair, standing in for a status.ca (or an operator-supplied CA) that does
+// not chain to the real upload origin's certificate -- exercising the "foreign CA" side of the
+// publish-vs-non-publish pinning tests below. It is deliberately NOT taken from a second
+// httptest.NewTLSServer: httptest servers share one built-in default certificate unless
+// explicitly configured otherwise, which would make the "unrelated" CA accidentally identical
+// to the real origin's and silently defeat the test.
+func unrelatedCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+
+	seed := bytes.Repeat([]byte{0x42}, ed25519.SeedSize)
+	privateKey := ed25519.NewKeyFromSeed(seed)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(9999),
+		Subject:      pkix.Name{CommonName: "unrelated-test-ca"},
+		NotBefore:    time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"unrelated.invalid"},
+	}
+
+	der, err := x509.CreateCertificate(rand.New(rand.NewSource(1)), template, template, privateKey.Public(), privateKey)
+	if err != nil {
+		t.Fatalf("create unrelated test certificate: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// TestUploadClient_PinningDependsOnPublish is the critical regression guard for the
+// publish-path trust model: with publish=true, uploadClient merges status.ca into the
+// caller's already-configured (kubeconfig) trust pool via SetTLSCAData, so a request to the
+// real origin succeeds even though the supplied CA itself is unrelated to it. With
+// publish=false, uploadClient calls SetTLSIdentityCAData instead, which REPLACES trust with
+// exactly the supplied CA -- so the same unrelated CA must cause the request to the real
+// origin to fail. A regression here (e.g. always using SetTLSCAData) would silently widen the
+// in-cluster upload path's pinning.
+func TestUploadClient_PinningDependsOnPublish(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	certificate := srv.Certificate()
+	if certificate == nil {
+		t.Fatal("TLS test server has no certificate")
+	}
+
+	trustedCA := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw})
+	unrelatedCA := unrelatedCertificatePEM(t)
+
+	tests := []struct {
+		name     string
+		publish  bool
+		insecure bool
+		wantErr  bool
+	}{
+		{
+			name:    "success: publish merges the unrelated CA with the kubeconfig-trusted pool",
+			publish: true,
+		},
+		{
+			name:    "error: non-publish pins exclusively to the unrelated CA and rejects the real origin",
+			publish: false,
+			wantErr: true,
+		},
+		{
+			// Regression guard for the insecure-skip-tls-verify bypass: SetTLSCAData must force
+			// verification on even though the caller's kubeconfig inherited Insecure: true, so a
+			// server whose certificate is in NEITHER the system pool NOR the explicitly supplied
+			// CA must still be rejected -- and, crucially, the bearer token must never reach that
+			// untrusted server, since a failed handshake means the request body (headers
+			// included) was never sent.
+			name:     "error: publish with inherited insecure-skip-tls-verify still enforces verification and never leaks the bearer token",
+			publish:  true,
+			insecure: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			targetURL := srv.URL
+			configCAData := trustedCA
+
+			var receivedAuthHeader string
+
+			if tc.insecure {
+				// A dedicated server (rather than the shared srv above) guarantees its
+				// certificate is untrusted by construction, and lets this subtest read
+				// receivedAuthHeader without racing the other subtests' concurrent requests
+				// against the shared srv.
+				untrustedSrv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					receivedAuthHeader = r.Header.Get("Authorization")
+				}))
+				t.Cleanup(untrustedSrv.Close)
+
+				targetURL = untrustedSrv.URL
+				configCAData = nil
+			}
+
+			config := &restclient.Config{
+				Host:        targetURL,
+				BearerToken: "must-not-leak",
+				TLSClientConfig: restclient.TLSClientConfig{
+					Insecure: tc.insecure,
+					CAData:   configCAData,
+				},
+			}
+
+			importer := &clusterVolumeImporter{
+				sc:      transport.NewClientForConfig(config),
+				publish: tc.publish,
+			}
+
+			httpClient, err := importer.uploadClient(base64.StdEncoding.EncodeToString(unrelatedCA), targetURL)
+			if err != nil {
+				t.Fatalf("uploadClient: %v", err)
+			}
+			t.Cleanup(httpClient.CloseIdleConnections)
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, targetURL, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			resp, doErr := httpClient.HTTPDo(req)
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+
+			if tc.wantErr {
+				if doErr == nil {
+					t.Fatal("request unexpectedly succeeded against an untrusted origin")
+				}
+
+				if tc.insecure && receivedAuthHeader != "" {
+					t.Fatalf("Authorization header leaked to an untrusted server: %q", receivedAuthHeader)
+				}
+
+				return
+			}
+
+			if doErr != nil {
+				t.Fatalf("request against the real origin unexpectedly failed under publish's merged trust pool: %v", doErr)
+			}
+		})
+	}
 }
 
 func TestUploadVolumeData_CompletedReuseRejectsChangedVerifiedPayload(t *testing.T) {
@@ -5006,7 +5646,7 @@ func TestEnsureDataImport_AlignsTTLRetryingConflict(t *testing.T) {
 
 // TestEnsureDataImport_TTLConflictRevalidatesFreshObject covers the race the retry loop must
 // close: if a concurrent writer replaces the DataImport with a foreign one in the window between
-// the conflicting Update and alignDataImportTTL's re-Get, the re-Get's result must be
+// the conflicting Update and alignDataImportSpec's re-Get, the re-Get's result must be
 // re-validated against leaf before any patch — never blindly reused from the pre-conflict
 // revision.
 func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
@@ -5028,7 +5668,7 @@ func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
 		updateCalls++
 		if updateCalls == 1 {
 			// Simulate a concurrent writer swapping in a foreign DataImport in the exact
-			// window the conflict forces alignDataImportTTL to re-Get.
+			// window the conflict forces alignDataImportSpec to re-Get.
 			if err := dyn.Tracker().Update(dataImportGVR, foreign, targetNS); err != nil {
 				return true, nil, fmt.Errorf("swap in foreign DataImport: %w", err)
 			}
@@ -5054,7 +5694,7 @@ func TestEnsureDataImport_TTLConflictRevalidatesFreshObject(t *testing.T) {
 }
 
 // TestEnsureDataImport_TTLTargetVanishedRecreates covers a conflict whose re-Get finds the
-// DataImport gone: alignDataImportTTL must surface errDataImportRecheck (not a hard failure) so
+// DataImport gone: alignDataImportSpec must surface errDataImportRecheck (not a hard failure) so
 // EnsureDataImport's outer loop re-evaluates from scratch and creates a fresh DataImport.
 func TestEnsureDataImport_TTLTargetVanishedRecreates(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
@@ -5109,7 +5749,7 @@ func TestEnsureDataImport_TTLTargetVanishedRecreates(t *testing.T) {
 
 // TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates mirrors
 // TestEnsureDataImport_RecreatesExpired for the conflict-retry path: if the re-Get after a
-// conflicting TTL Update finds the DataImport now Ready=False/Expired, alignDataImportTTL must
+// conflicting TTL Update finds the DataImport now Ready=False/Expired, alignDataImportSpec must
 // surface errDataImportRecheck so EnsureDataImport's outer loop deletes and recreates it instead
 // of patching a dying object.
 func TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates(t *testing.T) {
@@ -5165,7 +5805,7 @@ func TestEnsureDataImport_TTLTargetExpiredDuringAlignmentRecreates(t *testing.T)
 }
 
 // TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate is a regression anchor for the ordering
-// requirement in alignDataImportTTL: the ttl-equality check must run after any re-Get, but it
+// requirement in alignDataImportSpec: the ttl-equality check must run after any re-Get, but it
 // must still short-circuit to zero Updates on the common already-aligned path.
 func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
 	leaf := volumeSnapshotLeaf("pvc-1")
@@ -5179,6 +5819,232 @@ func TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate(t *testing.T) {
 
 	if u := countDataImportActions(dyn, "update"); u != 0 {
 		t.Errorf("update calls = %d, want 0 (ttl already aligned)", u)
+	}
+}
+
+// TestEnsureDataImport_BuildsSpecPublishField verifies EnsureDataImport always sets
+// spec.publish explicitly (including false), matching the importer's own Publish option --
+// so alignDataImportSpec's later comparison against the server's returned value never depends
+// on an implicit server-side default.
+func TestEnsureDataImport_BuildsSpecPublishField(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		publish bool
+	}{
+		{name: "success: publish=false is explicitly set", publish: false},
+		{name: "success: publish=true is explicitly set", publish: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leaf := volumeSnapshotLeaf("pvc-1")
+
+			dyn := newFakeDataImportDyn()
+			imp := newTestVolumeImporter(dyn)
+			imp.publish = tc.publish
+
+			if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+				t.Fatalf("EnsureDataImport: %v", err)
+			}
+
+			diName := imp.DataImportName(leaf)
+
+			got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+			if err != nil {
+				t.Fatalf("created DataImport not found: %v", err)
+			}
+
+			publish, found, err := unstructured.NestedBool(got.Object, "spec", "publish")
+			if err != nil {
+				t.Fatalf("read spec.publish: %v", err)
+			}
+
+			if !found {
+				t.Fatal("spec.publish was not set, want explicit value")
+			}
+
+			if publish != tc.publish {
+				t.Errorf("spec.publish = %v, want %v", publish, tc.publish)
+			}
+		})
+	}
+}
+
+// TestEnsureDataImport_AlignsPublishOnReuse verifies alignDataImportSpec patches spec.publish
+// on a reused DataImport when it drifts from the current run's --publish, in exactly one
+// Update, leaving spec.ttl untouched when it already matched.
+func TestEnsureDataImport_AlignsPublishOnReuse(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	// dataImportObj never sets spec.publish, so it is absent (equivalent to false).
+	existing := dataImportObj(targetNS, "pvc-1", false)
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Errorf("update calls = %d, want exactly 1", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if !publish {
+		t.Error("spec.publish = false, want true (aligned to the current run's --publish)")
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want unchanged 1h", ttl)
+	}
+}
+
+// TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate is a regression anchor for
+// alignDataImportSpec's single-Update contract: when BOTH spec.ttl and spec.publish drift on
+// the same reused object, they must be patched together in exactly one Update, never two
+// separate ones (which would open a second, redundant conflict window).
+func TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, "2m", "spec", "ttl")
+	_ = unstructured.SetNestedField(existing.Object, false, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Fatalf("update calls = %d, want exactly 1 (both fields patched together)", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	ttl, _, _ := unstructured.NestedString(got.Object, "spec", "ttl")
+	if ttl != "1h" {
+		t.Errorf("spec.ttl = %q, want 1h", ttl)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if !publish {
+		t.Error("spec.publish = false, want true")
+	}
+}
+
+// TestEnsureDataImport_PublishDowngradeInOneUpdate mirrors
+// TestEnsureDataImport_AlignsBothTTLAndPublishInOneUpdate for the true->false direction:
+// publish is aligned bidirectionally (unlike internal/data's upgrade-only semantics), so a
+// prior --publish=true run must not keep exposing the upload publicly once a later run asks
+// for the in-cluster path.
+func TestEnsureDataImport_PublishDowngradeInOneUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, true, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h", publish defaults false
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 1 {
+		t.Fatalf("update calls = %d, want exactly 1", u)
+	}
+
+	diName := imp.DataImportName(leaf)
+
+	got, err := dyn.Resource(dataImportGVR).Namespace(targetNS).Get(context.Background(), diName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get DataImport: %v", err)
+	}
+
+	publish, _, _ := unstructured.NestedBool(got.Object, "spec", "publish")
+	if publish {
+		t.Error("spec.publish = true, want false (downgraded from a prior --publish=true run)")
+	}
+}
+
+// TestEnsureDataImport_PublishAndTTLAlignedIssuesNoUpdate is a regression anchor for the
+// ordering requirement in alignDataImportSpec: both the ttl- and publish-equality checks must
+// run after any re-Get, but must still short-circuit to zero Updates when both are already
+// aligned -- not just ttl alone, as covered by TestEnsureDataImport_TTLAlreadyAlignedIssuesNoUpdate.
+func TestEnsureDataImport_PublishAndTTLAlignedIssuesNoUpdate(t *testing.T) {
+	leaf := volumeSnapshotLeaf("pvc-1")
+
+	existing := dataImportObj(targetNS, "pvc-1", false)
+	_ = unstructured.SetNestedField(existing.Object, true, "spec", "publish")
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn) // ttl: "1h"
+	imp.publish = true
+
+	if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+		t.Fatalf("EnsureDataImport: %v", err)
+	}
+
+	if u := countDataImportActions(dyn, "update"); u != 0 {
+		t.Errorf("update calls = %d, want 0 (ttl and publish already aligned)", u)
+	}
+}
+
+// TestEnsureDataImport_PublishChangeNeverForeign verifies the deliberate exclusion of
+// spec.publish from dataImportAnnotations/validateDataImportSpec: reusing a DataImport whose
+// spec.publish differs from the current run's --publish must NOT be treated as
+// ErrForeignDataImport, since publish is a transport property of THIS run, not part of the
+// leaf's content identity.
+func TestEnsureDataImport_PublishChangeNeverForeign(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		existingPublish bool
+		runPublish      bool
+	}{
+		{name: "success: existing false, run requests true", existingPublish: false, runPublish: true},
+		{name: "success: existing true, run requests false", existingPublish: true, runPublish: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			leaf := volumeSnapshotLeaf("pvc-1")
+			existing := dataImportObj(targetNS, "pvc-1", false)
+			_ = unstructured.SetNestedField(existing.Object, tc.existingPublish, "spec", "publish")
+
+			dyn := newFakeDataImportDyn(existing)
+			imp := newTestVolumeImporter(dyn)
+			imp.publish = tc.runPublish
+
+			if _, err := imp.EnsureDataImport(context.Background(), leaf, targetNS); err != nil {
+				t.Fatalf("EnsureDataImport must not fail with ErrForeignDataImport on a publish-only change: %v", err)
+			}
+		})
 	}
 }
 
@@ -5581,123 +6447,206 @@ func TestSendVolumeData_FSLeaf_UsesTarFile(t *testing.T) {
 	}
 }
 
-// TestBlockTotalSize covers every codec and every invalid-size shape
-// blockTotalSize must handle: the raw (ext=="") on-disk size is cross-checked
-// against the captured VolumeInfo.Size for BOTH a short and a long mismatch,
-// while a compressed file's on-disk (compressed) size is never compared to
-// the captured (decompressed) size at all. A missing or unparsable captured
-// size fails regardless of codec.
-func TestBlockTotalSize(t *testing.T) {
+// poisonReadSeeker fails the test immediately if Read or Seek is called — proves
+// resolveBlockPayloadSize's fast path trusts PayloadRawSizeBytes without touching the file.
+type poisonReadSeeker struct{ t *testing.T }
+
+func (p poisonReadSeeker) Read(_ []byte) (int, error) {
+	p.t.Helper()
+	p.t.Fatal("unexpected Read: the fast path must not touch the payload file")
+
+	return 0, nil
+}
+
+func (p poisonReadSeeker) Seek(_ int64, _ int) (int64, error) {
+	p.t.Helper()
+	p.t.Fatal("unexpected Seek: the fast path must not touch the payload file")
+
+	return 0, nil
+}
+
+// TestResolveBlockPayloadSize covers its three decision paths: the current-format fast path
+// for a non-raw codec (trusts PayloadRawSizeBytes, no I/O); the measured path for a legacy
+// archive or any raw payload; and the v3 raw cross-check against PayloadStoredSizeBytes.
+func TestResolveBlockPayloadSize(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
-		ext         string
-		size        string
-		fileContent []byte // nil => no on-disk file at all
+		leaf        PlannedNode
+		fileContent []byte // written to leaf.DataFile before the call
+		useSource   bool   // pass the file content as an explicit io.ReadSeeker
 		wantTotal   int64
-		wantErr     error // nil => any non-nil error is acceptable
-		wantErrNil  bool
+		wantErr     error
 	}{
 		{
-			name:        "raw exact match",
-			ext:         "",
-			size:        "10",
-			fileContent: []byte("0123456789"),
-			wantTotal:   10,
-			wantErrNil:  true,
+			name: "success: v3 zstd trusts recorded raw size without reading the file",
+			leaf: PlannedNode{
+				Ext:                 ".zst",
+				FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+				PayloadRawSizeBytes: 1077665792,
+			},
+			wantTotal: 1077665792,
 		},
 		{
-			name:        "raw short mismatch (on-disk smaller than captured)",
-			ext:         "",
-			size:        "10",
+			name: "success: v3 gzip trusts recorded raw size without reading the file",
+			leaf: PlannedNode{
+				Ext:                 ".gz",
+				FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+				PayloadRawSizeBytes: 4096,
+			},
+			wantTotal: 4096,
+		},
+		{
+			name: "success: legacy zstd is measured via frame headers, not trusted from a field",
+			leaf: PlannedNode{
+				Ext:           ".zst",
+				FormatVersion: archive.SnapshotFormatVersionAuthenticatedChildren,
+				// A stale/absent field on a legacy archive must be ignored entirely.
+				PayloadRawSizeBytes: 999999,
+			},
+		},
+		{
+			name: "success: legacy other codec is measured via a full decode from an explicit source",
+			leaf: PlannedNode{
+				Ext:           ".gz",
+				FormatVersion: archive.SnapshotFormatVersionAuthenticatedChildren,
+			},
+			useSource: true,
+		},
+		{
+			name: "success: legacy raw payload is measured via seek, no cross-check performed",
+			leaf: PlannedNode{
+				Ext:           "",
+				FormatVersion: archive.SnapshotFormatVersionAuthenticatedChildren,
+				// Deliberately mismatched: legacy archives never recorded StoredSizeBytes,
+				// so nothing to cross-check against — the measured length is trusted outright.
+				PayloadStoredSizeBytes: 999999,
+			},
+		},
+		{
+			name: "success: v3 raw payload matches recorded StoredSizeBytes",
+			leaf: PlannedNode{
+				Ext:                    "",
+				FormatVersion:          archive.SnapshotFormatVersionPayloadSizes,
+				PayloadStoredSizeBytes: 10,
+			},
+			fileContent: []byte("0123456789"),
+			wantTotal:   10,
+		},
+		{
+			name: "error: v3 raw payload disagrees with recorded StoredSizeBytes (short)",
+			leaf: PlannedNode{
+				Ext:                    "",
+				FormatVersion:          archive.SnapshotFormatVersionPayloadSizes,
+				PayloadStoredSizeBytes: 10,
+			},
 			fileContent: []byte("12345"),
 			wantErr:     ErrRawBlockSizeMismatch,
 		},
 		{
-			name:        "raw long mismatch (on-disk larger than captured)",
-			ext:         "",
-			size:        "10",
+			name: "error: v3 raw payload disagrees with recorded StoredSizeBytes (long)",
+			leaf: PlannedNode{
+				Ext:                    "",
+				FormatVersion:          archive.SnapshotFormatVersionPayloadSizes,
+				PayloadStoredSizeBytes: 10,
+			},
 			fileContent: []byte("012345678901234567890123456789"),
 			wantErr:     ErrRawBlockSizeMismatch,
 		},
 		{
-			name:        "zstd: on-disk (compressed) size never compared to captured size",
-			ext:         ".zst",
-			size:        "10Gi",
-			fileContent: []byte("short-compressed-stand-in"),
-			wantTotal:   10 * 1024 * 1024 * 1024,
-			wantErrNil:  true,
-		},
-		{
-			name:        "gzip: captured size is authoritative",
-			ext:         ".gz",
-			size:        "5Mi",
-			fileContent: []byte("x"),
-			wantTotal:   5 * 1024 * 1024,
-			wantErrNil:  true,
-		},
-		{
-			name:        "lz4: captured size is authoritative",
-			ext:         ".lz4",
-			size:        "1Ki",
-			fileContent: []byte("x"),
-			wantTotal:   1024,
-			wantErrNil:  true,
-		},
-		{
-			name:        "missing captured size",
-			ext:         "",
-			size:        "",
-			fileContent: []byte("12345"),
-			wantErrNil:  false,
-		},
-		{
-			name:        "invalid captured size",
-			ext:         "",
-			size:        "not-a-quantity",
-			fileContent: []byte("12345"),
-			wantErrNil:  false,
-		},
-		{
-			name:       "raw file missing on disk",
-			ext:        "",
-			size:       "10",
-			wantErrNil: false,
+			name: "error: raw file missing on disk",
+			leaf: PlannedNode{
+				Ext:           "",
+				FormatVersion: archive.SnapshotFormatVersionAuthenticatedChildren,
+			},
+			fileContent: nil,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
+			t.Parallel()
 
-			if tc.fileContent != nil {
+			dir := t.TempDir()
+			dataFile := filepath.Join(dir, "data.bin"+tc.leaf.Ext)
+			tc.leaf.DataFile = dataFile
+
+			if tc.wantTotal == 0 && tc.fileContent == nil && tc.wantErr == nil &&
+				tc.leaf.FormatVersion != archive.SnapshotFormatVersionPayloadSizes {
+				// Legacy paths that must actually measure something: synthesize a valid
+				// encoded (or raw) payload whose decoded length becomes the expectation.
+				plain := []byte("legacy-measured-block-payload-bytes")
+
+				if tc.leaf.Ext == "" {
+					tc.fileContent = plain
+				} else {
+					codec, err := compress.New(codecNameForExt(tc.leaf.Ext), 0)
+					if err != nil {
+						t.Fatalf("compress.New: %v", err)
+					}
+
+					var buf bytes.Buffer
+					if err := codec.EncodeFrameStream(&buf, bytes.NewReader(plain), int64(len(plain))); err != nil {
+						t.Fatalf("EncodeFrameStream: %v", err)
+					}
+
+					tc.fileContent = buf.Bytes()
+				}
+
+				tc.wantTotal = int64(len(plain))
+			}
+
+			var source io.ReadSeeker
+
+			switch {
+			case tc.leaf.Ext != "" && tc.leaf.FormatVersion >= archive.SnapshotFormatVersionPayloadSizes:
+				// Fast path: prove no I/O happens at all by handing over a poisoned source
+				// (or leaving DataFile pointed at a file that is never written).
+				source = poisonReadSeeker{t: t}
+			case tc.fileContent != nil:
 				if err := os.WriteFile(dataFile, tc.fileContent, 0o600); err != nil {
 					t.Fatalf("write %s: %v", dataFile, err)
 				}
+
+				if tc.useSource {
+					source = bytes.NewReader(tc.fileContent)
+				}
 			}
 
-			got, err := blockTotalSize(dataFile, tc.size, tc.ext)
+			got, err := resolveBlockPayloadSize(context.Background(), tc.leaf, source)
 
-			if tc.wantErrNil {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-
-				if got != tc.wantTotal {
-					t.Errorf("total = %d, want %d", got, tc.wantTotal)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("error = %v, want wrapping %v", err, tc.wantErr)
 				}
 
 				return
 			}
 
-			if err == nil {
-				t.Fatal("expected error, got nil")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
-				t.Errorf("expected error wrapping %v, got: %v", tc.wantErr, err)
+			if got != tc.wantTotal {
+				t.Errorf("total = %d, want %d", got, tc.wantTotal)
 			}
 		})
+	}
+}
+
+// codecNameForExt maps a compress.Codec.Ext-style extension back to its compress.New name,
+// for building legacy-archive test fixtures directly from PlannedNode.Ext.
+func codecNameForExt(ext string) string {
+	switch ext {
+	case ".zst":
+		return "zstd"
+	case ".gz":
+		return "gzip"
+	case ".lz4":
+		return "lz4"
+	default:
+		return "none"
 	}
 }
 
@@ -5713,10 +6662,10 @@ func (d noHTTPDoer) HTTPDo(_ *http.Request) (*http.Response, error) {
 	return nil, nil
 }
 
-// TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP verifies that a raw
-// (codec none) block leaf whose on-disk data.bin size disagrees with its
-// captured VolumeInfo.Size fails deterministically via blockTotalSize and
-// never issues a single HTTP request (no HEAD, no PUT).
+// TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP verifies that a raw (codec none)
+// block leaf from a v3 archive, whose on-disk data.bin size disagrees with its recorded
+// PayloadStoredSizeBytes, fails deterministically via resolveBlockPayloadSize before any
+// HTTP request (no HEAD, no PUT).
 func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
 	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "data.bin")
@@ -5726,12 +6675,13 @@ func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
 	}
 
 	leaf := PlannedNode{
-		APIVersion: "snapshot.storage.k8s.io/v1",
-		Kind:       "VolumeSnapshot",
-		Name:       "pvc-1",
-		DataFile:   dataFile,
-		Ext:        "",
-		Size:       "10", // disagrees with the 5-byte file actually on disk
+		APIVersion:             "snapshot.storage.k8s.io/v1",
+		Kind:                   "VolumeSnapshot",
+		Name:                   "pvc-1",
+		DataFile:               dataFile,
+		Ext:                    "",
+		FormatVersion:          archive.SnapshotFormatVersionPayloadSizes,
+		PayloadStoredSizeBytes: 10, // disagrees with the 5-byte file actually on disk
 	}
 
 	imp := &clusterVolumeImporter{log: discardLogger()}
@@ -5746,33 +6696,229 @@ func TestSendVolumeData_Block_RawSizeMismatch_SendsNoHTTP(t *testing.T) {
 	}
 }
 
-// TestSendVolumeData_Block_InvalidSize_SendsNoHTTP verifies that a block leaf
-// with a missing/unparsable captured size fails before any HTTP request,
-// for every codec (raw and compressed alike).
-func TestSendVolumeData_Block_InvalidSize_SendsNoHTTP(t *testing.T) {
+// TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail is the regression test for the live
+// bug: a thin-provisioning backend rounds the device up from the nominal captured size ("1Ki"
+// below, standing in for 1Gi/1073741824), so the real payload (2900 bytes here, standing in for
+// 1077665792) exceeds it. Before this fix, upload trusted nominal Size as totalSize and failed;
+// now resolveBlockPayloadSize reads the archive's measured PayloadRawSizeBytes instead, so
+// upload succeeds and setTotal reports the TRUE decoded size.
+func TestSendVolumeData_Block_NominalSizeMismatchDoesNotFail(t *testing.T) {
+	t.Parallel()
+
+	// Deliberately not a round number and deliberately larger than the nominal size below,
+	// standing in for a thin-provisioning device round-up.
+	payload := bytes.Repeat([]byte("thin-provisioned-block-bytes-"), 100)
+
+	dir := t.TempDir()
+	dataFile := filepath.Join(dir, "data.bin.zst")
+
+	writeEncodedBlockFile(t, dataFile, "zstd", payload)
+
+	leaf := PlannedNode{
+		APIVersion:          "snapshot.storage.k8s.io/v1",
+		Kind:                "VolumeSnapshot",
+		Name:                "pvc-1",
+		DataFile:            dataFile,
+		Ext:                 ".zst",
+		FormatVersion:       archive.SnapshotFormatVersionPayloadSizes,
+		PayloadRawSizeBytes: int64(len(payload)),
+		// Nominal size, deliberately smaller than the real payload above (mirrors the live
+		// bug) — resolveBlockPayloadSize must never consult this field.
+		Size: "1Ki",
+	}
+
+	imp := &fakeBlockImporter{}
+	srv := httptest.NewServer(imp)
+	t.Cleanup(srv.Close)
+
+	var totals []int64
+
+	setTotal := func(n int64) { totals = append(totals, n) }
+
+	importer := &clusterVolumeImporter{log: discardLogger()}
+
+	err := importer.sendVolumeData(context.Background(), plainHTTPDoer{}, srv.URL, volumeModeBlock, leaf, targetNS, "pvc-1", setTotal, nil, nil)
+	if err != nil {
+		t.Fatalf("sendVolumeData must succeed despite the nominal/real size mismatch: %v", err)
+	}
+
+	if got := imp.received(); !bytes.Equal(got, payload) {
+		t.Fatalf("server received %d bytes not matching the original %d-byte payload", len(got), len(payload))
+	}
+
+	if want := []int64{int64(len(payload))}; len(totals) != 1 || totals[0] != want[0] {
+		t.Errorf("setTotal calls = %v, want a single call with %v (the TRUE decoded size, not the nominal 1Ki)", totals, want)
+	}
+
+	nominalBytes := int64(1024)
+	if len(totals) == 1 && totals[0] == nominalBytes {
+		t.Errorf("setTotal was called with the nominal size %d, not the measured payload size %d", nominalBytes, len(payload))
+	}
+}
+
+// TestHeadBlockOffset_DeviceSize covers verifyDeviceCapacity's fail-open/fail-closed
+// contract as exercised through headBlockOffset's 200 OK branch.
+func TestHeadBlockOffset_DeviceSize(t *testing.T) {
+	t.Parallel()
+
+	const totalSize = int64(100)
+
+	tests := []struct {
+		name             string
+		deviceSizeHeader string
+		wantErr          bool
+	}{
+		{name: "success: header absent fails open", deviceSizeHeader: ""},
+		{name: "success: device size equal to payload", deviceSizeHeader: "100"},
+		{name: "success: device size larger than payload", deviceSizeHeader: "200"},
+		{name: "error: device size smaller than payload", deviceSizeHeader: "50", wantErr: true},
+		{name: "success: unparsable header fails open", deviceSizeHeader: "not-a-number"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			doer := testHTTPDoer(func(_ *http.Request) (*http.Response, error) {
+				header := http.Header{}
+				header.Set("X-Next-Offset", "0")
+
+				if tc.deviceSizeHeader != "" {
+					header.Set("X-Device-Size", tc.deviceSizeHeader)
+				}
+
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader(nil)),
+				}, nil
+			})
+
+			_, err := headBlockOffset(context.Background(), doer, "https://importer.local/block", totalSize)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+
+				if !strings.Contains(err.Error(), "50") || !strings.Contains(err.Error(), "100") {
+					t.Errorf("error should mention both device size and payload size, got: %v", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestHeadBlockOffset_DeviceSize_SendsNoPUTOnShortfall proves the device-capacity check runs
+// strictly before the first PUT: a doer that would fail the test on any PUT call never sees one.
+func TestHeadBlockOffset_DeviceSize_SendsNoPUTOnShortfall(t *testing.T) {
+	t.Parallel()
+
+	doer := testHTTPDoer(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPut {
+			t.Fatal("unexpected PUT: the device-capacity check must fail before any PUT is attempted")
+		}
+
+		header := http.Header{}
+		header.Set("X-Next-Offset", "0")
+		header.Set("X-Device-Size", "5")
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     header,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+		}, nil
+	})
+
+	err := putBlock(context.Background(), doer, "https://importer.local/api/v1/block", "/nonexistent/data.bin", "", 100, discardLogger(), nil, nil)
+	if err == nil {
+		t.Fatal("expected error for undersized target device, got nil")
+	}
+}
+
+// TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition proves resume/dedup is unaffected:
+// a DataImport created by a pre-fix binary (no PayloadRawSizeBytes/PayloadStoredSizeBytes/
+// FormatVersion anywhere) must still be recognised and reused when EnsureDataImport re-plans
+// the same leaf with a fixed binary that now carries those fields.
+func TestEnsureDataImport_ResumeAcrossPayloadSizeFieldsAddition(t *testing.T) {
+	leafOld := volumeSnapshotLeaf("pvc-1")
+	existing := dataImportObjForLeaf(targetNS, leafOld, false)
+
+	leafNew := leafOld
+	leafNew.PayloadRawSizeBytes = 1077665792
+	leafNew.PayloadStoredSizeBytes = 900000000
+	leafNew.FormatVersion = archive.SnapshotFormatVersionPayloadSizes
+
+	if dataImportIdentity(leafNew) != dataImportIdentity(leafOld) {
+		t.Fatal("dataImportIdentity must not incorporate PayloadRawSizeBytes/PayloadStoredSizeBytes/FormatVersion")
+	}
+
+	dyn := newFakeDataImportDyn(existing)
+	imp := newTestVolumeImporter(dyn)
+
+	name, err := imp.EnsureDataImport(context.Background(), leafNew, targetNS)
+	if err != nil {
+		t.Fatalf("EnsureDataImport must still match the pre-fix DataImport by its unaffected identity: %v", err)
+	}
+
+	if want := imp.DataImportName(leafNew); name != want {
+		t.Errorf("name = %q, want %q", name, want)
+	}
+
+	if want := imp.DataImportName(leafOld); name != want {
+		t.Errorf("DataImportName must be identity-stable across the payload-size fields addition: got %q, want %q", name, want)
+	}
+
+	if c := countDataImportActions(dyn, "create"); c != 0 {
+		t.Errorf("a pre-fix DataImport must be reused, not recreated (creates=%d)", c)
+	}
+
+	if c := countDataImportActions(dyn, "delete"); c != 0 {
+		t.Errorf("a pre-fix DataImport must not be deleted (deletes=%d)", c)
+	}
+}
+
+// TestSendVolumeData_Block_CorruptCompressedPayload_SendsNoHTTP verifies that a legacy-archive
+// compressed block leaf whose on-disk bytes aren't a valid frame fails during
+// resolveBlockPayloadSize's measurement pass, before any HEAD/PUT. A legacy archive's
+// compressed payload is always measured from the bytes themselves, so garbage bytes are the
+// failure mode caught here (replaces the old missing/unparsable-Size preflight).
+func TestSendVolumeData_Block_CorruptCompressedPayload_SendsNoHTTP(t *testing.T) {
 	for _, tc := range blockCodecCases {
+		if tc.ext == "" {
+			continue // the raw path has its own dedicated mismatch test above.
+		}
+
 		t.Run(tc.codec, func(t *testing.T) {
 			dir := t.TempDir()
 			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
 
-			if err := os.WriteFile(dataFile, []byte("irrelevant"), 0o600); err != nil {
+			if err := os.WriteFile(dataFile, []byte("not a valid "+tc.codec+" frame"), 0o600); err != nil {
 				t.Fatalf("write %s: %v", dataFile, err)
 			}
 
 			leaf := PlannedNode{
-				APIVersion: "snapshot.storage.k8s.io/v1",
-				Kind:       "VolumeSnapshot",
-				Name:       "pvc-1",
-				DataFile:   dataFile,
-				Ext:        tc.ext,
-				Size:       "", // missing captured size
+				APIVersion:    "snapshot.storage.k8s.io/v1",
+				Kind:          "VolumeSnapshot",
+				Name:          "pvc-1",
+				DataFile:      dataFile,
+				Ext:           tc.ext,
+				FormatVersion: archive.SnapshotFormatVersionAuthenticatedChildren, // legacy: always measured
 			}
 
 			imp := &clusterVolumeImporter{log: discardLogger()}
 
 			err := imp.sendVolumeData(context.Background(), noHTTPDoer{t: t}, "https://importer.local", volumeModeBlock, leaf, targetNS, "pvc-1", nil, nil, nil)
 			if err == nil {
-				t.Fatal("expected error for missing captured size, got nil")
+				t.Fatal("expected error for corrupt compressed payload, got nil")
 			}
 		})
 	}

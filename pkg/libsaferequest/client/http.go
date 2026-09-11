@@ -62,6 +62,13 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	return &SafeClient{restConfig}, nil
 }
 
+// NewSafeClientForConfig derives a SafeClient from an already-resolved REST
+// configuration instead of re-parsing --kubeconfig/--context flags, so a probe
+// built from it targets the same cluster the caller already resolved.
+func NewSafeClientForConfig(config *rest.Config) *SafeClient {
+	return &SafeClient{restConfig: rest.CopyConfig(config)}
+}
+
 // SetProbeEndpoint configures host, TLS ServerName and timeout for probe requests.
 func (c *SafeClient) SetProbeEndpoint(timeout time.Duration, targetHost, kubeServiceServerName string) {
 	c.restConfig.Host = targetHost
@@ -186,20 +193,33 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 
 	c.restConfig.TLSClientConfig.CAData = nil
 	c.restConfig.TLSClientConfig.CAFile = ""
+	c.restConfig.TLSClientConfig.Insecure = false
+	c.restConfig.TLSClientConfig.ServerName = ""
+	prev := c.restConfig.WrapTransport
+
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+		if prev != nil {
+			rt = prev(rt)
+		}
+
 		transport, ok := rt.(*http.Transport)
 		if !ok {
-			return transport
+			// CA-pool injection is a best-effort enhancement over *http.Transport;
+			// for any other RoundTripper degrade to pass-through so we never hand
+			// back a typed-nil transport that nil-panics on RoundTrip.
+			return rt
 		}
 
-		clonedTrasport := transport.Clone()
-		if clonedTrasport.TLSClientConfig == nil {
-			clonedTrasport.TLSClientConfig = &tls.Config{}
+		clonedTransport := transport.Clone()
+		if clonedTransport.TLSClientConfig == nil {
+			clonedTransport.TLSClientConfig = &tls.Config{}
 		}
 
-		clonedTrasport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.InsecureSkipVerify = false
+		clonedTransport.TLSClientConfig.ServerName = ""
 
-		return clonedTrasport
+		return clonedTransport
 	}
 }
 

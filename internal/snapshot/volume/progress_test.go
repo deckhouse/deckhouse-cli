@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -331,14 +332,14 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
 
-	// Simulate a prior partial run: root.txt was already staged (compressed
-	// blob written under stagingDir) but data.tar was never assembled.
-	// The staged bytes need not be a valid zstd stream for this assertion —
-	// stageCompressedFile's skip branch never decodes them, it only checks
-	// for the destination file's existence (see
-	// TestDownloadFilesystemVolume_SkipsExistingCompressedStaged in
-	// fs_test.go, which relies on the same property).
-	sentinel := []byte("sentinel-not-server-content")
+	// Simulate a prior partial run: root.txt was staged but data.tar wasn't assembled. With
+	// no source MD5, the resume-skip branch verifies size only — the pre-staged blob must
+	// decode to a plaintext of the same length as the listing's declared size (12 bytes) for
+	// the skip to stand, even though its content differs from the real source bytes.
+	sentinelPlaintext := bytes.Repeat([]byte("X"), len(files[0].content))
+	sentinel, err := codec.EncodeFrame(sentinelPlaintext)
+	require.NoError(t, err)
+
 	preStaged := filepath.Join(stagingDir, "root.txt"+codec.Ext())
 	require.NoError(t, os.WriteFile(preStaged, sentinel, 0o644))
 
@@ -350,7 +351,7 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 
 	var counter progressCounter
 
-	err := volume.DownloadFilesystemVolume(
+	err = volume.DownloadFilesystemVolume(
 		context.Background(),
 		slog.Default(),
 		tarPath,
@@ -371,8 +372,8 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 			"resume still reaches 100%%")
 
 	// The skip must still have avoided re-download: the tar entry for the
-	// pre-staged file carries the sentinel bytes, not freshly downloaded
-	// content.
+	// pre-staged file decodes back to the sentinel plaintext, not the real
+	// server content.
 	f, err := os.Open(tarPath)
 	require.NoError(t, err)
 
@@ -397,6 +398,15 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 		got, readErr := io.ReadAll(tr)
 		require.NoError(t, readErr)
 		require.Equal(t, sentinel, got, "pre-staged file must not be re-downloaded")
+
+		decoded, decodeErr := zstd.NewReader(bytes.NewReader(got))
+		require.NoError(t, decodeErr)
+
+		plaintext, readErr := io.ReadAll(decoded)
+		decoded.Close()
+		require.NoError(t, readErr)
+		require.Equal(t, sentinelPlaintext, plaintext,
+			"pre-staged file must decode to the sentinel plaintext, not freshly downloaded content")
 
 		foundSentinel = true
 	}

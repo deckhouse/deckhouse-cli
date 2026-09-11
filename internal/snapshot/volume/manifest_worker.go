@@ -267,6 +267,16 @@ func finalizeNodeWithChecksum(
 		return fmt.Errorf("compute children checksum for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
+	// The recorded payload size cannot be threaded through in memory from wherever the
+	// volume was downloaded: this call may finalize a node that downloaded nothing in
+	// THIS run (a crash-resume or a re-publication triggered by a re-published child), so
+	// the only value correct in every case is measured fresh from the bytes already on
+	// disk, here, at finalize time.
+	payload, err := MeasurePayload(ctx, destination, nodeDir)
+	if err != nil {
+		return fmt.Errorf("measure payload for %s/%s: %w", node.Kind, node.Name, err)
+	}
+
 	sy := archive.SnapshotYAML{
 		APIVersion:       node.APIVersion,
 		Kind:             node.Kind,
@@ -277,7 +287,7 @@ func finalizeNodeWithChecksum(
 		SourceObjectRef:  buildSourceObjectRef(node.SourceRef),
 		Checksum:         checksum,
 		ChildrenChecksum: &childrenChecksum,
-		Volumes:          buildVolumesList(node),
+		Volumes:          buildVolumesList(node, payload),
 	}
 
 	if err := writeSnapshotYAML(ctx, destination, nodeDir, sy); err != nil {
@@ -327,18 +337,19 @@ func removePath(destination *archive.RootedDestination, path string) error {
 
 // buildVolumesList constructs the Volumes list for snapshot.yaml from a node.
 // Returns nil (omitted) when the node captured no volume.
-func buildVolumesList(node *source.Node) []archive.VolumeInfo {
+func buildVolumesList(node *source.Node, payload PayloadSize) []archive.VolumeInfo {
 	if node.Data == nil {
 		return nil
 	}
 
-	return []archive.VolumeInfo{nodeDataToVolumeInfo(node.Data)}
+	return []archive.VolumeInfo{nodeDataToVolumeInfo(node.Data, payload)}
 }
 
 // nodeDataToVolumeInfo converts a namespaced status.data descriptor to a VolumeInfo. The
 // volume metadata (volumeMode/storageClassName/size) is carried through so the import side
 // can rebuild the DataImport spec for a re-import without re-reading the live cluster state.
-func nodeDataToVolumeInfo(d *source.NodeData) archive.VolumeInfo {
+// payload is the measured on-disk payload footprint (see MeasurePayload).
+func nodeDataToVolumeInfo(d *source.NodeData, payload PayloadSize) archive.VolumeInfo {
 	return archive.VolumeInfo{
 		Target: archive.VolumeObjectRef{
 			APIVersion: d.SourceRef.APIVersion,
@@ -355,6 +366,8 @@ func nodeDataToVolumeInfo(d *source.NodeData) archive.VolumeInfo {
 		VolumeMode:       d.VolumeMode,
 		StorageClassName: d.StorageClassName,
 		Size:             d.Size,
+		RawSizeBytes:     payload.RawBytes,
+		StoredSizeBytes:  payload.StoredBytes,
 	}
 }
 

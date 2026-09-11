@@ -121,6 +121,20 @@ type PlannedNode struct {
 	NodeChecksum string
 	// SizeBytes is Size parsed once into its canonical byte count before cluster mutation.
 	SizeBytes int64
+	// PayloadRawSizeBytes/PayloadStoredSizeBytes are the measured on-disk payload footprint
+	// recorded in snapshot.yaml Volumes[0] (archive.VolumeInfo.RawSizeBytes/StoredSizeBytes),
+	// read verbatim from an archive at FormatVersion >= SnapshotFormatVersionPayloadSizes. On
+	// an older archive both are zero (never recorded); resolveBlockPayloadSize disambiguates
+	// that from a genuinely empty v3 payload using FormatVersion, and measures the upload
+	// size from the payload itself instead. Empty for structural/aggregator nodes.
+	PayloadRawSizeBytes    int64
+	PayloadStoredSizeBytes int64
+	// FormatVersion is the archive envelope version this node's snapshot.yaml declared (see
+	// archive.SnapshotFormatVersion*). It exists solely to disambiguate
+	// PayloadRawSizeBytes == 0 meaning "not recorded" (FormatVersion <
+	// archive.SnapshotFormatVersionPayloadSizes) from "recorded, genuinely empty payload"
+	// (FormatVersion >= archive.SnapshotFormatVersionPayloadSizes).
+	FormatVersion int
 	// PayloadKind and Codec are the classified on-disk upload representation.
 	PayloadKind string
 	Codec       string
@@ -659,6 +673,7 @@ func (b *planBuilder) readNode(source *archive.RootedSource) (PlannedNode, error
 		Manifests:       manifests,
 		SourceObjectRef: sy.SourceObjectRef,
 		NodeChecksum:    sy.Checksum.Hex,
+		FormatVersion:   sy.FormatVersion,
 		snapshotDigest:  sha256.Sum256(snapshotData),
 		snapshotInfo:    snapshotInfoBefore,
 		manifestFiles:   manifestFiles,
@@ -672,6 +687,8 @@ func (b *planBuilder) readNode(source *archive.RootedSource) (PlannedNode, error
 		node.StorageClassName = v.StorageClassName
 		node.Size = v.Size
 		node.VolumeMode = v.VolumeMode
+		node.PayloadRawSizeBytes = v.RawSizeBytes
+		node.PayloadStoredSizeBytes = v.StoredSizeBytes
 	}
 
 	blockPayload, found, err := archive.ClassifyBlockPayloadIn(source)
