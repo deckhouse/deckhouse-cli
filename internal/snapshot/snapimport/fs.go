@@ -157,7 +157,8 @@ type fileConflictTracker struct {
 func (t *fileConflictTracker) observe(from, to int64) error {
 	if t.total == maxFileConflictReplays {
 		return fmt.Errorf(
-			"too many file upload conflict replays (%d); latest transition from %d to %d",
+			"%w: too many file upload conflict replays (%d); latest transition from %d to %d",
+			errConflictBudgetExhausted,
 			maxFileConflictReplays,
 			from,
 			to,
@@ -171,12 +172,14 @@ func (t *fileConflictTracker) observe(from, to int64) error {
 
 	for _, offset := range t.offsets[:t.count] {
 		if offset == to {
-			return fmt.Errorf("server-directed file upload offset cycle from %d to %d", from, to)
+			return fmt.Errorf("%w: server-directed file upload offset cycle from %d to %d",
+				errConflictBudgetExhausted, from, to)
 		}
 	}
 
 	if t.count == len(t.offsets) {
-		return fmt.Errorf("too many consecutive file upload conflicts (%d)", maxConsecutiveFileConflicts)
+		return fmt.Errorf("%w: too many consecutive file upload conflicts (%d)",
+			errConflictBudgetExhausted, maxConsecutiveFileConflicts)
 	}
 
 	t.offsets[t.count] = to
@@ -190,44 +193,61 @@ func (t *fileConflictTracker) reset() {
 	t.count = 0
 }
 
-// putFile sends bounded requests using a fresh body positioned at every server-selected
-// raw offset. Callers probe HEAD first and supply the validated durable offset.
+// putFile is ONE attempt of a filesystem entry's upload: it sends bounded requests using a
+// fresh body positioned at every server-selected raw offset until the importer holds the
+// whole entry, and stops at the first failure. Callers probe HEAD first and supply the
+// validated durable offset; it never retries internally, the retry seam being
+// fileUploadTransfer.attempt.
+//
+// It returns the offset the importer last confirmed, on the failure path as well as on the
+// success one, which is what lets a retry resume rather than restart. That offset is never
+// this client's own count of bytes PUSHED — bytes written into a connection that then died
+// may or may not have been stored. It is either an offset the importer named in a header
+// and doFileChunk validated, or, on the one answer this importer sends without a header,
+// the request's own end: a 201 with no X-Next-Offset, which doFileChunk accepts only when
+// that end is the declared total, and which this importer sends only after renaming the
+// finished file into place.
+//
+// Repositioning belongs to the body factory, not to this loop: newBody is asked for a body
+// AT AN OFFSET, and tarEntryStream — the only factory in production — reopens and
+// fast-forwards its decoder whenever that offset is not where the decoder already stands.
+// A retry is therefore just another call at another offset, and needs nothing of its own.
 func putFile(
 	ctx context.Context,
 	client httpDoer,
 	baseURL, relPath string,
-	totalSize, offset int64,
+	totalSize, offset, payloadLimit int64,
 	attrs fileAttrs,
 	newBody fileBodyFactory,
 	progress *fileUploadProgress,
 	activate func(),
-) error {
+) (int64, error) {
 	fileURL, err := fileUploadURL(baseURL, relPath)
 	if err != nil {
-		return err
+		return offset, err
 	}
 
 	if err := validateBlockOffset(offset, totalSize); err != nil {
-		return fmt.Errorf("invalid initial file offset: %w", err)
+		return offset, fmt.Errorf("invalid initial file offset: %w", err)
 	}
 
 	var conflicts fileConflictTracker
 
 	for {
-		requestEnd := offset + min(blockPutPayloadLimit, totalSize-offset)
+		requestEnd := offset + min(payloadLimit, totalSize-offset)
 		requestSize := requestEnd - offset
 
 		body := io.ReadCloser(http.NoBody)
 		if requestSize > 0 {
 			body, err = newBody(ctx, offset, requestSize)
 			if err != nil {
-				return fmt.Errorf("open body for %s at offset %d: %w", relPath, offset, err)
+				return offset, fmt.Errorf("open body for %s at offset %d: %w", relPath, offset, err)
 			}
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, fileURL, body)
 		if err != nil {
-			return errors.Join(
+			return offset, errors.Join(
 				fmt.Errorf("build PUT for %s at offset %d: %w", relPath, offset, err),
 				closeFileBody(body, relPath, offset),
 			)
@@ -245,12 +265,13 @@ func putFile(
 		closeErr := closeFileBody(body, relPath, offset)
 
 		if requestErr != nil || closeErr != nil {
-			return fmt.Errorf("upload %s at offset %d: %w", relPath, offset, errors.Join(requestErr, closeErr))
+			return offset, fmt.Errorf("upload %s at offset %d: %w",
+				relPath, offset, errors.Join(requestErr, closeErr))
 		}
 
 		if reposition {
 			if err := conflicts.observe(offset, next); err != nil {
-				return err
+				return offset, err
 			}
 		} else {
 			conflicts.reset()
@@ -263,7 +284,7 @@ func putFile(
 		offset = next
 
 		if !reposition && offset == totalSize {
-			return nil
+			return offset, nil
 		}
 	}
 }
@@ -428,6 +449,16 @@ func doFileChunk(client httpDoer, req *http.Request, offset, requestEnd, totalSi
 	}
 
 	if resp.StatusCode == http.StatusConflict {
+		if resp.Header.Get("X-Expected-Offset") == "" {
+			// Marked, not interpreted: for this importer the same answer means
+			// "a previous request's handler is still draining its dead body"
+			// and "the file is already whole", so it is settled by asking — see
+			// fileUploadTransfer.ask. A header that is PRESENT but malformed
+			// falls through to the parse error below instead: that is a broken
+			// producer, not a question worth putting.
+			return 0, false, fmt.Errorf("%w: file conflict at offset %d", errConflictOffsetUnknown, offset)
+		}
+
 		expected, parseErr := parseOffsetHeader(resp.Header, "X-Expected-Offset")
 		if parseErr != nil {
 			return 0, false, fmt.Errorf("409 missing valid X-Expected-Offset: %w", parseErr)
@@ -1461,7 +1492,7 @@ func uploadFSTarFromScanWithDependencies(
 
 		if err := uploadFSTarEntryWithDependencies(
 			ctx, client, baseURL, relPath, tarPath, source, ext,
-			payloadStart, hdr.Size, metadata.RawSize, offset, attrs, progress, activate, deps,
+			payloadStart, hdr.Size, metadata.RawSize, offset, attrs, log, progress, activate, deps,
 		); err != nil {
 			return errors.Join(err, closeFSTarSequence(sequence))
 		}
@@ -1522,12 +1553,13 @@ func uploadFSTarEntry(
 	ext string,
 	payloadStart, storedSize, rawSize, offset int64,
 	attrs fileAttrs,
+	log *slog.Logger,
 	progress *fileUploadProgress,
 	activate func(),
 ) error {
 	return uploadFSTarEntryWithDependencies(
 		ctx, client, baseURL, relPath, tarPath, source, ext,
-		payloadStart, storedSize, rawSize, offset, attrs, progress, activate,
+		payloadStart, storedSize, rawSize, offset, attrs, log, progress, activate,
 		defaultFSDecodeDependencies(),
 	)
 }
@@ -1540,6 +1572,7 @@ func uploadFSTarEntryWithDependencies(
 	ext string,
 	payloadStart, storedSize, rawSize, offset int64,
 	attrs fileAttrs,
+	log *slog.Logger,
 	progress *fileUploadProgress,
 	activate func(),
 	deps fsDecodeDependencies,
@@ -1556,7 +1589,35 @@ func uploadFSTarEntryWithDependencies(
 		return fmt.Errorf("prepare %s at offset %d: %w", relPath, offset, err)
 	}
 
-	uploadErr := putFile(ctx, client, baseURL, relPath, rawSize, offset, attrs, stream.body, progress, activate)
+	// Built here as well as inside putFile, which validates the entry path on every
+	// attempt: the transfer needs the same URL for its HEAD probes, and deriving it
+	// twice from the same input is cheaper than threading it and easier to see is
+	// consistent than a second parameter would be.
+	fileURL, err := fileUploadURL(baseURL, relPath)
+	if err != nil {
+		return err
+	}
+
+	// log reaches this far for one reason: the line Retrier.Resume prints when it
+	// absorbs a break is the only evidence, in a run's own output, that a transfer
+	// was interrupted and survived it. A nil logger here would leave the retry
+	// working and invisible, which reads exactly like a run no break ever touched.
+	transfer := &fileUploadTransfer{
+		client:       client,
+		baseURL:      baseURL,
+		fileURL:      fileURL,
+		relPath:      relPath,
+		totalSize:    rawSize,
+		payloadLimit: blockPutPayloadLimit,
+		attrs:        attrs,
+		newBody:      stream.body,
+		progress:     progress,
+		activate:     activate,
+		log:          log,
+		offset:       offset,
+	}
+
+	uploadErr := transfer.run(ctx)
 
 	folded, closeErr := stream.close(uploadErr == nil)
 	if err := errors.Join(uploadErr, closeErr); err != nil {

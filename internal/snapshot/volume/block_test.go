@@ -19,6 +19,7 @@ package volume_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1630,6 +1631,11 @@ type onceFlakyDoer struct {
 	inner    dataplane.Doer
 	trigger  string
 	cutBytes int64
+	// cutErr is the error the truncated body reports. nil means
+	// io.ErrUnexpectedEOF, the shape the shared classifier already names as
+	// transient; a test wanting to exercise the progress rule instead — the one
+	// that carries breaks NOTHING can name — sets an unrecognized error here.
+	cutErr error
 
 	mu        sync.Mutex
 	triggered bool
@@ -1653,7 +1659,12 @@ func (d *onceFlakyDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	if fireNow {
-		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: io.ErrUnexpectedEOF}
+		cutErr := d.cutErr
+		if cutErr == nil {
+			cutErr = io.ErrUnexpectedEOF
+		}
+
+		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: cutErr}
 	}
 
 	return resp, nil
@@ -1666,15 +1677,87 @@ func (d *onceFlakyDoer) callCount() int {
 	return d.calls
 }
 
+// TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy proves the
+// classification fix reaches the snapshot download as the COMMAND assembles it, not merely
+// as chunk_retry_internal_test.go assembles it.
+//
+// The distinction is the whole point of the test. The guard next door
+// (TestChunkRetrier_ResumesAfterUnrecognizedTransportBreak) drives chunkRetrier.fetchChunk
+// with a policy of its own; this one goes through volume.DownloadBlockChunks, which is what
+// the command calls and which names the policy itself — so it is the line in block.go
+// wiring dataplane.DefaultRetryPolicy into newChunkRetrier that this covers and that one
+// does not. A download that stopped using the shared retrier, or wired it to a policy
+// without the progress rule, would leave that guard green and this one red.
+//
+// The break is deliberately of a shape no classifier names: an HTTP/2 session torn down
+// mid-body, whose concrete type net/http keeps inside its own unexported copy of the http2
+// package, so nothing outside it can reach the type with errors.As. What licenses the
+// retry is therefore not the error at all but the bytes already delivered.
+//
+// Cost note: this runs under the production backoff, so the single retry it provokes costs
+// roughly a second. One break is enough — the budget's own arithmetic is proven in
+// internal/dataplane, not here.
+func TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 5
+
+	payload := []byte("ABCDEFGHIJKLMNOPQRST") // 20 bytes -> 4 chunks of 5
+
+	broken := errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR")
+
+	// The premise: this error really is unrecognized. Should a later change teach the
+	// classifier this shape, the test would keep passing while no longer saying anything
+	// about the progress rule — so it says so instead.
+	require.False(t, dataplane.IsTransientDataPlaneError(broken),
+		"premise broken: this failure is now a recognized transient error, so delivered bytes are no longer what carries it")
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	// Chunk 1 covers bytes [5,9]; its first Range GET is cut after 2 delivered bytes.
+	doer := &onceFlakyDoer{inner: srv.Client(), trigger: "bytes=5-9", cutBytes: 2, cutErr: broken}
+	fetcher := dataplane.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, int64(len(payload)), chunkSize, 4, fetcher, codec, nil)
+	require.NoError(t, err, "a break after delivered bytes must be resumed whatever its type")
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(
+		context.Background(), chunkDir, outPath, int64(len(payload)), chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must be byte-identical despite the mid-chunk break")
+
+	// Four clean fetches plus the one retried chunk's second attempt. Counting the
+	// requests is what separates "resumed" from "never broke": both leave the bytes
+	// right, and only the count says the retry happened.
+	assert.Equal(t, 5, doer.callCount(), "expected exactly one retried request across all 4 chunks")
+}
+
 // TestDownloadBlockChunks_RetryIsPerChunk proves the in-run retry is scoped
 // to the one chunk that hits a transient failure: three chunks download
 // cleanly on the first attempt while a fourth is interrupted mid-stream and
 // must recover via a resumed retry, without disturbing the others or
 // corrupting the merged output. It deliberately exercises the DEFAULT retry
-// policy (via the public DownloadBlockChunks entry point, with no policy
-// override available) — the only test proving the production policy is
-// actually wired into downloadBlockChunks rather than merely reachable
-// through a hand-rolled test policy.
+// policy, via the public DownloadBlockChunks entry point with no policy
+// override available, rather than a hand-rolled test policy.
+//
+// What it proves about that wiring has one limit, and the test next door exists
+// because of it: the failure injected here is io.ErrUnexpectedEOF, which the
+// shared classifier already names as transient, so a retrier wired to a policy
+// WITHOUT the progress rule still passes this test. Removing that rule was
+// measured to leave this test green and
+// TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy red.
 func TestDownloadBlockChunks_RetryIsPerChunk(t *testing.T) {
 	t.Parallel()
 
