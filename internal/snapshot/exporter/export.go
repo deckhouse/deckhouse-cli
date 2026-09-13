@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
@@ -50,7 +51,7 @@ type Export struct {
 	namespace   string
 	volumeMode  string
 	baseURL     string
-	fetcher     *Fetcher
+	fetcher     *dataplane.Fetcher
 	httpClients []IdleConnectionCloser
 }
 
@@ -71,7 +72,7 @@ func (e *Export) BaseURL() string {
 }
 
 // Fetcher returns the HTTP Fetcher wired to the data-exporter endpoint.
-func (e *Export) Fetcher() *Fetcher {
+func (e *Export) Fetcher() *dataplane.Fetcher {
 	return e.fetcher
 }
 
@@ -91,7 +92,7 @@ func NewExport(
 	deName,
 	volumeMode,
 	baseURL string,
-	fetcher *Fetcher,
+	fetcher *dataplane.Fetcher,
 	httpClients ...IdleConnectionCloser,
 ) *Export {
 	return &Export{
@@ -157,11 +158,11 @@ func OpenExport(
 		return nil, fmt.Errorf("build sub-clients for DataExport %q: %w", de.Name, err)
 	}
 
-	var fetcherOpts []FetcherOption
+	var fetcherOpts []dataplane.FetcherOption
 
-	fetcherOpts = append(fetcherOpts, WithSourceHashDoer(sourceHashHTTPClient))
+	fetcherOpts = append(fetcherOpts, dataplane.WithSourceHashDoer(sourceHashHTTPClient))
 	if publicEndpoint {
-		fetcherOpts = append(fetcherOpts, WithPublishUnauthorizedHint())
+		fetcherOpts = append(fetcherOpts, dataplane.WithPublishUnauthorizedHint())
 	}
 
 	return NewExport(
@@ -169,7 +170,7 @@ func OpenExport(
 		de.Name,
 		ready.Status.VolumeMode,
 		exportBaseURL(ready, publicEndpoint),
-		NewFetcher(dataHTTPClient, fetcherOpts...),
+		dataplane.NewFetcher(dataHTTPClient, fetcherOpts...),
 		dataHTTPClient,
 		sourceHashHTTPClient,
 	), nil
@@ -238,7 +239,7 @@ func buildSubClients(
 		return nil, nil, fmt.Errorf("configure source-hash TLS identity: %w", err)
 	}
 
-	sourceHashSub.SetResponseHeaderTimeout(sourceHashTimeoutCeiling)
+	sourceHashSub.SetResponseHeaderTimeout(dataplane.SourceHashTimeoutCeiling)
 
 	sourceHashHTTPClient, err := sourceHashSub.NewPersistentHTTPSClientForOrigin(baseURL)
 	if err != nil {

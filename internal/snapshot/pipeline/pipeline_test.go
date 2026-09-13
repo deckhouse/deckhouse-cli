@@ -57,6 +57,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
@@ -383,7 +384,7 @@ func TestPipeline_HappyPath(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -473,7 +474,7 @@ func TestPipeline_UnsupportedFilesystemEntryDoesNotFinalizeNode(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           buildFakeClient(t),
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-unsupported-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-unsupported-fs", "Filesystem", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -1297,7 +1298,7 @@ func TestPipeline_ClosesExportHTTPClientsOnEveryTransferExit(t *testing.T) {
 					"de-success",
 					"Block",
 					srv.URL,
-					exporter.NewFetcher(srv.Client()),
+					dataplane.NewFetcher(srv.Client()),
 					first,
 					second,
 				), nil
@@ -1362,7 +1363,7 @@ func TestPipeline_ClosesExportHTTPClientsOnEveryTransferExit(t *testing.T) {
 					"de-cancel",
 					"Block",
 					srv.URL,
-					exporter.NewFetcher(srv.Client()),
+					dataplane.NewFetcher(srv.Client()),
 					first,
 					second,
 				), nil
@@ -1469,7 +1470,7 @@ func TestPipeline_ChecksumMismatchAfterFinalize_SurfacesNotReblessed(t *testing.
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -1533,7 +1534,7 @@ func TestPipeline_CrashWindowDeleteSnapshotYAML_ReFinalizes(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -1630,7 +1631,7 @@ func TestPipeline_PublicationTransactionRecoversBottomUpAfterParentCrash(t *test
 			_ aggapi.NodeRef,
 			_ string,
 		) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -1757,7 +1758,7 @@ func TestPipeline_PublicationTransactionRecoversSuccessiveAncestorCrashes(t *tes
 			_ aggapi.NodeRef,
 			_ string,
 		) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-tree", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-tree", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -1842,7 +1843,7 @@ func TestPipeline_StaleParentWithoutPublicationTransactionIsRejected(t *testing.
 			_ aggapi.NodeRef,
 			_ string,
 		) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-stale", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-stale", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 	require.NoError(t, runPipeline(context.Background(), cfg))
@@ -2090,10 +2091,10 @@ func TestPipeline_PublicationStateKeepsUploadAndLocalScanWorking(t *testing.T) {
 			switch leafRef.Name {
 			case e2eBlockDisk:
 				return exporter.NewExport(namespace, "de-upload-block", "Block", blockSrv.URL,
-					exporter.NewFetcher(blockSrv.Client())), nil
+					dataplane.NewFetcher(blockSrv.Client())), nil
 			case e2eFSDisk:
 				return exporter.NewExport(namespace, "de-upload-fs", "Filesystem", fsSrv.URL,
-					exporter.NewFetcher(fsSrv.Client())), nil
+					dataplane.NewFetcher(fsSrv.Client())), nil
 			default:
 				return nil, fmt.Errorf("upload-layout: unknown leaf %q", leafRef.Name)
 			}
@@ -2224,10 +2225,10 @@ func TestPipeline_OrphanedCollisionDirIsSkippedByAllConsumers(t *testing.T) {
 			switch leafRef.Name {
 			case e2eBlockDisk:
 				return exporter.NewExport(namespace, "de-orphan-block", "Block", blockSrv.URL,
-					exporter.NewFetcher(blockSrv.Client())), nil
+					dataplane.NewFetcher(blockSrv.Client())), nil
 			case e2eFSDisk:
 				return exporter.NewExport(namespace, "de-orphan-fs", "Filesystem", fsSrv.URL,
-					exporter.NewFetcher(fsSrv.Client())), nil
+					dataplane.NewFetcher(fsSrv.Client())), nil
 			default:
 				return nil, fmt.Errorf("orphan-collision: unknown leaf %q", leafRef.Name)
 			}
@@ -2822,7 +2823,7 @@ func TestPipeline_ReleaseGetsFreshTimeoutAfterSlowOpenExport(t *testing.T) {
 				deName,
 				"Block",
 				srv.URL,
-				exporter.NewFetcher(srv.Client()),
+				dataplane.NewFetcher(srv.Client()),
 			), acquisition, nil
 		},
 	}
@@ -2968,7 +2969,7 @@ func TestPipeline_FSResumeAfterTarConfirmsDurabilityBeforeCompletion(t *testing.
 						"de-fs-durability",
 						"Filesystem",
 						fsSrv.URL,
-						exporter.NewFetcher(fsSrv.Client()),
+						dataplane.NewFetcher(fsSrv.Client()),
 					), nil
 				},
 			}
@@ -3121,7 +3122,7 @@ func TestPipeline_BlockResumeAfterMergeConfirmsDurabilityBeforeCompletion(t *tes
 						"de-block-durability",
 						"Block",
 						blockSrv.URL,
-						exporter.NewFetcher(blockSrv.Client()),
+						dataplane.NewFetcher(blockSrv.Client()),
 					), nil
 				},
 			}
@@ -3256,7 +3257,7 @@ func TestPipeline_RootedDirectoryAncestryRetryBlocksPublication(t *testing.T) {
 				"de-rooted-directory-ancestry",
 				"Block",
 				blockServer.URL,
-				exporter.NewFetcher(blockServer.Client()),
+				dataplane.NewFetcher(blockServer.Client()),
 			), nil
 		},
 	}
@@ -3504,7 +3505,7 @@ func TestPipeline_SnapshotYAMLRecoversDurabilityBeforeDone(t *testing.T) {
 						"de-snapshot-durability",
 						"Block",
 						blockSrv.URL,
-						exporter.NewFetcher(blockSrv.Client()),
+						dataplane.NewFetcher(blockSrv.Client()),
 					), nil
 				},
 			}
@@ -3604,7 +3605,7 @@ func TestPipeline_ForeignMergedBlock_NotLaunderedByResume(t *testing.T) {
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			openExportCalled.Store(true)
 
-			return exporter.NewExport(namespace, "de-foreign", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-foreign", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -3743,7 +3744,7 @@ func twoDataChildPipelineConfig(t *testing.T, outputDir string, server *httptest
 				"de-two-data-children",
 				"Block",
 				server.URL,
-				exporter.NewFetcher(server.Client()),
+				dataplane.NewFetcher(server.Client()),
 			), nil
 		},
 	}
@@ -4026,7 +4027,7 @@ func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.
 							"de-rooted-boundary",
 							"Block",
 							server.URL,
-							exporter.NewFetcher(server.Client()),
+							dataplane.NewFetcher(server.Client()),
 						), nil
 					},
 				}
@@ -4168,7 +4169,7 @@ func TestPipeline_LeafTargetRef(t *testing.T) {
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			capturedRef = leafRef
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4220,7 +4221,7 @@ func TestPipeline_SubtreeSelection(t *testing.T) {
 		SelectedNodeKind:     childKind,
 		SelectedNodeName:     diskSnapName,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-subtree", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-subtree", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4280,7 +4281,7 @@ func TestPipeline_SubtreeRootSelection(t *testing.T) {
 		SelectedNodeKind:     "Snapshot",
 		SelectedNodeName:     rootSnapshot,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-root-sel", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-root-sel", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4320,7 +4321,7 @@ func TestPipeline_NoneCompression(t *testing.T) {
 		KubeClient:           c,
 		Compression:          noneCodec,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-none", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-none", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4377,7 +4378,7 @@ func TestPipeline_Progress_NonTTYFallback(t *testing.T) {
 		KubeClient:           c,
 		Progress:             sink,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-progress", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-progress", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4424,7 +4425,7 @@ func TestPipeline_Progress_NilSinkIsNoop(t *testing.T) {
 		KubeClient:           c,
 		// Progress deliberately left nil to test the no-op path.
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-nil-progress", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-nil-progress", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4518,7 +4519,7 @@ func TestPipeline_PartialChunkResume(t *testing.T) {
 		KubeClient:           c,
 		Compression:          codec,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-partial-resume", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-partial-resume", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -4770,7 +4771,7 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 				once.Do(func() { streamsAtFirstCall = rec.count() })
 
-				return exporter.NewExport(namespace, "de-precreate", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-precreate", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -4822,7 +4823,7 @@ func TestPipeline_Progress_PrecreateStreams(t *testing.T) {
 					return nil, fmt.Errorf("unexpected leaf %q", leafRef.Name)
 				}
 
-				return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -4868,7 +4869,7 @@ func TestPipeline_Progress_ResumeSkip_NeverActivated(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-resume-first", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-resume-first", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 	require.NoError(t, runPipeline(context.Background(), firstCfg))
@@ -4985,7 +4986,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 					}
 				})
 
-				return exporter.NewExport(namespace, "de-seed-block", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-seed-block", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5088,7 +5089,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 					}
 				})
 
-				return exporter.NewExport(namespace, "de-seed-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-seed-fs", "Filesystem", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5123,7 +5124,7 @@ func TestPipeline_Progress_SeedsCommittedBytesBeforeTransfer(t *testing.T) {
 			KubeClient:           c,
 			Progress:             rec,
 			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-				return exporter.NewExport(namespace, "de-seed-fromscratch", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-seed-fromscratch", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5220,7 +5221,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 			Compression:          codec,
 			Progress:             rec,
 			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-				return exporter.NewExport(namespace, "de-monotonic-block", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-monotonic-block", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5312,7 +5313,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 			Compression:          codec,
 			Progress:             rec,
 			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-				return exporter.NewExport(namespace, "de-monotonic-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-monotonic-fs", "Filesystem", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5360,7 +5361,7 @@ func TestPipeline_Progress_MonotonicAcrossActivate(t *testing.T) {
 					currentAtOpenExport = streams[0].Current()
 				}
 
-				return exporter.NewExport(namespace, "de-monotonic-fromscratch", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-monotonic-fromscratch", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5480,7 +5481,7 @@ func TestPipeline_Progress_FSSizesSidecar_SeedsTotalAndCreditsStagedFile(t *test
 				}
 			})
 
-			return exporter.NewExport(namespace, "de-seed-fs-sizes", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-seed-fs-sizes", "Filesystem", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -5622,7 +5623,7 @@ func TestPipeline_Progress_BlockResumeScanCancellationStopsBeforeExport(t *testi
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			openExportCalls.Add(1)
 
-			return exporter.NewExport(namespace, "de-block-scan-cancel", "Block", server.URL, exporter.NewFetcher(server.Client())), nil
+			return exporter.NewExport(namespace, "de-block-scan-cancel", "Block", server.URL, dataplane.NewFetcher(server.Client())), nil
 		},
 	}
 
@@ -5744,7 +5745,7 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 					}
 				})
 
-				return exporter.NewExport(namespace, "de-clamp-block", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-clamp-block", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5848,7 +5849,7 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 					}
 				})
 
-				return exporter.NewExport(namespace, "de-clamp-fs", "Filesystem", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-clamp-fs", "Filesystem", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5926,7 +5927,7 @@ func TestPipeline_Progress_ClampStaleSeedToFreshTotal(t *testing.T) {
 			Compression:          codec,
 			Progress:             rec,
 			OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-				return exporter.NewExport(namespace, "de-clamp-valid", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+				return exporter.NewExport(namespace, "de-clamp-valid", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 			},
 		}
 
@@ -5979,7 +5980,7 @@ func TestPipeline_Progress_DownloadFailure_CallsFailNotDone(t *testing.T) {
 		KubeClient:           c,
 		Progress:             rec,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-fail", "Block", failingSrv.URL, exporter.NewFetcher(failingSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-fail", "Block", failingSrv.URL, dataplane.NewFetcher(failingSrv.Client())), nil
 		},
 	}
 
@@ -6090,7 +6091,7 @@ func TestPipeline_KeepExports(t *testing.T) {
 						deName,
 						"Block",
 						srv.URL,
-						exporter.NewFetcher(srv.Client()),
+						dataplane.NewFetcher(srv.Client()),
 					), acquisition, nil
 				},
 			}
@@ -6285,7 +6286,7 @@ func TestPipeline_CancelAfterAllNodesSucceed_ReturnsNil(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -6351,7 +6352,7 @@ func TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings(t *testing.T) {
 				return nil, exportCtx.Err()
 			}
 
-			return exporter.NewExport(ns, "de-"+ref.Name, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(ns, "de-"+ref.Name, "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -6645,15 +6646,15 @@ func TestPipeline_MixedResumeStates_ConcurrentRun(t *testing.T) {
 
 		switch leafRef.Name {
 		case mixedDiskDone:
-			return exporter.NewExport(namespace, "de-mixed-done", "Block", doneSrv.URL, exporter.NewFetcher(doneSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-mixed-done", "Block", doneSrv.URL, dataplane.NewFetcher(doneSrv.Client())), nil
 		case mixedDiskBlockPartial:
-			return exporter.NewExport(namespace, "de-mixed-block-partial", "Block", blockPartialSrv.URL, exporter.NewFetcher(blockPartialSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-mixed-block-partial", "Block", blockPartialSrv.URL, dataplane.NewFetcher(blockPartialSrv.Client())), nil
 		case mixedDiskFSPartial:
-			return exporter.NewExport(namespace, "de-mixed-fs-partial", "Filesystem", fsPartialSrv.URL, exporter.NewFetcher(fsPartialSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-mixed-fs-partial", "Filesystem", fsPartialSrv.URL, dataplane.NewFetcher(fsPartialSrv.Client())), nil
 		case mixedDiskManifestsOnly:
-			return exporter.NewExport(namespace, "de-mixed-manifests-only", "Block", manifestsOnlySrv.URL, exporter.NewFetcher(manifestsOnlySrv.Client())), nil
+			return exporter.NewExport(namespace, "de-mixed-manifests-only", "Block", manifestsOnlySrv.URL, dataplane.NewFetcher(manifestsOnlySrv.Client())), nil
 		case mixedDiskPending:
-			return exporter.NewExport(namespace, "de-mixed-pending", "Block", pendingSrv.URL, exporter.NewFetcher(pendingSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-mixed-pending", "Block", pendingSrv.URL, dataplane.NewFetcher(pendingSrv.Client())), nil
 		default:
 			return nil, fmt.Errorf("mixed-resume: unexpected leaf %q", leafRef.Name)
 		}
@@ -6957,7 +6958,7 @@ func TestPipeline_BlockAlreadyMerged_VolumeNode_RemovesLeftoverChunkDir(t *testi
 		PerVolumeConcurrency: 1,
 		KubeClient:           c,
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-agg-leaf", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 
@@ -7027,7 +7028,7 @@ func TestPipeline_BlockChunkDirWithoutMergedFile_DownloadsNormally(t *testing.T)
 		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			openExportCalled.Store(true)
 
-			return exporter.NewExport(namespace, "de-normal", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+			return exporter.NewExport(namespace, "de-normal", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 		},
 	}
 

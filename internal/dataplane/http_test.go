@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package exporter
+package dataplane
 
 import (
 	"bytes"
@@ -918,7 +918,7 @@ func TestSourceHashTimeout(t *testing.T) {
 			size: 10 * sourceHashMinimumThroughput * 60,
 			want: 10*time.Minute + sourceHashTimeoutSlack,
 		},
-		{name: "untrusted size is capped", size: int64(^uint64(0) >> 1), want: sourceHashTimeoutCeiling},
+		{name: "untrusted size is capped", size: int64(^uint64(0) >> 1), want: SourceHashTimeoutCeiling},
 	}
 
 	for _, tc := range tests {

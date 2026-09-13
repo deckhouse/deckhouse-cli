@@ -43,9 +43,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -111,8 +111,8 @@ func fsTestServer(t *testing.T) (*httptest.Server, []fsTestFile) {
 	return srv, files
 }
 
-func newFSFetcher(srv *httptest.Server) *exporter.Fetcher {
-	return exporter.NewFetcher(srv.Client())
+func newFSFetcher(srv *httptest.Server) *dataplane.Fetcher {
+	return dataplane.NewFetcher(srv.Client())
 }
 
 // mustCodec creates a compress.Codec by name or fails the test.
@@ -1554,7 +1554,7 @@ func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffse
 	// source-hash HEAD, and call 3 is the file's Range GET (there is exactly
 	// one chunk, since the file is well below chunkSize).
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec := mustCodec(t, "zstd")
 
@@ -1803,9 +1803,9 @@ func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *tes
 			return srv.Client().Do(req)
 		},
 	}
-	fetcher := exporter.NewFetcher(
+	fetcher := dataplane.NewFetcher(
 		ordinaryDoer,
-		exporter.WithSourceHashDoer(srv.Client()),
+		dataplane.WithSourceHashDoer(srv.Client()),
 	)
 
 	nodeDir := t.TempDir()
@@ -2118,7 +2118,7 @@ func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *test
 	const cutBytes = 20
 
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -2842,11 +2842,11 @@ func singleItemFSServer(t *testing.T, itemName string) *httptest.Server {
 	t.Helper()
 
 	body, err := json.Marshal(struct {
-		APIVersion string          `json:"apiVersion"`
-		Items      []exporter.Item `json:"items"`
+		APIVersion string           `json:"apiVersion"`
+		Items      []dataplane.Item `json:"items"`
 	}{
 		APIVersion: "v1",
-		Items: []exporter.Item{
+		Items: []dataplane.Item{
 			{Name: itemName, Type: "file", URI: "file.bin", Attributes: map[string]any{}},
 		},
 	})
@@ -3009,7 +3009,7 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 	// calls 4-5 = zz.bin's hash HEAD and Range GET. The fifth call is truncated
 	// mid-transfer so sizes.json is fully staged and zz.bin is not.
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: 20}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -3909,7 +3909,7 @@ func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.
 	// Run 1: interrupt during chunk 1's Range GET (call 1 = listing, call 2 =
 	// source-hash HEAD, call 3 = chunk 0, call 4 = chunk 1).
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 4, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -4376,7 +4376,7 @@ func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *test
 				_, _ = io.WriteString(w, ",")
 			}
 
-			if err := encoder.Encode(exporter.Item{
+			if err := encoder.Encode(dataplane.Item{
 				Name:       fmt.Sprintf("file-%06d", index),
 				Type:       "file",
 				URI:        fmt.Sprintf("file-%06d", index),
@@ -4444,27 +4444,27 @@ func TestDownloadFilesystemVolume_PreservesCausalStagingWorkerError(t *testing.T
 		name          string
 		advertisedMD5 string
 		wantErr       error
-		newFetcher    func(*httptest.Server) (*exporter.Fetcher, []*observedDoer)
+		newFetcher    func(*httptest.Server) (*dataplane.Fetcher, []*observedDoer)
 	}{
 		{
 			name:          "SourceMD5",
 			advertisedMD5: md5Hex([]byte("x")),
 			wantErr:       errSourceMD5,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
 				sourceDoer := &observedDoer{
 					do: func(*http.Request) (*http.Response, error) {
 						return nil, errSourceMD5
 					},
 				}
 
-				return exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)), []*observedDoer{sourceDoer}
+				return dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)), []*observedDoer{sourceDoer}
 			},
 		},
 		{
 			name:          "FileGET",
 			advertisedMD5: md5Hex([]byte("x")),
 			wantErr:       errFileGET,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
 				fileDoer := &observedDoer{
 					do: func(req *http.Request) (*http.Response, error) {
 						if req.Method == http.MethodGet && req.URL.Path != "/files/" {
@@ -4475,15 +4475,15 @@ func TestDownloadFilesystemVolume_PreservesCausalStagingWorkerError(t *testing.T
 					},
 				}
 
-				return exporter.NewFetcher(fileDoer, exporter.WithSourceHashDoer(srv.Client())), []*observedDoer{fileDoer}
+				return dataplane.NewFetcher(fileDoer, dataplane.WithSourceHashDoer(srv.Client())), []*observedDoer{fileDoer}
 			},
 		},
 		{
 			name:          "SourceDigest",
 			advertisedMD5: md5Hex([]byte("different")),
 			wantErr:       volume.ErrSourceHashMismatch,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
-				return exporter.NewFetcher(srv.Client()), nil
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
+				return dataplane.NewFetcher(srv.Client()), nil
 			},
 		},
 	}
@@ -4565,7 +4565,7 @@ func TestDownloadFilesystemVolume_InventoryErrorRemainsCausal(t *testing.T) {
 		srv.URL+"/files/",
 		1,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4605,7 +4605,7 @@ func TestDownloadFilesystemVolume_StagingCallerCancellationRemainsCausal(t *test
 		srv.URL+"/files/",
 		1,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4849,7 +4849,7 @@ func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.
 			srv.URL+"/files/",
 			workers,
 			0,
-			exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+			dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 			mustCodec(t, "none"),
 			nil,
 			nil,
@@ -4896,7 +4896,7 @@ func downloadFilesystemWithSourceDoer(
 		srv.URL+"/files/",
 		workers,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4923,7 +4923,7 @@ func newLargeFileInventoryServer(t *testing.T, entries int, advertisedMD5 string
 					_, _ = io.WriteString(w, ",")
 				}
 
-				if err := encoder.Encode(exporter.Item{
+				if err := encoder.Encode(dataplane.Item{
 					Name:       fmt.Sprintf("file-%06d", index),
 					Type:       "file",
 					URI:        fmt.Sprintf("file-%06d", index),
@@ -4964,7 +4964,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			encoder := json.NewEncoder(w)
 			written := 0
 
-			emit := func(item exporter.Item) bool {
+			emit := func(item dataplane.Item) bool {
 				if written > 0 {
 					_, _ = io.WriteString(w, ",")
 				}
@@ -4975,7 +4975,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			}
 
 			for index := range files {
-				if !emit(exporter.Item{
+				if !emit(dataplane.Item{
 					Name:       fmt.Sprintf("file-%06d", index),
 					Type:       "file",
 					URI:        fmt.Sprintf("file-%06d", index),
@@ -4986,7 +4986,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			}
 
 			for index := range links {
-				if !emit(exporter.Item{
+				if !emit(dataplane.Item{
 					Name:       fmt.Sprintf("link-%08d", index),
 					Type:       "link",
 					TargetPath: "target",
@@ -5231,7 +5231,7 @@ func writeLinkInventoryItems(w io.Writer, entries int, reverse bool) {
 			itemIndex = entries - index - 1
 		}
 
-		if err := encoder.Encode(exporter.Item{
+		if err := encoder.Encode(dataplane.Item{
 			Name:       fmt.Sprintf("link-%08d", itemIndex),
 			Type:       "link",
 			TargetPath: "target",
@@ -5306,7 +5306,7 @@ func TestDownloadFilesystemVolume_InventoryCancellationRebuildsCleanly(t *testin
 				_, _ = io.WriteString(w, ",")
 			}
 
-			if err := encoder.Encode(exporter.Item{
+			if err := encoder.Encode(dataplane.Item{
 				Name:       fmt.Sprintf("link-%06d", index),
 				Type:       "link",
 				TargetPath: "target",
@@ -5399,12 +5399,12 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 	tests := []struct {
 		name  string
 		codec string
-		items []exporter.Item
+		items []dataplane.Item
 	}{
 		{
 			name:  "duplicate",
 			codec: "none",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "same", Type: "file", URI: "first", Attributes: map[string]any{"size": 1}},
 				{Name: "same", Type: "file", URI: "second", Attributes: map[string]any{"size": 1}},
 			},
@@ -5412,7 +5412,7 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 		{
 			name:  "file-directory conflict",
 			codec: "none",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
 				{Name: "a", Type: "dir", URI: "a/", Attributes: map[string]any{}},
 			},
@@ -5420,7 +5420,7 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 		{
 			name:  "codec stored-path collision",
 			codec: "zstd",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
 				{Name: "a.zst", Type: "link", TargetPath: "target", Attributes: map[string]any{}},
 			},
@@ -5436,8 +5436,8 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/files/" {
 					_ = json.NewEncoder(w).Encode(struct {
-						APIVersion string          `json:"apiVersion"`
-						Items      []exporter.Item `json:"items"`
+						APIVersion string           `json:"apiVersion"`
+						Items      []dataplane.Item `json:"items"`
 					}{
 						APIVersion: "v1",
 						Items:      test.items,

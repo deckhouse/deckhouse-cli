@@ -14,11 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package exporter provides typed HTTP helpers for the data-exporter API exposed by a
-// running DataExport. The API has two endpoints: api/v1/block (block volumes served via
-// http.ServeContent with Range support) and api/v1/files (filesystem volumes: trailing-
-// slash paths return a JSON directory listing; other paths stream file bytes).
-package exporter
+// Package dataplane provides the transport half of a volume transfer, shared by
+// every d8 command that moves volume bytes: a typed client for the data-exporter
+// API, a classifier that decides which transport failures are worth another try,
+// and the bounded retry-with-resume policy built on top of them.
+//
+// The data-exporter API has two endpoints: api/v1/block (block volumes served via
+// http.ServeContent with Range support) and api/v1/files (filesystem volumes:
+// trailing-slash paths return a JSON directory listing; other paths stream file
+// bytes).
+//
+// It deliberately knows nothing about snapshots, chunk geometry, part files or
+// any other caller-specific framing: control-plane concerns (resolving a
+// DataExport, waiting for it to become ready, run-owner annotations) live with
+// their commands, which import this package rather than the other way round.
+package dataplane
 
 import (
 	"bufio"
@@ -36,8 +46,14 @@ import (
 	"time"
 )
 
-// Doer executes a single HTTP request and returns the response.
-// *http.Client and pkg/libsaferequest.SafeClient both satisfy this interface.
+// Doer executes a single HTTP request and returns the response. *http.Client
+// satisfies it directly, and so does the pinned per-origin client the snapshot
+// commands build (internal/snapshot/transport.PersistentHTTPClient, which has
+// both Do and HTTPDo).
+//
+// pkg/libsaferequest/client.SafeClient does NOT satisfy it: its only request
+// method is HTTPDo, and it has no Do at all. A caller holding a SafeClient — the
+// d8 data commands do — therefore needs an adapter, not a direct assignment.
 type Doer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -86,8 +102,12 @@ const (
 	sourceHashMinimumThroughput = int64(1 << 20)
 	sourceHashTimeoutFloor      = 5 * time.Minute
 	sourceHashTimeoutSlack      = 1 * time.Minute
-	sourceHashTimeoutCeiling    = 7 * 24 * time.Hour
 )
+
+// SourceHashTimeoutCeiling caps the size-derived budget SourceMD5 allows a
+// producer for hashing one file. Transports dedicated to source-hash requests
+// size their own response-header timeout from it, so it is exported.
+const SourceHashTimeoutCeiling = 7 * 24 * time.Hour
 
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
@@ -438,9 +458,9 @@ func sourceHashTimeout(size int64) time.Duration {
 		seconds++
 	}
 
-	maxSeconds := int64((sourceHashTimeoutCeiling - sourceHashTimeoutSlack) / time.Second)
+	maxSeconds := int64((SourceHashTimeoutCeiling - sourceHashTimeoutSlack) / time.Second)
 	if seconds >= maxSeconds {
-		return sourceHashTimeoutCeiling
+		return SourceHashTimeoutCeiling
 	}
 
 	timeout := time.Duration(seconds)*time.Second + sourceHashTimeoutSlack

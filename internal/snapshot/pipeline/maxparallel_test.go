@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -103,7 +104,7 @@ func TestPipeline_MaxParallelDownloadsCap(t *testing.T) {
 			active--
 			mu.Unlock()
 
-			return exporter.NewExport(ns, "de-cap", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+			return exporter.NewExport(ns, "de-cap", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 		},
 	}
 
@@ -183,7 +184,7 @@ func TestPipeline_MaxParallelDownloads_ZeroDefault(t *testing.T) {
 				MaxParallelDownloads: tc.maxPar,
 				KubeClient:           c,
 				OpenExport: func(_ context.Context, ns string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-					return exporter.NewExport(ns, "de-default", "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+					return exporter.NewExport(ns, "de-default", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 				},
 			}
 
