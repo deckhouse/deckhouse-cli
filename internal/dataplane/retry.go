@@ -24,6 +24,42 @@ import (
 	"syscall"
 )
 
+// ErrDataPlaneNotAccepted is one statement: the endpoint ANSWERED, and the
+// request did not complete. The answer is the whole of what it asserts — it
+// separates a far end that is there and did not take this request from silence,
+// which is the distinction that decides whether trying again can help.
+//
+// It says nothing about how much the destination now holds, and must not be read
+// as saying nothing arrived. A connection torn down mid-request leaves the
+// importer holding whatever it managed to take, and the carrier for that case
+// moves the durable offset forward onto it before returning this error, so a run
+// reports both on one line: delivered_bytes above zero beside this very failure.
+//
+// The shapes it is put on today, which is a list of the callers rather than a
+// closed set, all belong to the upload path: an importer that acknowledged a
+// chunk and named back the offset the chunk began at; one that refused a chunk
+// and named that same offset back; one that refused without naming an offset and
+// then could not resolve the question when asked; and a request whose connection
+// died while the importer went on answering probes at an offset short of the
+// whole.
+//
+// It is a member of the transient set below rather than a judgement a caller
+// makes for itself, and it has to be, because it must survive an attempt that
+// delivered NOTHING. The progress rule in Retrier.Resume cannot retry such an
+// attempt, and RetryPolicy.Fatal can only add to the fatal set.
+//
+// The distinction it draws is one only a WRITING transfer needs. A download
+// measures its own destination, so a broken body still leaves a durable prefix
+// behind and the progress rule carries it. An upload has no local measurement —
+// bytes pushed into a connection that then died may or may not have been
+// written — so the far end still being there is the only evidence available that
+// the failure was the transport rather than the setup.
+//
+// Being transient does not make it unbounded: an endpoint that keeps answering
+// and keeps not accepting delivers nothing, so MaxNoProgress ends the loop
+// (TestRetrier_NotAcceptedIsStillBoundedWithoutDelivery).
+var ErrDataPlaneNotAccepted = errors.New("data-plane endpoint did not accept the request")
+
 // IsFatalDataPlaneError reports whether err must end a transfer immediately,
 // no matter how many bytes the attempt delivered before it. It is the ONE
 // place this set is written down; Retrier.Resume consults it BEFORE it
@@ -97,6 +133,10 @@ func IsTransientDataPlaneError(err error) bool {
 	}
 
 	if errors.Is(err, ErrDataPlaneIdle) {
+		return true
+	}
+
+	if errors.Is(err, ErrDataPlaneNotAccepted) {
 		return true
 	}
 

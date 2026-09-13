@@ -53,6 +53,11 @@ func TestIsTransientDataPlaneError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "an endpoint that did not accept the request is transient",
+			err:  fmt.Errorf("upload chunk at offset 4096: %w", ErrDataPlaneNotAccepted),
+			want: true,
+		},
+		{
 			name: "ECONNRESET is transient",
 			err:  fmt.Errorf("read: %w", syscall.ECONNRESET),
 			want: true,

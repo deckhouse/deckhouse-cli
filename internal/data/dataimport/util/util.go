@@ -24,9 +24,17 @@ import (
 // var instead of const to allow test override.
 var maxRetryAttempts = 60
 
-// ResolveClientFunc is a function pointer for test stubbing: resolution is the first thing a
-// command does and the only step that contacts the API server before any of the work under test.
-var ResolveClientFunc = ResolveClient
+// Function pointers for test stubbing.
+var (
+	// ResolveClientFunc is stubbable because resolution is the first thing a command does and
+	// the only step that contacts the API server before any of the work under test.
+	ResolveClientFunc = ResolveClient
+
+	// PrepareUploadFunc is stubbable because it waits for a DataImport to be reconciled and an
+	// importer pod to come up, which is the whole of what a test would have to fake a cluster
+	// for; the transfer it hands the URL to is the part under test.
+	PrepareUploadFunc = PrepareUpload
+)
 
 const (
 	retryInterval = 3
@@ -412,32 +420,101 @@ func EnsureDataImportPublish(
 	return nil
 }
 
-func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {
-	req, err := http.NewRequest(http.MethodHead, targetURL, nil)
+// UploadState is everything a HEAD tells us about an upload destination. The
+// three facts are kept apart because collapsing them loses the one distinction
+// that matters after a broken transfer.
+//
+// An importer holding a partly uploaded destination names its resume offset in
+// X-Next-Offset. An importer holding a FINISHED one names no offset at all and
+// reports the size — which is why an offset of zero and an absent offset must
+// not read the same: the second means "nothing left to resume", not "start
+// over". Size carries no such meaning on its own for a block destination, whose
+// device reports its full size from creation however little has been written
+// into it, so a caller reading Size has to say what else it is leaning on.
+type UploadState struct {
+	// OffsetKnown is true only when the importer actually named an offset.
+	// When it is false, Offset is zero because nothing was said, not because
+	// the importer said zero.
+	OffsetKnown bool
+
+	// Offset is the resume offset the importer named.
+	Offset int64
+
+	// Size is the Content-Length the importer reported, or -1 when it
+	// reported none. A destination the importer does not have is reported the
+	// same way, deliberately rather than as an accident of the zero value:
+	// -1 is a length no upload can declare, so "the importer has nothing
+	// here" can never be mistaken for "the importer has all of it" by a
+	// caller comparing Size against a size of its own.
+	Size int64
+}
+
+// ProbeUploadState asks the importer what it currently holds at targetURL.
+func ProbeUploadState(
+	ctx context.Context,
+	httpClient *safeClient.SafeClient,
+	targetURL string,
+) (UploadState, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, targetURL, nil)
 	if err != nil {
-		return 0, err
+		return UploadState{}, err
 	}
 
-	resp, err := httpClient.HTTPDo(req.WithContext(ctx))
+	resp, err := httpClient.HTTPDo(req)
 	if err != nil {
-		return 0, err
+		return UploadState{}, err
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		if next := resp.Header.Get("X-Next-Offset"); next != "" {
-			if serverOffset, perr := strconv.ParseInt(next, 10, 64); perr == nil && serverOffset >= 0 {
-				return serverOffset, nil
-			}
+		state := UploadState{Size: -1}
 
-			return 0, fmt.Errorf("invalid X-Next-Offset header")
+		// The parsed length rather than the raw header, which net/http does
+		// also leave in place on a HEAD answer: ContentLength is already an
+		// int64 and is -1 when the answer carried no length at all, which is
+		// the distinction Size has to keep and a header lookup would flatten
+		// into an empty string alongside every other way of being unparseable.
+		if resp.ContentLength >= 0 {
+			state.Size = resp.ContentLength
 		}
 
-		return 0, nil
+		next := resp.Header.Get("X-Next-Offset")
+		if next == "" {
+			return state, nil
+		}
+
+		offset, perr := strconv.ParseInt(next, 10, 64)
+		if perr != nil || offset < 0 {
+			return UploadState{}, fmt.Errorf("invalid X-Next-Offset header")
+		}
+
+		state.OffsetKnown = true
+		state.Offset = offset
+
+		return state, nil
 	case http.StatusNotFound:
-		return 0, nil
+		return UploadState{Size: -1}, nil
 	default:
-		return 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return UploadState{}, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
+}
+
+// CheckUploadProgress returns the offset a NEW run should start from, which is
+// zero whenever the importer named none. That reading is right for --resume and
+// wrong in the middle of a transfer: it cannot tell a destination the importer
+// has never seen from one it has already finished, and it answers both with the
+// offset that restarts the upload. Callers deciding what to do after a break ask
+// ProbeUploadState instead.
+func CheckUploadProgress(ctx context.Context, httpClient *safeClient.SafeClient, targetURL string) (int64, error) {
+	state, err := ProbeUploadState(ctx, httpClient, targetURL)
+	if err != nil {
+		return 0, err
+	}
+
+	return state.Offset, nil
 }

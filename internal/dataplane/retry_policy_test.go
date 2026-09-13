@@ -158,6 +158,91 @@ func TestRetrier_UnrecognizedErrorWithoutDeliveryIsFatal(t *testing.T) {
 	}
 }
 
+// TestRetrier_RetriesNotAcceptedWithoutAnyDelivery proves the one thing
+// ErrDataPlaneNotAccepted exists to buy, and it is the exact opposite of the
+// test above: an attempt that delivered NOTHING still gets another one.
+//
+// Zero delivery is the whole point, and a guard written on a delivering attempt
+// would prove nothing — the progress rule already retries those, so such a guard
+// would be green with the sentinel removed from the transient set entirely. It
+// is the writing transfers that need this: an upload cannot measure how much of
+// a dead request landed, so "the far end still answers" is the only evidence it
+// has that the failure was the transport, and that evidence has to survive an
+// attempt whose durable offset never moved.
+//
+// Start and Durable are equal and NON-ZERO for the same reason as in
+// TestRetrier_UnrecognizedErrorWithoutDeliveryIsFatal: a rule keyed on "is the
+// durable offset above zero" rather than on delivery would pass a zero-based
+// version of this without ever consulting the transient set.
+func TestRetrier_RetriesNotAcceptedWithoutAnyDelivery(t *testing.T) {
+	t.Parallel()
+
+	notAccepted := fmt.Errorf("upload chunk at offset 4096: %w", ErrDataPlaneNotAccepted)
+
+	var attempts int
+
+	retrier := NewRetrier(fastRetryPolicy())
+
+	err := retrier.Resume(context.Background(), quietLogger(), "transfer",
+		func(_ context.Context) (Progress, error) {
+			attempts++
+
+			if attempts < 3 {
+				return Progress{Start: 4096, Durable: 4096}, notAccepted
+			}
+
+			return Progress{Start: 4096, Durable: 8192}, nil
+		})
+	if err != nil {
+		t.Fatalf("Resume() = %v, want nil: a far end that answers must buy another attempt", err)
+	}
+
+	if attempts != 3 {
+		t.Errorf("attempts = %d, want 3", attempts)
+	}
+}
+
+// TestRetrier_NotAcceptedIsStillBoundedWithoutDelivery holds the other side of
+// the same sentinel: buying attempts without delivering is exactly what
+// MaxNoProgress is for, so an endpoint that keeps answering and keeps refusing
+// must still run out. Without this, the case above is satisfied by a sentinel
+// that simply never stops.
+func TestRetrier_NotAcceptedIsStillBoundedWithoutDelivery(t *testing.T) {
+	t.Parallel()
+
+	notAccepted := fmt.Errorf("refused at offset 4096: %w", ErrDataPlaneNotAccepted)
+
+	policy := fastRetryPolicy()
+
+	var attempts int
+
+	retrier := NewRetrier(policy)
+
+	err := retrier.Resume(context.Background(), quietLogger(), "transfer",
+		func(_ context.Context) (Progress, error) {
+			attempts++
+
+			if attempts > policy.Backoff.Steps+policy.MaxNoProgress {
+				t.Errorf("attempt %d: the loop is not bounded", attempts)
+
+				return Progress{}, nil
+			}
+
+			return Progress{Start: 4096, Durable: 4096}, notAccepted
+		})
+	if err == nil {
+		t.Fatal("Resume() = nil, want an error once the no-progress ceiling is reached")
+	}
+
+	if !errors.Is(err, ErrDataPlaneNotAccepted) {
+		t.Errorf("err = %v, want it to carry the original refusal", err)
+	}
+
+	if attempts != policy.MaxNoProgress {
+		t.Errorf("attempts = %d, want %d (the consecutive no-progress ceiling)", attempts, policy.MaxNoProgress)
+	}
+}
+
 // TestRetrier_FatalErrorAfterDeliveredBytesIsNotRetried proves the fatal set
 // outranks the progress rule.
 //
