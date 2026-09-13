@@ -3975,6 +3975,13 @@ func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.
 
 				lock, err := archive.AcquireWriteLock(outputDir)
 				require.NoError(t, err)
+				// Release through defer rather than at the end of the body: a
+				// failing require aborts the subtest, and a lock left held keeps
+				// its dev:ino entry in the process-wide lock registry forever.
+				// A later temporary directory that reuses that inode is then
+				// refused with ErrArchiveLocked, so a single real failure turns
+				// into a cascade of unrelated ones.
+				defer func() { require.NoError(t, lock.Unlock()) }()
 
 				var (
 					fired            atomic.Bool
@@ -4012,13 +4019,23 @@ func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.
 
 				destination, err := archive.NewLockedRootedDestination(lock, hook)
 				require.NoError(t, err)
+				defer func() { require.NoError(t, destination.Close()) }()
 
 				cfg := pipeline.Config{
-					Namespace:            testNS,
-					RootSnapshot:         rootSnapshot,
-					OutputDir:            outputDir,
-					Workers:              2,
-					PerVolumeConcurrency: 2,
+					Namespace:    testNS,
+					RootSnapshot: rootSnapshot,
+					OutputDir:    outputDir,
+					// One worker, one stream per volume. The hook snapshots the
+					// pinned tree while the pipeline is still running, so the
+					// later comparison only means something if no other worker
+					// can be mid-mutation at that instant: a second worker that
+					// passed its binding check before the namespace swap may land
+					// its mkdirat after the snapshot was taken, which is not a
+					// binding-loss defect. The boundaries this test aims at are
+					// reached the same way with a single worker — the archive
+					// tree is built by the same mutation sequence either way.
+					Workers:              1,
+					PerVolumeConcurrency: 1,
 					KubeClient:           buildFakeClient(t),
 					ManifestSource:       testManifestSource(),
 					OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
@@ -4042,9 +4059,6 @@ func TestPipeline_RootedMutationsFailClosedAfterNamespaceReplacement(t *testing.
 					"replacement namespace must stay byte-for-byte untouched")
 				require.Equal(t, outsideTree, snapshotReplacementTree(t, outsideDir),
 					"outside symlink target must stay byte-for-byte untouched")
-
-				require.NoError(t, destination.Close())
-				require.NoError(t, lock.Unlock())
 			})
 		}
 	}
@@ -4057,10 +4071,18 @@ func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
 	require.NoError(t, os.Mkdir(firstDir, 0o755))
 	require.NoError(t, os.Mkdir(secondDir, 0o755))
 
+	// Both locks are released through defer rather than at the end of the body:
+	// a failing require aborts the test, and a lock left held keeps its dev:ino
+	// entry in the process-wide lock registry forever. A later temporary
+	// directory that reuses that inode is then refused with ErrArchiveLocked,
+	// so a single real failure turns into a cascade of unrelated ones.
 	firstLock, err := archive.AcquireWriteLock(firstDir)
 	require.NoError(t, err)
+	defer func() { require.NoError(t, firstLock.Unlock()) }()
+
 	secondLock, err := archive.AcquireWriteLock(secondDir)
 	require.NoError(t, err)
+	defer func() { require.NoError(t, secondLock.Unlock()) }()
 
 	reached := make(chan struct{})
 	release := make(chan struct{})
@@ -4068,7 +4090,6 @@ func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
 		blockOnce   sync.Once
 		releaseOnce sync.Once
 	)
-	defer releaseOnce.Do(func() { close(release) })
 
 	firstDestination, err := archive.NewLockedRootedDestination(
 		firstLock,
@@ -4085,9 +4106,11 @@ func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+	defer func() { require.NoError(t, firstDestination.Close()) }()
 
 	secondDestination, err := archive.NewLockedRootedDestination(secondLock, nil)
 	require.NoError(t, err)
+	defer func() { require.NoError(t, secondDestination.Close()) }()
 
 	rootOnlyClient := func() client.Client {
 		root := snapObj{
@@ -4119,9 +4142,21 @@ func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
 		}
 	}
 
-	firstResult := make(chan error, 1)
+	var firstErr error
+
+	firstDone := make(chan struct{})
 	go func() {
-		firstResult <- pipeline.RunRooted(context.Background(), config(firstDir), firstDestination)
+		defer close(firstDone)
+
+		firstErr = pipeline.RunRooted(context.Background(), config(firstDir), firstDestination)
+	}()
+	// Registered after the deferred Close and Unlock calls above, so it runs
+	// before them on the way out: the blocked worker keeps mutating through
+	// firstDestination and firstLock until RunRooted returns, and closing or
+	// unlocking underneath it would be a use-after-close on every failing path.
+	defer func() {
+		releaseOnce.Do(func() { close(release) })
+		<-firstDone
 	}()
 
 	select {
@@ -4136,12 +4171,8 @@ func TestPipeline_LockedSiblingDestinationsRemainConcurrent(t *testing.T) {
 		"an independent sibling destination must complete while the first is blocked")
 
 	releaseOnce.Do(func() { close(release) })
-	require.NoError(t, <-firstResult)
-
-	require.NoError(t, firstDestination.Close())
-	require.NoError(t, secondDestination.Close())
-	require.NoError(t, firstLock.Unlock())
-	require.NoError(t, secondLock.Unlock())
+	<-firstDone
+	require.NoError(t, firstErr)
 }
 
 // TestPipeline_LeafTargetRef verifies that OpenExport receives the correct snapshot
