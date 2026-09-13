@@ -71,6 +71,9 @@ func TestDownloadFilesystem_OK(t *testing.T) {
 	require.Equal(t, []byte("abc"), data)
 }
 
+// A backend that refuses the request must reach the caller as a failure: the
+// command's exit status is the only thing a script driving it can read, and a
+// download that transferred nothing used to exit 0 here.
 func TestDownloadFilesystem_BadPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate Block-mode error when files endpoint is used
@@ -90,7 +93,13 @@ func TestDownloadFilesystem_BadPath(t *testing.T) {
 
 	cmd := NewCommand(context.TODO(), slog.Default())
 	cmd.SetArgs([]string{"myexport", "foo.txt", "-o", filepath.Join(t.TempDir(), "out.txt"), "--publish=false"})
-	require.NoError(t, cmd.Execute())
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "400 Bad Request")
+	// What the backend said about the refusal is the part the user acts on:
+	// the wrong volume mode, or a path that is not there.
+	require.ErrorContains(t, err, "VolumeMode: Block. Not supported downloading files.")
 }
 
 func TestDownloadBlock_OK(t *testing.T) {
@@ -250,6 +259,8 @@ func TestDownloadFilesystem_RecursiveWithSocketsCompletes(t *testing.T) {
 	require.True(t, os.IsNotExist(err), "socket must not be created on disk")
 }
 
+// Same contract as TestDownloadFilesystem_BadPath from the other side: the
+// backend refuses, so the command fails rather than exiting 0 with no data.
 func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "VolumeMode: Filesystem. Not supported downloading raw block.", http.StatusBadRequest)
@@ -270,7 +281,11 @@ func TestDownloadBlock_WrongEndpoint(t *testing.T) {
 	cmd.SetArgs([]string{"myexport", "-o", filepath.Join(t.TempDir(), "raw.img"), "--publish=false"})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	require.NoError(t, cmd.Execute())
+
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "400 Bad Request")
+	require.ErrorContains(t, err, "VolumeMode: Filesystem. Not supported downloading raw block.")
 }
 
 // TestMain stubs the API-group resolution for every test in this package.
