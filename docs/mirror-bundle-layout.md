@@ -37,10 +37,12 @@ The segment constants are defined once in [internal/layout.go](../internal/layou
 platform.tar
 ├── index.json                 # Deckhouse main images        -> <repo>:<version>
 ├── blobs/
-├── install/                   # in-cluster installer          -> <repo>/install:<version>
+├── install/                   # in-cluster installer          -> <repo>/install:<channel|version>
 ├── install-standalone/        # standalone in-cluster installer-> <repo>/install-standalone:<version>
 └── release-channel/           # channel + version metadata    -> <repo>/release-channel:<channel|version>
 ```
+
+> `install/` is the one platform layout that carries channel tags (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts`) next to its version tags, because `docker run <repo>/install:<channel>` is the documented air-gapped install entry point. They are aliases of a version tag, not separate images: `propagateChannelAliases` in [platform.go](../internal/mirror/platform/platform.go) appends an extra index descriptor for an image already downloaded under `v<X.Y.Z>`, so it costs no extra traffic and does not require the source registry to serve `<repo>/install:<channel>` itself (LTS-only registries and registries fed by a previous `d8 mirror push` do not). The repo root and `install-standalone/` stay version-only — they are addressed by version, and channel metadata lives in `release-channel/`.
 
 **`installer.tar`** — the standalone installer layout, packed from a working dir whose only entry is `installer/`:
 
@@ -158,7 +160,7 @@ All discovered archives are unpacked into a single `unified/` working directory,
 | Layout path in the unified tree | Pushed to | Comes from |
 |---|---|---|
 | `` (root) | `<repo>:<tag>` | `platform.tar` (Deckhouse main) |
-| `install/` | `<repo>/install` | `platform.tar` |
+| `install/` | `<repo>/install` | `platform.tar` (version tags + channel aliases) |
 | `install-standalone/` | `<repo>/install-standalone` | `platform.tar` |
 | `release-channel/` | `<repo>/release-channel` | `platform.tar` |
 | `installer/` | `<repo>/installer` | `installer.tar` |

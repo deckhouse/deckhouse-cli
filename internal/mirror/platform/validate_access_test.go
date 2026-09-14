@@ -374,7 +374,7 @@ func TestService_findTagsToMirror(t *testing.T) {
 			client := localfake.NewRegistryClientStub()
 			svc := newTestPlatformService(client, tt.options, logger, userLogger)
 
-			versions, channels, err := svc.findTagsToMirror(context.Background())
+			versions, channels, _, err := svc.findTagsToMirror(context.Background())
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -398,7 +398,7 @@ func TestService_findTagsToMirror_PartialRegistryKeepsNotFoundCause(t *testing.T
 
 	svc := newTestPlatformService(rockSolidOnlyStub(), &Options{}, logger, userLogger)
 
-	_, _, err := svc.findTagsToMirror(context.Background())
+	_, _, _, err := svc.findTagsToMirror(context.Background())
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrSomeChannelsFailed)
