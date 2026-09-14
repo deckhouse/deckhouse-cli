@@ -252,7 +252,7 @@ func TestService_findTagsToMirror(t *testing.T) {
 			client := localfake.NewRegistryClientStub()
 			svc := newTestPlatformService(client, tt.options, logger, userLogger)
 
-			versions, channels, err := svc.findTagsToMirror(context.Background())
+			versions, channels, _, err := svc.findTagsToMirror(context.Background())
 
 			if tt.wantErr {
 				require.Error(t, err)
