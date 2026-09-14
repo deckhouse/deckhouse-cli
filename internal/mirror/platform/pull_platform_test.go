@@ -173,14 +173,16 @@ func TestPullPlatform_DryRun_SemverTag_PopulatesDownloadList(t *testing.T) {
 "expected installer entry for requested version")
 	assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone, rootURL+"/install-standalone:v1.69.0",
 "expected standalone installer entry for requested version")
-	// Channel aliases live only in the release-channel layout; the main
-	// Deckhouse repo carries only the version tag (see FillForChannels).
+	// Only release-channel:<channel> is DOWNLOADED. The main Deckhouse and
+	// install repos get their channel tags later, by re-tagging the version
+	// image they already hold (propagateChannelAliases), so nothing extra may
+	// appear in the download list here.
 	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel, rootURL+"/release-channel:stable",
 "expected release-channel alias for matched channel")
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":stable",
-"Deckhouse repo must not carry channel aliases")
+"channel aliases must not be downloaded from the main Deckhouse repo")
 	assert.NotContains(t, svc.downloadList.DeckhouseInstall, rootURL+"/install:stable",
-"Deckhouse installer must not carry channel aliases")
+"channel aliases must not be downloaded from the install repo")
 	// Other versions must NOT appear.
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":v1.72.10")
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":v1.68.0")
@@ -196,11 +198,12 @@ func TestPullPlatform_DryRun_AlphaVersionTag_MatchesAlphaChannel(t *testing.T) {
 
 	rootURL := stubRootURL
 	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.72.10")
-	// alpha is only an alias and must live in release-channel, not in <root>.
+	// alpha is an alias of v1.72.10: only release-channel:alpha is downloaded,
+	// <root>:alpha is produced later by re-tagging.
 	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel, rootURL+"/release-channel:alpha",
 "alpha alias expected in release-channel because v1.72.10 is the alpha version")
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":alpha",
-"Deckhouse repo must not carry channel aliases")
+"channel aliases must not be downloaded from the main Deckhouse repo")
 	// Stable and rock-solid must NOT appear anywhere for this target.
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":stable")
 	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":rock-solid")
@@ -239,10 +242,10 @@ svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{TargetTag: t
 				rootURL+"/release-channel:"+tt.channel,
 "release-channel alias entry expected for channel %s", tt.channel)
 			assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+tt.channel,
-"Deckhouse repo must not carry channel aliases")
+"channel aliases must not be downloaded from the main Deckhouse repo")
 			assert.NotContains(t, svc.downloadList.DeckhouseInstall,
 				rootURL+"/install:"+tt.channel,
-"Deckhouse installer must not carry channel aliases")
+"channel aliases must not be downloaded from the install repo")
 			// Exactly the single semver tag should be in Deckhouse.
 			assert.Len(t, svc.downloadList.Deckhouse, 1,
 "only the matched version should be in Deckhouse")
@@ -901,22 +904,25 @@ func TestPullPlatform_AllEditions_DownloadListUsesEditionRoot(t *testing.T) {
 	}
 }
 
-// TestPullPlatform_LTSPull_ChannelAliasesLiveOnlyInReleaseChannel pins down the
+// TestPullPlatform_LTSPull_ChannelAliasesLandInInstallRepo pins down the
 // shape of the bundle produced by `d8 mirror pull --deckhouse-tag <tag>` against
 // a CSE-like (LTS-only) registry. The invariant we lock in here is:
 //
-//   - release-channel layout carries every default channel alias
-//     (alpha/beta/early-access/stable/rock-solid) on top of the version tag and
-//     the originally requested `lts` tag. They are added by the propagation
-//     block in pullDeckhousePlatform.
-//   - The main Deckhouse, DeckhouseInstall and DeckhouseInstallStandalone
-//     layouts carry ONLY semver/`lts`-style tags. They MUST NOT contain channel
-//     aliases — those are just pointers to the version tag and duplicating them
-//     in the main repos created an inconsistency that broke
-//     `d8 mirror push` → `d8 mirror pull` (full discovery) cycles. See
-//     TestPullPlatform_RePullFromBundleLikeRegistry_FullDiscovery for the
-//     end-to-end variant of the regression.
-func TestPullPlatform_LTSPull_ChannelAliasesLiveOnlyInReleaseChannel(t *testing.T) {
+//   - The release-channel layout and the install repo carry every default
+//     channel alias (alpha/beta/early-access/stable/rock-solid) on top of the
+//     version tag, so a registry filled by `d8 mirror push` serves
+//     <repo>/install:stable - the tag the air-gapped install flow
+//     (`docker run <repo>/install:<channel>`) runs.
+//   - The main Deckhouse repo and install-standalone carry no channel aliases:
+//     they are addressed by version, and channel metadata lives in
+//     release-channel.
+//   - Every alias resolves to the same manifest as the version tag, because
+//     propagateChannelAliases only re-tags images that are already in the
+//     layout. Nothing extra is downloaded, which is what keeps
+//     pull -> push -> pull cycles working against registries that carry only
+//     version tags - see
+//     TestPullPlatform_RePullFromBundleLikeRegistry_FullDiscovery.
+func TestPullPlatform_LTSPull_ChannelAliasesLandInInstallRepo(t *testing.T) {
 	const ver = "v1.73.5"
 
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
@@ -959,21 +965,42 @@ func TestPullPlatform_LTSPull_ChannelAliasesLiveOnlyInReleaseChannel(t *testing.
 			ch)
 	}
 
-	// 2. The main Deckhouse / Install / InstallStandalone layouts MUST NOT
-	//    contain any channel aliases.
-	mainLayouts := []struct {
+	// 2. The install layout MUST carry every default channel alias, each
+	//    pointing at the same manifest as the version tag it aliases.
+	installPath := layout.Path(filepath.Join(unpackDir, internal.InstallSegment))
+
+	versionDescriptor, err := mlayouts.FindImageDescriptorByTag(installPath, ver)
+	require.NoErrorf(t, err, "DeckhouseInstall layout must contain the version tag %q", ver)
+
+	for _, ch := range internal.GetAllDefaultReleaseChannels() {
+		channelDescriptor, err := mlayouts.FindImageDescriptorByTag(installPath, ch)
+		if !assert.NoErrorf(t, err,
+			"DeckhouseInstall layout must contain channel alias %q so that <repo>/install:%s resolves after push",
+			ch, ch) {
+			continue
+		}
+
+		assert.Equalf(t, versionDescriptor.Digest, channelDescriptor.Digest,
+			"DeckhouseInstall alias %q must point at the same manifest as %q, not at a separately pulled image",
+			ch, ver)
+	}
+
+	// 3. The main Deckhouse repo and install-standalone must stay version-only.
+	unaliasedLayouts := []struct {
 		name       string
 		layoutPath layout.Path
 	}{
 		{name: "Deckhouse", layoutPath: layout.Path(unpackDir)},
-		{name: "DeckhouseInstall", layoutPath: layout.Path(filepath.Join(unpackDir, internal.InstallSegment))},
-		{name: "DeckhouseInstallStandalone", layoutPath: layout.Path(filepath.Join(unpackDir, internal.InstallStandaloneSegment))},
+		{
+			name:       "DeckhouseInstallStandalone",
+			layoutPath: layout.Path(filepath.Join(unpackDir, internal.InstallStandaloneSegment)),
+		},
 	}
-	for _, target := range mainLayouts {
+	for _, target := range unaliasedLayouts {
 		for _, ch := range internal.GetAllDefaultReleaseChannels() {
 			_, err := mlayouts.FindImageDescriptorByTag(target.layoutPath, ch)
 			assert.Errorf(t, err,
-				"%s layout must NOT contain channel alias %q (channels live only in release-channel)",
+				"%s layout must NOT contain channel alias %q (only install is aliased)",
 				target.name, ch)
 		}
 	}
@@ -1084,4 +1111,117 @@ func buildRegistryFromUnpackedBundle(t *testing.T, root string) localreg.Client 
 	}
 
 	return pkgclient.Adapt(upfake.NewClient(reg))
+}
+
+// multiChannelSourceStub returns a registry shaped like a real upstream one:
+// every default channel points at its own version, and every version tag
+// exists in the root, install, install-standalone and release-channel
+// repositories.
+//
+// Channel NAMES are published only in release-channel here. The platform
+// repositories deliberately carry version tags alone, so a test asserting that
+// <repo>/install:stable ends up in the bundle proves the alias was produced by
+// re-tagging a pulled image rather than by downloading <repo>/install:stable
+// from the source — the download variant is what broke pull -> push -> pull.
+// It also keeps the negative assertions honest: <repo>:<channel> is absent from
+// the bundle because nothing aliases it, not because the stub lacked it.
+func multiChannelSourceStub(channelVersions map[string]string) localreg.Client {
+	reg := upfake.NewRegistry(stubRootURL)
+
+	for channel, ver := range channelVersions {
+		img := upfake.NewImageBuilder().
+			WithFile("version.json", `{"version":"`+ver+`"}`).
+			WithFile("deckhouse/candi/images_digests.json", `{}`).
+			MustBuild()
+
+		reg.MustAddImage(internal.ReleaseChannelSegment, channel, img)
+
+		for _, segment := range []string{
+			"",
+			internal.InstallSegment,
+			internal.InstallStandaloneSegment,
+			internal.ReleaseChannelSegment,
+		} {
+			reg.MustAddImage(segment, ver, img)
+		}
+	}
+
+	return pkgclient.Adapt(upfake.NewClient(reg))
+}
+
+// TestPullPlatform_FullDiscovery_ChannelAliasesLandInInstallRepo covers the
+// plain `d8 mirror pull` (no flags) that users run before `d8 mirror push`:
+// after the push, `docker run <repo>/install:stable` must work, which requires
+// the bundle to carry install:<channel> for every mirrored channel, each
+// pointing at that channel's own version.
+func TestPullPlatform_FullDiscovery_ChannelAliasesLandInInstallRepo(t *testing.T) {
+	channelVersions := map[string]string{
+		internal.AlphaChannel:       "v1.72.10",
+		internal.BetaChannel:        "v1.71.0",
+		internal.EarlyAccessChannel: "v1.70.0",
+		internal.StableChannel:      "v1.69.0",
+		internal.RockSolidChannel:   "v1.68.0",
+	}
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	workingDir := t.TempDir()
+	bundleDir := t.TempDir()
+
+	svc := NewService(
+		registryservice.NewService(multiChannelSourceStub(channelVersions), pkg.NoEdition, logger),
+		workingDir,
+		&Options{BundleDir: bundleDir},
+		logger,
+		userLogger,
+	)
+
+	require.NoError(t, svc.PullPlatform(context.Background()))
+
+	tarFile, err := os.Open(filepath.Join(bundleDir, "platform.tar"))
+	require.NoError(t, err)
+	defer tarFile.Close()
+
+	unpackDir := t.TempDir()
+	require.NoError(t, bundle.Unpack(context.Background(), tarFile, unpackDir, "platform"))
+
+	installPath := layout.Path(filepath.Join(unpackDir, internal.InstallSegment))
+
+	for channel, ver := range channelVersions {
+		versionDescriptor, err := mlayouts.FindImageDescriptorByTag(installPath, ver)
+		require.NoErrorf(t, err, "DeckhouseInstall layout must contain version tag %q", ver)
+
+		channelDescriptor, err := mlayouts.FindImageDescriptorByTag(installPath, channel)
+		if !assert.NoErrorf(t, err,
+			"DeckhouseInstall layout must contain channel alias %q so that <repo>/install:%s resolves after push",
+			channel, channel) {
+			continue
+		}
+
+		assert.Equalf(t, versionDescriptor.Digest, channelDescriptor.Digest,
+			"DeckhouseInstall alias %q must point at %q, the version that channel resolves to upstream",
+			channel, ver)
+	}
+
+	// Only install is aliased: the main Deckhouse repo and install-standalone
+	// stay version-only.
+	unaliasedLayouts := []struct {
+		name       string
+		layoutPath layout.Path
+	}{
+		{name: "Deckhouse", layoutPath: layout.Path(unpackDir)},
+		{
+			name:       "DeckhouseInstallStandalone",
+			layoutPath: layout.Path(filepath.Join(unpackDir, internal.InstallStandaloneSegment)),
+		},
+	}
+	for _, target := range unaliasedLayouts {
+		for channel := range channelVersions {
+			_, err := mlayouts.FindImageDescriptorByTag(target.layoutPath, channel)
+			assert.Errorf(t, err,
+				"%s layout must NOT contain channel alias %q (only install is aliased)",
+				target.name, channel)
+		}
+	}
 }

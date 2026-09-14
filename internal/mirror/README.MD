@@ -306,6 +306,12 @@ The pull command creates a bundle with the following structure:
 
 If `--gost-digest` is specified, `.gostsum` files are created alongside each `.tar` file.
 
+#### Release channel tags
+
+Every mirrored release channel is written into `platform.tar` as a tag alias of the version it resolves to, both in `release-channel` and in `install`. After `d8 mirror push` the destination registry therefore serves `<repo>/install:stable` (and the other channels) the way the source registry does, so the air-gapped install flow `docker run <repo>/install:<channel>` works against the mirror unchanged.
+
+Aliases are extra index entries pointing at images already in the bundle: they cost no additional download, and they do not require the source registry to publish `<repo>/install:<channel>` itself. The main Deckhouse repository and `install-standalone` keep version tags only — they are addressed by version, and channel metadata lives in `release-channel`.
+
 ---
 
 ## d8 mirror push
