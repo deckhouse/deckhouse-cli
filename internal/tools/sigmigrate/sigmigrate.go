@@ -137,14 +137,16 @@ func getLegacyRetryFilePath() string {
 
 func tracef(format string, args ...interface{}) {
 	state := getCurrentRunState()
+
+	traceWriteMu.Lock()
+	defer traceWriteMu.Unlock()
+
+	// Checked under the lock: closeTraceFile drops the handle under the same lock.
 	if state.traceFile == nil {
 		return
 	}
 
 	message := fmt.Sprintf(format, args...)
-
-	traceWriteMu.Lock()
-	defer traceWriteMu.Unlock()
 
 	if _, err := fmt.Fprintf(state.traceFile, "%s TRACE %s\n", time.Now().UTC().Format(time.RFC3339Nano), message); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to write trace log file %s: %v\n", state.TraceLogFile, err)
@@ -342,22 +344,7 @@ func SigMigrate(cmd *cobra.Command, _ []string) error {
 	runState.LogLevel = config.LogLevel
 	setCurrentRunState(runState)
 
-	defer func() {
-		closeRunStateWriters(runState)
-
-		if runState.traceFile != nil {
-			traceWriteMu.Lock()
-			_ = runState.traceFile.Sync()
-			_ = runState.traceFile.Close()
-			traceWriteMu.Unlock()
-		}
-
-		if syncErr := syncLegacyRetryFileForState(runState); syncErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
-		}
-
-		setCurrentRunState(nil)
-	}()
+	defer finishRun(runState)
 
 	tracef("sig-migrate started: retry=%t, object=%q, log-level=%s, threads=%d, measure-stages=%t", config.RetryFailed, config.Object, config.LogLevel, config.Workers, config.MeasureStages)
 	tracef("run artifacts: failed=%s, errors=%s, skipped=%s, trace=%s", getFailedAttemptsFilePath(), getErrorLogFilePath(), getSkippedObjectsFilePath(), runState.TraceLogFile)
@@ -1237,6 +1224,39 @@ func getOrOpenRunWriter(current **os.File, path string) (*os.File, error) {
 	*current = f
 
 	return f, nil
+}
+
+// finishRun flushes the run artifacts at the end of a sig-migrate run.
+// The legacy retry file is synced while the trace log is still open,
+// so the sync itself is traced. The trace log is closed last.
+func finishRun(state *sigMigrateRunState) {
+	closeRunStateWriters(state)
+
+	if syncErr := syncLegacyRetryFileForState(state); syncErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to sync legacy retry file: %v\n", syncErr)
+	}
+
+	closeTraceFile(state)
+	setCurrentRunState(nil)
+}
+
+// closeTraceFile closes the trace log and drops the handle.
+// Later tracef calls become no-ops instead of writing to a closed file.
+func closeTraceFile(state *sigMigrateRunState) {
+	if state == nil {
+		return
+	}
+
+	traceWriteMu.Lock()
+	defer traceWriteMu.Unlock()
+
+	if state.traceFile == nil {
+		return
+	}
+
+	_ = state.traceFile.Sync()
+	_ = state.traceFile.Close()
+	state.traceFile = nil
 }
 
 func closeRunStateWriters(state *sigMigrateRunState) {
