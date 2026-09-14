@@ -2,7 +2,6 @@ package debugtar
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -16,7 +15,6 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
@@ -26,18 +24,26 @@ type Command struct {
 	Args []string
 	File string
 
-	// ExcludeKey overrides the identifier used in the --exclude/--list-exclude flags.
-	// Leave blank to get it from the "File" field. This is set explicitly if {module-name} is not the final "File" segment, as the default output only processes this pattern.
-	ExcludeKey string
-
-	// RequiredModule is the module prefix (status.phase == "Ready"). If the module is enabled, data from it will be collected. An empty string means always run.
+	// RequiredModule gates the command on a module being Ready (status.phase ==
+	// "Ready"): the command runs only when the name of some Ready module starts
+	// with this string, so "cloud-provider" matches cloud-provider-aws. An empty
+	// string means always run.
 	//
-	// If File or any Args element contains the {module-name} placeholder, it
-	// is only substituted (and the command duplicated once per matching
-	// module, see needsModuleExpansion) when RequiredModule is set — the
-	// module name to substitute comes from resolving RequiredModule against
-	// the active modules. Leaving RequiredModule empty while the placeholder
-	// is present means it is never resolved and stays literal in the output.
+	// Together with the {module-name} placeholder it also means "once per
+	// matching module": when RequiredModule is set and File or any Args element
+	// contains the placeholder (see needsModuleExpansion), the command is
+	// duplicated for every matching Ready module, with the placeholder
+	// substituted in both File and Args. Put the placeholder in File whenever it
+	// appears in Args — copies that differ only in Args all end up under the same
+	// archive entry name, and only the last one survives extraction.
+	//
+	// Leaving RequiredModule empty while the placeholder is present means it is
+	// never resolved and stays literal in the output.
+	//
+	// When the module list cannot be fetched at all, gating is impossible and
+	// the fallback differs by shape: commands without the placeholder run anyway
+	// (they either produce data or an empty file), commands with it are skipped,
+	// since their archive entry name cannot be resolved.
 	RequiredModule string
 }
 
@@ -187,14 +193,12 @@ var debugCommands = []Command{
 	},
 	{
 		File:           "d8-{module-name}-ccm-logs.txt",
-		ExcludeKey:     "ccm-logs",
 		Cmd:            "kubectl",
 		Args:           []string{"-n", "d8-{module-name}", "logs", "-l", "app=cloud-controller-manager", "--tail=3000"},
 		RequiredModule: "cloud-provider",
 	},
 	{
 		File:           "d8-{module-name}-csi-controller-logs.txt",
-		ExcludeKey:     "csi-controller-logs",
 		Cmd:            "kubectl",
 		Args:           []string{"-n", "d8-{module-name}", "logs", "-l", "app=csi-controller", "--tail=3000"},
 		RequiredModule: "cloud-provider",
@@ -365,8 +369,12 @@ var debugCommands = []Command{
 	},
 	{
 		File: "cluster-crd.json",
-		Cmd:  "kubectl",
-		Args: []string{"get", "customresourcedefinitions", "-o", "json", "--ignore-not-found=true"},
+		Cmd:  "bash",
+		// The OpenAPI schemas dominate the size of a full CRD dump (tens of MB on
+		// a cluster with virtualization/istio/cilium/storage) without adding
+		// diagnostic value, so they are dropped here instead of being buffered,
+		// transferred and stored.
+		Args: []string{"-c", `set -o pipefail; kubectl get customresourcedefinitions -o json | jq 'del(.items[].spec.versions[].schema)'`},
 	},
 	{
 		File:           "d8-virtualization-dvcr-logs.txt",
@@ -388,7 +396,7 @@ var debugCommands = []Command{
 	},
 }
 
-func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) (err error) {
+func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []string, commandTimeout time.Duration, requestInterval time.Duration) error {
 	const (
 		namespace     = "d8-system"
 		containerName = "deckhouse"
@@ -399,18 +407,38 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		return fmt.Errorf("failed to get Deckhouse pod: %w", err)
 	}
 
-	activeModules, err := fetchActiveModules(config, kubeCl, podName, namespace, containerName, commandTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: could not fetch active modules, module-dependent commands will be skipped: %v\n", err)
+	activeModules, modulesErr := fetchActiveModules(config, kubeCl, podName, namespace, containerName, commandTimeout)
+	if modulesErr != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: could not fetch the list of active modules: %v\n", modulesErr)
+		fmt.Fprintf(os.Stderr, "  collection continues without module filtering: module-gated commands run anyway and may produce empty files; per-module commands are skipped because their file names cannot be resolved (%s)\n",
+			strings.Join(moduleScopedFiles(debugCommands), ", "))
 	}
 
-	commands := filterAndExpandCommands(debugCommands, activeModules)
+	commands, acceptedNames := filterAndExpandCommands(debugCommands, activeModules, modulesErr == nil, newExcludeSet(excludeFiles))
 
-	excludeMap := make(map[string]bool, len(excludeFiles))
-	for _, file := range excludeFiles {
-		excludeMap[file] = true
+	if err := validateExcludeNames(excludeFiles, acceptedNames); err != nil {
+		return err
 	}
 
+	return writeArchive(
+		config, kubeCl, podName, namespace, containerName,
+		commands, commandTimeout, requestInterval,
+		"Collecting debug info from Deckhouse...",
+		"Debug archive collection completed.",
+	)
+}
+
+// writeArchive streams a gzipped tar of the given commands' output to stdout.
+// It is the shared body of the debug archives: only the command set and the
+// progress banners differ between them.
+func writeArchive(
+	config *rest.Config,
+	kubeCl kubernetes.Interface,
+	podName, namespace, containerName string,
+	commands []Command,
+	commandTimeout, requestInterval time.Duration,
+	startBanner, doneBanner string,
+) (err error) {
 	gzipWriter := gzip.NewWriter(os.Stdout)
 	tarWriter := tar.NewWriter(gzipWriter)
 
@@ -424,27 +452,40 @@ func Tarball(config *rest.Config, kubeCl kubernetes.Interface, excludeFiles []st
 		}
 	}()
 
-	fmt.Fprintf(os.Stderr, "Collecting debug info from Deckhouse...\n")
+	fmt.Fprintf(os.Stderr, "%s\n", startBanner)
 
-	if err = runCommands(tarWriter, config, kubeCl, podName, namespace, containerName, commands, excludeMap, commandTimeout, requestInterval); err != nil {
+	if err = runCommands(tarWriter, config, kubeCl, podName, namespace, containerName, commands, commandTimeout, requestInterval); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "Debug archive collection completed.\n")
+	fmt.Fprintf(os.Stderr, "%s\n", doneBanner)
 
 	return nil
 }
 
+// moduleScopedFiles lists the File templates that can only be resolved with a
+// known module list, for the warning printed when that list is unavailable.
+func moduleScopedFiles(commands []Command) []string {
+	var files []string
+
+	for _, cmd := range commands {
+		if cmd.RequiredModule != "" && needsModuleExpansion(cmd) {
+			files = append(files, cmd.File)
+		}
+	}
+
+	return files
+}
+
 // runCommands executes each command inside the Deckhouse pod and streams its
-// output into the tar archive, honoring the exclude list and the optional
-// rate limit between command executions.
+// output into the tar archive, honoring the optional rate limit between command
+// executions. The command list is already filtered by the caller.
 func runCommands(
 	tarWriter *tar.Writer,
 	config *rest.Config,
 	kubeCl kubernetes.Interface,
 	podName, namespace, containerName string,
 	commands []Command,
-	excludeMap map[string]bool,
 	commandTimeout, requestInterval time.Duration,
 ) error {
 	var tickCh <-chan time.Time
@@ -456,30 +497,15 @@ func runCommands(
 		tickCh = ticker.C
 	}
 
-	var stdout, stderr bytes.Buffer
-
 	for _, cmd := range commands {
-		if isFileExcluded(cmd, excludeMap) {
-			continue
-		}
-
 		if tickCh != nil {
 			<-tickCh
 		}
 
 		fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
 
-		executor, err := utilk8s.ExecInPod(config, kubeCl, fullCommand, podName, namespace, containerName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  ERROR: failed to create executor for %s: %v\n", cmd.File, err)
-			continue
-		}
-
 		cmdCtx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-		streamErr := executor.StreamWithContext(cmdCtx, remotecommand.StreamOptions{
-			Stdout: &stdout,
-			Stderr: &stderr,
-		})
+		output, stderrOutput, streamErr := utilk8s.ExecCommandInPod(cmdCtx, config, kubeCl, fullCommand, podName, namespace, containerName)
 
 		cancel()
 
@@ -487,19 +513,38 @@ func runCommands(
 			if errors.Is(streamErr, context.DeadlineExceeded) {
 				fmt.Fprintf(os.Stderr, "  WARNING: timed out collecting %s after %s\n", cmd.File, commandTimeout)
 			} else {
-				fmt.Fprintf(os.Stderr, "  ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderr.String())
+				fmt.Fprintf(os.Stderr, "  ERROR: collecting %s: %s\n%s\n", cmd.File, strings.Join(fullCommand, " "), stderrOutput)
 			}
 		}
 
-		if err = cmd.writeToTar(tarWriter, stdout.Bytes()); err != nil {
-			return fmt.Errorf("failed to write tar file %s: %w", cmd.File, err)
+		if notice := defaultedContainerNotice(stderrOutput); notice != "" {
+			output = append([]byte(notice), output...)
 		}
 
-		stdout.Reset()
-		stderr.Reset()
+		if err := cmd.writeToTar(tarWriter, output); err != nil {
+			return fmt.Errorf("failed to write tar file %s: %w", cmd.File, err)
+		}
 	}
 
 	return nil
+}
+
+// defaultedContainerNotice extracts kubectl's client-side "Defaulted container
+// ... out of: ..." notice(s) from a command's stderr, so they can be prepended
+// to the collected log output. Without this, the discarded stderr would take
+// with it the only record of which container a `logs` command without
+// -c/--all-containers actually collected from a multi-container pod.
+func defaultedContainerNotice(stderrOutput string) string {
+	var notice strings.Builder
+
+	for _, line := range strings.Split(stderrOutput, "\n") {
+		if strings.Contains(line, "Defaulted container") {
+			notice.WriteString(line)
+			notice.WriteString("\n")
+		}
+	}
+
+	return notice.String()
 }
 
 // fetchActiveModules returns a map with the names of modules that are in the Ready phase.
@@ -511,25 +556,20 @@ func fetchActiveModules(
 ) (map[string]bool, error) {
 	cmdLine := []string{"kubectl", "get", "module", "-o", "json"}
 
-	executor, err := utilk8s.ExecInPod(config, kubeCl, cmdLine, podName, namespace, containerName)
-	if err != nil {
-		return nil, fmt.Errorf("create executor: %w", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	if err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	}); err != nil {
-		return nil, fmt.Errorf("stream kubectl get module: %w (stderr: %s)", err, stderr.String())
+	stdout, stderr, err := utilk8s.ExecCommandInPod(ctx, config, kubeCl, cmdLine, podName, namespace, containerName)
+	if err != nil {
+		return nil, fmt.Errorf("stream kubectl get module: %w (stderr: %s)", err, stderr)
+	}
+
+	if len(stdout) == 0 {
+		return nil, fmt.Errorf("kubectl get module returned no output (stderr: %s)", stderr)
 	}
 
 	var list moduleList
-	if err = json.Unmarshal(stdout.Bytes(), &list); err != nil {
+	if err = json.Unmarshal(stdout, &list); err != nil {
 		return nil, fmt.Errorf("parse module list: %w", err)
 	}
 
@@ -543,39 +583,81 @@ func fetchActiveModules(
 	return active, nil
 }
 
-func filterAndExpandCommands(commands []Command, activeModules map[string]bool) []Command {
-	result := make([]Command, 0, len(commands))
+// filterAndExpandCommands selects the commands to run: it resolves the
+// {module-name} placeholder against the active modules and drops the entries
+// excluded on the command line. It also returns every name --exclude accepts
+// for this run, including the names of entries these very excludes dropped, so
+// a valid name is never reported as unknown.
+//
+// Exclusion happens here, and not further down, because this is the only place
+// where both spellings of an entry are known at once: the resolved archive name
+// (d8-cloud-provider-aws-ccm-logs.txt) and the module-independent token printed
+// by --list-exclude (ccm-logs). The resolved name alone does not reveal which
+// of its segments is the module.
+//
+// modulesKnown reports whether activeModules actually describes the cluster. It
+// is false when the module list could not be fetched: module-gated commands are
+// then collected anyway (an empty file beats a silently missing one), except
+// those whose File carries the {module-name} placeholder — their archive entry
+// name cannot be resolved, so they are skipped rather than stored under a
+// literal placeholder name.
+func filterAndExpandCommands(commands []Command, activeModules map[string]bool, modulesKnown bool, excludeSet map[string]bool) (selected []Command, acceptedNames []string) {
+	selected = make([]Command, 0, len(commands))
+	acceptedNames = make([]string, 0, len(commands))
+
 	for _, cmd := range commands {
+		// The token stays accepted even when the command is gated out below:
+		// --exclude ccm-logs must not fail on a cluster without a cloud provider.
+		token := excludeBaseName(cmd)
+		acceptedNames = append(acceptedNames, token)
+
+		if excludedByName(excludeSet, cmd.File, token) {
+			continue
+		}
+
 		if cmd.RequiredModule == "" {
-			result = append(result, cmd)
+			selected = append(selected, cmd)
 			continue
 		}
 
-		if len(activeModules) == 0 {
+		if !modulesKnown {
+			if !needsModuleExpansion(cmd) {
+				selected = append(selected, cmd)
+			}
+
 			continue
 		}
 
+		// No explicit guard for an empty activeModules is needed: both branches
+		// below iterate the matching modules, of which there are none.
 		if needsModuleExpansion(cmd) {
 			matchedModules := matchingModules(activeModules, cmd.RequiredModule)
 			for _, moduleName := range matchedModules {
-				result = append(result, Command{
-					Cmd:        cmd.Cmd,
-					File:       strings.ReplaceAll(cmd.File, "{module-name}", moduleName),
-					Args:       replaceModuleName(cmd.Args, moduleName),
-					ExcludeKey: cmd.ExcludeKey,
-				})
+				// Copy the command and overwrite only what is substituted, so a
+				// field added to Command later cannot be silently dropped here.
+				expanded := cmd
+				expanded.File = strings.ReplaceAll(cmd.File, "{module-name}", moduleName)
+				expanded.Args = replaceModuleName(cmd.Args, moduleName)
+
+				acceptedNames = append(acceptedNames, expanded.File)
+
+				if excludedByName(excludeSet, expanded.File) {
+					continue
+				}
+
+				selected = append(selected, expanded)
 			}
 		} else {
 			for moduleName := range activeModules {
 				if isModuleMatch(moduleName, cmd.RequiredModule) {
-					result = append(result, cmd)
+					selected = append(selected, cmd)
 					break
 				}
 			}
 		}
 	}
 
-	return result
+	return selected, acceptedNames
 }
 
 func matchingModules(activeModules map[string]bool, required string) []string {
@@ -636,36 +718,58 @@ func (c *Command) writeToTar(tarWriter *tar.Writer, fileContent []byte) error {
 	return nil
 }
 
-func excludeBaseName(cmd Command) string {
-	if cmd.ExcludeKey != "" {
-		return cmd.ExcludeKey
-	}
-
-	name := strings.TrimSuffix(cmd.File, ".json")
-	name = strings.TrimSuffix(name, ".txt")
-	name = strings.TrimSuffix(name, "-{module-name}")
-
-	return name
+// trimArchiveExt drops the archive entry extension, so --exclude accepts a name
+// with or without it.
+func trimArchiveExt(name string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(name, ".json"), ".txt")
 }
 
-func isFileExcluded(cmd Command, excludeMap map[string]bool) bool {
-	if excludeMap[cmd.File] {
-		return true
+// excludeBaseName returns the --exclude token printed by --list-exclude for a
+// command template: the archive entry name as written in debugCommands, or —
+// when that name is per-module and therefore cluster-specific — the
+// module-independent remainder (d8-{module-name}-ccm-logs.txt -> ccm-logs).
+//
+// The token is always derived from File, so a new per-module command needs no
+// extra per-command data and cannot disagree with its own file name.
+func excludeBaseName(cmd Command) string {
+	if !strings.Contains(cmd.File, "{module-name}") {
+		return cmd.File
 	}
 
-	if cmd.ExcludeKey != "" {
-		return excludeMap[cmd.ExcludeKey]
+	name := strings.ReplaceAll(cmd.File, "d8-{module-name}-", "")
+	name = strings.ReplaceAll(name, "-{module-name}-", "-")
+	name = strings.ReplaceAll(name, "-{module-name}", "")
+	name = strings.ReplaceAll(name, "{module-name}-", "")
+	name = strings.ReplaceAll(name, "{module-name}", "")
+
+	return trimArchiveExt(name)
+}
+
+// newExcludeSet normalizes the raw --exclude values into the form matched
+// against command names: surrounding spaces and the extension are irrelevant.
+func newExcludeSet(excludeFiles []string) map[string]bool {
+	set := make(map[string]bool, len(excludeFiles))
+
+	for _, name := range excludeFiles {
+		name = trimArchiveExt(strings.TrimSpace(name))
+		if name != "" {
+			set[name] = true
+		}
 	}
 
-	base := strings.TrimSuffix(cmd.File, ".json")
+	return set
+}
 
-	base = strings.TrimSuffix(base, ".txt")
-	if excludeMap[base] {
-		return true
+// excludedByName reports whether any of the spellings of one archive entry was
+// excluded on the command line. A name matches only that entry: there is no
+// prefix or group matching, so --exclude d8 cannot silently drop every d8-* file.
+func excludedByName(excludeSet map[string]bool, names ...string) bool {
+	if len(excludeSet) == 0 {
+		return false
 	}
 
-	for excluded := range excludeMap {
-		if strings.HasPrefix(base, excluded+"-") {
+	for _, name := range names {
+		if name != "" && excludeSet[trimArchiveExt(name)] {
 			return true
 		}
 	}
@@ -673,6 +777,80 @@ func isFileExcluded(cmd Command, excludeMap map[string]bool) bool {
 	return false
 }
 
+// validateExcludeNames rejects --exclude values that cannot match any archive
+// entry, so a typo is reported instead of quietly collecting the full archive.
+// acceptedNames comes from filterAndExpandCommands and already covers both the
+// resolved entry names of this run and the module-independent tokens.
+func validateExcludeNames(excludeFiles, acceptedNames []string) error {
+	known := make(map[string]bool, len(acceptedNames))
+	accepted := make([]string, 0, len(acceptedNames))
+
+	for _, name := range acceptedNames {
+		key := trimArchiveExt(name)
+		if key == "" || known[key] {
+			continue
+		}
+
+		known[key] = true
+
+		accepted = append(accepted, name)
+	}
+
+	var unknown []string
+
+	for _, name := range excludeFiles {
+		name = trimArchiveExt(strings.TrimSpace(name))
+		if name != "" && !known[name] {
+			unknown = append(unknown, name)
+		}
+	}
+
+	if len(unknown) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("unknown --exclude name(s): %s%s\nrun \"d8 system collect-debug-info --list-exclude\" to see the accepted names",
+		strings.Join(unknown, ", "), suggestExcludeNames(unknown, accepted))
+}
+
+// suggestExcludeNames offers the accepted names that contain (or are contained
+// in) an unknown one, which covers both typos and the group prefixes that used
+// to match implicitly.
+func suggestExcludeNames(unknown, accepted []string) string {
+	const maxSuggestions = 5
+
+	seen := make(map[string]bool, maxSuggestions)
+
+	var matches []string
+
+	for _, name := range unknown {
+		for _, candidate := range accepted {
+			key := trimArchiveExt(candidate)
+			if seen[key] || !strings.Contains(key, name) && !strings.Contains(name, key) {
+				continue
+			}
+
+			seen[key] = true
+
+			matches = append(matches, candidate)
+		}
+	}
+
+	if len(matches) == 0 {
+		return ""
+	}
+
+	sort.Strings(matches)
+
+	if len(matches) > maxSuggestions {
+		return fmt.Sprintf("; did you mean one of: %s, ... (%d more)", strings.Join(matches[:maxSuggestions], ", "), len(matches)-maxSuggestions)
+	}
+
+	return fmt.Sprintf("; did you mean: %s", strings.Join(matches, ", "))
+}
+
+// GetExcludableFiles returns the tokens accepted by --exclude, one per archive
+// entry, as printed by --list-exclude.
 func GetExcludableFiles() []string {
 	seen := make(map[string]bool, len(debugCommands))
 

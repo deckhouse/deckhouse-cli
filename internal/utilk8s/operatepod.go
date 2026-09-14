@@ -60,3 +60,33 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, cmdLine []strin
 
 	return executor, nil
 }
+
+// ExecCommandInPod runs cmdLine in the given container and returns whatever the
+// command wrote to stdout and stderr. Output collected before an error (a
+// timeout in particular) is returned along with that error, so callers can keep
+// a partial result.
+//
+// The buffers are goroutine-safe on purpose: StreamWithContext returns as soon
+// as ctx is done without joining the goroutines that copy the remote streams,
+// so those goroutines may still write into them after this call returned.
+func ExecCommandInPod(
+	ctx context.Context,
+	config *rest.Config,
+	kubeCl kubernetes.Interface,
+	cmdLine []string,
+	podName, namespace, containerName string,
+) (stdout []byte, stderr string, err error) {
+	executor, err := ExecInPod(config, kubeCl, cmdLine, podName, namespace, containerName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var stdoutBuf, stderrBuf syncBuffer
+
+	streamErr := executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdoutBuf,
+		Stderr: &stderrBuf,
+	})
+
+	return stdoutBuf.Bytes(), stderrBuf.String(), streamErr
+}

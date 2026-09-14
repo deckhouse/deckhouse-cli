@@ -54,10 +54,15 @@ func NewCommand() *cobra.Command {
 	)
 
 	collectDebugInfoCmd := &cobra.Command{
-		Use:           `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
-		Short:         "Collect debug info.",
-		Long:          collectDebugInfoCmdLong,
-		Example:       collectDebugInfoCmdExample,
+		Use:     `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
+		Short:   "Collect debug info.",
+		Long:    collectDebugInfoCmdLong,
+		Example: collectDebugInfoCmdExample,
+		// Without this, an unknown positional argument (a misspelled
+		// subcommand, say) is silently accepted by the parent and the full
+		// cluster-wide collection runs instead: cobra only reports unknown
+		// commands for the root command, and this one has a parent.
+		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
@@ -75,8 +80,8 @@ func NewCommand() *cobra.Command {
 			return collectDebugInfo(cmd, listExclude, excludeList, commandTimeout, requestInterval)
 		},
 	}
-	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated values")
-	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
+	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated names as printed by --list-exclude; the file extension is optional. An unknown name is an error")
+	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive, then exit")
 	collectDebugInfoCmd.Flags().DurationVar(&commandTimeout, "command-timeout", 2*time.Minute, "Timeout for each individual debug command execution")
 	collectDebugInfoCmd.Flags().DurationVar(&requestInterval, "request-interval", 0, "Minimum interval between debug command executions to avoid overloading the cluster (e.g. 200ms, 500ms, 1s). Zero disables rate limiting (default 0s)")
 
@@ -99,19 +104,9 @@ func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string
 		return nil
 	}
 
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	config, kubeCl, err := utilk8s.NewClientSet(cmd)
 	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	contextName, err := cmd.Flags().GetString("context")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return err
 	}
 
 	if err = debugtar.Tarball(config, kubeCl, excludeList, commandTimeout, requestInterval); err != nil {

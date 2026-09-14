@@ -52,6 +52,7 @@ d8 system  (aliases: s, p, platform)
 │   └── main                            Dump the main queue
 ├── logs                                Stream deckhouse-controller logs
 └── collect-debug-info                  Stream a gzipped debug tarball to stdout
+    └── virtualization                  Stream a d8-virtualization-only debug tarball
 ```
 
 The `s` alias is the recommended short form (`d8 s module list`). `p` and `platform` are legacy aliases kept for backward compatibility with older documentation.
@@ -227,16 +228,34 @@ Collects a wide cluster snapshot into a **gzipped tar streamed to stdout**, so y
 d8 system collect-debug-info > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
 ```
 
-It refuses to run when stdout is a terminal (to avoid dumping binary to your screen) unless you pass `--list-exclude`. The collection runs **inside** the leader pod: it executes on the order of ~60 diagnostic commands there (`deckhouse-controller queue list`, redacted global values, module/source/release inventories, cluster-wide `kubectl get` snapshots, and controller/etcd/apiserver/VPA/Prometheus logs, plus cloud-provider/cert-manager/istio/cni-cilium extras when those modules are Ready), writing each result as a file in the archive.
+It refuses to run when stdout is a terminal (to avoid dumping binary to your screen) unless you pass `--list-exclude`. The collection runs **inside** the leader pod: it executes 63 diagnostic commands there (`deckhouse-controller queue list`, redacted global values, module/source/release inventories, cluster-wide `kubectl get` snapshots, and controller/etcd/apiserver/VPA/Prometheus logs, plus cloud-provider/cert-manager/istio/cni-cilium/virtualization extras when those modules are Ready), writing each result as a file in the archive.
+
+Before collecting, the command reads the list of `Ready` modules to decide which module-gated commands apply. If that read fails, it prints an error and keeps going: module-gated commands run anyway (and may produce empty files), except the per-module log collections whose file name contains the module name - those are skipped, since their archive entry name cannot be resolved.
 
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
-| `--exclude` | | string list | (none) | Comma-separated list of elements to leave out of the archive. Matches by base name, so e.g. `ccm-logs` also drops the per-cloud `ccm-logs-<module>.txt`. |
-| `--list-exclude` | `-l` | bool | `false` | Print the names of everything that can be excluded, then exit. This path makes no cluster calls. |
+| `--exclude` | | string list | (none) | Comma-separated list of entries to leave out of the archive. Accepts exactly the names printed by `--list-exclude`, with or without the file extension; a name matches that entry only, never a group of files sharing a prefix. A name that matches nothing is an error listing close matches, so a typo cannot pass as "collect everything". |
+| `--list-exclude` | `-l` | bool | `false` | Print the names accepted by `--exclude`, then exit. This path makes no cluster calls. The names are the archive file names as declared in the command table, except the per-module cloud logs, which are printed as the module-independent keys `ccm-logs` and `csi-controller-logs` (their real entry is `d8-<module>-ccm-logs.txt`, and both spellings are accepted). |
 | `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command. |
 | `--request-interval` | | duration | `0` | Minimum gap between commands to avoid overloading the cluster (e.g. `200ms`, `1s`). `0` disables rate limiting. |
 
-**Handle the archive as sensitive.** Only `global-values.json` is redacted (its `kubeRBACProxyCA` and registry `dockercfg`); container logs and the raw `audit-policy` Secret are included unredacted. Also note that a file is written even when its source command fails or times out, so an entry may be empty rather than absent.
+**Handle the archive as sensitive.** Only `cluster-global-values.json` is redacted (its `kubeRBACProxyCA` and registry `dockercfg`); container logs and the raw audit policy Secret (`kube-system-audit-policy.json`) are included unredacted. Also note that a file is written even when its source command fails or times out, so an entry may be empty rather than absent.
+
+### `collect-debug-info virtualization`
+
+Collects a separate, virtualization-focused archive: the pod list of the `d8-virtualization` namespace plus the **full** log of every pod in it (`--tail=-1`, no line cap). Same stdout rules as the parent command.
+
+```bash
+d8 system collect-debug-info virtualization > deckhouse-debug-virtualization-$(date +"%Y_%m_%d").tar.gz
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--skip-ds-logs` | | bool | `false` | Skip logs of pods owned by a DaemonSet (`virt-handler`, `virtualization-dra`, `vm-route-forge`, ...), whose volume scales with the number of nodes. |
+| `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command. |
+| `--request-interval` | | duration | `0` | Minimum gap between commands to avoid overloading the cluster. |
+
+The pod list is the entire payload of this archive, so the command fails (and writes nothing) when the namespace cannot be listed or holds no pods - instead of producing a valid-looking archive with a single empty file. `--exclude`/`--list-exclude` do not apply here.
 
 ---
 
@@ -312,6 +331,10 @@ d8 system collect-debug-info --list-exclude
 d8 system collect-debug-info --exclude ccm-logs,csi-controller-logs \
   > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
 
+# Collect the virtualization-only archive, without DaemonSet pod logs
+d8 system collect-debug-info virtualization --skip-ds-logs \
+  > deckhouse-debug-virtualization-$(date +"%Y_%m_%d").tar.gz
+
 
 # --- Global flags ---
 
@@ -328,5 +351,6 @@ d8 system --kubeconfig ~/.kube/prod.config --context prod module list
 - **`approve` / `apply-now` are annotation-only and idempotent.** They never error on an already-annotated or non-`Pending` release; they print a notice and exit 0.
 - **`package scan` does not scan locally and does not wait.** It creates a `PackageRepositoryOperation` and returns; results are reported by the platform, not the CLI.
 - **In-pod commands need a leader pod.** `module list`/`values`/`snapshots`, `queue`, and `collect-debug-info` exec into the pod labeled `leader=true` in `d8-system`; without it they fail with `no pods deckhouse available in namespace d8-system`.
-- **The debug archive is sensitive** (unredacted logs and the raw audit-policy Secret) and must be redirected to a file.
+- **The debug archive is sensitive** (unredacted logs and the raw audit policy Secret, `kube-system-audit-policy.json`) and must be redirected to a file.
+- **`collect-debug-info` takes no positional arguments.** A misspelled subcommand (`virtualisation`) is rejected with `unknown command` instead of silently running the full cluster-wide collection.
 - **stdout vs stderr:** `module` state changes print to stdout while notices/warnings/errors print to stderr, which makes it easy to script against applied changes only.

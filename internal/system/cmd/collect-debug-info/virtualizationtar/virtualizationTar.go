@@ -56,6 +56,7 @@ func NewCommand() *cobra.Command {
 		Short:         "Collect a separate virtualization debug archive.",
 		Long:          virtualizationCmdLong,
 		Example:       virtualizationCmdExample,
+		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
@@ -78,19 +79,9 @@ func NewCommand() *cobra.Command {
 }
 
 func collectVirtualizationDebugInfo(cmd *cobra.Command, commandTimeout, requestInterval time.Duration, skipDsLogs bool) error {
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	config, kubeCl, err := utilk8s.NewClientSet(cmd)
 	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	contextName, err := cmd.Flags().GetString("context")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return err
 	}
 
 	if err = debugtar.VirtualizationTarball(config, kubeCl, commandTimeout, requestInterval, skipDsLogs); err != nil {
