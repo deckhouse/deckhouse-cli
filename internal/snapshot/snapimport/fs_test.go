@@ -183,13 +183,14 @@ func TestPutFile_409ReopensExactServerSelectedBodies(t *testing.T) {
 	progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
 	attrs := fileAttrs{Perm: 0o600, UID: 1, GID: 2}
 
-	err := putFile(
+	_, err := putFile(
 		context.Background(),
 		doer,
 		"https://import.example",
 		"file.bin",
 		int64(len(payload)),
 		0,
+		blockPutPayloadLimit,
 		attrs,
 		newBody,
 		progress,
@@ -303,13 +304,14 @@ func TestPutFile_ConflictSequencesAreBounded(t *testing.T) {
 			activated := 0
 			progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
 
-			err := putFile(
+			_, err := putFile(
 				context.Background(),
 				doer,
 				"https://import.example",
 				"file.bin",
 				int64(len(payload)),
 				0,
+				blockPutPayloadLimit,
 				fileAttrs{Perm: 0o600},
 				newBody,
 				progress,
@@ -421,13 +423,14 @@ func TestPutFile_SuccessResetsConflictHistory(t *testing.T) {
 	activated := 0
 	progress := &fileUploadProgress{onProgress: func(n int) { progressed += n }}
 
-	err := putFile(
+	_, err := putFile(
 		context.Background(),
 		doer,
 		"https://import.example",
 		"file.bin",
 		totalSize,
 		0,
+		blockPutPayloadLimit,
 		fileAttrs{Perm: 0o600},
 		newBody,
 		progress,
@@ -722,7 +725,7 @@ func TestPutFile_SingleShotUpload_CorrectHeaders(t *testing.T) {
 	defer srv.Close()
 
 	progress := &fileUploadProgress{}
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.txt", int64(len(payload)), 0,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.txt", int64(len(payload)), 0, blockPutPayloadLimit,
 		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -784,7 +787,7 @@ func TestPutFile_ResumeFromPartialOffset(t *testing.T) {
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
 	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 8,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 8, blockPutPayloadLimit,
 		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -818,7 +821,7 @@ func TestPutFile_OffsetMismatchCorrection(t *testing.T) {
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
 
 	progress := &fileUploadProgress{}
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 0,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", int64(len(payload)), 0, blockPutPayloadLimit,
 		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -850,7 +853,7 @@ func TestPutFile_PartialOffsetAtTotalFinalizesViaEmptyPUT(t *testing.T) {
 	attrs := fileAttrs{Perm: 0o600, UID: 0, GID: 0, ModTime: time.Now()}
 	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", 4, 4,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "data.bin", 4, 4, blockPutPayloadLimit,
 		attrs, bytesBodyFactory([]byte("data")), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -877,7 +880,7 @@ func TestPutFile_EmptyFile_CreatesViaSinglePUT(t *testing.T) {
 	defer srv.Close()
 
 	progress := &fileUploadProgress{}
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", 0, 0,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "empty.txt", 0, 0, blockPutPayloadLimit,
 		attrs, bytesBodyFactory(nil), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -925,7 +928,7 @@ func TestPutFile_FinishedPostUsesSharedEndpoint(t *testing.T) {
 	attrs := fileAttrs{Perm: 0o644, UID: 0, GID: 0, ModTime: time.Now()}
 	progress := &fileUploadProgress{}
 
-	if err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "file.txt", int64(len(payload)), 0,
+	if _, err := putFile(context.Background(), plainHTTPDoer{}, srv.URL, "file.txt", int64(len(payload)), 0, blockPutPayloadLimit,
 		attrs, bytesBodyFactory(payload), progress, nil); err != nil {
 		t.Fatalf("putFile: %v", err)
 	}
@@ -4238,14 +4241,34 @@ type fakeFileImporter struct {
 	files   map[string][]byte
 	final   map[string]bool
 	headers map[string]http.Header
+	// putOffsets records the X-Offset of EVERY PUT per path, in order, including
+	// the ones this importer goes on to refuse. headers, by contrast, keeps only
+	// the last ACCEPTED request — which is why a resume that started at the wrong
+	// offset and was corrected by a 409 is invisible there and visible here.
+	putOffsets map[string][]int64
 }
 
 func newFakeFileImporter() *fakeFileImporter {
 	return &fakeFileImporter{
-		files:   make(map[string][]byte),
-		final:   make(map[string]bool),
-		headers: make(map[string]http.Header),
+		files:      make(map[string][]byte),
+		final:      make(map[string]bool),
+		headers:    make(map[string]http.Header),
+		putOffsets: make(map[string][]int64),
 	}
+}
+
+// recordPut notes the offset a PUT arrived with, before anything decides whether to
+// accept it.
+func (f *fakeFileImporter) recordPut(relPath string, header http.Header) {
+	offset, err := strconv.ParseInt(header.Get("X-Offset"), 10, 64)
+	if err != nil {
+		offset = -1
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.putOffsets[relPath] = append(f.putOffsets[relPath], offset)
 }
 
 // seed pre-populates a file's durable buffer, simulating bytes a previous, interrupted run
@@ -4255,6 +4278,18 @@ func (f *fakeFileImporter) seed(relPath string, prefix []byte) {
 	defer f.mu.Unlock()
 
 	f.files[relPath] = append([]byte(nil), prefix...)
+}
+
+// offsetsPut reports the X-Offset every PUT for relPath carried, in order, refused ones
+// included. Read as a whole sequence it shows not just where a resumed request ended up
+// but that it never asked for the wrong place first — a distinction the last accepted
+// request on its own cannot make, since a wrong offset corrected by a 409 leaves no trace
+// in it. An unparsable offset is recorded as -1 rather than dropped.
+func (f *fakeFileImporter) offsetsPut(relPath string) []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]int64(nil), f.putOffsets[relPath]...)
 }
 
 // received returns a copy of every byte durably written so far for relPath.
@@ -4304,6 +4339,8 @@ func (f *fakeFileImporter) serveHead(w http.ResponseWriter, relPath string) {
 }
 
 func (f *fakeFileImporter) servePut(w http.ResponseWriter, r *http.Request, relPath string) {
+	f.recordPut(relPath, r.Header)
+
 	offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
 	expectedTotal, _ := strconv.ParseInt(r.Header.Get("X-Content-Length"), 10, 64)
 
@@ -4650,6 +4687,11 @@ func (f *interruptingFileImporter) ServeHTTP(w http.ResponseWriter, r *http.Requ
 // hijacks and closes the raw connection with no HTTP response, exactly as it would after
 // the importer process (or the network path to it) died mid-transfer.
 func (f *interruptingFileImporter) crashMidTransfer(w http.ResponseWriter, r *http.Request, relPath string) {
+	// This request bypasses servePut entirely, so it records itself; without this the
+	// severed PUT would be missing from the sequence and a resume that restarted from
+	// zero would look the same as one that continued.
+	f.inner.recordPut(relPath, r.Header)
+
 	chunk := make([]byte, f.partialN)
 	if _, err := io.ReadFull(r.Body, chunk); err != nil {
 		panic(fmt.Sprintf("test setup: reading %d-byte partial prefix: %v", f.partialN, err))
@@ -4672,19 +4714,31 @@ func (f *interruptingFileImporter) crashMidTransfer(w http.ResponseWriter, r *ht
 	_ = conn.Close()
 }
 
-// TestImportFSFromTar_InterruptAndResume_AllCodecs is the acceptance test for this task's
-// core promise: a filesystem entry interrupted mid-upload can be resumed by a wholly
-// independent later call (as a restarted CLI process would make) and still produce the
-// exact original bytes on the server, for every codec. Attempt 1 is severed mid-transfer
-// with no HTTP response; attempt 2 re-opens the same on-disk tar from scratch and re-derives
-// the resume offset purely from a fresh headFileOffset HEAD probe, then (for a compressed
-// entry) re-measures the exact size and discard-and-fast-forwards to the resume point before
-// streaming the remainder. "none" exercises the direct-from-tr path as a regression guard.
+// TestImportFSFromTar_InterruptAndResume_AllCodecs proves the two ways a filesystem
+// entry's upload survives losing its connection, across every codec.
+//
+// Leg 1 is the one this test used to assert the opposite of. A connection severed
+// mid-transfer with no HTTP response ended the command, losing every byte not yet sent.
+// It is now survived inside the one call, so what is asserted is that the call SUCCEEDS,
+// that the request after the break carried the offset the importer itself reported, and
+// that the importer ends up holding the original plaintext exactly — content, because a
+// decode stream resumed from the wrong position would still deliver the right number of
+// bytes under the right offset and raise no error anywhere.
+//
+// Leg 2 is the original cross-run property, unchanged in substance: a wholly independent
+// importFSFromTar call re-opens the same on-disk tar from scratch, re-derives the resume
+// offset purely from a fresh headFileOffset probe, and (for a compressed entry) re-measures
+// and fast-forwards to that point before streaming the remainder. "none" exercises the
+// direct-from-tar path as a regression guard.
 func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
+	t.Parallel()
+
 	content := bytes.Repeat([]byte("fs-interrupt-then-resume-bytes-"), 3000)
 
 	for _, tc := range codecCases {
 		t.Run(tc.codec, func(t *testing.T) {
+			t.Parallel()
+
 			ext, encoded := encodeEntry(t, tc.codec, content)
 
 			var tarBuf bytes.Buffer
@@ -4712,54 +4766,70 @@ func TestImportFSFromTar_InterruptAndResume_AllCodecs(t *testing.T) {
 			srv := httptest.NewServer(imp)
 			defer srv.Close()
 
-			// Attempt 1: simulates the CLI process being killed mid-transfer.
-			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(), nil, nil, nil)
-			if err == nil {
-				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
+			captured := &capturedLog{}
+
+			err := importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath,
+				captured.logger(), nil, nil, nil)
+			if err != nil {
+				t.Fatalf("importFSFromTar over a severed connection: %v (a break mid-transfer must be survived, not returned)", err)
 			}
 
-			if got := int64(len(inner.received("big.txt"))); got != partialN {
-				t.Fatalf("after simulated crash, server durably holds %d bytes, want exactly %d", got, partialN)
+			if got := inner.received("big.txt"); !bytes.Equal(got, content) {
+				t.Fatalf("after the break, the importer holds %d bytes that are not the original %d-byte content "+
+					"(content, not length: a decode stream resumed from the wrong position still sends the right count)",
+					len(got), len(content))
 			}
 
-			// Attempt 2: a genuinely independent invocation — re-opens the same archive
-			// file from scratch and re-derives everything from a fresh HEAD probe, exactly
-			// as a restarted process would.
+			if want := []int64{0, partialN}; !slices.Equal(inner.offsetsPut("big.txt"), want) {
+				t.Fatalf("PUT offsets = %v, want %v (the retry must continue from the offset the "+
+					"importer reported, without asking for the wrong place first)",
+					inner.offsetsPut("big.txt"), want)
+			}
+
+			assertRecoveredBreakLogged(t, captured.String(), partialN)
+
+			// Leg 2: a genuinely independent invocation against an importer already
+			// holding a prefix — re-opens the same archive file from scratch and
+			// re-derives everything from a fresh HEAD probe, exactly as a restarted
+			// process would.
+			seeded := newFakeFileImporter()
+			seeded.seed("big.txt", content[:partialN])
+
+			srv2 := httptest.NewServer(seeded)
+			defer srv2.Close()
+
 			var reported int
 
 			var lastTotal int64
 
 			activated := 0
 
-			err = importFSFromTar(context.Background(), plainHTTPDoer{}, srv.URL, tarPath, discardLogger(),
+			err = importFSFromTar(context.Background(), plainHTTPDoer{}, srv2.URL, tarPath, discardLogger(),
 				func(n int64) { lastTotal = n }, func(n int) { reported += n }, func() { activated++ })
 			if err != nil {
-				t.Fatalf("importFSFromTar (attempt 2, resume after simulated crash): %v", err)
+				t.Fatalf("importFSFromTar (leg 2, fresh run resuming a partial upload): %v", err)
 			}
 
-			// Attempt 2 genuinely PUTs the remaining bytes of a partially-resumed file, so
-			// it must activate (backlog #21 Bug A) even though the file was not uploaded
-			// from scratch.
+			// Leg 2 genuinely PUTs the remaining bytes of a partially-resumed file, so
+			// it must activate even though the file was not uploaded from scratch.
 			if activated == 0 {
 				t.Error("activate call count = 0, want >= 1 (a partially-resumed upload with real remaining bytes must activate)")
 			}
 
-			got := inner.received("big.txt")
+			got := seeded.received("big.txt")
 			if !bytes.Equal(got, content) {
-				t.Fatalf("after crash-then-resume, server holds %d bytes not matching the original %d-byte content "+
+				t.Fatalf("after a fresh resuming run, server holds %d bytes not matching the original %d-byte content "+
 					"(a regression here means either duplicated already-durable bytes or dropped bytes)", len(got), len(content))
 			}
 
 			if reported != len(content) {
-				t.Errorf("attempt 2 reported %d progress bytes, want %d (full file size credited once on completion)", reported, len(content))
+				t.Errorf("leg 2 reported %d progress bytes, want %d (full file size credited once on completion)", reported, len(content))
 			}
 
 			// A single-file tar has a running total equal to that one file's exact
-			// (measured) decompressed size — the resume attempt re-measures from
-			// scratch, so the total reflects the same value regardless of the
-			// earlier interrupted attempt.
+			// (measured) decompressed size.
 			if lastTotal != int64(len(content)) {
-				t.Errorf("attempt 2 setTotal = %d, want %d (single file's exact decompressed size)", lastTotal, len(content))
+				t.Errorf("leg 2 setTotal = %d, want %d (single file's exact decompressed size)", lastTotal, len(content))
 			}
 		})
 	}
@@ -4780,11 +4850,16 @@ func TestSendVolumeData_FSProtocolErrorDoesNotFinalizeOrCreditProgress(t *testin
 			status: http.StatusNoContent,
 			header: http.Header{"X-Next-Offset": []string{strconv.Itoa(len(content))}},
 		},
-		{
-			name:   "409 missing expected offset",
-			status: http.StatusConflict,
-			header: http.Header{},
-		},
+		// A 409 carrying NO X-Expected-Offset is deliberately absent from this
+		// table. It is not a protocol error for this importer: the same answer
+		// means "a previous request's handler is still draining" and "the file
+		// is already whole", so the client asks rather than reading a verdict
+		// off it. Where that coverage went, by name:
+		// TestFileUpload_ConflictWithoutOffsetOnAWholeFileIsNotAFailure and
+		// TestFileUpload_ConflictWithoutOffsetOnAPartialFileIsNotCompletion,
+		// one for each of the two opposite misreadings. A malformed header
+		// stays here, because a header that is PRESENT and unreadable is a
+		// broken producer and nothing to ask about.
 		{
 			name:   "409 malformed expected offset",
 			status: http.StatusConflict,

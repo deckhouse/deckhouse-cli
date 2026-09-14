@@ -36,9 +36,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -95,7 +95,7 @@ func TestDownloadBlockChunks_OnProgressTotalsBytes(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestDownloadBlockChunks_NilOnProgress(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestDownloadFilesystemVolume_OnProgressTotalsBytes(t *testing.T) {
 	srv, files := fsTestServer(t)
 
 	filesURL := srv.URL + "/files/"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("none", 0)
 	require.NoError(t, err)
@@ -228,7 +228,7 @@ func TestDownloadFilesystemVolume_NilOnProgress(t *testing.T) {
 	srv, _ := fsTestServer(t)
 
 	filesURL := srv.URL + "/files/"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("none", 0)
 	require.NoError(t, err)
@@ -322,7 +322,7 @@ func TestDownloadFilesystemVolume_ResumeSkipReachesFullTotal(t *testing.T) {
 	srv, files := fsTestServerWithSizes(t)
 
 	filesURL := srv.URL + "/files/"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec := mustCodec(t, "zstd")
 
@@ -462,7 +462,7 @@ func TestDownloadFilesystemVolume_OnProgressIsIncremental(t *testing.T) {
 	srv := largeFSFileServer(t, content)
 
 	filesURL := srv.URL + "/files/"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	// codec "none" avoids compression framing complexity when reasoning about
 	// exact byte counts (mirrors TestDownloadFilesystemVolume_OnProgressTotalsBytes).

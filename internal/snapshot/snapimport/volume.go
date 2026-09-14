@@ -1026,6 +1026,24 @@ type requestBodyReport struct {
 	readErr   error
 	closeErr  error
 	closed    bool
+
+	// sourceEndedShort records that the body's own reader ended — cleanly or
+	// with an error — before it had produced the declared number of bytes.
+	//
+	// It separates the two failures that otherwise look identical from the
+	// outside, both surfacing as a round trip that did not complete having
+	// consumed fewer bytes than declared: a link that broke mid-request, and a
+	// local source that ran out. A transport that gives up simply stops ASKING
+	// the body for bytes and leaves no mark on it; a source that ends says so,
+	// and this is that mark.
+	//
+	// Telling the two apart matters twice over. An upload asks the importer
+	// where it stands only when the TRANSPORT is what failed — asking is
+	// pointless when this client is the one that could not deliver — and only a
+	// body that ran dry earns the compressed path's "the archive's declared
+	// size may not match its content" diagnosis, which on a broken link would
+	// be a plain falsehood pointing the next reader at the wrong thing.
+	sourceEndedShort bool
 }
 
 func (r requestBodyReport) lifecycleError() error {
@@ -1067,16 +1085,17 @@ func (r requestBodyReport) validateExact() error {
 }
 
 type attestedRequestBody struct {
-	mu        sync.Mutex
-	body      io.ReadCloser
-	bodyRange requestBodyRange
-	expected  int64
-	consumed  int64
-	readErr   error
-	closeErr  error
-	closed    bool
-	closeOnce sync.Once
-	done      chan struct{}
+	mu               sync.Mutex
+	body             io.ReadCloser
+	bodyRange        requestBodyRange
+	expected         int64
+	consumed         int64
+	readErr          error
+	closeErr         error
+	closed           bool
+	sourceEndedShort bool
+	closeOnce        sync.Once
+	done             chan struct{}
 }
 
 func newAttestedRequestBody(body io.ReadCloser, bodyRange requestBodyRange, expected int64) *attestedRequestBody {
@@ -1115,6 +1134,15 @@ func (b *attestedRequestBody) Read(p []byte) (int, error) {
 				fmt.Errorf("request body consumed %d bytes, exceeding declared size %d", b.consumed, b.expected),
 			)
 		}
+	}
+
+	// An end of input — clean or not — reached before the declared size is the
+	// body itself saying it has no more, which is what separates a source that
+	// ran out from a transport that stopped asking. Recorded for both shapes:
+	// io.LimitReader ends a dry stream with io.EOF, while terminalProofReader
+	// ends one with io.ErrNoProgress.
+	if err != nil && b.consumed < b.expected {
+		b.sourceEndedShort = true
 	}
 
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -1175,12 +1203,13 @@ func (b *attestedRequestBody) report() requestBodyReport {
 	defer b.mu.Unlock()
 
 	report := requestBodyReport{
-		bodyRange: b.bodyRange,
-		expected:  b.expected,
-		consumed:  b.consumed,
-		readErr:   b.readErr,
-		closeErr:  b.closeErr,
-		closed:    b.closed,
+		bodyRange:        b.bodyRange,
+		expected:         b.expected,
+		consumed:         b.consumed,
+		readErr:          b.readErr,
+		closeErr:         b.closeErr,
+		closed:           b.closed,
+		sourceEndedShort: b.sourceEndedShort,
 	}
 
 	return report
@@ -1200,7 +1229,9 @@ func doAttestedRequest(
 			closed:    true,
 		}
 
-		return resp, report, errors.Join(err, responseErr)
+		// A request with no body has no source that could have run dry, so
+		// every failure of this round trip is the transport's.
+		return resp, report, markUploadTransportFailure(errors.Join(err, responseErr), false)
 	}
 
 	if req.Body == nil || req.Body == http.NoBody {
@@ -1220,7 +1251,23 @@ func doAttestedRequest(
 	responseErr := drainAndCloseResponseBody(resp)
 	report, waitErr := body.wait(req.Context())
 
-	return resp, report, errors.Join(requestErr, responseErr, waitErr, report.lifecycleError())
+	roundTripErr := markUploadTransportFailure(
+		errors.Join(requestErr, responseErr), report.sourceEndedShort)
+
+	return resp, report, errors.Join(roundTripErr, waitErr, report.lifecycleError())
+}
+
+// markUploadTransportFailure labels a failed round trip as the transport's,
+// which is what licenses the caller to ask the importer where it stands (see
+// errUploadTransportFailure). sourceEndedShort withholds the label: a request
+// this client could not feed says nothing about the link, and the importer has
+// nothing to add about it.
+func markUploadTransportFailure(err error, sourceEndedShort bool) error {
+	if err == nil || sourceEndedShort {
+		return err
+	}
+
+	return fmt.Errorf("%w: %w", errUploadTransportFailure, err)
 }
 
 func drainAndCloseResponseBody(resp *http.Response) error {
@@ -1299,14 +1346,6 @@ func measureBlockPayloadSize(ctx context.Context, leaf PlannedNode, source io.Re
 	return size, nil
 }
 
-// putBlock streams the block-volume payload at dataFile to the importer's block
-// endpoint, honouring the server-reported X-Next-Offset for resumable progress. ext
-// selects the decode codec via compress.NewReader ("" for raw/no codec, matching
-// Codec.Ext); totalSize is the volume's exact decompressed byte count (see
-// resolveBlockPayloadSize). onProgress, when non-nil, is called as validated server offsets make
-// raw bytes known durable, including the initial HEAD prefix. activate, when non-nil, is called at the start of every
-// real transfer iteration (never when offset==totalSize short-circuits before any PUT is
-// attempted), so the caller's progress stream is activated only on a genuine transfer.
 type blockArchiveSource interface {
 	io.Reader
 	io.ReaderAt
@@ -1323,6 +1362,16 @@ func resetAuthenticatedRead(source any) {
 	}
 }
 
+// putBlock streams the block-volume payload at dataFile to the importer's block
+// endpoint, honouring the server-reported X-Next-Offset for resumable progress, and
+// surviving a broken connection by continuing from the offset the importer confirms (see
+// blockUploadTransfer). ext selects the decode codec via compress.NewReader ("" for
+// raw/no codec, matching Codec.Ext); totalSize is the volume's exact decompressed byte
+// count (see resolveBlockPayloadSize). onProgress, when non-nil, is called as validated
+// server offsets make raw bytes known durable, including the initial HEAD prefix.
+// activate, when non-nil, is called at the start of every real transfer iteration (never
+// when offset==totalSize short-circuits before any PUT is attempted), so the caller's
+// progress stream is activated only on a genuine transfer.
 func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext string, totalSize int64, log *slog.Logger, onProgress func(int), activate func()) error {
 	if err := validateBlockOffset(0, totalSize); err != nil {
 		return fmt.Errorf("invalid block upload size %d: %w", totalSize, err)
@@ -1345,8 +1394,10 @@ func putBlock(ctx context.Context, httpClient httpDoer, url, dataFile, ext strin
 		return fmt.Errorf("open volume data %s: %w", dataFile, err)
 	}
 
-	uploadErr := putBlockFromOffset(ctx, httpClient, url, dataFile, ext, totalSize, offset,
+	transfer := newBlockUploadTransfer(httpClient, url, dataFile, ext, totalSize, offset,
 		file, log, &progress, activate)
+
+	uploadErr := transfer.run(ctx)
 
 	closeErr := file.Close()
 	if closeErr != nil {
@@ -1372,12 +1423,13 @@ func putBlockFromSource(ctx context.Context, httpClient httpDoer, url, dataFile,
 	progress := blockUploadProgress{onProgress: onProgress}
 	progress.creditTo(offset)
 
-	return putBlockFromOffset(ctx, httpClient, url, dataFile, ext, totalSize, offset,
-		source, log, &progress, activate)
+	return newBlockUploadTransfer(httpClient, url, dataFile, ext, totalSize, offset,
+		source, log, &progress, activate).run(ctx)
 }
 
-func putBlockFromOffset(
-	ctx context.Context,
+// newBlockUploadTransfer builds the retryable transfer both block entry points
+// run, with the production payload limit and decode dependencies.
+func newBlockUploadTransfer(
 	httpClient httpDoer,
 	url, dataFile, ext string,
 	totalSize, offset int64,
@@ -1385,23 +1437,69 @@ func putBlockFromOffset(
 	log *slog.Logger,
 	progress *blockUploadProgress,
 	activate func(),
-) error {
+) *blockUploadTransfer {
+	return &blockUploadTransfer{
+		httpClient:   httpClient,
+		url:          url,
+		dataFile:     dataFile,
+		ext:          ext,
+		totalSize:    totalSize,
+		payloadLimit: blockPutPayloadLimit,
+		source:       source,
+		log:          log,
+		progress:     progress,
+		activate:     activate,
+		deps:         defaultBlockDecodeDependencies(),
+		offset:       offset,
+	}
+}
+
+// putBlockFromOffset is ONE attempt of a block upload from offset: it sends
+// bounded PUTs until the importer holds the whole volume and stops at the first
+// failure, returning the offset the importer last confirmed. It never retries
+// internally — the retry seam is blockUploadTransfer.attempt.
+//
+// Returning the confirmed offset on the failure path is what makes a retry
+// resume rather than restart, and the value is never this client's own count of
+// bytes pushed: every assignment to it inside the two loops below comes from a
+// header the importer sent and doBlockChunk validated.
+//
+// At offset == totalSize there is nothing left to send, and what remains is to
+// prove the archive's declared size against its actual decoded content — the
+// under-count check the compressed loops run after their last chunk. Reaching
+// this branch is ordinary, not exceptional: a resumed run whose importer is
+// already full lands here, and so does the attempt after a break whose last PUT
+// turned out to have arrived.
+func putBlockFromOffset(
+	ctx context.Context,
+	httpClient httpDoer,
+	url, dataFile, ext string,
+	totalSize, offset, payloadLimit int64,
+	source blockArchiveSource,
+	log *slog.Logger,
+	progress *blockUploadProgress,
+	activate func(),
+	deps blockDecodeDependencies,
+) (int64, error) {
 	if offset == totalSize {
 		switch ext {
 		case ".zst":
-			return validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
+			return offset, validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
 		case "":
-			return nil
+			return offset, nil
 		default:
-			return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
+			return offset, verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
 		}
 	}
 
 	if ext == "" {
-		return putBlockRaw(ctx, httpClient, url, source, offset, totalSize, progress, activate)
+		return putBlockRawWithPayloadLimit(
+			ctx, httpClient, url, source, offset, totalSize, payloadLimit, progress, activate)
 	}
 
-	return putBlockCompressed(ctx, httpClient, url, source, dataFile, ext, offset, totalSize, log, progress, activate)
+	return putBlockCompressedWithDependencies(
+		ctx, httpClient, url, source, dataFile, ext, offset, totalSize, payloadLimit,
+		log, progress, activate, deps)
 }
 
 type blockUploadProgress struct {
@@ -1436,7 +1534,8 @@ func newBlockConflictTracker(offset int64) blockConflictTracker {
 func (t *blockConflictTracker) observeConflict(from, to int64) error {
 	if t.total == maxBlockConflictReplays {
 		return fmt.Errorf(
-			"too many block upload conflict replays (%d); latest transition from %d to %d",
+			"%w: too many block upload conflict replays (%d); latest transition from %d to %d",
+			errConflictBudgetExhausted,
 			maxBlockConflictReplays,
 			from,
 			to,
@@ -1446,7 +1545,8 @@ func (t *blockConflictTracker) observeConflict(from, to int64) error {
 	replayBytes := max(t.highWater-to, 0)
 	if replayBytes > maxBlockReplayBytes-t.replayedBytes {
 		return fmt.Errorf(
-			"block upload replay budget exceeded (%d bytes); latest transition from %d to %d would replay %d bytes",
+			"%w: block upload replay budget exceeded (%d bytes); latest transition from %d to %d would replay %d bytes",
+			errConflictBudgetExhausted,
 			maxBlockReplayBytes,
 			from,
 			to,
@@ -1466,12 +1566,14 @@ func (t *blockConflictTracker) observeConflict(from, to int64) error {
 
 	for _, offset := range t.offsets[:t.count] {
 		if offset == to {
-			return fmt.Errorf("server-directed block upload offset loop from %d to %d", from, to)
+			return fmt.Errorf("%w: server-directed block upload offset loop from %d to %d",
+				errConflictBudgetExhausted, from, to)
 		}
 	}
 
 	if t.count == len(t.offsets) {
-		return fmt.Errorf("too many consecutive block upload conflicts (%d)", maxConsecutiveBlockConflicts)
+		return fmt.Errorf("%w: too many consecutive block upload conflicts (%d)",
+			errConflictBudgetExhausted, maxConsecutiveBlockConflicts)
 	}
 
 	t.offsets[t.count] = to
@@ -1495,23 +1597,14 @@ func (t *blockConflictTracker) reset() {
 	t.count = 0
 }
 
-// putBlockRaw streams an uncompressed data.bin file starting at offset. Every request
-// gets a fresh SectionReader limited to the client cap, so neither nginx's 64m ingress
-// limit nor a server-directed reposition can make one PUT body unbounded.
-func putBlockRaw(ctx context.Context, httpClient httpDoer, url string, source io.ReaderAt, offset, totalSize int64, progress *blockUploadProgress, activate func()) error {
-	return putBlockRawWithPayloadLimit(
-		ctx,
-		httpClient,
-		url,
-		source,
-		offset,
-		totalSize,
-		blockPutPayloadLimit,
-		progress,
-		activate,
-	)
-}
-
+// putBlockRawWithPayloadLimit streams an uncompressed data.bin file starting at offset.
+// Every request gets a fresh SectionReader limited to the client cap, so neither nginx's
+// 64m ingress limit nor a server-directed reposition can make one PUT body unbounded.
+//
+// That per-request SectionReader is also the whole of this path's repositioning: a request
+// at any offset, first or hundredth, retried or not, is built the same way from the source's
+// own coordinates. There is no stream position to rewind, which is why a break costs this
+// path nothing beyond the chunk it interrupted — unlike the compressed loop below.
 func putBlockRawWithPayloadLimit(
 	ctx context.Context,
 	httpClient httpDoer,
@@ -1520,7 +1613,7 @@ func putBlockRawWithPayloadLimit(
 	offset, totalSize, payloadLimit int64,
 	progress *blockUploadProgress,
 	activate func(),
-) error {
+) (int64, error) {
 	conflicts := newBlockConflictTracker(offset)
 
 	for offset < totalSize {
@@ -1536,7 +1629,7 @@ func putBlockRawWithPayloadLimit(
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(section))
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		req.ContentLength = requestEnd - offset
@@ -1548,12 +1641,12 @@ func putBlockRawWithPayloadLimit(
 
 		next, reposition, err := doBlockChunk(httpClient, req, offset, requestEnd, totalSize)
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		if reposition {
 			if err := conflicts.observeConflict(offset, next); err != nil {
-				return err
+				return offset, err
 			}
 		} else {
 			conflicts.observeSuccess(next)
@@ -1563,40 +1656,7 @@ func putBlockRawWithPayloadLimit(
 		offset = next
 	}
 
-	return nil
-}
-
-// putBlockCompressed streams a compressed data.bin.<ext> file starting at offset,
-// decoding it on the fly via compress.NewReader instead of decompressing it into a
-// temporary file first — the whole point of this path is to keep peak disk usage at one
-// copy (the compressed archive) instead of two.
-//
-// DECODE STRATEGY has three cases (see resolveBlockDecodeReader):
-//
-//  1. zstd: walk mandatory Frame_Content_Size metadata for every upload, seek to
-//     the compressed boundary preceding offset, then decode and discard only the
-//     intra-frame raw prefix. At offset zero the walk is still required so a
-//     content-size-less stream cannot bypass geometry validation on a fresh upload.
-//  2. gzip/lz4 at offset zero: open a fresh decoder from the start.
-//  3. gzip/lz4 at a resumed offset: reset f to byte zero and discard offset
-//     decoded bytes. These compatibility codecs retain the O(offset) path.
-//     The "none" codec never reaches this function; putBlock routes it to
-//     putBlockRaw.
-func putBlockCompressed(ctx context.Context, httpClient httpDoer, url string, source io.ReadSeeker, dataFile, ext string, offset, totalSize int64, log *slog.Logger, progress *blockUploadProgress, activate func()) error {
-	return putBlockCompressedWithPayloadLimit(
-		ctx,
-		httpClient,
-		url,
-		source,
-		dataFile,
-		ext,
-		offset,
-		totalSize,
-		blockPutPayloadLimit,
-		log,
-		progress,
-		activate,
-	)
+	return offset, nil
 }
 
 func putBlockCompressedWithPayloadLimit(
@@ -1609,7 +1669,7 @@ func putBlockCompressedWithPayloadLimit(
 	log *slog.Logger,
 	progress *blockUploadProgress,
 	activate func(),
-) error {
+) (int64, error) {
 	return putBlockCompressedWithDependencies(
 		ctx,
 		httpClient,
@@ -1627,6 +1687,34 @@ func putBlockCompressedWithPayloadLimit(
 	)
 }
 
+// putBlockCompressedWithDependencies streams a compressed data.bin.<ext> file starting at
+// offset, decoding it on the fly via compress.NewReader instead of decompressing it into a
+// temporary file first — the whole point of this path is to keep peak disk usage at one
+// copy (the compressed archive) instead of two.
+//
+// DECODE STRATEGY has three cases (see resolveBlockDecodeReader):
+//
+//  1. zstd: walk mandatory Frame_Content_Size metadata for every upload, seek to
+//     the compressed boundary preceding offset, then decode and discard only the
+//     intra-frame raw prefix. At offset zero the walk is still required so a
+//     content-size-less stream cannot bypass geometry validation on a fresh upload.
+//  2. gzip/lz4 at offset zero: open a fresh decoder from the start.
+//  3. gzip/lz4 at a resumed offset: reset the source to byte zero and discard offset
+//     decoded bytes. These compatibility codecs retain the O(offset) path.
+//     The "none" codec never reaches this function; putBlockFromOffset routes it to
+//     putBlockRawWithPayloadLimit.
+//
+// WHAT A BREAK COSTS HERE, said out loud because it is the one place in this package where
+// resuming is not free. The request bodies come off ONE forward-decoding stream, so a
+// stream that has already been read past the offset the importer confirms cannot serve the
+// next request — its next bytes are the wrong bytes, and they would be sent under the right
+// offset with the right length and no error anywhere. The stream is therefore never carried
+// across a reposition: it is closed and rebuilt from the archive's start by
+// openBlockDecodeReaderAt, which is the ONLY way this function ever obtains a decoder — on
+// entry, after a server-directed 409, and, since a retry re-enters this function from
+// blockUploadTransfer.attempt, after a break as well. For a codec without random access
+// that rebuild re-reads the archive from the beginning, so the cost of one break grows with
+// how far the transfer had got.
 func putBlockCompressedWithDependencies(
 	ctx context.Context,
 	httpClient httpDoer,
@@ -1638,16 +1726,10 @@ func putBlockCompressedWithDependencies(
 	progress *blockUploadProgress,
 	activate func(),
 	deps blockDecodeDependencies,
-) error {
-	if _, err := source.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind compressed block %s: %w", dataFile, err)
-	}
-
-	decodeReader, _, err := resolveBlockDecodeReaderWith(
-		ctx, source, dataFile, ext, offset, totalSize, log, deps,
-	)
+) (int64, error) {
+	decodeReader, err := openBlockDecodeReaderAt(ctx, source, dataFile, ext, offset, totalSize, log, deps)
 	if err != nil {
-		return err
+		return offset, err
 	}
 
 	defer func() {
@@ -1674,7 +1756,7 @@ func putBlockCompressedWithDependencies(
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.NopCloser(bodyReader))
 		if err != nil {
-			return err
+			return offset, err
 		}
 
 		// net/http only auto-detects Content-Length for *bytes.Buffer/*bytes.Reader/
@@ -1694,12 +1776,12 @@ func putBlockCompressedWithDependencies(
 
 		next, reposition, err := doBlockChunk(httpClient, req, offset, requestEnd, totalSize)
 		if err != nil {
-			return fmt.Errorf("%s: declared size %d bytes may not match the archive's actual decompressed content: %w", dataFile, totalSize, err)
+			return offset, wrapCompressedBlockChunkError(dataFile, totalSize, err)
 		}
 
 		if reposition {
 			if err := conflicts.observeConflict(offset, next); err != nil {
-				return err
+				return offset, err
 			}
 		} else {
 			conflicts.observeSuccess(next)
@@ -1709,7 +1791,7 @@ func putBlockCompressedWithDependencies(
 
 		if reposition {
 			if closeErr := decodeReader.Close(); closeErr != nil {
-				return fmt.Errorf("%w for %s before repositioning to offset %d: %w",
+				return offset, fmt.Errorf("%w for %s before repositioning to offset %d: %w",
 					errFailedBlockDecoderClose, dataFile, next, closeErr)
 			}
 
@@ -1720,15 +1802,9 @@ func putBlockCompressedWithDependencies(
 				break
 			}
 
-			if _, err := source.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("reset compressed block %s before repositioning to offset %d: %w", dataFile, offset, err)
-			}
-
-			decodeReader, _, err = resolveBlockDecodeReaderWith(
-				ctx, source, dataFile, ext, offset, totalSize, log, deps,
-			)
+			decodeReader, err = openBlockDecodeReaderAt(ctx, source, dataFile, ext, offset, totalSize, log, deps)
 			if err != nil {
-				return fmt.Errorf("reposition block decoder for %s to offset %d: %w", dataFile, offset, err)
+				return offset, fmt.Errorf("reposition block decoder for %s to offset %d: %w", dataFile, offset, err)
 			}
 
 			continue
@@ -1739,23 +1815,23 @@ func putBlockCompressedWithDependencies(
 
 	if ext == ".zst" {
 		if decodeReader == nil {
-			return validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
+			return offset, validateZstdBlockGeometry(ctx, source, dataFile, totalSize, offset)
 		}
 
 		var probe [1]byte
 
 		n, readErr := decodeReader.Read(probe[:])
 		if n > 0 {
-			return fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
+			return offset, fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
 				"(extra bytes found after the declared total); the archive may be corrupt or was built by a mismatched d8 version",
 				dataFile, totalSize)
 		}
 
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, readErr)
+			return offset, fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, readErr)
 		}
 
-		return nil
+		return offset, nil
 	}
 
 	// Safety net: totalSize came from the archive's captured metadata (leaf.Size), never
@@ -1767,20 +1843,67 @@ func putBlockCompressedWithDependencies(
 	var probe [1]byte
 
 	if decodeReader == nil {
-		return verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
+		return offset, verifyCompressedBlockSizeFromSource(ctx, source, dataFile, ext, totalSize)
 	}
 
 	n, rerr := decodeReader.Read(probe[:])
 	if n > 0 {
-		return fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
+		return offset, fmt.Errorf("%s: declared size %d bytes is smaller than the archive's actual decompressed content "+
 			"(extra bytes found after the declared total); the archive may be corrupt or was built by a mismatched d8 version", dataFile, totalSize)
 	}
 
 	if rerr != nil && !errors.Is(rerr, io.EOF) {
-		return fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, rerr)
+		return offset, fmt.Errorf("verifying end of archive %s after upload: %w", dataFile, rerr)
 	}
 
-	return nil
+	return offset, nil
+}
+
+// openBlockDecodeReaderAt rewinds source and builds a decode stream positioned at offset.
+//
+// It is the ONE way putBlockCompressedWithDependencies obtains a decoder, and keeping it
+// that way is what makes resuming safe: every decoder that path uses is built from the
+// archive's start for a named offset, so a stream can never be carried past the offset the
+// importer confirmed. The three occasions are the first request of an attempt, a
+// server-directed reposition, and — because a retry re-enters that function — an attempt
+// following a break.
+func openBlockDecodeReaderAt(
+	ctx context.Context,
+	source io.ReadSeeker,
+	dataFile, ext string,
+	offset, totalSize int64,
+	log *slog.Logger,
+	deps blockDecodeDependencies,
+) (io.ReadCloser, error) {
+	if _, err := source.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewind compressed block %s: %w", dataFile, err)
+	}
+
+	decodeReader, _, err := resolveBlockDecodeReaderWith(ctx, source, dataFile, ext, offset, totalSize, log, deps)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeReader, nil
+}
+
+// wrapCompressedBlockChunkError explains a failed compressed-block PUT, and explains it
+// only where the explanation is true.
+//
+// A request body drawn from a decode stream can end early, and when it does net/http
+// refuses to send fewer bytes than the declared Content-Length — so an archive whose
+// recorded size overstates its content surfaces here rather than as a silently truncated
+// device, and the reader deserves to be told that. A broken link surfaces here too, and
+// telling that reader the same thing would send them to audit an archive that is fine.
+// The two are separated by requestBodyReport.sourceEndedShort, carried out to here by
+// errUploadTransportFailure.
+func wrapCompressedBlockChunkError(dataFile string, totalSize int64, err error) error {
+	if errors.Is(err, errUploadTransportFailure) || errors.Is(err, errConflictOffsetUnknown) {
+		return err
+	}
+
+	return fmt.Errorf("%s: declared size %d bytes may not match the archive's actual decompressed content: %w",
+		dataFile, totalSize, err)
 }
 
 type terminalProofReader struct {
@@ -2312,7 +2435,9 @@ func doBlockChunk(httpClient httpDoer, req *http.Request, offset, requestEnd, to
 	if resp.StatusCode == http.StatusConflict {
 		expectedStr := resp.Header.Get("X-Expected-Offset")
 		if expectedStr == "" {
-			return 0, false, fmt.Errorf("server conflict at offset %d returned no X-Expected-Offset header", offset)
+			// Marked, not interpreted: this answer is a question the importer
+			// alone can settle, and blockUploadTransfer.ask is where it is put.
+			return 0, false, fmt.Errorf("%w: block conflict at offset %d", errConflictOffsetUnknown, offset)
 		}
 
 		expected, parseErr := strconv.ParseInt(expectedStr, 10, 64)

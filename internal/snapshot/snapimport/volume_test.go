@@ -233,7 +233,7 @@ func TestPutBlock_RejectsOversizeServerOffset(t *testing.T) {
 // request body at that offset (rejecting an offset mismatch, mirroring the real
 // handler's 409) and reports the new offset, and POST .../finished is a no-op success.
 // It deliberately has no on-disk device and no independent Content-Length bound check —
-// net/http's own enforcement of req.ContentLength (see transfer.go) and putBlockCompressed's
+// net/http's own enforcement of req.ContentLength (see transfer.go) and the compressed block path's
 // own post-loop safety-net read are what this file's size-mismatch tests exercise.
 type fakeBlockImporter struct {
 	mu      sync.Mutex
@@ -315,10 +315,22 @@ type interruptingBlockImporter struct {
 	mu       sync.Mutex
 	written  []byte
 	putCount int
+	// putOffsets records the X-Offset every PUT carried, in order. It is what
+	// proves a resumed request continued from the offset the importer itself
+	// reported rather than from the client's own count of bytes it had pushed.
+	putOffsets []int64
 	// partialN is the number of body bytes durably persisted before the first PUT's
 	// connection is severed. It is deliberately not aligned to any codec frame or chunk
 	// boundary, mirroring TestPutBlockCompressed_ResumesViaFastForward's seedLen.
 	partialN int64
+}
+
+// offsetsPut returns the X-Offset every PUT carried, in order.
+func (f *interruptingBlockImporter) offsetsPut() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]int64(nil), f.putOffsets...)
 }
 
 // durablyWritten returns a copy of every byte the server has durably accepted so far.
@@ -351,13 +363,15 @@ func (f *interruptingBlockImporter) ServeHTTP(w http.ResponseWriter, r *http.Req
 // only partialN bytes and kills the connection before any response is written; every
 // later call behaves exactly like fakeBlockImporter.
 func (f *interruptingBlockImporter) handlePut(w http.ResponseWriter, r *http.Request) {
+	offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
+
 	f.mu.Lock()
 	f.putCount++
 	isFirstPut := f.putCount == 1
 	cur := int64(len(f.written))
+	f.putOffsets = append(f.putOffsets, offset)
 	f.mu.Unlock()
 
-	offset, _ := strconv.ParseInt(r.Header.Get("X-Offset"), 10, 64)
 	if offset != cur {
 		http.Error(w, "offset mismatch", http.StatusConflict)
 		return
@@ -410,21 +424,34 @@ func (f *interruptingBlockImporter) crashMidTransfer(w http.ResponseWriter, r *h
 	_ = conn.Close()
 }
 
-// TestPutBlock_InterruptAndResume_AllCodecs proves the streaming resume mechanism
-// (import-block-streaming-decode-put) survives a simulated process restart, not just a
-// clean server-reported partial offset: attempt 1 is severed mid-transfer with no HTTP
-// response (interruptingBlockImporter.crashMidTransfer), so putBlock must return an
-// error; attempt 2 is a wholly separate putBlock call -- as a restarted CLI process would
-// make, carrying forward nothing but what HEAD reports -- and must complete the transfer
-// so that the server's durably-received bytes equal the original plaintext exactly. Run
-// across every codec putBlock supports: zstd/gzip/lz4 exercise the new discard-and-fast-
-// forward decode path (putBlockCompressed); none exercises the pre-existing
-// io.SectionReader-based resume path (putBlockRaw) as a regression guard.
+// TestPutBlock_InterruptAndResume_AllCodecs proves the two ways a block upload survives
+// losing its connection, across every codec putBlock supports.
+//
+// Leg 1 is the one this test used to assert the opposite of. A connection severed
+// mid-transfer with no HTTP response (interruptingBlockImporter.crashMidTransfer) ended
+// the command: putBlock returned the error and every byte it had not yet sent stayed
+// unsent. It is now survived inside the one call — the client asks the importer where it
+// stands and continues from there — so what is asserted is that the call SUCCEEDS, that
+// the second request carried the importer's own offset rather than the client's idea of
+// one, and that the bytes the importer ends up holding are the original plaintext exactly.
+// The last of those is the assertion that catches a resume continuing from the wrong place
+// on the compressed codecs: a decode stream carried past the resume offset would deliver
+// the right NUMBER of bytes under the right offset, so only their content gives it away.
+//
+// Leg 2 is the original cross-run property, unchanged in substance: a wholly separate
+// putBlock call — as a restarted CLI process would make, carrying forward nothing but the
+// same on-disk archive — resumes from a HEAD probe against an importer already holding a
+// prefix, and completes the transfer. zstd/gzip/lz4 exercise the discard-and-fast-forward
+// decode path; "none" exercises the io.SectionReader path.
 func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
+	t.Parallel()
+
 	payload := bytes.Repeat([]byte("interrupt-then-resume-bytes-"), 3000)
 
 	for _, tc := range blockCodecCases {
 		t.Run(tc.codec, func(t *testing.T) {
+			t.Parallel()
+
 			dir := t.TempDir()
 			dataFile := filepath.Join(dir, "data.bin"+tc.ext)
 
@@ -441,58 +468,68 @@ func TestPutBlock_InterruptAndResume_AllCodecs(t *testing.T) {
 
 			totalSize := int64(len(payload))
 
-			// Attempt 1: simulates the CLI process being killed (or the connection
-			// dropping) mid-transfer. putBlock must surface an error -- the connection
-			// was severed with no response -- and the server must have durably kept
-			// exactly partialN bytes, no more and no less.
 			activated1 := 0
+			captured := &capturedLog{}
 
-			err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(), nil, func() { activated1++ })
-			if err == nil {
-				t.Fatal("expected attempt 1 (simulated crash mid-transfer) to return an error")
+			err := putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize,
+				captured.logger(), nil, func() { activated1++ })
+			if err != nil {
+				t.Fatalf("putBlock over a severed connection: %v (a break mid-transfer must be survived, not returned)", err)
 			}
 
-			if got := int64(len(imp.durablyWritten())); got != partialN {
-				t.Fatalf("after simulated crash, server durably holds %d bytes, want exactly %d", got, partialN)
+			if got := imp.durablyWritten(); !bytes.Equal(got, payload) {
+				t.Fatalf("after the break, the importer holds %d bytes that are not the original %d-byte payload "+
+					"(content, not length: a decode stream resumed from the wrong position still sends the right count)",
+					len(got), len(payload))
 			}
 
-			// Attempt 1 genuinely PUT partialN real bytes before the crash, so it must have
-			// activated even though it ultimately errored (backlog #21 Bug A).
+			if got, want := imp.offsetsPut(), []int64{0, partialN}; !slices.Equal(got, want) {
+				t.Fatalf("PUT offsets = %v, want %v (the retry must continue from the offset the importer reported)", got, want)
+			}
+
 			if activated1 == 0 {
-				t.Error("attempt 1 activate call count = 0, want >= 1 (real bytes were transferred before the crash)")
+				t.Error("activate call count = 0, want >= 1 (real bytes were transferred)")
 			}
 
-			// Attempt 2: a genuinely independent invocation of putBlock -- a fresh call
-			// with its own local variables, exactly as a restarted process would make.
-			// Nothing from attempt 1 is passed in except the same on-disk archive file
-			// (which a real restarted process would also re-open from disk) and the same
-			// server URL; the resume offset itself is re-derived entirely from this
-			// call's own HEAD probe, per headBlockOffset/putBlock.
+			assertRecoveredBreakLogged(t, captured.String(), partialN)
+
+			// Leg 2: a genuinely independent invocation of putBlock -- a fresh call with
+			// its own local variables, exactly as a restarted process would make. Nothing
+			// from leg 1 is passed in except the same on-disk archive file (which a real
+			// restarted process would also re-open from disk); the resume offset itself is
+			// re-derived entirely from this call's own HEAD probe, per
+			// headBlockOffset/putBlock.
+			seeded := &fakeBlockImporter{}
+			seeded.seed(payload[:partialN])
+
+			srv2 := httptest.NewServer(seeded)
+			defer srv2.Close()
+
 			var reported int64
 
 			activated2 := 0
 
-			err = putBlock(context.Background(), plainHTTPDoer{}, srv.URL, dataFile, tc.ext, totalSize, discardLogger(),
+			err = putBlock(context.Background(), plainHTTPDoer{}, srv2.URL, dataFile, tc.ext, totalSize, discardLogger(),
 				func(n int) { reported += int64(n) }, func() { activated2++ })
 			if err != nil {
-				t.Fatalf("putBlock (attempt 2, resume after simulated crash): %v", err)
+				t.Fatalf("putBlock (leg 2, fresh run resuming a partial upload): %v", err)
 			}
 
-			got := imp.durablyWritten()
+			got := seeded.received()
 			if !bytes.Equal(got, payload) {
-				t.Fatalf("after crash-then-resume, server holds %d bytes not matching the original %d-byte payload "+
+				t.Fatalf("after a fresh resuming run, server holds %d bytes not matching the original %d-byte payload "+
 					"(a regression here means either duplicated already-durable bytes or dropped bytes)", len(got), len(payload))
 			}
 
 			if reported != totalSize {
-				t.Errorf("attempt 2 reported %d progress bytes, want %d (validated HEAD prefix plus newly sent suffix)",
+				t.Errorf("leg 2 reported %d progress bytes, want %d (validated HEAD prefix plus newly sent suffix)",
 					reported, totalSize)
 			}
 
-			// Attempt 2 is a partial resume with real remaining bytes to PUT, so it must
-			// activate exactly because genuine transfer happens (backlog #21 Bug A).
+			// Leg 2 is a partial resume with real remaining bytes to PUT, so it must
+			// activate exactly because genuine transfer happens.
 			if activated2 == 0 {
-				t.Error("attempt 2 activate call count = 0, want >= 1 (a partially-resumed upload with real remaining bytes must activate)")
+				t.Error("leg 2 activate call count = 0, want >= 1 (a partially-resumed upload with real remaining bytes must activate)")
 			}
 		})
 	}
@@ -1154,7 +1191,7 @@ func TestPutBlock_RawAndZstdBoundLifetimeSuccessRollbackCycles(t *testing.T) {
 			progress := blockUploadProgress{}
 
 			if tc.ext == "" {
-				err = putBlockRawWithPayloadLimit(
+				_, err = putBlockRawWithPayloadLimit(
 					context.Background(),
 					doer,
 					"https://importer.local/block",
@@ -1166,7 +1203,7 @@ func TestPutBlock_RawAndZstdBoundLifetimeSuccessRollbackCycles(t *testing.T) {
 					func() { activated++ },
 				)
 			} else {
-				err = putBlockCompressedWithPayloadLimit(
+				_, err = putBlockCompressedWithPayloadLimit(
 					context.Background(),
 					doer,
 					"https://importer.local/block",
@@ -1397,7 +1434,7 @@ func TestResolveBlockDecodeReader_ResumedSuffixMatches(t *testing.T) {
 
 	for _, tc := range blockCodecCases {
 		if tc.ext == "" {
-			continue // "none" never reaches putBlockCompressed.
+			continue // "none" never reaches the compressed block path.
 		}
 
 		t.Run(tc.codec, func(t *testing.T) {
@@ -2364,7 +2401,7 @@ func TestZstdBlockAndFilesystemResume_Logical400GiB(t *testing.T) {
 				}
 				progress := &blockUploadProgress{credited: tc.offset}
 
-				err := putBlockCompressedWithDependencies(
+				_, err := putBlockCompressedWithDependencies(
 					context.Background(),
 					doer,
 					"https://importer.test/block",
@@ -2456,13 +2493,14 @@ func TestZstdBlockAndFilesystemResume_Logical400GiB(t *testing.T) {
 				}
 				progress := &fileUploadProgress{credited: tc.offset}
 
-				err := putFile(
+				_, err := putFile(
 					context.Background(),
 					doer,
 					"https://importer.test",
 					"large.bin",
 					totalSize,
 					tc.offset,
+					blockPutPayloadLimit,
 					fileAttrs{},
 					stream.body,
 					progress,
@@ -2540,7 +2578,7 @@ func TestZstdFreshUploadDecodesExactlyOnce(t *testing.T) {
 		}
 		progress := &blockUploadProgress{}
 
-		err := putBlockCompressedWithDependencies(
+		_, err := putBlockCompressedWithDependencies(
 			context.Background(),
 			doer,
 			"https://importer.test/block",
@@ -2595,13 +2633,14 @@ func TestZstdFreshUploadDecodesExactlyOnce(t *testing.T) {
 		}
 		progress := &fileUploadProgress{}
 
-		err := putFile(
+		_, err := putFile(
 			context.Background(),
 			doer,
 			"https://importer.test",
 			"fresh.bin",
 			totalSize,
 			0,
+			blockPutPayloadLimit,
 			fileAttrs{},
 			stream.body,
 			progress,
@@ -2650,7 +2689,7 @@ func TestZstdFreshUploadRejectsMissingFCSBeforePUT(t *testing.T) {
 		{
 			name: "block",
 			run: func(doer testHTTPDoer) error {
-				return putBlockCompressedWithDependencies(
+				_, err := putBlockCompressedWithDependencies(
 					context.Background(),
 					doer,
 					"https://importer.test/block",
@@ -2665,6 +2704,8 @@ func TestZstdFreshUploadRejectsMissingFCSBeforePUT(t *testing.T) {
 					nil,
 					defaultBlockDecodeDependencies(),
 				)
+
+				return err
 			},
 		},
 		{
@@ -2683,6 +2724,7 @@ func TestZstdFreshUploadRejectsMissingFCSBeforePUT(t *testing.T) {
 					int64(len(payload)),
 					0,
 					fileAttrs{},
+					discardLogger(),
 					&fileUploadProgress{},
 					nil,
 				)
@@ -4235,7 +4277,7 @@ func newTestHTTPResponse(statusCode int, header http.Header) *http.Response {
 
 // TestPutBlockCompressed_TooSmallDeclaredSizeErrors verifies the under-declared-size
 // safety net: when totalSize is smaller than the archive's actual decompressed content,
-// putBlockCompressed's post-loop probe read must catch the leftover bytes and fail
+// putBlockCompressedWithDependencies' post-loop probe read must catch the leftover bytes and fail
 // loudly instead of silently truncating a successful-looking upload.
 func TestPutBlockCompressed_TooSmallDeclaredSizeErrors(t *testing.T) {
 	payload := bytes.Repeat([]byte("extra-bytes-beyond-declared-total-"), 200)
@@ -4258,7 +4300,7 @@ func TestPutBlockCompressed_TooSmallDeclaredSizeErrors(t *testing.T) {
 // TestPutBlockCompressed_TooLargeDeclaredSizeErrors verifies the over-declared-size
 // safety net: when totalSize is larger than the archive's actual decompressed content,
 // the explicit req.ContentLength must make net/http refuse to send a short body, so
-// putBlockCompressed surfaces a clear wrapped error instead of hanging or letting the
+// putBlockCompressedWithDependencies surfaces a clear wrapped error instead of hanging or letting the
 // server reject the request opaquely.
 func TestPutBlockCompressed_TooLargeDeclaredSizeErrors(t *testing.T) {
 	payload := bytes.Repeat([]byte("short-archive-"), 50)
@@ -4350,7 +4392,7 @@ const memoryBoundedStreamingTimeout = 2 * time.Minute
 // buffer alike -- into the same small (~32KiB) pieces, so this number cannot by itself
 // distinguish genuine incremental streaming from full in-memory buffering followed by a
 // bytes.Reader-backed body. This was confirmed empirically in the 2026-07-22 whole-batch
-// review: a throwaway io.ReadAll-then-bytes.Reader regression in putBlockCompressed still
+// review: a throwaway io.ReadAll-then-bytes.Reader regression in the compressed block path still
 // produced a maxRead of exactly 32768 here, sailing under any chunk-size ceiling. See
 // cross-cutting invariant #11 in .agent/implementer-prompt.md.
 //
@@ -4443,7 +4485,7 @@ func (t *requestBodyReadTracker) peakHeapDelta() int64 {
 // every Read call receives. It deliberately implements ONLY io.ReadCloser, not
 // io.WriterTo: verified empirically against the pinned Go stdlib (io.LimitedReader has
 // no WriteTo method, and io.NopCloser only preserves WriteTo when its wrapped reader
-// already has one — see io/io.go and io/io.go's NopCloser doc), putBlockCompressed's
+// already has one — see io/io.go and io/io.go's NopCloser doc), the compressed block path's
 // io.NopCloser(io.LimitReader(decodeReader, remain)) body is never eligible for that
 // fast path in the first place, so hiding it here costs nothing on the current
 // implementation while guaranteeing a hypothetical regression to a fully-buffered

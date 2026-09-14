@@ -14,6 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package exporter owns the CONTROL-PLANE half of a snapshot volume transfer:
+// creating or re-using the DataExport custom resource for a snapshot leaf,
+// stamping it with this run's ownership, waiting for it to become Ready,
+// deriving its endpoint, and releasing it afterwards.
+//
+// Moving the bytes is not its job. That lives in internal/dataplane — a typed
+// client for the data-exporter HTTP API plus the retry-with-resume policy —
+// which this package wires up (OpenExport) and hands to callers through
+// Export.Fetcher(). The split runs that way round because internal/dataplane
+// must stay usable by commands that have no snapshot, no DataExport CR and no
+// run owner at all.
 package exporter
 
 import (

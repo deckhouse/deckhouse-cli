@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/pipeline"
@@ -99,7 +100,7 @@ func TestPipeline_Download_NeverReadsSnapshotContent(t *testing.T) {
 		PerVolumeConcurrency: 1,
 		KubeClient:           guarded,
 		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
-			return exporter.NewExport(namespace, "de-guard", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-guard", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 		},
 	}
 

@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	deapi "github.com/deckhouse/deckhouse-cli/internal/data/dataexport/api/v1alpha1"
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
@@ -690,7 +691,7 @@ func TestBuildSubClients_PublishBindsBothClientsToPublicOrigin(t *testing.T) {
 // publish path still produces two DISTINCT, independently usable persistent HTTP
 // clients (the ordinary data client and the source-hash client), each carrying
 // its own response-header-timeout configuration exactly as the non-publish path
-// does (dataPlaneResponseHeaderTimeout vs sourceHashTimeoutCeiling) — the two
+// does (dataPlaneResponseHeaderTimeout vs dataplane.SourceHashTimeoutCeiling) — the two
 // underlying rest.Config WrapTransport chains are not the same object, and both
 // remain independently functional.
 func TestBuildSubClients_PublishPreservesResponseHeaderTimeouts(t *testing.T) {
@@ -864,7 +865,7 @@ func TestOpenExport_PublishBaseURLKeepsIngressPathPrefix(t *testing.T) {
 	assert.Equal(t, publicURL, export.BaseURL(),
 		"the Export base URL must be the path-prefixed public URL, not the bare origin")
 
-	blockURL, err := BlockURL(export.BaseURL())
+	blockURL, err := dataplane.BlockURL(export.BaseURL())
 	require.NoError(t, err)
 	assert.Equal(t, publicURL+"api/v1/block", blockURL)
 

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package exporter
+package dataplane
 
 import (
 	"context"
@@ -50,6 +50,11 @@ func TestIsTransientDataPlaneError(t *testing.T) {
 		{
 			name: "idle watchdog trip is transient",
 			err:  fmt.Errorf("read chunk: %w", ErrDataPlaneIdle),
+			want: true,
+		},
+		{
+			name: "an endpoint that did not accept the request is transient",
+			err:  fmt.Errorf("upload chunk at offset 4096: %w", ErrDataPlaneNotAccepted),
 			want: true,
 		},
 		{

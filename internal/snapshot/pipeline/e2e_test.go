@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
@@ -108,9 +109,9 @@ func TestPipeline_E2E_FullTree(t *testing.T) {
 		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			switch leafRef.Name {
 			case e2eBlockDisk:
-				return exporter.NewExport(namespace, "de-block", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+				return exporter.NewExport(namespace, "de-block", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 			case e2eFSDisk:
-				return exporter.NewExport(namespace, "de-fs", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
+				return exporter.NewExport(namespace, "de-fs", "Filesystem", fsSrv.URL, dataplane.NewFetcher(fsSrv.Client())), nil
 			default:
 				return nil, fmt.Errorf("e2e: unknown leaf %q", leafRef.Name)
 			}
@@ -455,7 +456,7 @@ func TestPipeline_E2E_DeletedPVC(t *testing.T) {
 				return nil, fmt.Errorf("e2e-del: unexpected leaf %q", leafRef.Name)
 			}
 
-			return exporter.NewExport(namespace, "de-del", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-del", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 		},
 	}
 
@@ -561,7 +562,7 @@ func TestPipeline_E2E_OrphanPVCLeaf(t *testing.T) {
 				return nil, fmt.Errorf("e2e-agg: unexpected leaf %q", leafRef.Name)
 			}
 
-			return exporter.NewExport(namespace, "de-agg", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+			return exporter.NewExport(namespace, "de-agg", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 		},
 	}
 
@@ -709,7 +710,7 @@ func TestPipeline_BlockCodecMatrix(t *testing.T) {
 				KubeClient:           c,
 				Compression:          codec,
 				OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
-					return exporter.NewExport(namespace, "de-"+tc.codec, "Block", srv.URL, exporter.NewFetcher(srv.Client())), nil
+					return exporter.NewExport(namespace, "de-"+tc.codec, "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
 				},
 			}
 
@@ -833,9 +834,9 @@ func TestPipeline_E2E_FSNoneCodecEntries(t *testing.T) {
 		OpenExport: func(_ context.Context, namespace string, leafRef aggapi.NodeRef, _ string) (*exporter.Export, error) {
 			switch leafRef.Name {
 			case e2eBlockDisk:
-				return exporter.NewExport(namespace, "de-block-none", "Block", blockSrv.URL, exporter.NewFetcher(blockSrv.Client())), nil
+				return exporter.NewExport(namespace, "de-block-none", "Block", blockSrv.URL, dataplane.NewFetcher(blockSrv.Client())), nil
 			case e2eFSDisk:
-				return exporter.NewExport(namespace, "de-fs-none", "Filesystem", fsSrv.URL, exporter.NewFetcher(fsSrv.Client())), nil
+				return exporter.NewExport(namespace, "de-fs-none", "Filesystem", fsSrv.URL, dataplane.NewFetcher(fsSrv.Client())), nil
 			default:
 				return nil, fmt.Errorf("e2e-none: unknown leaf %q", leafRef.Name)
 			}
