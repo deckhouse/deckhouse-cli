@@ -795,6 +795,39 @@ func TestUpload_DestinationOfTheWrongSizeIsNotComplete(t *testing.T) {
 // The stub therefore bounds itself (maxPuts). An implementation that resets the
 // budget on progress would otherwise not turn this guard red — it would hang it,
 // and take the package's whole test run with it.
+// TestUpload_OffsetPastTheEndIsNotSuccess pins the one direction the loop in
+// attempt cannot notice by itself. Every other refusal leaves the offset short
+// of totalSize and the loop keeps going; an offset PAST the end satisfies the
+// loop's own exit condition, so the run ends having sent nothing and with
+// nothing left to object.
+//
+// The importer does not have to misbehave to produce one. It names the size of
+// the partial file it holds at the destination path, and that size belongs to
+// whatever ran there before — so a previous, larger upload interrupted at the
+// same path makes it name an offset this run can never reach. Observed live
+// against the filesystem importer: X-Content-Length 52428800 answered with
+// 409 X-Expected-Offset 55364826.
+//
+// The guard sits in run(), after the retry loop, so it covers every writer of
+// the offset and not only the conflict header exercised here.
+func TestUpload_OffsetPastTheEndIsNotSuccess(t *testing.T) {
+	fastRetries(t)
+
+	src := pseudoRandom(4_096, 21)
+
+	im := newImporter(t, int64(len(src)))
+	im.conflicts[1] = conflict{expected: "999999999"}
+
+	srv := im.start()
+
+	log, _ := captureLog()
+	err := runUpload(t, srv, src, log, "-c", "1")
+
+	require.Error(t, err, "an offset past the end of the source is not a finished upload")
+	require.Zero(t, im.finishedCount(), "an import must not be finalised over bytes this run never sent")
+	require.Empty(t, im.snapshot(), "not a byte of the source belongs at the destination in this state")
+}
+
 func TestUpload_ExhaustedBudgetFailsWithoutFinalising(t *testing.T) {
 	fastRetries(t)
 

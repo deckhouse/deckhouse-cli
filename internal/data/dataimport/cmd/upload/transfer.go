@@ -108,12 +108,19 @@ func (u *uploader) run(ctx context.Context) error {
 		return err
 	}
 
-	// A tripwire, not a check, and it is worth being exact about which. The
-	// loop in attempt cannot exit early without an error, so nothing a server
-	// does reaches this line, and removing it on its own turns no test red.
-	// What it is here for is the shape of the bug it would catch: a future
-	// change that lets the loop fall out early hands a half-written volume to
-	// the finalisation step, which has nothing of its own to check it against.
+	// A check, and a reachable one: the offset this compares is whatever the
+	// importer last named, and the importer names it from the partial file it
+	// holds at the destination path -- a size that belongs to whatever ran
+	// there before, not to this upload. An importer still holding a longer
+	// partial from a DIFFERENT file therefore names an offset past the end of
+	// this one, the loop in attempt never runs a single iteration, and without
+	// this the finalisation step would be told a transfer succeeded that never
+	// sent a byte.
+	if u.offset > u.totalSize {
+		return fmt.Errorf("%w: the importer holds %d bytes at %s, more than the %d being uploaded, so it is mid-transfer of a different file: upload to a fresh destination",
+			errUploadIncomplete, u.offset, u.url, u.totalSize)
+	}
+
 	if u.offset < u.totalSize {
 		return fmt.Errorf("%w: %d of %d bytes at %s", errUploadIncomplete, u.offset, u.totalSize, u.url)
 	}
