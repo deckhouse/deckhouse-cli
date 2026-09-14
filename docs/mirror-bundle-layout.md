@@ -35,12 +35,14 @@ The segment constants are defined once in [internal/layout.go](../internal/layou
 
 ```
 platform.tar
-├── index.json                 # Deckhouse main images        -> <repo>:<version>
+├── index.json                 # Deckhouse main images        -> <repo>:<channel|version>
 ├── blobs/
-├── install/                   # in-cluster installer          -> <repo>/install:<version>
+├── install/                   # in-cluster installer          -> <repo>/install:<channel|version>
 ├── install-standalone/        # standalone in-cluster installer-> <repo>/install-standalone:<version>
 └── release-channel/           # channel + version metadata    -> <repo>/release-channel:<channel|version>
 ```
+
+> Channel tags (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts`) are aliases of a version tag, not separate images: `propagateChannelAliases` in [platform.go](../internal/mirror/platform/platform.go) appends an extra index descriptor for an image that was already downloaded under `v<X.Y.Z>`. The repositories that get them mirror what upstream publishes — the repo root and `install/` do, `install-standalone/` does not. This is what makes `docker run <repo>/install:stable` work against a registry filled by `d8 mirror push`, and why it costs no extra traffic and does not require the source registry to serve `<repo>/install:<channel>` itself (LTS-only registries and registries fed by a previous `d8 mirror push` do not).
 
 **`installer.tar`** — the standalone installer layout, packed from a working dir whose only entry is `installer/`:
 
@@ -157,8 +159,8 @@ All discovered archives are unpacked into a single `unified/` working directory,
 
 | Layout path in the unified tree | Pushed to | Comes from |
 |---|---|---|
-| `` (root) | `<repo>:<tag>` | `platform.tar` (Deckhouse main) |
-| `install/` | `<repo>/install` | `platform.tar` |
+| `` (root) | `<repo>:<tag>` | `platform.tar` (Deckhouse main, version tags + channel aliases) |
+| `install/` | `<repo>/install` | `platform.tar` (version tags + channel aliases) |
 | `install-standalone/` | `<repo>/install-standalone` | `platform.tar` |
 | `release-channel/` | `<repo>/release-channel` | `platform.tar` |
 | `installer/` | `<repo>/installer` | `installer.tar` |
