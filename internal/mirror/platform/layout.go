@@ -63,17 +63,19 @@ func (l *ImageDownloadList) FillDeckhouseImages(deckhouseVersions []string) {
 // FillForChannels enqueues only release-channel:<channel> DOWNLOADS (e.g.
 // release-channel:stable). The main Deckhouse and Install repositories are
 // intentionally left out of the download list even though the bundle does end
-// up carrying <root>:<channel> and <root>/install:<channel>: channel names
-// like "alpha", "stable" or "lts" are just aliases for the corresponding
-// version tag, so downloading <root>:<channel> on top of <root>:<vX.Y.Z> would
-// duplicate work in the best case and fail in the worst case — e.g. when
-// re-pulling from a registry that received a `d8 mirror push` of a tag-based
-// bundle, where those repositories carry version tags only.
+// up carrying <root>/install:<channel>: channel names like "alpha", "stable"
+// or "lts" are just aliases for the corresponding version tag, so downloading
+// <root>:<channel> on top of <root>:<vX.Y.Z> would duplicate work in the best
+// case and fail in the worst case — e.g. when re-pulling from a registry that
+// received a `d8 mirror push` of a tag-based bundle, where those repositories
+// carry version tags only.
 //
-// The aliases are instead produced after the pull by propagateChannelAliases
-// in platform.go, which re-tags the images that are already in the layout.
-// Same result in the destination registry, no extra traffic, and no dependency
-// on the source registry publishing the channel tags itself.
+// The install aliases are instead produced after the pull by
+// propagateChannelAliases in platform.go, which re-tags the image already in
+// the layout: same result in the destination registry, no extra traffic, and
+// no dependency on the source registry publishing the channel tags itself.
+// The main Deckhouse repository gets no channel tags at all - it is addressed
+// by version, and channel metadata lives in release-channel.
 func (l *ImageDownloadList) FillForChannels(channels []string) {
 	for _, channel := range channels {
 		key := path.Join(l.rootURL, internal.ReleaseChannelSegment) + ":" + channel

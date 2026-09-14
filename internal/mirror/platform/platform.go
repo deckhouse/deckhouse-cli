@@ -1077,11 +1077,9 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	return nil
 }
 
-// propagateChannelAliases tags the pulled platform images with release channel
-// names, so that <repo>:stable, <repo>/install:stable and
-// <repo>/release-channel:stable all resolve in a registry filled by
-// `d8 mirror push` exactly like they do in the source registry. Without the
-// install aliases the documented air-gapped install flow
+// propagateChannelAliases tags the pulled installer images with release
+// channel names, so that <repo>/install:stable resolves in a registry filled
+// by `d8 mirror push`. Without it the documented air-gapped install flow
 // (`docker run <repo>/install:<channel>`) has no tag to run.
 //
 // A channel name is a pure alias of a version tag, so the aliases are produced
@@ -1093,8 +1091,10 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 // downloading channel tags there is the 404 that made
 // pull -> push -> pull cycles fail.
 //
-// install-standalone is deliberately left out - upstream publishes no channel
-// tags for it.
+// Only the install repository is aliased. The main Deckhouse repository is
+// addressed by version everywhere that matters (the release controller reads
+// release-channel, which carries the aliases already), and install-standalone
+// publishes no channel tags upstream, so neither gets them here.
 func (svc *Service) propagateChannelAliases(tagsToMirror []string) error {
 	// Tag-pinned pull: every default channel is re-pointed at the pinned
 	// build, but only when the source serves a release-channel image for it.
@@ -1132,25 +1132,13 @@ func (svc *Service) propagateChannelAliases(tagsToMirror []string) error {
 			return nil
 		}
 
-		return svc.tagPlatformImageAliases(tagsToMirror[0], channels)
+		return tagImageAliases(svc.layout.DeckhouseInstall, tagsToMirror[0], channels)
 	}
 
 	// Full discovery: every channel keeps pointing at the version it resolves
 	// to upstream.
 	for _, resolved := range svc.resolvedChannelTags {
-		if err := svc.tagPlatformImageAliases(resolved.Tag, []string{resolved.Channel}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// tagPlatformImageAliases adds every alias to the image already stored under
-// versionTag, in each repository that carries channel tags upstream.
-func (svc *Service) tagPlatformImageAliases(versionTag string, aliases []string) error {
-	for _, l := range []*image.ImageLayout{svc.layout.Deckhouse, svc.layout.DeckhouseInstall} {
-		if err := tagImageAliases(l, versionTag, aliases); err != nil {
+		if err := tagImageAliases(svc.layout.DeckhouseInstall, resolved.Tag, []string{resolved.Channel}); err != nil {
 			return err
 		}
 	}
@@ -1162,6 +1150,10 @@ func (svc *Service) tagPlatformImageAliases(versionTag string, aliases []string)
 // A version that never landed in the layout is skipped instead of failing the
 // pull: installers are pulled with AllowMissingTags, so a release without one
 // is an expected state rather than an error.
+//
+// Aliasing is index-only - it appends a descriptor for a manifest the layout
+// already holds, so it costs no traffic and does not require the source
+// registry to publish <repo>/install:<channel> itself.
 func tagImageAliases(l *image.ImageLayout, versionTag string, aliases []string) error {
 	if l == nil {
 		return nil
