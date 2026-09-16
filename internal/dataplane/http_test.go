@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package exporter
+package dataplane
 
 import (
 	"bytes"
@@ -25,7 +25,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,21 +179,73 @@ func TestRangeGet_FullRange(t *testing.T) {
 	}
 }
 
+// countingBody is a response body that records how many times it was closed, so a
+// test can tell "read the explanation out of it" from "read it and let the
+// connection leak".
+type countingBody struct {
+	io.Reader
+	closes atomic.Int32
+}
+
+func (b *countingBody) Close() error {
+	b.closes.Add(1)
+
+	return nil
+}
+
 func TestRangeGet_Non206Error(t *testing.T) {
-	t.Helper()
+	// A producer that always answers 200 (no Range support), through a stub
+	// transport so the body itself can be watched. The refusal path both READS
+	// this body (for the producer's explanation) and must CLOSE it: reading
+	// without closing leaks the connection, and with a body longer than the
+	// explanation limit it is not drained either, so it never returns to the
+	// pool.
+	body := &countingBody{Reader: strings.NewReader("no range support here")}
 
-	// A server that always returns 200 (no Range support).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, "body")
-	}))
-	defer srv.Close()
+	doer := DoerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})
 
-	f := NewFetcher(http.DefaultClient)
-	_, err := f.RangeGet(context.Background(), srv.URL, 0, 4)
+	f := NewFetcher(doer)
 
+	_, err := f.RangeGet(context.Background(), "http://exporter.invalid/api/v1/block", 0, 4)
 	if err == nil {
 		t.Fatal("expected error for non-206 response, got nil")
+	}
+
+	if got := body.closes.Load(); got != 1 {
+		t.Fatalf("refused response body closed %d times, want exactly 1", got)
+	}
+}
+
+// The same for the resume path, which builds its refusal in another place and so
+// can lose the close on its own.
+func TestOpenStream_RefusalClosesTheResponseBody(t *testing.T) {
+	body := &countingBody{Reader: strings.NewReader("VolumeMode: Block. Not supported downloading files.")}
+
+	doer := DoerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Header:     make(http.Header),
+			Body:       body,
+		}, nil
+	})
+
+	f := NewFetcher(doer)
+
+	_, _, err := f.OpenStream(context.Background(), "http://exporter.invalid/api/v1/block", 0)
+	if err == nil {
+		t.Fatal("expected error for a 400 response, got nil")
+	}
+
+	if got := body.closes.Load(); got != 1 {
+		t.Fatalf("refused response body closed %d times, want exactly 1", got)
 	}
 }
 
@@ -918,7 +972,7 @@ func TestSourceHashTimeout(t *testing.T) {
 			size: 10 * sourceHashMinimumThroughput * 60,
 			want: 10*time.Minute + sourceHashTimeoutSlack,
 		},
-		{name: "untrusted size is capped", size: int64(^uint64(0) >> 1), want: sourceHashTimeoutCeiling},
+		{name: "untrusted size is capped", size: int64(^uint64(0) >> 1), want: SourceHashTimeoutCeiling},
 	}
 
 	for _, tc := range tests {
@@ -1444,5 +1498,422 @@ func TestFetcher_PublishHintOnlyWhenEnabled(t *testing.T) {
 				t.Fatalf("hint present = %v, want %v (error: %v)", gotHint, tt.wantHint, err)
 			}
 		})
+	}
+}
+
+// TestOpenStream_FirstRequestCarriesNoRange pins the shape of the first request
+// of a transfer: no Range header at all, and the whole object in the answer. The
+// producer's declared length comes back with the body because a caller that
+// streams into a file needs it to tell a complete transfer from a truncated one.
+func TestOpenStream_FirstRequestCarriesNoRange(t *testing.T) {
+	var gotRange string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		http.ServeContent(w, r, "data.img", time.Time{}, bytes.NewReader(blockData))
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	rc, declared, err := f.OpenStream(context.Background(), srv.URL, 0)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if gotRange != "" {
+		t.Fatalf("first request carried Range %q, want none", gotRange)
+	}
+
+	if declared != int64(len(blockData)) {
+		t.Fatalf("declared length = %d, want %d", declared, len(blockData))
+	}
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if !bytes.Equal(got, blockData) {
+		t.Fatalf("body = %q, want %q", got, blockData)
+	}
+}
+
+// TestOpenStream_FirstRequestServesAnEmptyObject holds http.ServeContent — the
+// handler both exporters serve files and the block device through — to the
+// carve-out OpenStream's first request relies on: a zero-length object comes back
+// as an ordinary empty 200, so an empty file in a tree is an ordinary transfer of
+// nothing rather than a failure.
+func TestOpenStream_FirstRequestServesAnEmptyObject(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "empty.bin", time.Time{}, bytes.NewReader(nil))
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	rc, declared, err := f.OpenStream(context.Background(), srv.URL, 0)
+	if err != nil {
+		t.Fatalf("OpenStream on an empty object: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if declared != 0 {
+		t.Fatalf("declared length = %d, want 0", declared)
+	}
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Fatalf("body = %q, want empty", got)
+	}
+}
+
+// TestOpenStream_FirstRequestSurvivesAProducerIgnoringRanges pins the other half
+// of the same decision: the first request must succeed against a producer that
+// only ever answers 200. Requiring 206 from the start would break every transfer
+// against such a producer, including the ones that never break at all.
+func TestOpenStream_FirstRequestSurvivesAProducerIgnoringRanges(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(blockData)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(blockData)
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	rc, declared, err := f.OpenStream(context.Background(), srv.URL, 0)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if declared != int64(len(blockData)) {
+		t.Fatalf("declared length = %d, want %d", declared, len(blockData))
+	}
+}
+
+// TestOpenStream_ResumeRejectsWholeObjectAnswer covers the failure that would
+// otherwise be silent: a producer (or a proxy) that ignores the Range header
+// answers 200 with the object from offset zero, and a caller appending that body
+// at its resume offset ends up with a file nothing later complains about.
+func TestOpenStream_ResumeRejectsWholeObjectAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(blockData)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(blockData)
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	_, _, err := f.OpenStream(context.Background(), srv.URL, 10)
+	if !errors.Is(err, ErrRangeIgnored) {
+		t.Fatalf("error = %v, want wrapped ErrRangeIgnored", err)
+	}
+}
+
+// TestOpenStream_ResumeReportsTotalFromContentRange asserts a resumed request
+// returns the bytes from its offset onwards and learns the whole object's length
+// from Content-Range, which is the only place a 206 states it.
+func TestOpenStream_ResumeReportsTotalFromContentRange(t *testing.T) {
+	var gotRange string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRange = r.Header.Get("Range")
+		http.ServeContent(w, r, "data.img", time.Time{}, bytes.NewReader(blockData))
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	rc, declared, err := f.OpenStream(context.Background(), srv.URL, 10)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+
+	defer func() { _ = rc.Close() }()
+
+	if gotRange != "bytes=10-" {
+		t.Fatalf("resume request carried Range %q, want %q", gotRange, "bytes=10-")
+	}
+
+	if declared != int64(len(blockData)) {
+		t.Fatalf("declared length = %d, want %d", declared, len(blockData))
+	}
+
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if !bytes.Equal(got, blockData[10:]) {
+		t.Fatalf("body = %q, want %q", got, blockData[10:])
+	}
+}
+
+// TestOpenStream_ResumeRequiresContentRangeStartingAtTheResumeOffset covers a
+// 206 whose body starts somewhere else: its bytes belong at an offset the caller
+// did not ask about, so writing them where the caller is would corrupt the
+// destination just as surely as a 200 would.
+func TestOpenStream_ResumeRequiresContentRangeStartingAtTheResumeOffset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 4-%d/%d", len(blockData)-1, len(blockData)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(blockData[4:])
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(http.DefaultClient)
+
+	_, _, err := f.OpenStream(context.Background(), srv.URL, 10)
+	if !errors.Is(err, ErrContentRangeMismatch) {
+		t.Fatalf("error = %v, want wrapped ErrContentRangeMismatch", err)
+	}
+}
+
+// TestOpenStream_ResumeClassifiesUnauthorized keeps the resume path's refusals
+// classified like every other request of this package: a rejected credential is
+// fatal, and a retry loop that could not recognize it would spend a whole budget
+// on it.
+func TestOpenStream_ResumeClassifiesUnauthorized(t *testing.T) {
+	srv := unauthorizedServer(t)
+
+	f := NewFetcher(srv.Client())
+
+	blockURL, err := BlockURL(srv.URL)
+	if err != nil {
+		t.Fatalf("BlockURL: %v", err)
+	}
+
+	_, _, err = f.OpenStream(context.Background(), blockURL, 10)
+	if !errors.Is(err, ErrExportUnauthorized) {
+		t.Fatalf("error = %v, want wrapped ErrExportUnauthorized", err)
+	}
+}
+
+// refusalExplanation is what the exporters put in the body of a refusal: one line
+// of plain text through net/http's Error helper, naming the cause.
+const refusalExplanation = "VolumeMode: Filesystem. Not supported downloading raw block."
+
+// TestStatusExplanation_EveryRefusalCarriesWhatTheProducerSaid walks ALL SIX
+// places this package turns an HTTP status into an error and holds each to the
+// rule: a refusal carries the producer's own explanation, because the status
+// names the class of failure and only the body names the cause.
+//
+// Six rows rather than one, deliberately. Each place builds its own error, and a
+// place that stops carrying the explanation — by closing the body first, say —
+// goes on returning a perfectly plausible error that simply says less. Only a row
+// per place notices. The two HEAD rows pin the opposite expectation for the same
+// reason: their absence of a body is a documented property, not an oversight to
+// be "fixed" later.
+func TestStatusExplanation_EveryRefusalCarriesWhatTheProducerSaid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, refusalExplanation, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	for _, tt := range refusalCalls() {
+		t.Run(tt.name, func(t *testing.T) {
+			f := NewFetcher(srv.Client())
+
+			err := tt.call(f, srv.URL)
+			if err == nil {
+				t.Fatal("expected an error for a 400 response, got nil")
+			}
+
+			if !strings.Contains(err.Error(), "400 Bad Request") {
+				t.Fatalf("error does not name the status: %v", err)
+			}
+
+			if got := strings.Contains(err.Error(), refusalExplanation); got != tt.wantExplanation {
+				t.Fatalf("explanation present = %v, want %v (error: %v)", got, tt.wantExplanation, err)
+			}
+		})
+	}
+}
+
+// refusalCall is one place this package turns an HTTP status into an error.
+type refusalCall struct {
+	name            string
+	call            func(f *Fetcher, baseURL string) error
+	wantExplanation bool
+}
+
+// refusalCalls enumerates every such place. TestStatusExplanation_EveryRefusalSiteIsCovered
+// holds this list to the file it describes.
+func refusalCalls() []refusalCall {
+	return []refusalCall{
+		{
+			name: "GET a stream from the start",
+			call: func(f *Fetcher, baseURL string) error {
+				_, _, err := f.OpenStream(context.Background(), baseURL, 0)
+				return err
+			},
+			wantExplanation: true,
+		},
+		{
+			name: "GET a stream resumed from an offset",
+			call: func(f *Fetcher, baseURL string) error {
+				_, _, err := f.OpenStream(context.Background(), baseURL, 10)
+				return err
+			},
+			wantExplanation: true,
+		},
+		{
+			name: "GET a bounded range",
+			call: func(f *Fetcher, baseURL string) error {
+				_, err := f.RangeGet(context.Background(), baseURL, 0, 9)
+				return err
+			},
+			wantExplanation: true,
+		},
+		{
+			name: "GET a directory listing",
+			call: func(f *Fetcher, baseURL string) error {
+				return f.ListDir(context.Background(), baseURL+"/", func(Item) error { return nil })
+			},
+			wantExplanation: true,
+		},
+		{
+			name: "HEAD the volume",
+			call: func(f *Fetcher, baseURL string) error {
+				_, err := f.HeadVolume(context.Background(), baseURL)
+				return err
+			},
+			// A HEAD response carries no body at all, so there is nothing to
+			// quote: net/http discards it, however the producer wrote it.
+			wantExplanation: false,
+		},
+		{
+			name: "HEAD the source hash",
+			call: func(f *Fetcher, baseURL string) error {
+				_, err := f.SourceMD5(context.Background(), baseURL, 1)
+				return err
+			},
+			wantExplanation: false,
+		},
+	}
+}
+
+// TestStatusExplanation_EveryRefusalSiteIsCovered keeps the list above honest as
+// this file changes, and it is written around the regression that a list of
+// examples cannot catch by itself: a refusal site added tomorrow that never asks
+// for an explanation would leave every assertion above passing, because the
+// assertions only know the sites they already name.
+//
+// So it counts two things and requires both to agree:
+//
+//   - exportStatusError is the one place this package classifies an HTTP status,
+//     so its call sites ARE the refusal sites. Every one of them must ask for the
+//     producer's explanation, or a status is being turned into an error without
+//     the half of it the caller can act on;
+//   - each of those sites must have an entry in refusalCalls, so its behaviour is
+//     actually exercised rather than merely counted.
+//
+// LIMIT, named because the counter reads like it proves more than it does: it
+// keys on exportStatusError. A future site that formats resp.Status into an error
+// WITHOUT going through it is invisible here — that would also drop the 401/403
+// classification, so it is a different and louder bug, but this guard is not the
+// one that would catch it.
+//
+// Not every status this package turns into an error is a refusal: a 200 answer to
+// a resumed request becomes ErrRangeIgnored and deliberately carries no
+// explanation, because that body is the object itself rather than a reason. It
+// does not go through exportStatusError and is not counted here.
+//
+// It reads the file from disk, so it sees the working tree rather than whatever a
+// build overlay substituted: a mutation probe run through "go test -overlay" does
+// not reach it, and proving it can fail means editing the file for real.
+func TestStatusExplanation_EveryRefusalSiteIsCovered(t *testing.T) {
+	source, err := os.ReadFile("http.go")
+	if err != nil {
+		t.Fatalf("read http.go: %v", err)
+	}
+
+	explained, classified := 0, 0
+
+	for _, line := range strings.Split(string(source), "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		// Comments mention both by name, and the two definitions are not calls.
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "func ") {
+			continue
+		}
+
+		explained += strings.Count(line, "f.statusExplanation(")
+		classified += strings.Count(line, "exportStatusError(")
+	}
+
+	t.Logf("http.go: %d refusals classified, %d of them explained; refusalCalls lists %d",
+		classified, explained, len(refusalCalls()))
+
+	if classified != explained {
+		t.Fatalf("http.go turns a status into an error in %d places but asks for the producer's "+
+			"explanation in %d: a refusal that reports only its status tells the caller nothing "+
+			"it can act on", classified, explained)
+	}
+
+	if explained != len(refusalCalls()) {
+		t.Fatalf("http.go asks for a producer explanation in %d places but refusalCalls lists %d: "+
+			"give the new place an entry (or drop the stale one), so it is exercised and not just counted",
+			explained, len(refusalCalls()))
+	}
+}
+
+// TestStatusExplanation_StopsWaitingForABodyThatNeverArrives holds the read of a
+// refusal's body to the same idle watchdog every other body this package touches
+// runs under. There is no overall deadline on this path by design (volume
+// transfers are long), so a producer that sends a status and then goes quiet
+// without closing the connection — the exact shape the watchdog exists for —
+// would otherwise hang the client inside the code that is trying to REPORT a
+// failure.
+func TestStatusExplanation_StopsWaitingForABodyThatNeverArrives(t *testing.T) {
+	release := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "128")
+		w.WriteHeader(http.StatusBadRequest)
+		w.(http.Flusher).Flush()
+
+		// Status sent, body never written, connection held open.
+		<-release
+	}))
+
+	// Registered first so it runs LAST: httptest's Close waits for outstanding
+	// handlers, and this one only returns once release is closed.
+	defer srv.Close()
+	defer close(release)
+
+	f := NewFetcher(srv.Client(), WithIdleReadTimeout(50*time.Millisecond))
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, _, err := f.OpenStream(context.Background(), srv.URL, 0)
+		done <- err
+	}()
+
+	// Bounded in time rather than by waiting for the call: an unbounded read does
+	// not fail an assertion, it never reaches one.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error for a 400 response, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "400 Bad Request") {
+			t.Fatalf("error does not name the status: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal never came back: reading the producer's explanation has no time bound")
 	}
 }

@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
@@ -1798,7 +1799,7 @@ func downloadBlock(
 	stream progress.Stream,
 	seeded int64,
 ) error {
-	blockURL, err := exporter.BlockURL(exp.BaseURL())
+	blockURL, err := dataplane.BlockURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build block URL: %w", err)
 	}
@@ -1878,7 +1879,7 @@ func downloadFS(
 	stream progress.Stream,
 	seeded int64,
 ) error {
-	filesURL, err := exporter.FilesURL(exp.BaseURL())
+	filesURL, err := dataplane.FilesURL(exp.BaseURL())
 	if err != nil {
 		return fmt.Errorf("build files URL: %w", err)
 	}

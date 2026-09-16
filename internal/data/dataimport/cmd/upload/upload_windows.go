@@ -5,12 +5,9 @@ package upload
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -108,7 +105,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	podUrl, baseUrl, _, subClient, err := util.PrepareUpload(ctx, backend, diName, namespace, publish, httpClient, log)
+	podUrl, baseUrl, _, subClient, err := util.PrepareUploadFunc(ctx, backend, diName, namespace, publish, httpClient, log)
 	if err != nil {
 		return err
 	}
@@ -130,91 +127,4 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	// session open until it receives POST /api/v1/finished, and only then does the controller
 	// set UploadFinished=True and rebind the target / mark the DataImport Completed.
 	return util.PostFinished(ctx, subClient, baseUrl)
-}
-
-func upload(ctx context.Context, log *slog.Logger, httpClient *client.SafeClient, url string, filePath string, chunks int, permOctal string, uid, gid int, resume bool) error {
-	var offset int64 = 0
-	if resume {
-		off, err := util.CheckUploadProgress(ctx, httpClient, url)
-		if err != nil {
-			return err
-		}
-		offset = off
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	fi, err := file.Stat()
-	if err != nil {
-		return err
-	}
-
-	totalSize := fi.Size()
-	if totalSize < 0 {
-		return fmt.Errorf("invalid file size")
-	}
-
-	chunkSize := totalSize / int64(chunks)
-	if totalSize%int64(chunks) != 0 {
-		chunkSize++
-	}
-
-	for offset < totalSize {
-		remaining := totalSize - offset
-		sendLen := chunkSize
-		if sendLen > remaining {
-			sendLen = remaining
-		}
-
-		section := io.NewSectionReader(file, offset, sendLen)
-		req, err := http.NewRequest(http.MethodPut, url, io.NopCloser(section))
-		if err != nil {
-			return err
-		}
-		req = req.WithContext(ctx)
-
-		req.Header.Set("X-Content-Length", strconv.FormatInt(totalSize, 10))
-		req.Header.Set("X-Attribute-Permissions", permOctal)
-		req.Header.Set("X-Attribute-Uid", strconv.Itoa(uid))
-		req.Header.Set("X-Attribute-Gid", strconv.Itoa(gid))
-		req.Header.Set("X-Offset", strconv.FormatInt(offset, 10))
-
-		if err := func() error {
-			resp, err := httpClient.HTTPDo(req)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-			}()
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return fmt.Errorf("server error at offset %d: status %d (%s)", offset, resp.StatusCode, resp.Status)
-			}
-
-			nextOffsetStr := resp.Header.Get("X-Next-Offset")
-			if nextOffsetStr == "" {
-				offset += sendLen
-				return nil
-			}
-			nextOffset, err := strconv.ParseInt(nextOffsetStr, 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid X-Next-Offset: %s: %w", nextOffsetStr, err)
-			}
-			if nextOffset < offset {
-				return fmt.Errorf("server returned X-Next-Offset (%d) smaller than current offset (%d)", nextOffset, offset)
-			}
-			offset = nextOffset
-			return nil
-		}(); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }

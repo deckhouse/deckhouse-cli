@@ -34,9 +34,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -85,7 +85,7 @@ func TestPutBlockCompressed_ProductionFrameGeometryResume(t *testing.T) {
 		totalSize,
 		volume.DefaultChunkSize,
 		1,
-		exporter.NewFetcher(source.Client()),
+		dataplane.NewFetcher(source.Client()),
 		codec,
 		nil,
 	))

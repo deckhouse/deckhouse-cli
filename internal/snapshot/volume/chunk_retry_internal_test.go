@@ -26,18 +26,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 )
 
 // fastChunkRetryPolicy is a test-only policy with the same shape as
-// defaultChunkRetryPolicy but with a millisecond-scale backoff, so retry
+// dataplane.DefaultRetryPolicy but with a millisecond-scale backoff, so retry
 // tests don't pay the production policy's multi-second budget. It is
 // deliberately unexported and local to this file: no test in this package
 // gets to change the production default via a shared knob.
@@ -48,15 +50,15 @@ import (
 // invocation EARLIER than Steps would otherwise suggest — the moment a
 // projected next duration exceeds Cap, so a tight Cap here would silently
 // undercount the very attempts these tests assert on.
-func fastChunkRetryPolicy() chunkRetryPolicy {
-	return chunkRetryPolicy{
-		backoff: wait.Backoff{
+func fastChunkRetryPolicy() dataplane.RetryPolicy {
+	return dataplane.RetryPolicy{
+		Backoff: wait.Backoff{
 			Steps:    4,
 			Duration: time.Millisecond,
 			Factor:   2,
 			Cap:      50 * time.Millisecond,
 		},
-		maxNoProgress: 3,
+		MaxNoProgress: 3,
 	}
 }
 
@@ -108,12 +110,12 @@ func (b *cutBody) Close() error {
 	return b.r.Close()
 }
 
-// scriptedRangeDoer wraps a real exporter.Doer and records every request's
+// scriptedRangeDoer wraps a real dataplane.Doer and records every request's
 // Range header in call order. cut, when non-nil, truncates every response
 // body (every call, not just one) after cutBytes bytes with cutErr — standing
 // in for a link that breaks on every attempt.
 type scriptedRangeDoer struct {
-	inner     exporter.Doer
+	inner     dataplane.Doer
 	cutBytes  int64
 	cutErr    error           // nil disables truncation
 	firstSeen chan<- struct{} // optional: signaled once, on the very first Do() call
@@ -161,11 +163,11 @@ func (d *scriptedRangeDoer) callCount() int {
 	return len(d.ranges)
 }
 
-// onceCutDoer wraps a real exporter.Doer and truncates only the FIRST
+// onceCutDoer wraps a real dataplane.Doer and truncates only the FIRST
 // response body (with cutErr, after cutBytes bytes); every subsequent call —
 // in particular the resumed retry — passes through untouched.
 type onceCutDoer struct {
-	inner    exporter.Doer
+	inner    dataplane.Doer
 	cutBytes int64
 	cutErr   error
 
@@ -218,12 +220,12 @@ func TestChunkRetrier_ResumesFromDurableOffset(t *testing.T) {
 
 	doer := &onceCutDoer{cutBytes: cutBytes, cutErr: io.ErrUnexpectedEOF}
 	doer.inner = srv.Client()
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	dir := t.TempDir()
 	partPath := filepath.Join(dir, "chunk_00000.part")
 
-	retrier := &chunkRetrier{policy: fastChunkRetryPolicy()}
+	retrier := newChunkRetrier(fastChunkRetryPolicy())
 
 	var (
 		mu      sync.Mutex
@@ -277,6 +279,184 @@ func TestChunkRetrier_ResumesFromDurableOffset(t *testing.T) {
 	}
 }
 
+// TestChunkRetrier_ResumesAfterUnrecognizedTransportBreak proves the chunk
+// download survives the break that actually happens in the field: a proxy
+// reload tears the HTTP/2 session down mid-body, and net/http reports it from
+// a type it keeps in its own unexported copy of the http2 package — so no
+// errors.As or errors.Is reaches it, and the fail-closed classifier calls it
+// fatal. What makes it retryable is not its identity but the bytes it
+// delivered first.
+//
+// This is the same rule TestRetrier_RetriesUnrecognizedErrorAfterDeliveredBytes
+// pins on the policy itself; here it is checked through the real Range GET and
+// the real ".part" file, because a rule expressed in the shared layer can
+// still fail to reach its consumer — the attempt has to report its delivery
+// honestly for the policy to act on it. The resumed Range header below is what
+// shows it did.
+func TestChunkRetrier_ResumesAfterUnrecognizedTransportBreak(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789ABCDEFGHIJ") // 20 bytes
+	const cutBytes = 12                       // attempt 1 delivers 12 bytes, then breaks
+
+	broken := errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR")
+
+	// The premise: this error really is unrecognized. Should a later change
+	// teach the classifier this shape, the test would keep passing while no
+	// longer testing anything about progress — so it says so instead.
+	if dataplane.IsTransientDataPlaneError(broken) {
+		t.Fatalf("premise broken: %v is now a recognized transient error", broken)
+	}
+
+	srv := newRangeServer(t, payload)
+	blockURL := srv.URL + "/block"
+
+	doer := &onceCutDoer{cutBytes: cutBytes, cutErr: broken}
+	doer.inner = srv.Client()
+	fetcher := dataplane.NewFetcher(doer)
+
+	dir := t.TempDir()
+	partPath := filepath.Join(dir, "chunk_00000.part")
+
+	retrier := newChunkRetrier(fastChunkRetryPolicy())
+
+	rawLen := int64(len(payload))
+
+	err := retrier.fetchChunk(context.Background(), nil, slog.Default(), fetcher, blockURL,
+		partPath, 0, 0, rawLen-1, rawLen, nil)
+	if err != nil {
+		t.Fatalf("fetchChunk: %v (a break after delivered bytes must resume, whatever its type)", err)
+	}
+
+	got, err := os.ReadFile(partPath)
+	if err != nil {
+		t.Fatalf("read partPath: %v", err)
+	}
+
+	if string(got) != string(payload) {
+		t.Errorf("partPath content = %q, want %q", got, payload)
+	}
+
+	ranges := doer.recordedRanges()
+	if len(ranges) != 2 {
+		t.Fatalf("expected exactly 2 requests, got %d: %v", len(ranges), ranges)
+	}
+
+	if want := "bytes=12-19"; ranges[1] != want {
+		t.Errorf("attempt 2 range = %q, want %q (resume from the durable offset, not byte 0)", ranges[1], want)
+	}
+}
+
+// TestChunkRetrier_InheritedDurablePrefixIsNotCountedAsDelivery pins what an
+// attempt reports when it fails BEFORE the network gives it anything: the
+// durable prefix it inherited from an earlier run belongs to that earlier
+// run, not to this attempt.
+//
+// Get that wrong and the damage is not in this chunk but in the retry
+// ceiling: an endpoint that refuses every connection would look like it
+// delivered the whole inherited prefix on every attempt, resetting the
+// no-progress counter each time, and a dead address would cost the full retry
+// budget instead of failing on the first attempt. The chunk still ends up
+// correct either way, which is why the property needs its own guard: when it
+// was broken deliberately (reporting Start as 0 instead of the inherited
+// prefix), this was the only test in this package or in internal/dataplane
+// that went red.
+func TestChunkRetrier_InheritedDurablePrefixIsNotCountedAsDelivery(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789ABCDEFGHIJ") // 20 bytes
+	const have = 12                           // durable prefix left by an earlier run
+
+	srv := newRangeServer(t, payload)
+	blockURL := srv.URL + "/block"
+
+	doer := &scriptedRangeDoer{inner: srv.Client()}
+	fetcher := dataplane.NewFetcher(doer)
+
+	// Take the listener away: every connection is now refused before a body
+	// can exist, so this attempt delivers nothing by construction.
+	// ECONNREFUSED is not in the transient list (the export never accepted the
+	// connection at all), so the ONLY thing that could buy a second attempt
+	// here is a miscounted delivery.
+	srv.Close()
+
+	dir := t.TempDir()
+	partPath := filepath.Join(dir, "chunk_00000.part")
+
+	if err := os.WriteFile(partPath, payload[:have], 0o600); err != nil {
+		t.Fatalf("seed durable partial: %v", err)
+	}
+
+	if err := os.WriteFile(partPath+partOffsetSuffix,
+		[]byte(strconv.FormatInt(have, 10)), 0o600); err != nil {
+		t.Fatalf("seed durable offset sidecar: %v", err)
+	}
+
+	retrier := newChunkRetrier(fastChunkRetryPolicy())
+
+	rawLen := int64(len(payload))
+
+	err := retrier.fetchChunk(context.Background(), nil, slog.Default(), fetcher, blockURL,
+		partPath, 0, 0, rawLen-1, rawLen, nil)
+	if err == nil {
+		t.Fatal("expected a refused endpoint to fail the chunk, got nil")
+	}
+
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Errorf("expected errors.Is(err, syscall.ECONNREFUSED), got: %v", err)
+	}
+
+	if got := doer.callCount(); got != 1 {
+		t.Errorf("expected exactly 1 request, got %d: the inherited %d-byte prefix is being counted as bytes "+
+			"THIS attempt delivered, so a dead endpoint buys retries it has not earned", got, have)
+	}
+}
+
+// TestChunkRetrier_KeepsTheCallerFatalPredicate proves newChunkRetrier EXTENDS
+// the policy's fatal set rather than replacing it. Replacing it would demote
+// whatever the caller had already named back to retryable, silently, and the
+// only visible symptom would be a failure that takes a whole budget to arrive.
+//
+// The stub delivers bytes before failing, so the progress rule would retry
+// this error: only the predicate can be what stops the loop on attempt one.
+func TestChunkRetrier_KeepsTheCallerFatalPredicate(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte("0123456789ABCDEFGHIJ")
+
+	callerFatal := errors.New("a failure the caller recognises as final")
+
+	policy := fastChunkRetryPolicy()
+	policy.Fatal = func(err error) bool { return errors.Is(err, callerFatal) }
+
+	srv := newRangeServer(t, payload)
+	blockURL := srv.URL + "/block"
+
+	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 8, cutErr: callerFatal}
+	fetcher := dataplane.NewFetcher(doer)
+
+	dir := t.TempDir()
+	partPath := filepath.Join(dir, "chunk_00000.part")
+
+	retrier := newChunkRetrier(policy)
+
+	rawLen := int64(len(payload))
+
+	err := retrier.fetchChunk(context.Background(), nil, slog.Default(), fetcher, blockURL,
+		partPath, 0, 0, rawLen-1, rawLen, nil)
+	if err == nil {
+		t.Fatal("expected the caller-named failure to be fatal, got nil")
+	}
+
+	if !errors.Is(err, callerFatal) {
+		t.Errorf("expected errors.Is(err, callerFatal), got: %v", err)
+	}
+
+	if got := doer.callCount(); got != 1 {
+		t.Errorf("expected exactly 1 request, got %d: the caller's predicate was dropped", got)
+	}
+}
+
 // TestChunkRetrier_ExhaustsBudget proves that a link broken on every attempt
 // exhausts exactly the policy's Steps budget and returns an error that still
 // satisfies errors.Is against the underlying transient sentinel.
@@ -289,13 +469,13 @@ func TestChunkRetrier_ExhaustsBudget(t *testing.T) {
 	blockURL := srv.URL + "/block"
 
 	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 5, cutErr: io.ErrUnexpectedEOF}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	dir := t.TempDir()
 	partPath := filepath.Join(dir, "chunk_00000.part")
 
 	policy := fastChunkRetryPolicy()
-	retrier := &chunkRetrier{policy: policy}
+	retrier := newChunkRetrier(policy)
 
 	rawLen := int64(len(payload))
 
@@ -309,8 +489,8 @@ func TestChunkRetrier_ExhaustsBudget(t *testing.T) {
 		t.Errorf("expected errors.Is(err, io.ErrUnexpectedEOF), got: %v", err)
 	}
 
-	if got := doer.callCount(); got != policy.backoff.Steps {
-		t.Errorf("expected exactly %d requests (the full Steps budget), got %d", policy.backoff.Steps, got)
+	if got := doer.callCount(); got != policy.Backoff.Steps {
+		t.Errorf("expected exactly %d requests (the full Steps budget), got %d", policy.Backoff.Steps, got)
 	}
 
 	// The durable partial and its offset sidecar must survive: a future
@@ -360,8 +540,9 @@ func (h *chunkWarnCapture) warnMessages() []string {
 
 // TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps proves that when
 // wait.Backoff.Cap forces the retry loop to stop before its declared Steps
-// budget is reached (see chunkFetchBackoff's doc comment), fetchChunk reports
-// the ACTUAL number of attempts made — never the declared Steps — in its
+// budget is reached (see the backoff doc comment behind
+// dataplane.DefaultRetryPolicy), fetchChunk reports the ACTUAL number of
+// attempts made — never the declared Steps — in its
 // returned error, and logs each transient failure exactly once: one WARN per
 // attempt, and the exhausted error is never separately logged anywhere in
 // this call chain once it becomes final.
@@ -374,7 +555,7 @@ func TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps(t *testing.T) {
 	blockURL := srv.URL + "/block"
 
 	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 5, cutErr: io.ErrUnexpectedEOF}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	dir := t.TempDir()
 	partPath := filepath.Join(dir, "chunk_00000.part")
@@ -382,22 +563,22 @@ func TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps(t *testing.T) {
 	// Steps=6 alone would suggest 6 attempts, but Cap=4ms forces the internal
 	// step budget to 0 early: the projected delay grows 1ms -> 2ms -> 4ms,
 	// and the 3rd projected delay (8ms) exceeds Cap, ending the loop after
-	// exactly 3 real attempts — the same arithmetic chunkFetchBackoff's doc
-	// comment works out for the production policy (5 of 6 there).
-	policy := chunkRetryPolicy{
-		backoff: wait.Backoff{
+	// exactly 3 real attempts — the same arithmetic the production backoff's
+	// doc comment works out for its own parameters (5 of 6 there).
+	policy := dataplane.RetryPolicy{
+		Backoff: wait.Backoff{
 			Steps:    6,
 			Duration: time.Millisecond,
 			Factor:   2,
 			Cap:      4 * time.Millisecond,
 		},
-		maxNoProgress: 3,
+		MaxNoProgress: 3,
 	}
 
 	warns := &chunkWarnCapture{}
 	log := slog.New(warns)
 
-	retrier := &chunkRetrier{policy: policy}
+	retrier := newChunkRetrier(policy)
 
 	rawLen := int64(len(payload))
 
@@ -419,12 +600,12 @@ func TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps(t *testing.T) {
 	wantMsg := fmt.Sprintf("exhausted %d attempts", gotCalls)
 	if !strings.Contains(err.Error(), wantMsg) {
 		t.Errorf("error = %q, want it to name the actual attempt count (%q), not the declared Steps=%d",
-			err.Error(), wantMsg, policy.backoff.Steps)
+			err.Error(), wantMsg, policy.Backoff.Steps)
 	}
 
-	if staleMsg := fmt.Sprintf("exhausted %d attempts", policy.backoff.Steps); strings.Contains(err.Error(), staleMsg) {
+	if staleMsg := fmt.Sprintf("exhausted %d attempts", policy.Backoff.Steps); strings.Contains(err.Error(), staleMsg) {
 		t.Errorf("error = %q, must not report the declared Steps budget (%d) as the attempt count",
-			err.Error(), policy.backoff.Steps)
+			err.Error(), policy.Backoff.Steps)
 	}
 
 	// Every attempt here is a plain transient failure (never a no-progress or
@@ -436,44 +617,56 @@ func TestChunkRetrier_ExhaustsBudget_CapCutsAttemptsShortOfSteps(t *testing.T) {
 	}
 }
 
-// TestChunkRetrier_DoesNotRetryFatal proves that every non-transient error
-// stops the retry loop on the very first attempt, and that errors.Is against
-// the original sentinel still holds through fetchChunk's returned error.
+// TestChunkRetrier_DoesNotRetryFatal proves that a fatal error stops the
+// retry loop on the very first attempt, and that errors.Is against the
+// original sentinel still holds through fetchChunk's returned error.
+//
+// The first three cases fail before the exporter hands back a body, so the
+// attempt delivers nothing and the progress rule never comes into it; the
+// companion guard that those stay fatal even AFTER bytes have been delivered
+// lives with the policy itself
+// (TestRetrier_FatalErrorAfterDeliveredBytesIsNotRetried), where the two
+// checks whose order it pins are written. The fourth case is the one that
+// does deliver bytes first.
 func TestChunkRetrier_DoesNotRetryFatal(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name       string
-		buildFetch func(t *testing.T) (fetcher *exporter.Fetcher, blockURL string, callCount func() int)
+		buildFetch func(t *testing.T) (fetcher *dataplane.Fetcher, blockURL string, callCount func() int)
 		wantErr    error
 	}{
 		{
 			name: "401 unauthorized",
-			buildFetch: func(t *testing.T) (*exporter.Fetcher, string, func() int) {
+			buildFetch: func(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 				t.Helper()
 				return statusDoerFetcher(t, http.StatusUnauthorized)
 			},
-			wantErr: exporter.ErrExportUnauthorized,
+			wantErr: dataplane.ErrExportUnauthorized,
 		},
 		{
 			name: "403 forbidden",
-			buildFetch: func(t *testing.T) (*exporter.Fetcher, string, func() int) {
+			buildFetch: func(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 				t.Helper()
 				return statusDoerFetcher(t, http.StatusForbidden)
 			},
-			wantErr: exporter.ErrExportUnauthorized,
+			wantErr: dataplane.ErrExportUnauthorized,
 		},
 		{
 			name: "content-range mismatch",
-			buildFetch: func(t *testing.T) (*exporter.Fetcher, string, func() int) {
+			buildFetch: func(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 				t.Helper()
 				return mismatchedRangeFetcher(t)
 			},
-			wantErr: exporter.ErrContentRangeMismatch,
+			wantErr: dataplane.ErrContentRangeMismatch,
 		},
 		{
+			// Unlike the three above, this one delivers bytes BEFORE it
+			// fails, so the progress rule in the shared policy would retry
+			// it. It stays fatal only because newChunkRetrier names it in
+			// the policy's Fatal predicate — which is what this case pins.
 			name: "clean short read",
-			buildFetch: func(t *testing.T) (*exporter.Fetcher, string, func() int) {
+			buildFetch: func(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 				t.Helper()
 				return shortReadFetcher(t)
 			},
@@ -490,7 +683,7 @@ func TestChunkRetrier_DoesNotRetryFatal(t *testing.T) {
 			dir := t.TempDir()
 			partPath := filepath.Join(dir, "chunk_00000.part")
 
-			retrier := &chunkRetrier{policy: fastChunkRetryPolicy()}
+			retrier := newChunkRetrier(fastChunkRetryPolicy())
 
 			err := retrier.fetchChunk(context.Background(), nil, slog.Default(), fetcher, blockURL,
 				partPath, 0, 0, 19, 20, nil)
@@ -510,7 +703,7 @@ func TestChunkRetrier_DoesNotRetryFatal(t *testing.T) {
 }
 
 // TestChunkRetrier_DoesNotRetryLocalWriteError proves a local filesystem
-// failure (unreachable from exporter.IsTransientDataPlaneError's allow-list)
+// failure (unreachable from dataplane.IsTransientDataPlaneError's allow-list)
 // is fatal on the first attempt, exactly like a rejected/mismatched response.
 func TestChunkRetrier_DoesNotRetryLocalWriteError(t *testing.T) {
 	t.Parallel()
@@ -521,13 +714,13 @@ func TestChunkRetrier_DoesNotRetryLocalWriteError(t *testing.T) {
 	blockURL := srv.URL + "/block"
 
 	doer := &scriptedRangeDoer{inner: srv.Client()}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	// partPath's parent directory does not exist, so opening it for append
 	// fails with a local *os.PathError — not in the transient allow-list.
 	partPath := filepath.Join(t.TempDir(), "missing-parent", "chunk_00000.part")
 
-	retrier := &chunkRetrier{policy: fastChunkRetryPolicy()}
+	retrier := newChunkRetrier(fastChunkRetryPolicy())
 
 	rawLen := int64(len(payload))
 
@@ -560,23 +753,23 @@ func TestChunkRetrier_ContextCancelStopsRetryImmediately(t *testing.T) {
 
 	firstSeen := make(chan struct{}, 1)
 	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 2, cutErr: io.ErrUnexpectedEOF, firstSeen: firstSeen}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	dir := t.TempDir()
 	partPath := filepath.Join(dir, "chunk_00000.part")
 
 	// A long backoff so cancellation, not a natural step timeout, is what
 	// ends the loop.
-	longBackoffPolicy := chunkRetryPolicy{
-		backoff: wait.Backoff{
+	longBackoffPolicy := dataplane.RetryPolicy{
+		Backoff: wait.Backoff{
 			Steps:    6,
 			Duration: 10 * time.Second,
 			Factor:   2,
 			Cap:      time.Minute,
 		},
-		maxNoProgress: 3,
+		MaxNoProgress: 3,
 	}
-	retrier := &chunkRetrier{policy: longBackoffPolicy}
+	retrier := newChunkRetrier(longBackoffPolicy)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -637,21 +830,21 @@ func TestChunkRetrier_BoundsNoProgressAttempts(t *testing.T) {
 
 	// Every attempt is cut after 0 bytes: the durable offset never advances.
 	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 0, cutErr: io.ErrUnexpectedEOF}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	dir := t.TempDir()
 	partPath := filepath.Join(dir, "chunk_00000.part")
 
-	policy := chunkRetryPolicy{
-		backoff: wait.Backoff{
+	policy := dataplane.RetryPolicy{
+		Backoff: wait.Backoff{
 			Steps:    6, // larger than maxNoProgress: no-progress must stop it first
 			Duration: time.Millisecond,
 			Factor:   2,
 			Cap:      50 * time.Millisecond, // see fastChunkRetryPolicy: keep well above the growth curve
 		},
-		maxNoProgress: 3,
+		MaxNoProgress: 3,
 	}
-	retrier := &chunkRetrier{policy: policy}
+	retrier := newChunkRetrier(policy)
 
 	rawLen := int64(len(payload))
 
@@ -665,14 +858,13 @@ func TestChunkRetrier_BoundsNoProgressAttempts(t *testing.T) {
 		t.Errorf("expected the error to name the no-progress condition, got: %v", err)
 	}
 
-	// The very first attempt always establishes a baseline durable offset (0
-	// bytes is still "progress" relative to no prior attempt at all — see
-	// chunkRetrier.fetchChunk's lastDurable := -1 sentinel), so it takes
-	// maxNoProgress+1 total attempts before maxNoProgress CONSECUTIVE
-	// zero-advancement attempts have actually occurred.
-	wantCalls := policy.maxNoProgress + 1
+	// The ceiling counts attempts that DELIVERED NOTHING, and every attempt
+	// here delivers nothing — including the first, which has no earlier
+	// attempt to be compared against. So the count is reached on attempt
+	// MaxNoProgress exactly, with no extra baseline attempt in front of it.
+	wantCalls := policy.MaxNoProgress
 	if got := doer.callCount(); got != wantCalls {
-		t.Errorf("expected exactly %d requests (maxNoProgress+1 for the baseline attempt), got %d", wantCalls, got)
+		t.Errorf("expected exactly %d requests (one per zero-delivery attempt), got %d", wantCalls, got)
 	}
 }
 
@@ -738,41 +930,7 @@ func TestChunkProgressLedger_MonotonicAcrossAttempts(t *testing.T) {
 	}
 }
 
-// TestRootCause proves rootCause unwraps a chain of %w-wrapped errors down to
-// the deepest cause, and passes both nil and an already-unwrapped error
-// through unchanged.
-func TestRootCause(t *testing.T) {
-	t.Parallel()
-
-	base := errors.New("base failure")
-
-	tests := []struct {
-		name string
-		err  error
-		want error
-	}{
-		{name: "nil error returns nil", err: nil, want: nil},
-		{name: "unwrapped error returns itself", err: base, want: base},
-		{name: "single wrap returns the base", err: fmt.Errorf("attempt 1: %w", base), want: base},
-		{
-			name: "double wrap returns the deepest base",
-			err:  fmt.Errorf("attempt 2: %w", fmt.Errorf("attempt 1: %w", base)),
-			want: base,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := rootCause(tc.err); got != tc.want {
-				t.Errorf("rootCause(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
-
-// pathOnceFlakyDoer wraps a real exporter.Doer and truncates (with cutErr,
+// pathOnceFlakyDoer wraps a real dataplane.Doer and truncates (with cutErr,
 // after cutBytes bytes) only the FIRST request whose URL path it sees —
 // tracked per distinct path — so several concurrently-downloading chunks
 // backed by DIFFERENT paths on the same doer each flake exactly once,
@@ -781,7 +939,7 @@ func TestRootCause(t *testing.T) {
 // has received (also useful for asserting "exactly one retry per chunk"
 // under real concurrency, not just sequential simulation).
 type pathOnceFlakyDoer struct {
-	inner     exporter.Doer
+	inner     dataplane.Doer
 	cutBytes  int64
 	cutErr    error
 	firstSeen chan<- string // optional: signaled with path on that path's first Do() call
@@ -873,9 +1031,9 @@ func TestChunkRetrier_ConcurrentChunksIndependentRecoveredCount(t *testing.T) {
 
 	doer := &pathOnceFlakyDoer{cutBytes: 3, cutErr: io.ErrUnexpectedEOF}
 	doer.inner = srv.Client()
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
-	retrier := &chunkRetrier{policy: fastChunkRetryPolicy()}
+	retrier := newChunkRetrier(fastChunkRetryPolicy())
 
 	var (
 		progressMu sync.Mutex
@@ -937,7 +1095,7 @@ func TestChunkRetrier_ConcurrentChunksIndependentRecoveredCount(t *testing.T) {
 		}
 	}
 
-	if recovered := retrier.recovered.Load(); recovered != numChunks {
+	if recovered := retrier.Recovered(); recovered != numChunks {
 		t.Errorf("recovered = %d, want %d (one retry credited per concurrently-flaking chunk)", recovered, numChunks)
 	}
 
@@ -986,18 +1144,18 @@ func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
 	firstSeen := make(chan string, numChunks)
 	doer := &pathOnceFlakyDoer{cutBytes: 2, cutErr: io.ErrUnexpectedEOF, firstSeen: firstSeen}
 	doer.inner = srv.Client()
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
-	longBackoffPolicy := chunkRetryPolicy{
-		backoff: wait.Backoff{
+	longBackoffPolicy := dataplane.RetryPolicy{
+		Backoff: wait.Backoff{
 			Steps:    6,
 			Duration: 10 * time.Second,
 			Factor:   2,
 			Cap:      time.Minute,
 		},
-		maxNoProgress: 3,
+		MaxNoProgress: 3,
 	}
-	retrier := &chunkRetrier{policy: longBackoffPolicy}
+	retrier := newChunkRetrier(longBackoffPolicy)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -1061,7 +1219,7 @@ func TestChunkRetrier_ConcurrentContextCancelStopsAllRetries(t *testing.T) {
 
 // statusDoerFetcher builds a Fetcher whose RangeGet always fails with the
 // given HTTP status.
-func statusDoerFetcher(t *testing.T, status int) (*exporter.Fetcher, string, func() int) {
+func statusDoerFetcher(t *testing.T, status int) (*dataplane.Fetcher, string, func() int) {
 	t.Helper()
 
 	var calls int
@@ -1077,7 +1235,7 @@ func statusDoerFetcher(t *testing.T, status int) (*exporter.Fetcher, string, fun
 	}))
 	t.Cleanup(srv.Close)
 
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	return fetcher, srv.URL, func() int {
 		mu.Lock()
@@ -1089,7 +1247,7 @@ func statusDoerFetcher(t *testing.T, status int) (*exporter.Fetcher, string, fun
 
 // mismatchedRangeFetcher builds a Fetcher whose RangeGet always returns 206
 // with a Content-Range header that does not match the requested range.
-func mismatchedRangeFetcher(t *testing.T) (*exporter.Fetcher, string, func() int) {
+func mismatchedRangeFetcher(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 	t.Helper()
 
 	var calls int
@@ -1107,7 +1265,7 @@ func mismatchedRangeFetcher(t *testing.T) (*exporter.Fetcher, string, func() int
 	}))
 	t.Cleanup(srv.Close)
 
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	return fetcher, srv.URL, func() int {
 		mu.Lock()
@@ -1120,7 +1278,7 @@ func mismatchedRangeFetcher(t *testing.T) (*exporter.Fetcher, string, func() int
 // shortReadFetcher builds a Fetcher whose RangeGet always returns a
 // correctly-ranged 206 that ends in a clean EOF short of the promised range,
 // standing in for a server that lied about how much data it would send.
-func shortReadFetcher(t *testing.T) (*exporter.Fetcher, string, func() int) {
+func shortReadFetcher(t *testing.T) (*dataplane.Fetcher, string, func() int) {
 	t.Helper()
 
 	payload := []byte("0123456789ABCDEFGHIJ") // 20 bytes
@@ -1128,7 +1286,7 @@ func shortReadFetcher(t *testing.T) (*exporter.Fetcher, string, func() int) {
 	srv := newRangeServer(t, payload)
 
 	doer := &scriptedRangeDoer{inner: srv.Client(), cutBytes: 10, cutErr: io.EOF}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	return fetcher, srv.URL + "/block", doer.callCount
 }

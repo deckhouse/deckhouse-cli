@@ -37,10 +37,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
@@ -389,9 +389,9 @@ func TestNewDownloadClients_ProgressingDataStreamOutlivesControlTimeout(t *testi
 		t.Fatalf("build persistent data-plane client: %v", err)
 	}
 
-	fetcher := exporter.NewFetcher(
+	fetcher := dataplane.NewFetcher(
 		persistentClient,
-		exporter.WithIdleReadTimeout(dataIdleTimeout),
+		dataplane.WithIdleReadTimeout(dataIdleTimeout),
 	)
 	start := time.Now()
 
