@@ -21,6 +21,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	cnimigration "github.com/deckhouse/deckhouse-cli/internal/network/cnimigration/cmd"
+	"github.com/deckhouse/deckhouse-cli/internal/network/istio"
 )
 
 var networkLong = templates.LongDesc(`
@@ -38,6 +39,7 @@ func NewCommand() *cobra.Command {
 
 	networkCmd.AddCommand(
 		cnimigration.NewCommand(),
+		istio.NewCommand(),
 	)
 
 	return networkCmd
