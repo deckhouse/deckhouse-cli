@@ -716,6 +716,55 @@ func TestTracefWritesContent(t *testing.T) {
 	require.Contains(t, string(data), "TRACE hello trace")
 }
 
+func TestFinishRun_SyncsLegacyRetryFileBeforeClosingTrace(t *testing.T) {
+	tmpDir := t.TempDir()
+	runFile := filepath.Join(tmpDir, "failed_annotations_run.log")
+	legacyFile := filepath.Join(tmpDir, "failed_annotations.log")
+	tracePath := filepath.Join(tmpDir, "sigmigrate_trace.log")
+
+	require.NoError(t, os.WriteFile(runFile, []byte("ns|obj|pods\n"), 0644))
+
+	traceFile, err := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+
+	stderrPath := filepath.Join(tmpDir, "stderr.log")
+	stderrFile, err := os.Create(stderrPath)
+	require.NoError(t, err)
+	origStderr := os.Stderr
+	os.Stderr = stderrFile
+	defer func() { os.Stderr = origStderr }()
+
+	runState := &sigMigrateRunState{
+		FailedAttemptsFile:    runFile,
+		LegacyFailedRetryFile: legacyFile,
+		TraceLogFile:          tracePath,
+		traceFile:             traceFile,
+	}
+	setCurrentRunState(runState)
+
+	finishRun(runState)
+
+	// A tracef after cleanup must be a silent no-op.
+	tracef("after cleanup")
+
+	require.NoError(t, stderrFile.Close())
+	stderrData, err := os.ReadFile(stderrPath)
+	require.NoError(t, err)
+	require.Empty(t, string(stderrData), "no warnings expected on stderr")
+
+	legacyData, err := os.ReadFile(legacyFile)
+	require.NoError(t, err)
+	require.Equal(t, "ns|obj|pods\n", string(legacyData))
+
+	traceData, err := os.ReadFile(tracePath)
+	require.NoError(t, err)
+	require.Contains(t, string(traceData), "synced retry compatibility file")
+	require.NotContains(t, string(traceData), "after cleanup")
+
+	require.Nil(t, runState.traceFile)
+	require.Nil(t, currentRunState)
+}
+
 func TestNewSigMigrateRunState_GeneratesSaltedPaths(t *testing.T) {
 	ts := time.Date(2026, 4, 14, 15, 16, 25, 0, time.UTC)
 	state := newSigMigrateRunState(ts)
