@@ -228,13 +228,13 @@ Collects a wide cluster snapshot into a **gzipped tar streamed to stdout**, so y
 d8 system collect-debug-info > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz
 ```
 
-It refuses to run when stdout is a terminal (to avoid dumping binary to your screen) unless you pass `--list-exclude`. The collection runs **inside** the leader pod: it executes 63 diagnostic commands there (`deckhouse-controller queue list`, redacted global values, module/source/release inventories, cluster-wide `kubectl get` snapshots, and controller/etcd/apiserver/VPA/Prometheus logs, plus cloud-provider/cert-manager/istio/cni-cilium/virtualization extras when those modules are Ready), writing each result as a file in the archive.
+It refuses to run when stdout is a terminal (to avoid dumping binary to your screen) unless you pass `--list-exclude`. The collection runs **inside** the leader pod: it executes the 63 declared commands there (`deckhouse-controller queue list`, redacted global values, module/source/release inventories, cluster-wide `kubectl get` snapshots, and controller/etcd/apiserver/VPA/Prometheus logs, plus cloud-provider/cert-manager/istio/cni-cilium/virtualization extras when those modules are Ready), writing each result as a file in the archive. The two per-cloud log collections are repeated once per matching provider module, so a cloud cluster ends up with slightly more archive entries than commands.
 
 Before collecting, the command reads the list of `Ready` modules to decide which module-gated commands apply. If that read fails, it prints an error and keeps going: module-gated commands run anyway (and may produce empty files), except the per-module log collections whose file name contains the module name - those are skipped, since their archive entry name cannot be resolved.
 
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
-| `--exclude` | | string list | (none) | Comma-separated list of entries to leave out of the archive. Accepts exactly the names printed by `--list-exclude`, with or without the file extension; a name matches that entry only, never a group of files sharing a prefix. A name that matches nothing is an error listing close matches, so a typo cannot pass as "collect everything". |
+| `--exclude` | | string list | (none) | Comma-separated list of entries to leave out of the archive. Accepts exactly the names printed by `--list-exclude`, with or without the file extension and ignoring surrounding spaces; a name matches that entry only, never a group of files sharing a prefix. A name that matches nothing is an error listing close matches, so a typo cannot pass as "collect everything". |
 | `--list-exclude` | `-l` | bool | `false` | Print the names accepted by `--exclude`, then exit. This path makes no cluster calls. The names are the archive file names as declared in the command table, except the per-module cloud logs, which are printed as the module-independent keys `ccm-logs` and `csi-controller-logs` (their real entry is `d8-<module>-ccm-logs.txt`, and both spellings are accepted). |
 | `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command. |
 | `--request-interval` | | duration | `0` | Minimum gap between commands to avoid overloading the cluster (e.g. `200ms`, `1s`). `0` disables rate limiting. |
@@ -245,6 +245,8 @@ Before collecting, the command reads the list of `Ready` modules to decide which
 
 Collects a separate, virtualization-focused archive: the pod list of the `d8-virtualization` namespace plus the **full** log of every pod in it (`--tail=-1`, no line cap). Same stdout rules as the parent command.
 
+The pod list is read through the Kubernetes API with **your own** kubeconfig, so the account you run `d8` with needs `list pods` in `d8-virtualization`; the logs themselves are still collected by `kubectl` running inside the leader pod, like every other archive entry.
+
 ```bash
 d8 system collect-debug-info virtualization > deckhouse-debug-virtualization-$(date +"%Y_%m_%d").tar.gz
 ```
@@ -252,7 +254,7 @@ d8 system collect-debug-info virtualization > deckhouse-debug-virtualization-$(d
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
 | `--skip-ds-logs` | | bool | `false` | Skip logs of pods owned by a DaemonSet (`virt-handler`, `virtualization-dra`, `vm-route-forge`, ...), whose volume scales with the number of nodes. |
-| `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command. |
+| `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command, and to the pod list request. |
 | `--request-interval` | | duration | `0` | Minimum gap between commands to avoid overloading the cluster. |
 
 The pod list is the entire payload of this archive, so the command fails (and writes nothing) when the namespace cannot be listed or holds no pods - instead of producing a valid-looking archive with a single empty file. `--exclude`/`--list-exclude` do not apply here.

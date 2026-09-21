@@ -16,7 +16,7 @@ import (
 const virtualizationNamespace = "d8-virtualization"
 
 // virtualizationCommands - additional resource-intensive commands collected only in the virtualization archive
-var virtualizationCommands = []Command{
+var virtualizationCommands = []command{
 	{
 		File: "d8-virtualization-pods-wide.txt",
 		Cmd:  "kubectl",
@@ -36,7 +36,7 @@ type virtualizationPod struct {
 // volume scales with the number of nodes.
 //
 // The pod list is the entire payload of this archive, so a failure to obtain it
-// aborts the collection instead of producing an archive that looks complete.
+// aborts the collection.
 func VirtualizationTarball(config *rest.Config, kubeCl kubernetes.Interface, commandTimeout, requestInterval time.Duration, skipDsLogs bool) error {
 	const (
 		namespace     = "d8-system"
@@ -95,8 +95,8 @@ func fetchVirtualizationPods(kubeCl kubernetes.Interface, timeout time.Duration)
 
 // buildVirtualizationCommands transforms the discovered list of pods into a final list.
 // first the static commands, then one log collection command for each pod (skipping pods belonging to DaemonSet if skipDsLogs is set).
-func buildVirtualizationCommands(pods []virtualizationPod, skipDsLogs bool) []Command {
-	commands := make([]Command, 0, len(virtualizationCommands)+len(pods))
+func buildVirtualizationCommands(pods []virtualizationPod, skipDsLogs bool) []command {
+	commands := make([]command, 0, len(virtualizationCommands)+len(pods))
 	commands = append(commands, virtualizationCommands...)
 
 	for _, pod := range pods {
@@ -104,7 +104,7 @@ func buildVirtualizationCommands(pods []virtualizationPod, skipDsLogs bool) []Co
 			continue
 		}
 
-		commands = append(commands, Command{
+		commands = append(commands, command{
 			File: fmt.Sprintf("d8-virtualization-%s-logs.txt", pod.Name),
 			Cmd:  "kubectl",
 			Args: []string{"-n", virtualizationNamespace, "logs", pod.Name, "--tail=-1", "--ignore-errors=true"},
