@@ -42,6 +42,7 @@ type Linter struct {
 // Lint executes the openapi rules against the configured package path.
 func (l *Linter) Lint(ctx context.Context) {
 	rules.NewAdvancedRule(l.config.Path, l.collector).Check(ctx)
+	rules.NewExtensionsRule(l.config.Path, l.collector).Check(ctx)
 	rules.NewEnumRule(l.config.Path, l.collector).Check(ctx)
 	rules.NewBilingualRule(l.config.Path, l.collector).Check(ctx)
 }
