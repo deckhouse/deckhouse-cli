@@ -71,6 +71,14 @@ func ExecInPod(config *rest.Config, kubeCl kubernetes.Interface, cmdLine []strin
 // The buffers are goroutine-safe on purpose: StreamWithContext returns as soon
 // as ctx is done without joining the goroutines that copy the remote streams,
 // so those goroutines may still write into them after this call returned.
+//
+// That only happens on one branch, though. The stream protocol handlers join
+// their copy goroutines before returning (wg.Wait() in client-go
+// tools/remotecommand/v2.go and v4.go), so once StreamWithContext returns
+// anything other than the context error, nothing can write into the buffers any
+// more and the defensive copy of Bytes() is pure overhead. It is not a cheap
+// overhead: a single archive entry can hold hundreds of megabytes of logs, and
+// the copy costs that much memory again on top of the buffer itself.
 func ExecCommandInPod(
 	ctx context.Context,
 	config *rest.Config,
@@ -90,7 +98,14 @@ func ExecCommandInPod(
 		Stderr: &stderrBuf,
 	})
 
-	return stdoutBuf.Bytes(), stderrBuf.String(), streamErr
+	// Only the ctx.Done() branch of StreamWithContext leaves the copy goroutines
+	// running, and it is the only branch that can report anything but nil here,
+	// so the snapshot is taken exactly when a writer may still be alive.
+	if streamErr != nil {
+		return stdoutBuf.Bytes(), stderrBuf.String(), streamErr
+	}
+
+	return stdoutBuf.detach(), stderrBuf.String(), nil
 }
 
 // syncBuffer is a goroutine-safe sink for the output of a remote command.
@@ -124,6 +139,17 @@ func (b *syncBuffer) Bytes() []byte {
 	defer b.mu.Unlock()
 
 	return bytes.Clone(b.buf.Bytes())
+}
+
+// detach returns everything written so far without copying it. The returned
+// slice aliases the buffer's storage, so it may only be used once no writer is
+// left: see the branch in ExecCommandInPod that calls it. Callers that cannot
+// prove that must use Bytes instead.
+func (b *syncBuffer) detach() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buf.Bytes()
 }
 
 // String returns everything written so far as a string.

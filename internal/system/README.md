@@ -239,7 +239,11 @@ Before collecting, the command reads the list of `Ready` modules to decide which
 | `--command-timeout` | | duration | `2m` | Timeout applied to each individual in-pod command. |
 | `--request-interval` | | duration | `0` | Minimum gap between commands to avoid overloading the cluster (e.g. `200ms`, `1s`). `0` disables rate limiting. |
 
-**Handle the archive as sensitive.** Only `cluster-global-values.json` is redacted (its `kubeRBACProxyCA` and registry `dockercfg`); container logs and the raw audit policy Secret (`kube-system-audit-policy.json`) are included unredacted. Also note that a file is written even when its source command fails or times out, so an entry may be empty rather than absent.
+While collecting, the command prints one progress line per entry to stderr (position, entry name, duration, bytes), so a slow command can be told from a stuck one.
+
+A file is written even when its source command fails or times out, so an entry may be empty or truncated rather than absent. Every such command is listed in a **`collection-errors.txt`** entry added to the archive, naming the entry, the command, the error (or the timeout) and how many bytes were kept. The archive has no `collection-errors.txt` when everything succeeded. Check for it before treating an empty entry as "the resource holds nothing" - the warnings printed during collection go to stderr, which is not part of the archive.
+
+**Handle the archive as sensitive.** Only `cluster-global-values.json` is redacted (its `kubeRBACProxyCA` and registry `dockercfg`); container logs and the raw audit policy Secret (`kube-system-audit-policy.json`) are included unredacted.
 
 ### `collect-debug-info virtualization`
 

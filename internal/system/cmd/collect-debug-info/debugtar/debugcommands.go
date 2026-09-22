@@ -16,32 +16,32 @@ var debugCommands = []command{
 	{
 		File: "cluster-global-values.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `deckhouse-controller global values -o json | jq '.internal.modules.kubeRBACProxyCA = "REDACTED" | .modulesImages.registry.dockercfg = "REDACTED"'`},
+		Args: []string{"-c", `set -o pipefail; deckhouse-controller global values -o json | jq '.internal.modules.kubeRBACProxyCA = "REDACTED" | .modulesImages.registry.dockercfg = "REDACTED"'`},
 	},
 	{
 		File: "deckhouse-enabled-modules.json",
 		Cmd:  "bash",
-		Args: []string{"-c", "kubectl get modules -o json | jq '.items[]'"},
+		Args: []string{"-c", "set -o pipefail; kubectl get modules -o json | jq '.items[]'"},
 	},
 	{
 		File: "deckhouse-module-sources.json",
 		Cmd:  "bash",
-		Args: []string{"-c", "kubectl get modulesources -o json | jq '.items[]'"},
+		Args: []string{"-c", "set -o pipefail; kubectl get modulesources -o json | jq '.items[]'"},
 	},
 	{
 		File: "deckhouse-module-pull-overrides.json",
 		Cmd:  "bash",
-		Args: []string{"-c", "kubectl get modulepulloverrides -o json | jq '.items[]'"},
+		Args: []string{"-c", "set -o pipefail; kubectl get modulepulloverrides -o json | jq '.items[]'"},
 	},
 	{
 		File: "deckhouse-module-update-policies.json",
 		Cmd:  "bash",
-		Args: []string{"-c", "kubectl get moduleupdatepolicies -o json | jq '.items[]'"},
+		Args: []string{"-c", "set -o pipefail; kubectl get moduleupdatepolicies -o json | jq '.items[]'"},
 	},
 	{
 		File: "deckhouse-maintenance-modules.txt",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get moduleconfig -ojson | jq -r '.items[] | select(.spec.maintenance == "NoResourceReconciliation") | .metadata.name'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get moduleconfig -ojson | jq -r '.items[] | select(.spec.maintenance == "NoResourceReconciliation") | .metadata.name'`},
 	},
 	{
 		File: "cluster-events.json",
@@ -51,7 +51,7 @@ var debugCommands = []command{
 	{
 		File: "d8-all.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `for ns in $(kubectl get ns -o go-template='{{range .items}}{{.metadata.name}}{{"\n"}}{{end}}{{"kube-system"}}' -l heritage=deckhouse); do kubectl -n $ns get all -o json; done | jq -s '[.[].items[]]'`},
+		Args: []string{"-c", `set -o pipefail; for ns in $(kubectl get ns -o go-template='{{range .items}}{{.metadata.name}}{{"\n"}}{{end}}{{"kube-system"}}' -l heritage=deckhouse); do kubectl -n $ns get all -o json; done | jq -s '[.[].items[]]'`},
 	},
 	{
 		File: "cluster-node-groups.json",
@@ -76,33 +76,33 @@ var debugCommands = []command{
 	{
 		File: "instance-manager-capi-machines.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get machines.cluster.x-k8s.io -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl -n d8-cloud-instance-manager get machines.cluster.x-k8s.io -o json | jq '.items[]'`},
 	},
 	{
 		File: "instance-manager-instances.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get instances.deckhouse.io -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get instances.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
 		File: "instance-manager-staticinstances.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get staticinstances.deckhouse.io -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get staticinstances.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
 		File:           "instance-manager-cloud-machine-deployment.txt",
 		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl -n d8-cloud-instance-manager get machinedeployments.machine.sapcloud.io -o json | jq '.items[]'`},
+		Args:           []string{"-c", `set -o pipefail; kubectl -n d8-cloud-instance-manager get machinedeployments.machine.sapcloud.io -o json | jq '.items[]'`},
 		RequiredModule: "cloud-provider",
 	},
 	{
 		File: "instance-manager-static-machine-deployment.txt",
 		Cmd:  "bash",
-		Args: []string{"-c", "kubectl -n d8-cloud-instance-manager get machinedeployments.cluster.x-k8s.io -o json --ignore-not-found | jq '.items[]'"},
+		Args: []string{"-c", "set -o pipefail; kubectl -n d8-cloud-instance-manager get machinedeployments.cluster.x-k8s.io -o json --ignore-not-found | jq '.items[]'"},
 	},
 	{
 		File: "deckhouse-version.json",
 		Cmd:  "bash",
-		Args: []string{"-c", "jq -s add <(kubectl -n d8-system get deployment deckhouse -o json | jq -r '.metadata.annotations | {\"core.deckhouse.io/edition\",\"core.deckhouse.io/version\"}') <(kubectl -n d8-system get deployment deckhouse -o json | jq -r '.spec.template.spec.containers[] | select(.name == \"deckhouse\") | {image}')"},
+		Args: []string{"-c", "set -o pipefail; jq -s add <(kubectl -n d8-system get deployment deckhouse -o json | jq -r '.metadata.annotations | {\"core.deckhouse.io/edition\",\"core.deckhouse.io/version\"}') <(kubectl -n d8-system get deployment deckhouse -o json | jq -r '.spec.template.spec.containers[] | select(.name == \"deckhouse\") | {image}')"},
 	},
 	{
 		File: "deckhouse-releases.json",
@@ -127,7 +127,7 @@ var debugCommands = []command{
 	{
 		File: "instance-manager-machine-controller-manager.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get pods -l app=machine-controller-manager -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl -n d8-cloud-instance-manager get pods -l app=machine-controller-manager -o json | jq '.items[]'`},
 	},
 	{
 		File: "instance-manager-mcm-logs.txt",
@@ -137,7 +137,7 @@ var debugCommands = []command{
 	{
 		File: "instance-manager-mcm-cloud-machines.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl -n d8-cloud-instance-manager get machines.machine.sapcloud.io -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl -n d8-cloud-instance-manager get machines.machine.sapcloud.io -o json | jq '.items[]'`},
 	},
 	{
 		File:           "d8-{module-name}-ccm-logs.txt",
@@ -191,22 +191,22 @@ var debugCommands = []command{
 	{
 		File: "cluster-alerts.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get clusteralerts.deckhouse.io -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get clusteralerts.deckhouse.io -o json | jq '.items[]'`},
 	},
 	{
 		File: "cluster-bad-pods.txt",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get pod -A -owide | grep -Pv '\s+([1-9]+[\d]*)\/\1\s+' | grep -v 'Completed\|Evicted' | grep -E "^(d8-|kube-system)" || true`},
+		Args: []string{"-c", `set -o pipefail; kubectl get pod -A -owide | grep -Pv '\s+([1-9]+[\d]*)\/\1\s+' | grep -v 'Completed\|Evicted' | grep -E "^(d8-|kube-system)" || true`},
 	},
 	{
 		File: "security-cluster-authorization-rules.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get clusterauthorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get clusterauthorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
 	},
 	{
 		File: "security-authorization-rules.json",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get authorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get authorizationrules.deckhouse.io -A -o json | jq '.items[]'`},
 	},
 	{
 		File: "deckhouse-module-configs.json",
@@ -216,19 +216,19 @@ var debugCommands = []command{
 	{
 		File:           "d8-istio-resources.json",
 		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl -n d8-istio get all -o json | jq '.items[]'`},
+		Args:           []string{"-c", `set -o pipefail; kubectl -n d8-istio get all -o json | jq '.items[]'`},
 		RequiredModule: "istio",
 	},
 	{
 		File:           "d8-istio-custom-resources.json",
 		Cmd:            "bash",
-		Args:           []string{"-c", `for crd in $(kubectl get crds | grep -E 'istio.io|gateway.networking.k8s.io' | awk '{print $1}'); do echo "Listing resources for CRD: $crd" && kubectl get $crd -A -o json; done`},
+		Args:           []string{"-c", `set -o pipefail; for crd in $(kubectl get crds | grep -E 'istio.io|gateway.networking.k8s.io' | awk '{print $1}'); do echo "Listing resources for CRD: $crd" && kubectl get $crd -A -o json; done`},
 		RequiredModule: "istio",
 	},
 	{
 		File:           "d8-istio-envoy-config.json",
 		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl port-forward daemonset/ingressgateway -n d8-istio 15000:15000 & sleep 5; (curl http://localhost:15000/config_dump?include_eds=true | jq 'del(.configs[6].dynamic_active_secrets)' && kill $!) || { kill $!; exit 0; }`},
+		Args:           []string{"-c", `set -o pipefail; kubectl port-forward daemonset/ingressgateway -n d8-istio 15000:15000 & sleep 5; (curl http://localhost:15000/config_dump?include_eds=true | jq 'del(.configs[6].dynamic_active_secrets)' && kill $!) || { kill $!; exit 0; }`},
 		RequiredModule: "istio",
 	},
 	{
@@ -246,13 +246,13 @@ var debugCommands = []command{
 	{
 		File:           "d8-istio-users-logs.txt",
 		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.metadata.annotations.istio\.io/rev)]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.containers[*].name}{"\n"}{end}' | awk '/istio-proxy/ {print $0}' | shuf -n 1 | while read namespace pod_name containers; do echo "Collecting logs from istio-proxy in Pod $pod_name (Namespace: $namespace)"; kubectl logs "$pod_name" -n "$namespace" -c istio-proxy; done`},
+		Args:           []string{"-c", `set -o pipefail; kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.metadata.annotations.istio\.io/rev)]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.containers[*].name}{"\n"}{end}' | awk '/istio-proxy/ {print $0}' | shuf -n 1 | while read namespace pod_name containers; do echo "Collecting logs from istio-proxy in Pod $pod_name (Namespace: $namespace)"; kubectl logs "$pod_name" -n "$namespace" -c istio-proxy; done`},
 		RequiredModule: "istio",
 	},
 	{
 		File:           "network-cni-cilium-health-status.txt",
 		Cmd:            "bash",
-		Args:           []string{"-c", `kubectl -n d8-cni-cilium exec -it $(kubectl -n d8-cni-cilium get pod -o name | grep agent | head -n 1) -c cilium-agent -- cilium-health status`},
+		Args:           []string{"-c", `set -o pipefail; kubectl -n d8-cni-cilium exec -it $(kubectl -n d8-cni-cilium get pod -o name | grep agent | head -n 1) -c cilium-agent -- cilium-health status`},
 		RequiredModule: "cni-cilium",
 	},
 	{
@@ -308,7 +308,7 @@ var debugCommands = []command{
 	{
 		File: "other-storage-deckhouse-io-terminating.txt",
 		Cmd:  "bash",
-		Args: []string{"-c", `kubectl get $(kubectl api-resources --api-group=storage.deckhouse.io --verbs=list -o name | paste -sd, -) --ignore-not-found -A --chunk-size=200 -o json | jq -r '.items[] | select(.apiVersion == "storage.deckhouse.io/v1alpha1") | select(.metadata.deletionTimestamp != null) | "[\(.kind)] \(.metadata.namespace // "-")/\(.metadata.name)"'`},
+		Args: []string{"-c", `set -o pipefail; kubectl get $(kubectl api-resources --api-group=storage.deckhouse.io --verbs=list -o name | paste -sd, -) --ignore-not-found -A --chunk-size=200 -o json | jq -r '.items[] | select(.apiVersion == "storage.deckhouse.io/v1alpha1") | select(.metadata.deletionTimestamp != null) | "[\(.kind)] \(.metadata.namespace // "-")/\(.metadata.name)"'`},
 	},
 	{
 		File: "network-ingressnginxcontrollers.json",

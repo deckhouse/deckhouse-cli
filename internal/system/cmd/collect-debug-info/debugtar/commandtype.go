@@ -60,19 +60,31 @@ func replaceModuleName(args []string, moduleName string) []string {
 	return expanded
 }
 
-func (c *command) writeToTar(tarWriter *tar.Writer, fileContent []byte) error {
+// writeToTar stores the concatenation of chunks as one archive entry. Taking
+// the content in pieces is what keeps a prefix (the "Defaulted container"
+// notice) from being prepended by copying: a tar entry needs its size up front,
+// but not its bytes in one slice, and the collected output can be hundreds of
+// megabytes.
+func (c *command) writeToTar(tarWriter *tar.Writer, chunks ...[]byte) error {
+	var size int64
+	for _, chunk := range chunks {
+		size += int64(len(chunk))
+	}
+
 	header := &tar.Header{
 		Name: c.File,
 		Mode: 0o600,
-		Size: int64(len(fileContent)),
+		Size: size,
 	}
 
 	if err := tarWriter.WriteHeader(header); err != nil {
 		return fmt.Errorf("write tar header: %v", err)
 	}
 
-	if _, err := tarWriter.Write(fileContent); err != nil {
-		return fmt.Errorf("copy content: %v", err)
+	for _, chunk := range chunks {
+		if _, err := tarWriter.Write(chunk); err != nil {
+			return fmt.Errorf("copy content: %v", err)
+		}
 	}
 
 	return nil
