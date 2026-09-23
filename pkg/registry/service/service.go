@@ -47,6 +47,7 @@ type Service struct {
 	deckhouseService *DeckhouseService
 	security         *SecurityServices
 	installer        *InstallerServices
+	cli              *CLIService
 	plugins          *PluginsService
 
 	// modulesPath is the registry path where modules live, relative to the
@@ -112,7 +113,12 @@ func NewService(c client.Client, edition pkg.Edition, logger *log.Logger, opts .
 
 	// services that are not scoped by edition
 	s.installer = NewInstallerServices(installerServiceName, c.WithSegment("installer"), logger.Named("installer"))
-	s.plugins = NewPluginsService(c.WithSegment(deckhouseCLISegment, pluginsSegment), logger.Named("plugins"))
+
+	// The CLI binary repository and the plugins catalog under it share one
+	// root, so the plugins client is derived from the CLI one.
+	cliClient := c.WithSegment(deckhouseCLISegment)
+	s.cli = NewCLIService(cliClient, logger.Named("deckhouse-cli"))
+	s.plugins = NewPluginsService(cliClient.WithSegment(pluginsSegment), logger.Named("plugins"))
 
 	return s
 }
@@ -161,6 +167,12 @@ func (s *Service) Security() *SecurityServices {
 
 func (s *Service) InstallerService() *InstallerServices {
 	return s.installer
+}
+
+// CLIService returns the deckhouse-cli binary repository service. It is scoped
+// to <root>/deckhouse-cli, outside the edition segment.
+func (s *Service) CLIService() *CLIService {
+	return s.cli
 }
 
 // PluginService returns the CLI plugins catalog service. It is scoped to

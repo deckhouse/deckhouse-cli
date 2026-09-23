@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/dist"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/plugins"
 )
 
 // TestBuildPluginsInput pins the modules->plugins handoff: module versions
@@ -59,27 +59,27 @@ func TestBuildPluginsInput(t *testing.T) {
 // TestToPluginsStats pins the phase-stats -> summary mapping, including the
 // reason-kind labels the renderer keys on.
 func TestToPluginsStats(t *testing.T) {
-	stats := toPluginsStats(plugins.PluginsStats{
+	stats := toPluginsStats(dist.PluginsStats{
 		Attempted: true,
-		Plugins: []plugins.PluginStat{{
+		Plugins: []dist.PluginStat{{
 			Name:   "postgresql-mgr",
 			Images: 2,
-			Versions: []plugins.PluginVersionStat{{
+			Versions: []dist.PluginVersionStat{{
 				Version: "v1.2.0",
-				Reasons: []plugins.Reason{
-					{Kind: plugins.ReasonModule, Subject: "postgresql", Constraint: ">=1.5.0"},
-					{Kind: plugins.ReasonExplicit, Subject: "--include-plugin postgresql-mgr"},
+				Reasons: []dist.Reason{
+					{Kind: dist.ReasonModule, Subject: "postgresql", Constraint: ">=1.5.0"},
+					{Kind: dist.ReasonExplicit, Subject: "--include-plugin postgresql-mgr"},
 				},
 			}},
 		}, {
 			Name:   "db-connector",
 			Images: 1,
-			Versions: []plugins.PluginVersionStat{{
+			Versions: []dist.PluginVersionStat{{
 				Version: "v0.9.1",
-				Reasons: []plugins.Reason{{Kind: plugins.ReasonDependency, Subject: "postgresql-mgr@v1.2.0", Constraint: ">=0.9.0"}},
+				Reasons: []dist.Reason{{Kind: dist.ReasonDependency, Subject: "postgresql-mgr@v1.2.0", Constraint: ">=0.9.0"}},
 			}},
 		}},
-		Skipped:     []plugins.SkippedPlugin{{Name: "backup-tool", Reason: "requires postgresql >=3.0.0"}},
+		Skipped:     []dist.SkippedPlugin{{Name: "backup-tool", Reason: "requires postgresql >=3.0.0"}},
 		Warnings:    []string{"some advisory"},
 		TotalImages: 3,
 	})

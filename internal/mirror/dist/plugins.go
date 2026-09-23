@@ -14,62 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package dist
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"path/filepath"
-	"time"
 
 	"github.com/Masterminds/semver/v3"
-	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/types"
 
-	dkplog "github.com/deckhouse/deckhouse/pkg/log"
-	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
-
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
+	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	pluginlayout "github.com/deckhouse/deckhouse-cli/internal/plugins/layout"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
-	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
-	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
-const (
-	// pluginsDirName is the working-dir subdirectory holding per-plugin OCI
-	// layouts during a pull.
-	pluginsDirName = "plugins"
-
-	pullRetryAttempts = 5
-	pullRetryDelay    = 10 * time.Second
-)
-
-// Options contains configuration options for the plugins service.
-type Options struct {
-	// Filter carries --include-plugin expressions (whitelist, additive to the
-	// module-driven auto-selection). May be nil.
-	Filter *modules.Filter
-	// Builtins are d8 built-in command names that satisfy a same-named plugin
-	// dependency by presence (never pulled).
-	Builtins map[string]struct{}
-	// BundleDir is the directory to store the bundle.
-	BundleDir string
-	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking).
-	BundleChunkSize int64
-	// DryRun prints the pull plan without downloading any image blobs.
-	DryRun bool
-	// ProxyRegistry means the registry serves no catalog: auto-selection is
-	// impossible, only explicit exact pins are resolved.
-	ProxyRegistry bool
-}
+// pluginsDirName is the working-dir subdirectory holding per-plugin OCI
+// layouts during a pull.
+const pluginsDirName = "plugins"
 
 // PullInput is the cross-phase handoff: what the earlier pull phases put into
 // the bundle. Built by the pull orchestrator, never by this package.
@@ -80,59 +46,11 @@ type PullInput struct {
 	PlatformVersions []*semver.Version
 }
 
-// Service is the plugins phase of mirror pull: resolve which plugin versions
-// the bundle needs, pull them (multi-platform indexes whole), pack one
-// plugin-<name>.tar per plugin.
-type Service struct {
-	workingDir string
-
-	// pluginsService handles plugin registry operations.
-	pluginsService *registryservice.PluginsService
-	// resolver picks the plugin versions to mirror.
-	resolver Resolver
-	// layouts holds per-plugin OCI layouts, created lazily.
-	layouts map[pluginName]*regimage.ImageLayout
-
-	options *Options
-
-	// stats accumulates pull accounting for the summary.
-	stats *pluginsPullStats
-
-	logger     *dkplog.Logger
-	userLogger *log.SLogger
-}
-
-// NewService creates the plugins phase service.
-func NewService(
-	registryService *registryservice.Service,
-	workingDir string,
-	options *Options,
-	logger *dkplog.Logger,
-	userLogger *log.SLogger,
-) *Service {
-	pluginsService := registryService.PluginService()
-
-	return &Service{
-		workingDir: workingDir,
-
-		pluginsService: pluginsService,
-		resolver:       NewResolver(NewCatalog(pluginsService, logger), logger),
-		layouts:        make(map[pluginName]*regimage.ImageLayout),
-
-		options: options,
-
-		stats: newPluginsPullStats(),
-
-		logger:     logger,
-		userLogger: userLogger,
-	}
-}
-
 // PullPlugins mirrors the plugins the bundle needs: plugins whose contracts
 // name the mirrored modules (per bundled module version), their mandatory
 // plugin dependencies, and explicit --include-plugin entries.
 func (svc *Service) PullPlugins(ctx context.Context, in PullInput) error {
-	svc.stats.attempted = true
+	svc.pluginStats.attempted = true
 
 	modulesIn := in.Modules
 	if svc.options.ProxyRegistry {
@@ -157,7 +75,7 @@ func (svc *Service) PullPlugins(ctx context.Context, in PullInput) error {
 		return err
 	}
 
-	svc.stats.recordResolution(resolution)
+	svc.pluginStats.recordResolution(resolution)
 
 	for _, warning := range resolution.Warnings {
 		svc.userLogger.WarnLn(warning)
@@ -185,7 +103,7 @@ func (svc *Service) PullPlugins(ctx context.Context, in PullInput) error {
 
 	// Image counts must be captured before packing: bundle.Pack deletes the
 	// layout files as it tars them.
-	svc.stats.captureImages(svc.layouts)
+	svc.pluginStats.captureImages(svc.layouts)
 
 	return svc.packPlugins(ctx, resolution)
 }
@@ -221,103 +139,14 @@ func (svc *Service) pullPlugins(ctx context.Context, resolution *Resolution) err
 	return nil
 }
 
-// pullVersion pulls one plugin version into the plugin's OCI layout. A
-// multi-platform index is stored whole: children are fetched by digest, so
-// their bytes (and the contract annotation) stay exactly as published.
+// pullVersion pulls one plugin version into the plugin's OCI layout.
 func (svc *Service) pullVersion(ctx context.Context, name pluginName, tag versionTag) error {
-	pluginSvc := svc.pluginsService.Plugin(name)
-
-	layout, err := svc.layoutFor(name)
+	pluginLayout, err := svc.layoutFor(name)
 	if err != nil {
 		return err
 	}
 
-	result, err := pluginSvc.GetManifest(ctx, tag)
-	if err != nil {
-		return fmt.Errorf("get manifest: %w", err)
-	}
-
-	if !result.GetMediaType().IsIndex() {
-		img, err := pluginSvc.GetImage(ctx, tag)
-		if err != nil {
-			return fmt.Errorf("get image: %w", err)
-		}
-
-		return layout.AddImage(img, tag)
-	}
-
-	indexManifest, err := result.GetIndexManifest()
-	if err != nil {
-		return fmt.Errorf("read index manifest: %w", err)
-	}
-
-	idx, err := rebuildIndex(ctx, pluginSvc, indexManifest, result.GetMediaType())
-	if err != nil {
-		return err
-	}
-
-	return layout.AddIndex(idx, tag, svc.pluginRef(name, tag))
-}
-
-// rebuildIndex reassembles a multi-platform index from its children. Children
-// are fetched by digest (byte-exact); only the top-level index manifest is
-// re-marshaled locally, with its media type, annotations, subject and the
-// per-child descriptor fields carried over. Per-child artifactType is the one
-// field ggcr's mutate cannot carry.
-func rebuildIndex(ctx context.Context, pluginSvc *registryservice.PluginService, indexManifest dkpreg.IndexManifest, mediaType types.MediaType) (v1.ImageIndex, error) {
-	children := indexManifest.GetManifests()
-
-	adds := make([]mutate.IndexAddendum, 0, len(children))
-
-	for _, child := range children {
-		img, err := pluginSvc.GetImage(ctx, "@"+child.GetDigest().String())
-		if err != nil {
-			return nil, fmt.Errorf("get platform image %s: %w", child.GetDigest(), err)
-		}
-
-		adds = append(adds, mutate.IndexAddendum{
-			Add: img,
-			Descriptor: v1.Descriptor{
-				MediaType:   child.GetMediaType(),
-				URLs:        child.GetURLs(),
-				Annotations: child.GetAnnotations(),
-				Platform:    child.GetPlatform(),
-				Data:        child.GetData(),
-			},
-		})
-	}
-
-	idx := mutate.AppendManifests(empty.Index, adds...)
-
-	if annotations := indexManifest.GetAnnotations(); len(annotations) > 0 {
-		annotated, ok := mutate.Annotations(idx, annotations).(v1.ImageIndex)
-		if !ok {
-			return nil, fmt.Errorf("annotate rebuilt index: unexpected mutate result type")
-		}
-
-		idx = annotated
-	}
-
-	idx = mutate.IndexMediaType(idx, mediaType)
-
-	// Subject goes on last: every mutate wrapper rewrites the subject from
-	// its own field, so a wrapper added later would erase it.
-	if subject := indexManifest.GetSubject(); subject != nil {
-		withSubject, ok := mutate.Subject(idx, v1.Descriptor{
-			MediaType:    subject.GetMediaType(),
-			Size:         subject.GetSize(),
-			Digest:       subject.GetDigest(),
-			Annotations:  subject.GetAnnotations(),
-			ArtifactType: subject.GetArtifactType(),
-		}).(v1.ImageIndex)
-		if !ok {
-			return nil, fmt.Errorf("set subject on rebuilt index: unexpected mutate result type")
-		}
-
-		idx = withSubject
-	}
-
-	return idx, nil
+	return pullTag(ctx, svc.pluginsService.Plugin(name), pluginLayout, tag, svc.pluginRef(name, tag))
 }
 
 func (svc *Service) packPlugins(ctx context.Context, resolution *Resolution) error {
@@ -339,7 +168,7 @@ func (svc *Service) packPlugins(ctx context.Context, resolution *Resolution) err
 			// inside the bundle - the path mirror push uploads verbatim and
 			// the registry-packages-proxy expects on the target side.
 			pluginDir := filepath.Join(svc.workingDir, pluginsDirName, plugin.Name)
-			tarPrefix := filepath.Join("deckhouse-cli", "plugins", plugin.Name)
+			tarPrefix := filepath.Join(internal.D8CLISegment, internal.D8PluginsSegment, plugin.Name)
 
 			return pack.Bundle(ctx, svc.options.BundleDir, pkgName, svc.options.BundleChunkSize, func(w io.Writer) error {
 				return bundle.PackWithPrefix(ctx, pluginDir, tarPrefix, w)

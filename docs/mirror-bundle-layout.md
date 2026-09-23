@@ -12,7 +12,9 @@ Everything below is a consequence of this single rule. `pull` encodes the destin
 
 ## 1. How `d8 mirror pull` builds the bundle
 
-`pull` downloads the platform, installer, security databases, modules and packages, and writes them into the bundle directory (the first positional argument) as a set of tar archives. The orchestration lives in [`PullService.Pull`](../internal/mirror/pull.go); each component is pulled by its own service under [`internal/mirror/`](../internal/mirror/) (`platform`, `installer`, `security`, `modules`, `packages`).
+`pull` downloads the platform, installer, security databases, modules, packages and the d8 CLI distribution (the binary and its plugins), and writes them into the bundle directory (the first positional argument) as a set of tar archives. The orchestration lives in [`PullService.Pull`](../internal/mirror/pull.go); each component is pulled by its own service under [`internal/mirror/`](../internal/mirror/) (`platform`, `installer`, `security`, `modules`, `packages`, `dist`).
+
+The d8 CLI tree is the one part of the bundle that is **not** edition-scoped: `deckhouse-cli/` sits at the bare registry root, like `installer/`, so the same binary and plugins serve every edition.
 
 ### 1.1. Archives written to the bundle directory
 
@@ -24,6 +26,8 @@ Everything below is a consequence of this single rule. `pull` encodes the destin
 | `module-<name>.tar` | `modules` service | module | `modules/<name>/` (main + `release/` + `extra/<extra-name>/`) |
 | `package-<name>.tar` | `packages` service | package | `packages/<name>/` (main + `version/` + `extra/<extra-name>/`) |
 | `package-versions.tar` | `packages` service | bundle | `packages/<name>/version/` for every package |
+| `deckhouse-cli.tar` | `dist` service | bundle | `deckhouse-cli/` (the d8 binary, one version) |
+| `plugin-<name>.tar` | `dist` service | plugin | `deckhouse-cli/plugins/<name>/` |
 
 The segment constants are defined once in [internal/layout.go](../internal/layout.go) and reused by both `pull` and `push`, so the two sides can never drift.
 
@@ -207,19 +211,23 @@ Archives that share a layout path may each carry a partial `index.json`; the tag
 
 ## 4. End-to-end example
 
-A `pull` of the platform, one module and one package produces:
+A `pull` of the platform, one module, one package and the d8 CLI produces:
 
 ```
 bundle/
 ├── platform.tar
 ├── installer.tar
 ├── security.tar
-├── module-stronghold.tar
-├── package-deckhouse-cli.tar
-└── package-versions.tar
+├── module-<name>.tar
+├── package-<name>.tar
+├── package-versions.tar
+├── deckhouse-cli.tar
+└── plugin-system.tar
 ```
 
-`push bundle/ registry.example.com/deckhouse/fe` unpacks all six into one tree:
+The `system` plugin is in the bundle because mirroring the platform mirrors its plugins; the second one it brings, `package`, is elided to keep the example short. Note that `deckhouse-cli.tar` and `plugin-system.tar` land in one tree: the binary at `deckhouse-cli/`, the plugin under it at `deckhouse-cli/plugins/system/`.
+
+`push bundle/ registry.example.com/deckhouse/fe` unpacks all eight into one tree:
 
 ```
 unified/
@@ -227,8 +235,9 @@ unified/
 ├── install/ install-standalone/ release-channel/
 ├── installer/
 ├── security/{trivy-db,trivy-bdu,trivy-java-db,trivy-checks}/
-├── modules/stronghold/{,release/,extra/<extra>/}
-└── packages/deckhouse-cli/{,version/,extra/<extra>/}
+├── modules/<name>/{,release/,extra/<extra>/}
+├── packages/<name>/{,version/,extra/<extra>/}
+└── deckhouse-cli/{,plugins/system/}
 ```
 
 and pushes each layout to the segment its path names:
@@ -238,11 +247,14 @@ registry.example.com/deckhouse/fe                        <- unified/index.json
 registry.example.com/deckhouse/fe/install                <- unified/install
 registry.example.com/deckhouse/fe/installer              <- unified/installer
 registry.example.com/deckhouse/fe/security/trivy-db      <- unified/security/trivy-db
-registry.example.com/deckhouse/fe/modules/stronghold     <- unified/modules/stronghold
-registry.example.com/deckhouse/fe/packages/deckhouse-cli <- unified/packages/deckhouse-cli
+registry.example.com/deckhouse/fe/modules/<name>         <- unified/modules/<name>
+registry.example.com/deckhouse/fe/packages/<name>        <- unified/packages/<name>
+registry.example.com/deckhouse/fe/deckhouse-cli          <- unified/deckhouse-cli (the d8 binary)
+registry.example.com/deckhouse/fe/deckhouse-cli/plugins/system <- unified/deckhouse-cli/plugins/system
 …
-registry.example.com/deckhouse/fe/modules:stronghold     <- discovery index tag
-registry.example.com/deckhouse/fe/packages:deckhouse-cli <- discovery index tag
+registry.example.com/deckhouse/fe/modules:<name>         <- discovery index tag
+registry.example.com/deckhouse/fe/packages:<name>        <- discovery index tag
+registry.example.com/deckhouse/fe/deckhouse-cli/plugins:system <- discovery index tag
 ```
 
 The bundle carried no routing table and `push` consulted none: every destination above was read straight out of the paths the archives were built with.

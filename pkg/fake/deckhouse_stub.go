@@ -55,6 +55,10 @@ const imagesDigestsJSON = `{}`
 // stubModuleVersion is the version the stub module's stable channel points at.
 const stubModuleVersion = "v0.5.0"
 
+// StubCLIVersion is the newest d8 binary version the stub publishes - what a
+// pull with no --deckhouse-cli-tag must select.
+const StubCLIVersion = "v0.13.1"
+
 // stubPluginContract makes the stub plugin auto-selected whenever the
 // cert-manager module is mirrored.
 const stubPluginContract = `{
@@ -80,6 +84,9 @@ const stubPluginContract = `{
 //
 //   - "modules" catalog with the cert-manager module: one version
 //     (stubModuleVersion) reachable via its stable release channel.
+//
+//   - "deckhouse-cli" repository with the d8 binary itself (StubCLIVersion,
+//     plus an older version the newest-stable selection must pass over).
 //
 //   - "deckhouse-cli/plugins" catalog with the cert-manager-tool plugin
 //     (v1.0.0), whose contract requires the cert-manager module - so a pull
@@ -145,6 +152,14 @@ func NewRegistryClientStub() localreg.Client {
 	reg.MustAddImage("modules/cert-manager", stubModuleVersion, moduleImage())
 	reg.MustAddImage("modules/cert-manager/release", "stable", moduleImage())
 	reg.MustAddImage("modules/cert-manager/release", stubModuleVersion, moduleImage())
+
+	// ---- deckhouse-cli binary ----
+	// Two versions, so command-level tests see the newest-stable selection
+	// and not just "whatever is published".
+	reg.MustAddImage("deckhouse-cli", "v0.13.0",
+		upfake.NewImageBuilder().WithFile("d8", "binary-v0.13.0").MustBuild())
+	reg.MustAddImage("deckhouse-cli", StubCLIVersion,
+		upfake.NewImageBuilder().WithFile("d8", "binary-"+StubCLIVersion).MustBuild())
 
 	// ---- plugins catalog ----
 	// The catalog name index is directory-as-tags: a tag per plugin name on

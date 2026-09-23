@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package dist
 
 import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
@@ -38,6 +38,20 @@ type PluginStat struct {
 	Versions []PluginVersionStat
 }
 
+// CLIStats is the deckhouse-cli binary's contribution to the pull, mapped into
+// the top-level summary by the pull orchestrator.
+type CLIStats struct {
+	Attempted bool
+	// Version is the mirrored CLI version tag, empty when none was mirrored.
+	Version string
+	Images  int
+	// SkipReason explains an attempted phase that mirrored nothing: the
+	// registry publishes no deckhouse-cli repository, denies access to it, or
+	// serves no catalog to pick the newest version from. Empty when the CLI
+	// was mirrored.
+	SkipReason string
+}
+
 // PluginsStats is the plugins phase's accounting, mapped into the top-level
 // summary by the pull orchestrator.
 type PluginsStats struct {
@@ -48,7 +62,17 @@ type PluginsStats struct {
 	TotalImages int
 }
 
-// pluginsPullStats is the internal accumulator behind Stats. The resolution
+// cliPullStats is the internal accumulator behind CLIStats. Version is
+// recorded at resolution time (dry-run friendly); the image count is captured
+// before packing deletes the layout (see bundle.Pack).
+type cliPullStats struct {
+	attempted  bool
+	version    string
+	images     int
+	skipReason string
+}
+
+// pluginsPullStats is the internal accumulator behind PluginStats. The resolution
 // is recorded up front (dry-run friendly); image counts are captured before
 // packing deletes the layouts (see bundle.Pack).
 type pluginsPullStats struct {
@@ -75,11 +99,21 @@ func (s *pluginsPullStats) captureImages(layouts map[pluginName]*regimage.ImageL
 	}
 }
 
-// Stats returns accounting for the plugins phase.
-func (svc *Service) Stats() PluginsStats {
-	stats := PluginsStats{Attempted: svc.stats.attempted}
+// CLIStats returns accounting for the deckhouse-cli binary.
+func (svc *Service) CLIStats() CLIStats {
+	return CLIStats{
+		Attempted:  svc.cliStats.attempted,
+		Version:    svc.cliStats.version,
+		Images:     svc.cliStats.images,
+		SkipReason: svc.cliStats.skipReason,
+	}
+}
 
-	resolution := svc.stats.resolution
+// PluginStats returns accounting for the plugins phase.
+func (svc *Service) PluginStats() PluginsStats {
+	stats := PluginsStats{Attempted: svc.pluginStats.attempted}
+
+	resolution := svc.pluginStats.resolution
 	if resolution == nil {
 		return stats
 	}
@@ -90,7 +124,7 @@ func (svc *Service) Stats() PluginsStats {
 			versions = append(versions, PluginVersionStat{Version: sv.Version.Original(), Reasons: sv.Reasons})
 		}
 
-		images := svc.stats.imagesByPlugin[plugin.Name]
+		images := svc.pluginStats.imagesByPlugin[plugin.Name]
 
 		stats.Plugins = append(stats.Plugins, PluginStat{Name: plugin.Name, Images: images, Versions: versions})
 		stats.TotalImages += images

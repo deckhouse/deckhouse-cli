@@ -109,6 +109,24 @@ type PackagesStats struct {
 	TotalVEX int
 }
 
+// DeckhouseCLIStats is the d8 binary's contribution to the pull: one version
+// of the deckhouse-cli repository, the one `d8 dist update` reads through the
+// in-cluster registry-packages-proxy.
+type DeckhouseCLIStats struct {
+	// Skipped is true when the phase did not run (--only-extra-images).
+	Skipped bool
+	// Attempted is true when the phase ran.
+	Attempted bool
+	// Version is the mirrored CLI version tag, empty when none was mirrored.
+	Version string
+	// Images is the number of manifests pulled (the platform index and its
+	// children). Zero in dry-run.
+	Images int
+	// SkipReason explains an attempted phase that mirrored nothing, e.g. a
+	// registry that publishes no deckhouse-cli repository.
+	SkipReason string
+}
+
 // PluginReason is one provenance edge of a pulled plugin version: why it is
 // in the bundle. Kind is "module" (Subject = module name), "dependency"
 // (Subject = "<dependent>@<version>"), or "explicit" (Subject = the flag).
@@ -194,12 +212,13 @@ type PullSummary struct {
 	// Elapsed is the wall-clock duration of the pull, filled by the CLI.
 	Elapsed time.Duration
 
-	Platform  ComponentStats
-	Installer ComponentStats
-	Security  SecurityStats
-	Modules   ModulesStats
-	Packages  PackagesStats
-	Plugins   PluginsStats
+	Platform     ComponentStats
+	Installer    ComponentStats
+	Security     SecurityStats
+	Modules      ModulesStats
+	Packages     PackagesStats
+	DeckhouseCLI DeckhouseCLIStats
+	Plugins      PluginsStats
 
 	// Bundle is populated by the CLI from the bundle directory (real pull only).
 	Bundle BundleStats
@@ -231,6 +250,9 @@ type PushSummary struct {
 	SecurityDatabases int
 	// Modules is the number of module repositories pushed.
 	Modules int
+	// DeckhouseCLIPushed is true when the bundle carried the d8 binary
+	// repository (deckhouse-cli itself, not the plugins catalog under it).
+	DeckhouseCLIPushed bool
 	// Plugins is the number of CLI plugin repositories pushed, counted from
 	// the plugins index step.
 	Plugins int
