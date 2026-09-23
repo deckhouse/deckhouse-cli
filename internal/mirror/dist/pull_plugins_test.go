@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package plugins
+package dist
 
 import (
 	"archive/tar"
@@ -184,7 +184,7 @@ func TestPullPlugins_EndToEnd(t *testing.T) {
 	assert.ElementsMatch(t, []string{"v1.1.0", "v1.2.0"}, tags,
 		"the bundle must hold exactly the versions the resolver picked")
 
-	stats := svc.Stats()
+	stats := svc.PluginStats()
 	assert.True(t, stats.Attempted)
 	require.Len(t, stats.Plugins, 1)
 	assert.Equal(t, "postgresql-mgr", stats.Plugins[0].Name)
@@ -211,7 +211,7 @@ func TestPullPlugins_NothingToMirror(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, entries, "no bundle files must be written when nothing is mirrored")
 
-	stats := svc.Stats()
+	stats := svc.PluginStats()
 	assert.True(t, stats.Attempted)
 	assert.Empty(t, stats.Plugins)
 }
@@ -234,7 +234,7 @@ func TestPullPlugins_DryRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, entries, "dry-run must not write bundle files")
 
-	stats := svc.Stats()
+	stats := svc.PluginStats()
 	require.Len(t, stats.Plugins, 1)
 	assert.Equal(t, []PluginVersionStat{{
 		Version: "v1.2.0",
@@ -391,7 +391,7 @@ func TestPullPlugins_DeniedCatalogIsSkipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, entries)
 
-	stats := svc.Stats()
+	stats := svc.PluginStats()
 	assert.True(t, stats.Attempted)
 	assert.Empty(t, stats.Plugins)
 	assert.Empty(t, stats.Warnings)

@@ -76,11 +76,12 @@ Packages are mirrored with the same `name[@version-constraint]` dialect as modul
 
 #### Plugin Selection
 
-d8 CLI plugins that the mirrored modules need are selected **automatically** (see [Plugin Mirroring](#plugin-mirroring)); the flag adds more on top.
+d8 CLI plugins that the mirrored modules need are selected **automatically** (see [Plugin Mirroring](#plugin-mirroring)); the flag adds more on top. The d8 binary itself is mirrored at its newest published version unless a version is named (see [Deckhouse CLI Mirroring](#deckhouse-cli-mirroring)).
 
 | Flag | Description |
 |------|-------------|
 | `--include-plugin` | Mirror a specific plugin in addition to the automatic selection. Format: `plugin-name[@constraint]`, same dialect as `--include-module`. Use one flag per plugin |
+| `--deckhouse-cli-tag` | Specific d8 CLI version to mirror, e.g. `v0.13.1` (default: the newest published stable version) |
 
 #### Component Selection
 
@@ -396,13 +397,32 @@ If the source registry has no `packages` repository (some public/CE registries),
 
 ---
 
+### Deckhouse CLI Mirroring
+
+The d8 binary is published as a multi-platform OCI index at the bare registry root, in the repository that owns the plugins catalog:
+
+| Path | Contents |
+|------|----------|
+| `<root>/deckhouse-cli:<vX.Y.Z>` | One CLI release (linux/darwin/windows in one index) |
+| `<root>/deckhouse-cli/plugins` | The plugin catalog under it (see [Plugin Mirroring](#plugin-mirroring)) |
+
+**Bundle output:** `deckhouse-cli.tar`, carrying the layout at `deckhouse-cli/`.
+
+One version is mirrored: the newest published **stable** one (non-semver build tags and genuine pre-releases are dropped, the same notion of stable that `d8 dist update` uses), or the exact version named by `--deckhouse-cli-tag`. After `d8 mirror push` it lands at `<target>/deckhouse-cli` - where the in-cluster registry-packages-proxy looks - so `d8 dist update` works in the air-gapped cluster with no extra setup.
+
+**A missing binary never fails the pull.** Registries that publish no `deckhouse-cli` repository, or deny access to it, are reported in the summary (`d8 CLI: not mirrored - ...`) and the rest of the bundle is built as usual. The exception is `--deckhouse-cli-tag`: a version asked for by name and not found fails the pull, like an unmet `--include-plugin`.
+
+Release metadata (`<root>/deckhouse-cli/version:<vX.Y.Z>`) is **not** mirrored - the registries do not publish it yet.
+
+---
+
 ### Plugin Mirroring
 
 d8 CLI plugins are standalone binaries the CLI installs through the in-cluster registry-packages-proxy. A plugin declares its requirements (Deckhouse modules, other plugins, platform versions) in a contract - a base64-JSON annotation on its image manifest. The plugins phase runs **last**, after modules and packages, because it resolves against what the earlier phases actually put into the bundle.
 
 Selection principle: **nothing extra**, with one standing exception. A plugin enters the bundle when:
 
-- **the platform is mirrored** - `package` and `system` ship with the platform rather than with any module, so mirroring the platform mirrors them too, unconditionally and regardless of `--include-plugin`. A bundle without them can install the platform but not operate it. The version still has to be one the bundled platform can run (its `deckhouse` constraint is checked like any other), and a registry that does not publish them, or denies access, yields a warning rather than a failed pull. The list lives in `PlatformPlugins` (`internal/mirror/plugins/resolver.go`);
+- **the platform is mirrored** - `package` and `system` ship with the platform rather than with any module, so mirroring the platform mirrors them too, unconditionally and regardless of `--include-plugin`. A bundle without them can install the platform but not operate it. The version still has to be one the bundled platform can run (its `deckhouse` constraint is checked like any other), and a registry that does not publish them, or denies access, yields a warning rather than a failed pull. The list lives in `PlatformPlugins` (`internal/mirror/dist/resolver.go`);
 - a mirrored module needs it - the plugin's contract names that module in its `mandatory` or `anyOf` requirements. For **each bundled version** of the module, the newest plugin version whose contract the bundle satisfies is picked (so a bundle carrying module v1.0.0 and v1.5.0 may get two plugin versions, deduplicated);
 - it is a mandatory plugin dependency of another selected plugin (resolved recursively; a version already picked is shared when it satisfies the constraint). A dependency whose name matches a **built-in d8 command** (`delivery-kit`, `package`) is mirrored too when the registry publishes it - the built-in is only the fallback, because an air-gapped cluster cannot fetch the plugin later and, once installed, it takes the command over. When it is not published the built-in satisfies the dependency and only a note is recorded, so the dependent is never dropped over it;
 - the user names it with `--include-plugin` (additive; an unmet explicit include fails the pull, unlike the automatic selection which skips with a reason in the summary).
@@ -472,6 +492,7 @@ The pull command creates a bundle with the following structure:
 ├── module-<name>.tar         # One archive per module (if not --no-modules)
 ├── package-<name>.tar        # One archive per package (if not --no-packages)
 ├── package-versions.tar      # Package release-metadata catalog (always produced)
+├── deckhouse-cli.tar         # The d8 binary itself (see Deckhouse CLI Mirroring)
 ├── plugin-<name>.tar         # One archive per d8 CLI plugin the bundle needs (see Plugin Mirroring)
 └── <name>.tar.NNNN.chunk     # Chunk parts, when --images-bundle-chunk-size is set (NNNN = 0000, 0001, …)
 ```
@@ -482,7 +503,7 @@ If `--gost-digest` is specified, a GOST R 34.11-2012 Streebog-256 `.gostsum` fil
 
 ### Summary
 
-After a pull, `d8 mirror` prints a framed summary of what was pulled (platform, installer, security databases, modules, packages) and the bundle size.
+After a pull, `d8 mirror` prints a framed summary of what was pulled (platform, installer, security databases, modules, packages, the d8 CLI and its plugins) and the bundle size.
 
 When `--modules-path-suffix` moves modules off the default `modules/` and modules were actually pulled, the summary warns about the non-default modules path, highlighting it with a hint of the standard path so a non-standard layout is easy to spot. A default path, or a moved path that no module went through, produces no warning.
 

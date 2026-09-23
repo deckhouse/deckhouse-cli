@@ -84,6 +84,7 @@ var (
 //	║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]
 //	║ Packages:   1
 //	║     deckhouse                       [v1.69.1]
+//	║ d8 CLI:     v0.13.1
 //	║ Plugins:    2  ·  1 for modules  ·  1 dependency
 //	║     console
 //	║       console-ctl                   [v0.4.1]
@@ -122,6 +123,7 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	writeSecurity(&b, s.Security)
 	writeModules(&b, s.Modules, verbose)
 	writePackages(&b, s.Packages, verbose)
+	writeDeckhouseCLI(&b, s.DeckhouseCLI)
 	writePlugins(&b, s.Plugins, verbose)
 
 	if !s.DryRun && len(s.Bundle.Files) > 0 {
@@ -367,6 +369,34 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 		}
 
 		fmt.Fprintf(b, "%s     %s\n", bar(), line)
+	}
+}
+
+// writeDeckhouseCLI renders the d8 binary line. The CLI is one version, so the
+// line is the version itself; a registry that offers no deckhouse-cli
+// repository is reported with its reason rather than passed over silently -
+// an air-gapped cluster given a bundle without the CLI has no other way to
+// obtain it. e.g.:
+//
+//	║ d8 CLI:     v0.13.1
+//	║ d8 CLI:     not mirrored - no published deckhouse-cli versions found at registry.example.com/deckhouse/deckhouse-cli
+func writeDeckhouseCLI(b *strings.Builder, c mirror.DeckhouseCLIStats) {
+	label := cLabel(padLabel("d8 CLI"))
+
+	switch {
+	case c.Skipped:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
+	case !c.Attempted:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not pulled"))
+	case c.Version == "":
+		reason := c.SkipReason
+		if reason == "" {
+			reason = "nothing was mirrored"
+		}
+
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not mirrored - "+reason))
+	default:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cVersion(c.Version))
 	}
 }
 

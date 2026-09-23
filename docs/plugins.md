@@ -123,7 +123,9 @@ modules) are only *verified* - d8 never changes the cluster for you.
 
 ## Air-gapped installs (via d8 mirror)
 
-`d8 mirror pull` mirrors plugins into the images bundle automatically: every
+`d8 mirror pull` also mirrors the d8 binary itself - one version of `<root>/deckhouse-cli`, the newest published stable one or the version named by `--deckhouse-cli-tag`. After `d8 mirror push` it sits where the registry-packages-proxy looks, so `d8 dist update` works in the air-gapped cluster too. A registry that publishes no `deckhouse-cli` repository is reported in the pull summary rather than failing the pull.
+
+Plugins are mirrored into the same bundle automatically: every
 plugin whose contract names a mirrored module is selected (per bundled module
 version, newest compatible), along with its mandatory plugin dependencies;
 `--include-plugin <name>[@constraint]` adds more.
@@ -139,7 +141,7 @@ registry has it, and the built-in command covers the dependency when it does not
 plugins live at `<target>/deckhouse-cli/plugins/<name>` - exactly where the
 in-cluster registry-packages-proxy looks - so `d8 plugins install <name>`
 works in the air-gapped cluster with no extra setup. See
-`internal/mirror/README.MD` (Plugin Mirroring) for selection details.
+`internal/mirror/README.MD` (Deckhouse CLI Mirroring, Plugin Mirroring) for selection details.
 
 Note: the proxy serves plugins by exact name; listing the catalog through it
 is not supported. To see what a registry offers, use
