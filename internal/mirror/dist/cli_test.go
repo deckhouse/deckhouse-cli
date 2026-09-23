@@ -185,7 +185,7 @@ func TestPullCLI_NoStableVersions(t *testing.T) {
 
 	stats := svc.CLIStats()
 	assert.Empty(t, stats.Version)
-	assert.Contains(t, stats.SkipReason, "no published deckhouse-cli versions")
+	assert.Equal(t, "no published versions", stats.SkipReason)
 }
 
 // TestPullCLI_ProxyRegistry: a proxy registry serves no tag listing, so

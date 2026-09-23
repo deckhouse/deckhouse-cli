@@ -418,7 +418,7 @@ func TestRenderPullSummary(t *testing.T) {
 				DeckhouseCLI: mirror.DeckhouseCLIStats{Skipped: true},
 				Plugins:      mirror.PluginsStats{Skipped: true},
 			},
-			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:", "d8 CLI:", "Plugins:"},
+			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:", "d8 dist:", "d8 plugins:"},
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
 			skippedCount: 7,
 		},
@@ -562,7 +562,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 	t.Run("aggregate line with provenance breakdown", func(t *testing.T) {
 		out := renderPullSummary(base(), false)
 
-		require.Contains(t, out, "Plugins:")
+		require.Contains(t, out, "d8 plugins:")
 		require.Contains(t, out, "1 with the platform")
 		require.Contains(t, out, "1 for modules")
 		require.Contains(t, out, "1 dependency")
@@ -601,7 +601,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{Skipped: true}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+skipped`, out)
+		require.Regexp(t, `d8 plugins:\s+skipped`, out)
 	})
 
 	t.Run("phase never ran renders not pulled", func(t *testing.T) {
@@ -609,7 +609,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+not pulled`, out)
+		require.Regexp(t, `d8 plugins:\s+not pulled`, out)
 	})
 
 	t.Run("zero plugins render a bare count", func(t *testing.T) {
@@ -617,7 +617,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{Attempted: true}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+0`, out)
+		require.Regexp(t, `d8 plugins:\s+0`, out)
 	})
 }
 

@@ -410,7 +410,7 @@ The d8 binary is published as a multi-platform OCI index at the bare registry ro
 
 One version is mirrored: the newest published **stable** one (non-semver build tags and genuine pre-releases are dropped, the same notion of stable that `d8 dist update` uses), or the exact version named by `--deckhouse-cli-tag`. After `d8 mirror push` it lands at `<target>/deckhouse-cli` - where the in-cluster registry-packages-proxy looks - so `d8 dist update` works in the air-gapped cluster with no extra setup.
 
-**A missing binary never fails the pull.** Registries that publish no `deckhouse-cli` repository, or deny access to it, are reported in the summary (`d8 CLI: not mirrored - ...`) and the rest of the bundle is built as usual. The exception is `--deckhouse-cli-tag`: a version asked for by name and not found fails the pull, like an unmet `--include-plugin`.
+**A missing binary never fails the pull.** Registries that publish no `deckhouse-cli` repository, or deny access to it, are reported in the summary (`d8 dist: not mirrored - not available in this registry`) and the rest of the bundle is built as usual. The exception is `--deckhouse-cli-tag`: a version asked for by name and not found fails the pull, like an unmet `--include-plugin`.
 
 Release metadata (`<root>/deckhouse-cli/version:<vX.Y.Z>`) is **not** mirrored - the registries do not publish it yet.
 
