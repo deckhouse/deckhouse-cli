@@ -222,10 +222,12 @@ bundle/
 ├── package-deckhouse-cli.tar
 ├── package-versions.tar
 ├── deckhouse-cli.tar
-└── plugin-stronghold-tool.tar
+└── plugin-system.tar
 ```
 
 Note the two unrelated `deckhouse-cli` names: `package-deckhouse-cli.tar` is a **package** (`packages/deckhouse-cli/`), while `deckhouse-cli.tar` is the **d8 binary** at the root of the CLI tree (`deckhouse-cli/`).
+
+The `system` plugin is in the bundle because mirroring the platform mirrors its plugins; the second one it brings, `package`, is elided to keep the example short. And `plugin-system.tar` unpacks *under* the binary's tree, at `deckhouse-cli/plugins/system/`.
 
 `push bundle/ registry.example.com/deckhouse/fe` unpacks all eight into one tree:
 
@@ -237,7 +239,7 @@ unified/
 ├── security/{trivy-db,trivy-bdu,trivy-java-db,trivy-checks}/
 ├── modules/stronghold/{,release/,extra/<extra>/}
 ├── packages/deckhouse-cli/{,version/,extra/<extra>/}
-└── deckhouse-cli/{,plugins/stronghold-tool/}
+└── deckhouse-cli/{,plugins/system/}
 ```
 
 and pushes each layout to the segment its path names:
@@ -250,11 +252,11 @@ registry.example.com/deckhouse/fe/security/trivy-db      <- unified/security/tri
 registry.example.com/deckhouse/fe/modules/stronghold     <- unified/modules/stronghold
 registry.example.com/deckhouse/fe/packages/deckhouse-cli <- unified/packages/deckhouse-cli
 registry.example.com/deckhouse/fe/deckhouse-cli          <- unified/deckhouse-cli (the d8 binary)
-registry.example.com/deckhouse/fe/deckhouse-cli/plugins/stronghold-tool <- unified/deckhouse-cli/plugins/stronghold-tool
+registry.example.com/deckhouse/fe/deckhouse-cli/plugins/system <- unified/deckhouse-cli/plugins/system
 …
 registry.example.com/deckhouse/fe/modules:stronghold     <- discovery index tag
 registry.example.com/deckhouse/fe/packages:deckhouse-cli <- discovery index tag
-registry.example.com/deckhouse/fe/deckhouse-cli/plugins:stronghold-tool <- discovery index tag
+registry.example.com/deckhouse/fe/deckhouse-cli/plugins:system <- discovery index tag
 ```
 
 The bundle carried no routing table and `push` consulted none: every destination above was read straight out of the paths the archives were built with.
