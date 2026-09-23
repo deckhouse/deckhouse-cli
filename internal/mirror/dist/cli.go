@@ -49,16 +49,16 @@ const cliBundleName = "deckhouse-cli.tar"
 func (svc *Service) PullCLI(ctx context.Context) error {
 	svc.cliStats.attempted = true
 
-	tag, err := svc.resolveCLITag(ctx)
+	tag, skipReason, err := svc.resolveCLITag(ctx)
 	if err != nil {
-		if svc.options.CLITag != "" {
-			return err
-		}
+		return err
+	}
 
+	if skipReason != "" {
 		// Automatic selection: the CLI is simply not on offer here. Say so
 		// and move on - the rest of the bundle is unaffected.
-		svc.cliStats.skipReason = err.Error()
-		svc.userLogger.Warnf("No d8 CLI images mirrored: %v", err)
+		svc.cliStats.skipReason = skipReason
+		svc.userLogger.WarnLn("d8 CLI not mirrored: " + skipReason)
 
 		return nil
 	}
@@ -93,8 +93,11 @@ func (svc *Service) PullCLI(ctx context.Context) error {
 
 		// An automatically picked version that cannot be pulled is worth a
 		// warning, not a dead bundle: everything else in it is still usable.
-		svc.cliStats.skipReason = fmt.Sprintf("pull %s: %v", tag, err)
-		svc.userLogger.Warnf("No d8 CLI images mirrored: pull %s: %v", tag, err)
+		// The transport error goes to the log; the summary gets the phrase.
+		svc.logger.Debug(fmt.Sprintf("Pulling deckhouse-cli %s failed: %v", tag, err))
+
+		svc.cliStats.skipReason = "could not be pulled at " + tag
+		svc.userLogger.WarnLn("d8 CLI not mirrored: could not be pulled at " + tag)
 
 		return nil
 	}
@@ -108,35 +111,47 @@ func (svc *Service) PullCLI(ctx context.Context) error {
 }
 
 // resolveCLITag picks the version to mirror: the pinned tag as given, or the
-// newest published stable version.
-func (svc *Service) resolveCLITag(ctx context.Context) (string, error) {
+// newest published stable one.
+//
+// A registry that simply does not offer the binary is not a failure: it yields
+// an empty tag and a short skipReason for the summary, the way an absent
+// platform plugin yields a warning. The registry's own error text goes to the
+// debug log rather than the summary - a wrapped NAME_UNKNOWN chain names the
+// repository the label already names, and buries the one fact the operator
+// needs behind four levels of transport detail.
+//
+// err is reserved for a pinned version that cannot be resolved: the user asked
+// for it by name, so it stops the pull.
+func (svc *Service) resolveCLITag(ctx context.Context) (tag versionTag, skipReason string, err error) {
 	if pinned := svc.options.CLITag; pinned != "" {
 		// An explicit version is checked before the pull so a typo fails
 		// immediately instead of after the transfer retries are exhausted.
 		if err := svc.cliService.CheckImageExists(ctx, pinned); err != nil {
-			return "", fmt.Errorf("deckhouse-cli %s: %w", pinned, err)
+			return "", "", fmt.Errorf("deckhouse-cli %s: %w", pinned, err)
 		}
 
-		return pinned, nil
+		return pinned, "", nil
 	}
 
 	if svc.options.ProxyRegistry {
-		return "", fmt.Errorf("a proxy registry serves no tag listing; pin the version with --deckhouse-cli-tag")
+		return "", "no version listing over a proxy registry; pin it with --deckhouse-cli-tag <version>", nil
 	}
 
 	tags, err := svc.cliService.ListTags(ctx)
 	if err != nil {
 		// Most registries answer this way when the repository was never
 		// published, or when the license has no access to it.
-		return "", fmt.Errorf("no deckhouse-cli repository at %s: %w", svc.cliService.GetRoot(), err)
+		svc.logger.Debug(fmt.Sprintf("Listing tags of %s failed: %v", svc.cliService.GetRoot(), err))
+
+		return "", "not available in this registry", nil
 	}
 
 	versions := stableVersions(sortedSemverDesc(tags))
 	if len(versions) == 0 {
-		return "", fmt.Errorf("no published deckhouse-cli versions found at %s", svc.cliService.GetRoot())
+		return "", "no published versions", nil
 	}
 
-	return versions[0].Original(), nil
+	return versions[0].Original(), "", nil
 }
 
 func (svc *Service) packCLI(ctx context.Context) error {

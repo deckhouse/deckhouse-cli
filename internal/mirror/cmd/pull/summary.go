@@ -84,8 +84,8 @@ var (
 //	║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]
 //	║ Packages:   1
 //	║     deckhouse                       [v1.69.1]
-//	║ d8 CLI:     v0.13.1
-//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║ d8 dist:    v0.13.1
+//	║ d8 plugins: 2  ·  1 for modules  ·  1 dependency
 //	║     console
 //	║       console-ctl                   [v0.4.1]
 //	║       └ db-connector                [v0.9.1]  (dependency)
@@ -378,10 +378,10 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 // an air-gapped cluster given a bundle without the CLI has no other way to
 // obtain it. e.g.:
 //
-//	║ d8 CLI:     v0.13.1
-//	║ d8 CLI:     not mirrored - no published deckhouse-cli versions found at registry.example.com/deckhouse/deckhouse-cli
+//	║ d8 dist:    v0.13.1
+//	║ d8 dist:    not mirrored - not available in this registry
 func writeDeckhouseCLI(b *strings.Builder, c mirror.DeckhouseCLIStats) {
-	label := cLabel(padLabel("d8 CLI"))
+	label := cLabel(padLabel("d8 dist"))
 
 	switch {
 	case c.Skipped:
@@ -405,14 +405,14 @@ func writeDeckhouseCLI(b *strings.Builder, c mirror.DeckhouseCLIStats) {
 // (always - losing a plugin in an air-gapped bundle, or shipping one the
 // target cluster cannot run, is an operational surprise). e.g.:
 //
-//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║ d8 plugins: 2  ·  1 for modules  ·  1 dependency
 //	║     postgresql
 //	║       postgresql-mgr              [v1.2.0, v1.1.0]
 //	║       └ db-connector              [v0.9.1]  (dependency)
 //	║     skipped: backup-tool - requires module "postgresql" >=3.0.0
 //	║     warning: plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it
 func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
-	label := cLabel(padLabel("Plugins"))
+	label := cLabel(padLabel("d8 plugins"))
 
 	if p.Skipped {
 		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
