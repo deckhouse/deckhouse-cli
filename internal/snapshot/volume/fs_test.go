@@ -43,9 +43,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -111,8 +111,8 @@ func fsTestServer(t *testing.T) (*httptest.Server, []fsTestFile) {
 	return srv, files
 }
 
-func newFSFetcher(srv *httptest.Server) *exporter.Fetcher {
-	return exporter.NewFetcher(srv.Client())
+func newFSFetcher(srv *httptest.Server) *dataplane.Fetcher {
+	return dataplane.NewFetcher(srv.Client())
 }
 
 // mustCodec creates a compress.Codec by name or fails the test.
@@ -1554,7 +1554,7 @@ func TestDownloadFilesystemVolume_SmallFile_InterruptedResumesFromPersistedOffse
 	// source-hash HEAD, and call 3 is the file's Range GET (there is exactly
 	// one chunk, since the file is well below chunkSize).
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 3, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec := mustCodec(t, "zstd")
 
@@ -1803,9 +1803,9 @@ func TestDownloadFilesystemVolume_SourceHashOutlivesOrdinaryHeaderTimeout(t *tes
 			return srv.Client().Do(req)
 		},
 	}
-	fetcher := exporter.NewFetcher(
+	fetcher := dataplane.NewFetcher(
 		ordinaryDoer,
-		exporter.WithSourceHashDoer(srv.Client()),
+		dataplane.WithSourceHashDoer(srv.Client()),
 	)
 
 	nodeDir := t.TempDir()
@@ -2118,7 +2118,7 @@ func TestDownloadFilesystemVolume_SizesSidecar_SeedsResumeWithoutNetwork(t *test
 	const cutBytes = 20
 
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -2669,15 +2669,15 @@ func TestDownloadFilesystemVolume_ResumeSkip_MismatchedBlobRestaged(t *testing.T
 	}
 }
 
-// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn verifies that
-// an already-staged blob for a listing item with no hash.md5 attribute is
-// skipped WITHOUT verification (matching the fresh-path convention): the blob
-// is not re-downloaded even though its bytes differ from the server's, its
-// declared size is credited once, and a single WARN is logged.
-func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T) {
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches verifies that, with no
+// source MD5, an already-staged blob whose measured raw size matches the fresh listing's
+// declared size is skipped without content verification: no file GET, the sentinel content
+// survives in the tar, a single "verifying size only" WARN fires, and the size is credited
+// to onProgress once.
+func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeMatches(t *testing.T) {
 	t.Parallel()
 
-	content := []byte("server content that must never be fetched on an empty-md5 skip")
+	content := []byte("server content that must never be fetched on a size-only skip!")
 	codec := mustCodec(t, "none")
 	srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, "")
 
@@ -2689,9 +2689,9 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T)
 		t.Fatal(err)
 	}
 
-	// Sentinel differs from the server content: with no advertised MD5 the skip
-	// branch must NOT verify it and must NOT re-download it.
-	sentinel := []byte("sentinel-not-server-content")
+	// Sentinel is the SAME length as the server content but differs byte for byte: content
+	// still can't be verified without MD5, but the size matches so the skip stands.
+	sentinel := bytes.Repeat([]byte("X"), len(content))
 	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2718,28 +2718,116 @@ func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5SkipsWithWarn(t *testing.T)
 	}
 
 	if getCount() != 0 {
-		t.Errorf("empty-md5 staged file was re-downloaded: %d file GET(s), want 0", getCount())
+		t.Errorf("size-matched empty-md5 staged file was re-downloaded: %d file GET(s), want 0", getCount())
 	}
 
 	warnCount := 0
 
 	for _, msg := range lh.warnMessages() {
-		if msg == "no source MD5 available for file, skipping integrity verification" {
+		if msg == "no source MD5 available for file, verifying size only" {
 			warnCount++
 		}
 	}
 
 	if warnCount != 1 {
-		t.Errorf("expected exactly 1 missing-digest WARN, got %d: %v", warnCount, lh.warnMessages())
+		t.Errorf("expected exactly 1 verifying-size-only WARN, got %d: %v", warnCount, lh.warnMessages())
 	}
 
 	entries := readTarContents(t, tarPath)
 	if !bytes.Equal(entries["file.bin"], sentinel) {
-		t.Errorf("file.bin content = %q; want sentinel %q (skipped without verification)", entries["file.bin"], sentinel)
+		t.Errorf("file.bin content = %q; want sentinel %q (skipped, content unverifiable without MD5)", entries["file.bin"], sentinel)
 	}
 
 	if credited != int64(len(content)) {
 		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+	}
+}
+
+// TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers verifies that, with no
+// source MD5, an already-staged blob whose measured size does NOT match the fresh listing
+// is treated as stale and re-staged in the same run: at least one file GET fires, the tar
+// carries the true server content, the "re-staging" WARN fires, progress reaches the
+// declared size, and the resulting tar's PAX metadata stays consistent (SumTarRawSizes).
+func TestDownloadFilesystemVolume_ResumeSkip_EmptyMD5_SizeDiffers(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("resume-skip true source content for the size-mismatched blob")
+	codec := mustCodec(t, "none")
+	srv, getCount := newFileGetCountingFSServer(t, "file.bin", content, "")
+
+	nodeDir := t.TempDir()
+	tarPath := filepath.Join(nodeDir, archive.FsTarName)
+	stagingDir := filepath.Join(nodeDir, archive.FsTarStagingDirName)
+
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sentinel differs in LENGTH from the server content: with no MD5, the skip branch
+	// still catches this via the size check and re-fetches rather than trusting it.
+	sentinel := []byte("short-stale-blob")
+	if err := os.WriteFile(filepath.Join(stagingDir, "file.bin"), sentinel, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lh := &warnCapture{}
+	log := slog.New(lh)
+
+	var (
+		progMu   sync.Mutex
+		credited int64
+	)
+
+	onProgress := func(n int) {
+		progMu.Lock()
+		credited += int64(n)
+		progMu.Unlock()
+	}
+
+	if err := volume.DownloadFilesystemVolume(
+		context.Background(), log, tarPath, stagingDir, srv.URL+"/files/",
+		1, 0, newFSFetcher(srv), codec, nil, onProgress,
+	); err != nil {
+		t.Fatalf("DownloadFilesystemVolume: %v", err)
+	}
+
+	if getCount() < 1 {
+		t.Errorf("size-mismatched empty-md5 staged file was not re-downloaded: %d file GET(s), want >= 1", getCount())
+	}
+
+	warnCount := 0
+
+	for _, msg := range lh.warnMessages() {
+		if msg == "staged file failed source MD5 re-check on resume, re-staging" {
+			warnCount++
+		}
+	}
+
+	if warnCount != 1 {
+		t.Errorf("expected exactly 1 re-staging WARN, got %d: %v", warnCount, lh.warnMessages())
+	}
+
+	entries := readTarContents(t, tarPath)
+	if !bytes.Equal(entries["file.bin"], content) {
+		t.Errorf("file.bin content = %q; want true source content %q (re-staged)", entries["file.bin"], content)
+	}
+
+	if credited != int64(len(content)) {
+		t.Errorf("onProgress credited = %d; want %d (declared size once)", credited, len(content))
+	}
+
+	// The tar's PAX rawSize records must be honest: ParseFSMetadata rejects an entry whose
+	// stored byte count disagrees with its declared rawSize. A stale skip that never
+	// re-fetched would leave rawSize describing the listing's size while the tar stored the
+	// shorter sentinel, tripping exactly this check downstream.
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatalf("open tar %s: %v", tarPath, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	if _, err := archive.SumTarRawSizes(context.Background(), f); err != nil {
+		t.Errorf("SumTarRawSizes: %v", err)
 	}
 }
 
@@ -2754,11 +2842,11 @@ func singleItemFSServer(t *testing.T, itemName string) *httptest.Server {
 	t.Helper()
 
 	body, err := json.Marshal(struct {
-		APIVersion string          `json:"apiVersion"`
-		Items      []exporter.Item `json:"items"`
+		APIVersion string           `json:"apiVersion"`
+		Items      []dataplane.Item `json:"items"`
 	}{
 		APIVersion: "v1",
-		Items: []exporter.Item{
+		Items: []dataplane.Item{
 			{Name: itemName, Type: "file", URI: "file.bin", Attributes: map[string]any{}},
 		},
 	})
@@ -2921,7 +3009,7 @@ func TestDownloadFilesystemVolume_UserFileNamedSizesJson_NotShadowed(t *testing.
 	// calls 4-5 = zz.bin's hash HEAD and Range GET. The fifth call is truncated
 	// mid-transfer so sizes.json is fully staged and zz.bin is not.
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 5, cutBytes: 20}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -3821,7 +3909,7 @@ func TestDownloadFilesystemVolume_ChunkedResume_UsesReservedChunkDir(t *testing.
 	// Run 1: interrupt during chunk 1's Range GET (call 1 = listing, call 2 =
 	// source-hash HEAD, call 3 = chunk 0, call 4 = chunk 1).
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 4, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	err := volume.DownloadFilesystemVolume(
 		context.Background(), slog.Default(), tarPath, stagingDir, srv.URL+"/files/",
@@ -4288,7 +4376,7 @@ func TestDownloadFilesystemVolume_LargeInventorySpillsBeforeFileMutation(t *test
 				_, _ = io.WriteString(w, ",")
 			}
 
-			if err := encoder.Encode(exporter.Item{
+			if err := encoder.Encode(dataplane.Item{
 				Name:       fmt.Sprintf("file-%06d", index),
 				Type:       "file",
 				URI:        fmt.Sprintf("file-%06d", index),
@@ -4356,27 +4444,27 @@ func TestDownloadFilesystemVolume_PreservesCausalStagingWorkerError(t *testing.T
 		name          string
 		advertisedMD5 string
 		wantErr       error
-		newFetcher    func(*httptest.Server) (*exporter.Fetcher, []*observedDoer)
+		newFetcher    func(*httptest.Server) (*dataplane.Fetcher, []*observedDoer)
 	}{
 		{
 			name:          "SourceMD5",
 			advertisedMD5: md5Hex([]byte("x")),
 			wantErr:       errSourceMD5,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
 				sourceDoer := &observedDoer{
 					do: func(*http.Request) (*http.Response, error) {
 						return nil, errSourceMD5
 					},
 				}
 
-				return exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)), []*observedDoer{sourceDoer}
+				return dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)), []*observedDoer{sourceDoer}
 			},
 		},
 		{
 			name:          "FileGET",
 			advertisedMD5: md5Hex([]byte("x")),
 			wantErr:       errFileGET,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
 				fileDoer := &observedDoer{
 					do: func(req *http.Request) (*http.Response, error) {
 						if req.Method == http.MethodGet && req.URL.Path != "/files/" {
@@ -4387,15 +4475,15 @@ func TestDownloadFilesystemVolume_PreservesCausalStagingWorkerError(t *testing.T
 					},
 				}
 
-				return exporter.NewFetcher(fileDoer, exporter.WithSourceHashDoer(srv.Client())), []*observedDoer{fileDoer}
+				return dataplane.NewFetcher(fileDoer, dataplane.WithSourceHashDoer(srv.Client())), []*observedDoer{fileDoer}
 			},
 		},
 		{
 			name:          "SourceDigest",
 			advertisedMD5: md5Hex([]byte("different")),
 			wantErr:       volume.ErrSourceHashMismatch,
-			newFetcher: func(srv *httptest.Server) (*exporter.Fetcher, []*observedDoer) {
-				return exporter.NewFetcher(srv.Client()), nil
+			newFetcher: func(srv *httptest.Server) (*dataplane.Fetcher, []*observedDoer) {
+				return dataplane.NewFetcher(srv.Client()), nil
 			},
 		},
 	}
@@ -4477,7 +4565,7 @@ func TestDownloadFilesystemVolume_InventoryErrorRemainsCausal(t *testing.T) {
 		srv.URL+"/files/",
 		1,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4517,7 +4605,7 @@ func TestDownloadFilesystemVolume_StagingCallerCancellationRemainsCausal(t *test
 		srv.URL+"/files/",
 		1,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4761,7 +4849,7 @@ func TestDownloadFilesystemVolume_InventoryErrorCancelsBlockedWorker(t *testing.
 			srv.URL+"/files/",
 			workers,
 			0,
-			exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+			dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 			mustCodec(t, "none"),
 			nil,
 			nil,
@@ -4808,7 +4896,7 @@ func downloadFilesystemWithSourceDoer(
 		srv.URL+"/files/",
 		workers,
 		0,
-		exporter.NewFetcher(srv.Client(), exporter.WithSourceHashDoer(sourceDoer)),
+		dataplane.NewFetcher(srv.Client(), dataplane.WithSourceHashDoer(sourceDoer)),
 		mustCodec(t, "none"),
 		nil,
 		nil,
@@ -4835,7 +4923,7 @@ func newLargeFileInventoryServer(t *testing.T, entries int, advertisedMD5 string
 					_, _ = io.WriteString(w, ",")
 				}
 
-				if err := encoder.Encode(exporter.Item{
+				if err := encoder.Encode(dataplane.Item{
 					Name:       fmt.Sprintf("file-%06d", index),
 					Type:       "file",
 					URI:        fmt.Sprintf("file-%06d", index),
@@ -4876,7 +4964,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			encoder := json.NewEncoder(w)
 			written := 0
 
-			emit := func(item exporter.Item) bool {
+			emit := func(item dataplane.Item) bool {
 				if written > 0 {
 					_, _ = io.WriteString(w, ",")
 				}
@@ -4887,7 +4975,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			}
 
 			for index := range files {
-				if !emit(exporter.Item{
+				if !emit(dataplane.Item{
 					Name:       fmt.Sprintf("file-%06d", index),
 					Type:       "file",
 					URI:        fmt.Sprintf("file-%06d", index),
@@ -4898,7 +4986,7 @@ func newFileThenLinkInventoryServer(t *testing.T, files, links int, advertisedMD
 			}
 
 			for index := range links {
-				if !emit(exporter.Item{
+				if !emit(dataplane.Item{
 					Name:       fmt.Sprintf("link-%08d", index),
 					Type:       "link",
 					TargetPath: "target",
@@ -5143,7 +5231,7 @@ func writeLinkInventoryItems(w io.Writer, entries int, reverse bool) {
 			itemIndex = entries - index - 1
 		}
 
-		if err := encoder.Encode(exporter.Item{
+		if err := encoder.Encode(dataplane.Item{
 			Name:       fmt.Sprintf("link-%08d", itemIndex),
 			Type:       "link",
 			TargetPath: "target",
@@ -5218,7 +5306,7 @@ func TestDownloadFilesystemVolume_InventoryCancellationRebuildsCleanly(t *testin
 				_, _ = io.WriteString(w, ",")
 			}
 
-			if err := encoder.Encode(exporter.Item{
+			if err := encoder.Encode(dataplane.Item{
 				Name:       fmt.Sprintf("link-%06d", index),
 				Type:       "link",
 				TargetPath: "target",
@@ -5311,12 +5399,12 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 	tests := []struct {
 		name  string
 		codec string
-		items []exporter.Item
+		items []dataplane.Item
 	}{
 		{
 			name:  "duplicate",
 			codec: "none",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "same", Type: "file", URI: "first", Attributes: map[string]any{"size": 1}},
 				{Name: "same", Type: "file", URI: "second", Attributes: map[string]any{"size": 1}},
 			},
@@ -5324,7 +5412,7 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 		{
 			name:  "file-directory conflict",
 			codec: "none",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
 				{Name: "a", Type: "dir", URI: "a/", Attributes: map[string]any{}},
 			},
@@ -5332,7 +5420,7 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 		{
 			name:  "codec stored-path collision",
 			codec: "zstd",
-			items: []exporter.Item{
+			items: []dataplane.Item{
 				{Name: "a", Type: "file", URI: "a", Attributes: map[string]any{"size": 1}},
 				{Name: "a.zst", Type: "link", TargetPath: "target", Attributes: map[string]any{}},
 			},
@@ -5348,8 +5436,8 @@ func TestDownloadFilesystemVolume_RejectsInventoryPathConflictsBeforeFetch(t *te
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/files/" {
 					_ = json.NewEncoder(w).Encode(struct {
-						APIVersion string          `json:"apiVersion"`
-						Items      []exporter.Item `json:"items"`
+						APIVersion string           `json:"apiVersion"`
+						Items      []dataplane.Item `json:"items"`
 					}{
 						APIVersion: "v1",
 						Items:      test.items,

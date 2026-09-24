@@ -477,3 +477,120 @@ func TestNewCommand_AllowExistingFlagDefault(t *testing.T) {
 		t.Fatalf("default --%s: got true, want false (opt-in flag)", flagAllowExisting)
 	}
 }
+
+// TestNewCommand_PublishFlagDefault verifies --publish defaults to false and, crucially, that
+// Changed stays false when the flag is never passed on the command line: Run's autodetection
+// path (dataio.ParsePublishFlag) distinguishes "not set" from "explicitly set to false" via
+// Changed, and that distinction must survive flag registration untouched.
+func TestNewCommand_PublishFlagDefault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{name: "success: default value is false and unset"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := NewCommand(slog.Default())
+
+			flag := cmd.Flags().Lookup(flagPublish)
+			if flag == nil {
+				t.Fatalf("--%s flag is not registered", flagPublish)
+			}
+
+			publish, err := cmd.Flags().GetBool(flagPublish)
+			if err != nil {
+				t.Fatalf("getting %s flag: %v", flagPublish, err)
+			}
+
+			if publish {
+				t.Fatalf("default --%s: got true, want false", flagPublish)
+			}
+
+			if flag.Changed {
+				t.Fatal("--publish.Changed = true without ever being set on the command line, want false (autodetection relies on this)")
+			}
+		})
+	}
+}
+
+// TestNewCommand_PublishFlagExplicitlySet verifies that explicitly passing --publish=true
+// marks the flag Changed, so Run's dataio.ParsePublishFlag sees an explicit override rather
+// than falling back to autodetection.
+func TestNewCommand_PublishFlagExplicitlySet(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "success: explicit true", value: "true", want: true},
+		{name: "success: explicit false", value: "false", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := NewCommand(slog.Default())
+
+			if err := cmd.Flags().Set(flagPublish, tt.value); err != nil {
+				t.Fatalf("setting --%s flag: %v", flagPublish, err)
+			}
+
+			flag := cmd.Flags().Lookup(flagPublish)
+			if flag == nil {
+				t.Fatalf("--%s flag is not registered", flagPublish)
+			}
+
+			if !flag.Changed {
+				t.Fatal("--publish.Changed = false after explicitly setting the flag, want true")
+			}
+
+			publish, err := cmd.Flags().GetBool(flagPublish)
+			if err != nil {
+				t.Fatalf("getting %s flag: %v", flagPublish, err)
+			}
+
+			if publish != tt.want {
+				t.Fatalf("--%s = %v, want %v", flagPublish, publish, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewCommand_PublishDocumentation verifies the command's Long/Example text documents
+// --publish and its bearer-token requirement, since a certificate-based kubeconfig silently
+// fails (401) through the published path -- this must be discoverable from --help.
+func TestNewCommand_PublishDocumentation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "flag mention", fragment: "--publish"},
+		{name: "ingress endpoint", fragment: "storage-foundation-published Ingress endpoint"},
+		{name: "bearer token requirement", fragment: "works only with a kubeconfig"},
+		{name: "certificate rejection", fragment: "receives a 401 when --publish=true"},
+		{name: "example usage", fragment: "--publish=true"},
+	}
+
+	cmd := NewCommand(slog.Default())
+	combined := cmd.Long + "\n" + cmd.Example
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !strings.Contains(combined, tc.fragment) {
+				t.Errorf("command Long/Example does not contain %q:\n%s", tc.fragment, combined)
+			}
+		})
+	}
+}

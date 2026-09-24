@@ -42,7 +42,8 @@ import (
 //	║ Security:   4 databases
 //	║ Modules:    12
 //	║ Packages:   3
-//	║ Plugins:    2
+//	║ d8 dist:    pushed
+//	║ d8 plugins: 2
 //	║
 //	║ Elapsed: 2m4s
 //	╚═══════════════════════════════════════════════════════
@@ -63,7 +64,8 @@ func renderPushSummary(s *mirror.PushSummary) string {
 	writePushSecurity(&b, s.SecurityDatabases)
 	writePushCount(&b, "Modules", s.Modules)
 	writePushCount(&b, "Packages", s.Packages)
-	writePushCount(&b, "Plugins", s.Plugins)
+	writePushPresence(&b, "d8 dist", s.DeckhouseCLIPushed)
+	writePushCount(&b, "d8 plugins", s.Plugins)
 
 	b.WriteString(summaryui.Bar() + "\n")
 

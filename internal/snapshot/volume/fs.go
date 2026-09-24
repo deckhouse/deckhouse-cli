@@ -43,9 +43,9 @@ import (
 	"github.com/pierrec/lz4/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
 
 // ErrSourceHashMismatch is returned when a staged filesystem file's raw (decompressed)
@@ -255,7 +255,7 @@ func DownloadFilesystemVolume(
 	filesRootURL string,
 	workers int,
 	chunkSize int64,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	setTotal func(total int64),
 	onProgress func(n int),
@@ -286,7 +286,7 @@ func DownloadFilesystemVolumeRooted(
 	filesRootURL string,
 	workers int,
 	chunkSize int64,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	setTotal func(total int64),
 	onProgress func(n int),
@@ -316,7 +316,7 @@ func downloadFilesystemVolume(
 	filesRootURL string,
 	workers int,
 	chunkSize int64,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	setTotal func(total int64),
 	onProgress func(n int),
@@ -422,7 +422,7 @@ func prepareFSInventory(
 	filesRootURL string,
 	base *url.URL,
 	ext string,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 ) (string, fsInventorySummary, error) {
 	metaDir := filepath.Join(stagingDir, FSMetaDirName)
 	if err := view.ensureDir(metaDir); err != nil {
@@ -483,7 +483,7 @@ func buildFSInventory(
 	filesRootURL string,
 	base *url.URL,
 	ext string,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 ) (fsInventorySummary, error) {
 	workDir := filepath.Join(metaDir, fsInventoryWorkDirName)
 	if err := view.removeAll(workDir); err != nil {
@@ -534,7 +534,7 @@ func walkFSInventory(
 	workDir string,
 	filesRootURL string,
 	base *url.URL,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	add func(fsItem) error,
 ) (fsInventorySummary, error) {
 	queuePath := filepath.Join(workDir, "directories.jsonl")
@@ -585,7 +585,7 @@ func walkFSInventory(
 			return fsInventorySummary{}, err
 		}
 
-		err = fetcher.ListDir(ctx, dirURL, func(item exporter.Item) error {
+		err = fetcher.ListDir(ctx, dirURL, func(item dataplane.Item) error {
 			inventoryItem, itemErr := inventoryItemFromListing(base, dirURL, record.RelPrefix, item)
 			if itemErr != nil {
 				return itemErr
@@ -659,7 +659,7 @@ func readDirectoryRecord(reader *bufio.Reader) (fsDirectoryRecord, error) {
 	return record, nil
 }
 
-func inventoryItemFromListing(base *url.URL, dirURL, relPrefix string, item exporter.Item) (fsItem, error) {
+func inventoryItemFromListing(base *url.URL, dirURL, relPrefix string, item dataplane.Item) (fsItem, error) {
 	// The producer sets Name from fs.FileInfo.Name(), so it is one literal
 	// directory-entry leaf. Rejecting "/" here prevents a malicious listing
 	// from synthesizing descendants without the corresponding parent directory
@@ -1354,7 +1354,7 @@ func stageFSInventoryFiles(
 	base *url.URL,
 	workers int,
 	chunkSize int64,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
@@ -1544,9 +1544,12 @@ func defaultPortForScheme(scheme string) string {
 // and re-hashed via verifyStagedFileMD5 before the skip is trusted; on a
 // mismatch the bad blob is removed and staging falls through to re-fetch it in
 // this same run (a self-healing condition, not a hard error). When no MD5 is
-// advertised the blob is still skipped, matching the fresh-path convention,
-// with a one-line WARN. The verify costs one decode pass per already-staged
-// file per resume run, bounded by staging size — the price of not trusting
+// advertised, full content verification is impossible, but the already-staged
+// blob is still decoded to measure its plaintext size via stagedFileRawSize,
+// which is compared against the item's declared size below; a mismatch drives
+// the same self-healing re-fetch as an MD5 mismatch, with a one-line WARN.
+// The verify costs one decode pass per already-staged file per resume run,
+// bounded by staging size — the price of not trusting
 // bytes we did not just write. A trusted skip still credits the item's
 // declared size to onProgress so the numerator can reach the denominator that
 // setTotal established from the inventory total — otherwise
@@ -1561,7 +1564,7 @@ func stageCompressedFile(
 	item fsItem,
 	chunkSize int64,
 	codec compress.Codec,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	onProgress func(n int),
 ) (int64, error) {
 	destPath := filepath.Join(stagingDir, filepath.FromSlash(item.relPath+codec.Ext()))
@@ -1573,14 +1576,10 @@ func stageCompressedFile(
 		)
 
 		if item.md5 == "" {
-			log.Warn("no source MD5 available for file, skipping integrity verification",
+			log.Warn("no source MD5 available for file, verifying size only",
 				slog.String("path", item.relPath))
 
-			if item.size >= 0 {
-				rawSize = item.size
-			} else {
-				rawSize, verifyErr = stagedFileRawSize(view, destPath, codec.Ext())
-			}
+			rawSize, verifyErr = stagedFileRawSize(view, destPath, codec.Ext())
 		} else {
 			rawSize, verifyErr = verifyStagedFileMD5(view, destPath, codec.Ext(), item.md5)
 		}
@@ -1674,7 +1673,7 @@ func stageChunkedFile(
 	item fsItem,
 	chunkSize int64,
 	codec compress.Codec,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	onProgress func(n int),
 ) (int64, error) {
 	chunkDirName := archive.FsFileChunksDirName(item.relPath, codec.Ext())
@@ -1877,7 +1876,7 @@ func stageWholeFile(
 	destPath string,
 	item fsItem,
 	codec compress.Codec,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	onProgress func(n int),
 ) (int64, error) {
 	log.Debug("staging fs file", slog.String("path", item.relPath))
@@ -2990,7 +2989,7 @@ func (v filesystemView) downloadBlockChunks(
 	totalSize int64,
 	chunkSize int64,
 	workers int,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {

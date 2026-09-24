@@ -3,13 +3,14 @@
 
 package mirror
 
-// End-to-end tests for the plugins leg of the pull pipeline. Unlike the unit
-// suites in internal/mirror/plugins, these run the whole PullService.Pull:
+// End-to-end tests for the d8 CLI distribution leg of the pull pipeline (the
+// binary and the plugins). Unlike the unit
+// suites in internal/mirror/dist, these run the whole PullService.Pull:
 // the modules phase discovers module versions from release channels, records
 // them in its stats, and the plugins phase resolves the catalog against those
 // stats. The tests pin the cross-phase handoff and the produced artifacts
 // (bundle tars, stats, summary provenance), not the resolver internals -
-// those are covered by internal/mirror/plugins/resolver_test.go.
+// those are covered by internal/mirror/dist/resolver_test.go.
 
 import (
 	"archive/tar"
@@ -36,9 +37,13 @@ import (
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
 )
 
-// pluginsCatalogRepo is where PluginsService looks for the catalog, relative
-// to the registry root (plugins are not edition-scoped).
-const pluginsCatalogRepo = "deckhouse-cli/plugins"
+// pluginsCatalogRepo is where PluginsService looks for the catalog, and
+// cliRepo where the binary itself lives - both relative to the registry root,
+// as neither is edition-scoped.
+const (
+	pluginsCatalogRepo = "deckhouse-cli/plugins"
+	cliRepo            = "deckhouse-cli"
+)
 
 // e2eBuiltins mirrors pluginBuiltinCommands from the cmd layer: built-in d8
 // commands that satisfy a same-named plugin dependency without being pulled.
@@ -111,6 +116,8 @@ func TestPullE2E_ModuleVersionsReachPluginResolver(t *testing.T) {
 	addModule(reg, "postgresql", map[string]string{"stable": "v1.5.0", "alpha": "v1.10.0"})
 	addPluginVersion(reg, "postgresql-mgr", "v1.1.0", mgrContractForOldPostgres)
 	addPluginVersion(reg, "postgresql-mgr", "v1.2.0", mgrContractForNewPostgres)
+	addCLIRelease(reg, "v0.13.0")
+	addCLIRelease(reg, "v0.13.1")
 
 	bundleDir := t.TempDir()
 	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
@@ -382,6 +389,8 @@ func TestPullE2E_DryRun_ResolutionParityNoFiles(t *testing.T) {
 	addModule(reg, "postgresql", map[string]string{"stable": "v1.5.0", "alpha": "v1.10.0"})
 	addPluginVersion(reg, "postgresql-mgr", "v1.1.0", mgrContractForOldPostgres)
 	addPluginVersion(reg, "postgresql-mgr", "v1.2.0", mgrContractForNewPostgres)
+	addCLIRelease(reg, "v0.13.0")
+	addCLIRelease(reg, "v0.13.1")
 
 	bundleDir := t.TempDir()
 	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
@@ -445,6 +454,70 @@ func TestPullE2E_OnlyExtraImages_PluginsSkipped(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: the d8 binary
+// ---------------------------------------------------------------------------
+
+// TestPullE2E_NoCLIImages_PullStillSucceeds is the state of the public
+// registry today: nothing is published under deckhouse-cli. A bundle built
+// against such a registry must come out complete in every other respect, with
+// the missing binary reported in the summary rather than raised as an error.
+func TestPullE2E_NoCLIImages_PullStillSucceeds(t *testing.T) {
+	reg := upfake.NewRegistry(pullStubRootURL)
+	addModule(reg, "postgresql", map[string]string{"stable": "v1.5.0"})
+	addPluginVersion(reg, "postgresql-mgr", "v1.1.0", mgrContractForOldPostgres)
+
+	bundleDir := t.TempDir()
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
+		SkipPlatform:   true,
+		SkipSecurity:   true,
+		SkipInstaller:  true,
+		SkipVexImages:  true,
+		BundleDir:      bundleDir,
+		PluginBuiltins: e2eBuiltins,
+	})
+
+	summary, err := svc.Pull(context.Background())
+	require.NoError(t, err, "a registry without deckhouse-cli images must not fail the pull")
+
+	assert.True(t, summary.DeckhouseCLI.Attempted)
+	assert.Empty(t, summary.DeckhouseCLI.Version)
+	assert.NotEmpty(t, summary.DeckhouseCLI.SkipReason, "the summary must say the CLI was not found")
+
+	assert.NoFileExists(t, filepath.Join(bundleDir, "deckhouse-cli.tar"))
+
+	// Everything else still made it into the bundle.
+	pluginTars, err := filepath.Glob(filepath.Join(bundleDir, "plugin-*.tar"))
+	require.NoError(t, err)
+	assert.Len(t, pluginTars, 1)
+}
+
+// TestPullE2E_CLITagPinned: --deckhouse-cli-tag mirrors the named version
+// instead of the newest one.
+func TestPullE2E_CLITagPinned(t *testing.T) {
+	reg := upfake.NewRegistry(pullStubRootURL)
+	addCLIRelease(reg, "v0.13.0")
+	addCLIRelease(reg, "v0.13.1")
+
+	bundleDir := t.TempDir()
+	svc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
+		SkipPlatform:    true,
+		SkipSecurity:    true,
+		SkipInstaller:   true,
+		SkipModules:     true,
+		SkipVexImages:   true,
+		BundleDir:       bundleDir,
+		DeckhouseCLITag: "v0.13.0",
+		PluginBuiltins:  e2eBuiltins,
+	})
+
+	summary, err := svc.Pull(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "v0.13.0", summary.DeckhouseCLI.Version)
+	assert.FileExists(t, filepath.Join(bundleDir, "deckhouse-cli.tar"))
+}
+
+// ---------------------------------------------------------------------------
 // Tests: pull -> push roundtrip
 // ---------------------------------------------------------------------------
 
@@ -458,6 +531,8 @@ func TestPullE2E_RoundTrip_PullThenPushPlugins(t *testing.T) {
 	addModule(reg, "postgresql", map[string]string{"stable": "v1.5.0", "alpha": "v1.10.0"})
 	addPluginVersion(reg, "postgresql-mgr", "v1.1.0", mgrContractForOldPostgres)
 	addPluginVersion(reg, "postgresql-mgr", "v1.2.0", mgrContractForNewPostgres)
+	addCLIRelease(reg, "v0.13.0")
+	addCLIRelease(reg, "v0.13.1")
 
 	bundleDir := t.TempDir()
 	pullSvc := newPullService(t, pkgclient.Adapt(upfake.NewClient(reg)), "", &PullServiceOptions{
@@ -496,6 +571,14 @@ func TestPullE2E_RoundTrip_PullThenPushPlugins(t *testing.T) {
 
 	assert.Equal(t, 1, pushSummary.Plugins, "one plugin repository pushed")
 	assert.Equal(t, 1, pushSummary.Modules)
+	assert.True(t, pushSummary.DeckhouseCLIPushed, "the d8 binary must be reported as pushed")
+
+	// The binary lands at the deckhouse-cli root, one version, and the
+	// plugins catalog under it is untouched by it.
+	cliClient := destClient.WithSegment("deckhouse-cli")
+	assert.NoError(t, cliClient.CheckImageExists(ctx, "v0.13.1"))
+	assert.Error(t, cliClient.CheckImageExists(ctx, "v0.13.0"),
+		"only the newest stable CLI version belongs in the bundle")
 
 	// Both resolved plugin versions land verbatim at deckhouse-cli/plugins.
 	pluginClient := destClient.WithSegment("deckhouse-cli", "plugins", "postgresql-mgr")
@@ -585,6 +668,11 @@ func addPluginVersion(reg *upfake.Registry, name, tag, contractJSON string) {
 
 	reg.MustAddImage(pluginsCatalogRepo+"/"+name, tag, annotated)
 	reg.MustAddImage(pluginsCatalogRepo, name, upfake.NewImageBuilder().WithFile("name", name).MustBuild())
+}
+
+// addCLIRelease publishes one d8 binary release at the deckhouse-cli root.
+func addCLIRelease(reg *upfake.Registry, tag string) {
+	reg.MustAddImage(cliRepo, tag, upfake.NewImageBuilder().WithFile("d8", "binary-"+tag).MustBuild())
 }
 
 // ---------------------------------------------------------------------------

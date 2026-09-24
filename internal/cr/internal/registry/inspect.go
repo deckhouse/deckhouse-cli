@@ -21,19 +21,28 @@ import (
 	"fmt"
 )
 
-// FetchManifest returns the raw manifest bytes as the registry served them.
-// This preserves signatures and byte-for-byte JSON the user may want to pipe.
+// FetchManifest returns the raw manifest bytes as the registry served them,
+// which is what signature verification and audit trails need - a manifest
+// decoded and re-encoded no longer hashes to its own digest.
+//
+// With a platform pinned, a multi-arch reference resolves to that child's
+// manifest instead of the index. Without one the index is returned as served.
 func FetchManifest(ctx context.Context, ref string, opts *Options) ([]byte, error) {
-	desc, err := FetchDescriptor(ctx, ref, opts)
+	client, id, err := clientForRef(ref, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	return desc.Manifest, nil
+	res, err := client.GetManifest(ctx, id, opts.manifestGetOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch manifest %s: %w", ref, err)
+	}
+
+	return res.GetRaw(), nil
 }
 
-// FetchConfig returns the config JSON for ref. Multi-arch indices are
-// resolved via the caller's platform (set on Options).
+// FetchConfig returns the raw config JSON for ref, byte-for-byte as stored, so
+// it stays pipeable into jq and comparable across pulls.
 func FetchConfig(ctx context.Context, ref string, opts *Options) ([]byte, error) {
 	img, err := Fetch(ctx, ref, opts)
 	if err != nil {
@@ -48,12 +57,26 @@ func FetchConfig(ctx context.Context, ref string, opts *Options) ([]byte, error)
 	return cfg, nil
 }
 
-// FetchDigest returns "sha256:<hex>" for ref's manifest as served.
+// FetchDigest returns "sha256:<hex>" for ref.
+//
+// With a platform pinned this is the digest of that child image, not of the
+// index - the whole point of asking for a digest is to pin what will actually
+// run, and an index digest does not identify a single image.
 func FetchDigest(ctx context.Context, ref string, opts *Options) (string, error) {
-	desc, err := FetchDescriptor(ctx, ref, opts)
+	client, id, err := clientForRef(ref, opts)
 	if err != nil {
 		return "", err
 	}
 
-	return desc.Digest.String(), nil
+	res, err := client.GetManifest(ctx, id, opts.manifestGetOptions()...)
+	if err != nil {
+		return "", fmt.Errorf("fetch digest %s: %w", ref, err)
+	}
+
+	desc := res.GetDescriptor()
+	if desc == nil {
+		return "", fmt.Errorf("fetch digest %s: registry returned a manifest without a descriptor", ref)
+	}
+
+	return desc.GetDigest().String(), nil
 }

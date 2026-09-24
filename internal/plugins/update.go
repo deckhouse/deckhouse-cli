@@ -30,7 +30,11 @@ import (
 // UpdateAll updates every installed plugin to its newest cluster-compatible
 // version within the current major. A per-plugin failure does not stop the
 // others; the failures are reported together in the returned error.
-func (m *Manager) UpdateAll(ctx context.Context) error {
+//
+// opts are forwarded to every plugin's install, so only options that make sense
+// applied uniformly belong here - the command layer rejects the rest (an exact
+// --version or a --use-major pin cannot mean anything across a whole set).
+func (m *Manager) UpdateAll(ctx context.Context, opts ...InstallOption) error {
 	plugins, err := m.InstalledPluginNames()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to read plugins directory: %w", err)
@@ -38,7 +42,7 @@ func (m *Manager) UpdateAll(ctx context.Context) error {
 
 	// A non-root install lives in the home fallback (~/.deckhouse-cli), so this
 	// update must look there too when the configured root has nothing - otherwise
-	// `d8 dist plugins update all` would be a silent no-op for that install.
+	// `d8 dist plugins install --all` would be a silent no-op for that install.
 	if len(plugins) == 0 && m.switchToFallbackRoot() {
 		if plugins, err = m.InstalledPluginNames(); err != nil {
 			return fmt.Errorf("failed to read plugins directory: %w", err)
@@ -51,7 +55,7 @@ func (m *Manager) UpdateAll(ctx context.Context) error {
 	var failed []string
 
 	for _, plugin := range plugins {
-		if err := m.InstallPlugin(ctx, plugin); err != nil {
+		if err := m.InstallPlugin(ctx, plugin, opts...); err != nil {
 			// Render a child HelpfulError in full so the per-plugin failure keeps
 			// its cause/solution detail instead of flattening to one line.
 			var he *diagnostic.HelpfulError
@@ -95,24 +99,5 @@ func (m *Manager) switchToFallbackRoot() bool {
 // failed install has no symlink and is excluded, so it cannot become an install
 // target for a plugin the user never had.
 func (m *Manager) InstalledPluginNames() ([]string, error) {
-	entries, err := os.ReadDir(layout.PluginsRoot(m.pluginDirectory))
-	if err != nil {
-		return nil, err
-	}
-
-	names := make([]string, 0, len(entries))
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		if _, err := os.Lstat(layout.CurrentLinkPath(m.pluginDirectory, entry.Name())); err != nil {
-			continue
-		}
-
-		names = append(names, entry.Name())
-	}
-
-	return names, nil
+	return layout.InstalledNames(m.pluginDirectory)
 }

@@ -84,7 +84,8 @@ var (
 //	║     csi-nfs                         (3 VEX)  [v0.6.2, v0.6.1]
 //	║ Packages:   1
 //	║     deckhouse                       [v1.69.1]
-//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║ d8 dist:    v0.13.1
+//	║ d8 plugins: 2  ·  1 for modules  ·  1 dependency
 //	║     console
 //	║       console-ctl                   [v0.4.1]
 //	║       └ db-connector                [v0.9.1]  (dependency)
@@ -122,6 +123,7 @@ func renderPullSummary(s *mirror.PullSummary, verbose bool) string {
 	writeSecurity(&b, s.Security)
 	writeModules(&b, s.Modules, verbose)
 	writePackages(&b, s.Packages, verbose)
+	writeDeckhouseCLI(&b, s.DeckhouseCLI)
 	writePlugins(&b, s.Plugins, verbose)
 
 	if !s.DryRun && len(s.Bundle.Files) > 0 {
@@ -370,19 +372,47 @@ func writePackages(b *strings.Builder, p mirror.PackagesStats, verbose bool) {
 	}
 }
 
+// writeDeckhouseCLI renders the d8 binary line. The CLI is one version, so the
+// line is the version itself; a registry that offers no deckhouse-cli
+// repository is reported with its reason rather than passed over silently -
+// an air-gapped cluster given a bundle without the CLI has no other way to
+// obtain it. e.g.:
+//
+//	║ d8 dist:    v0.13.1
+//	║ d8 dist:    not mirrored - not available in this registry
+func writeDeckhouseCLI(b *strings.Builder, c mirror.DeckhouseCLIStats) {
+	label := cLabel(padLabel("d8 dist"))
+
+	switch {
+	case c.Skipped:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
+	case !c.Attempted:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not pulled"))
+	case c.Version == "":
+		reason := c.SkipReason
+		if reason == "" {
+			reason = "nothing was mirrored"
+		}
+
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cWarn("not mirrored - "+reason))
+	default:
+		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cVersion(c.Version))
+	}
+}
+
 // writePlugins renders the plugins line, the module-grouped provenance tree
 // (verbose only), then skipped plugins with reasons and resolver warnings
 // (always - losing a plugin in an air-gapped bundle, or shipping one the
 // target cluster cannot run, is an operational surprise). e.g.:
 //
-//	║ Plugins:    2  ·  1 for modules  ·  1 dependency
+//	║ d8 plugins: 2  ·  1 for modules  ·  1 dependency
 //	║     postgresql
 //	║       postgresql-mgr              [v1.2.0, v1.1.0]
 //	║       └ db-connector              [v0.9.1]  (dependency)
 //	║     skipped: backup-tool - requires module "postgresql" >=3.0.0
 //	║     warning: plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it
 func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
-	label := cLabel(padLabel("Plugins"))
+	label := cLabel(padLabel("d8 plugins"))
 
 	if p.Skipped {
 		fmt.Fprintf(b, "%s %s %s\n", bar(), label, cDim("skipped"))
@@ -398,6 +428,10 @@ func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 	parts := []string{cCount(fmt.Sprint(len(p.Plugins)))}
 
 	counts := countPluginProvenance(p.Plugins)
+	if counts.withPlatform > 0 {
+		parts = append(parts, cDim(fmt.Sprintf("%d with the platform", counts.withPlatform)))
+	}
+
 	if counts.forModules > 0 {
 		parts = append(parts, cDim(fmt.Sprintf("%d for modules", counts.forModules)))
 	}
@@ -432,14 +466,15 @@ func writePlugins(b *strings.Builder, p mirror.PluginsStats, verbose bool) {
 
 // pluginProvenanceCounts is the per-category tally of the aggregate line.
 type pluginProvenanceCounts struct {
+	withPlatform int
 	forModules   int
 	dependencies int
 	explicit     int
 }
 
 // countPluginProvenance counts each plugin once by its strongest provenance:
-// serving a mirrored module beats an explicit include, which beats being
-// someone's dependency.
+// shipping with the platform beats serving a mirrored module, which beats an
+// explicit include, which beats being someone's dependency.
 func countPluginProvenance(plugins []mirror.PluginStat) pluginProvenanceCounts {
 	var counts pluginProvenanceCounts
 
@@ -447,6 +482,8 @@ func countPluginProvenance(plugins []mirror.PluginStat) pluginProvenanceCounts {
 		provenance := pluginProvenance(plugin)
 
 		switch {
+		case provenance.platform:
+			counts.withPlatform++
 		case len(provenance.modules) > 0:
 			counts.forModules++
 		case provenance.explicit:
@@ -466,6 +503,9 @@ type pluginProvenanceInfo struct {
 	modules    []string
 	dependents []string
 	explicit   bool
+	// platform marks a plugin that ships with the platform, pulled because the
+	// platform was mirrored rather than because anything asked for it.
+	platform bool
 }
 
 func pluginProvenance(plugin mirror.PluginStat) pluginProvenanceInfo {
@@ -491,6 +531,8 @@ func pluginProvenance(plugin mirror.PluginStat) pluginProvenanceInfo {
 				}
 			case "explicit":
 				info.explicit = true
+			case "platform":
+				info.platform = true
 			}
 		}
 	}
@@ -512,6 +554,9 @@ type pluginTreeNode struct {
 // dependency plugins nested under their dependents and explicitly included
 // plugins in their own group. e.g.:
 //
+//	║     platform
+//	║       package                     [v0.0.34]
+//	║       system                      [v1.2.0]
 //	║     postgresql
 //	║       postgresql-mgr              [v1.1.0, v1.2.0]
 //	║       └ db-connector              [v0.9.1]  (dependency)
@@ -543,6 +588,8 @@ func writePluginsTree(b *strings.Builder, plugins []mirror.PluginStat) {
 		provenance := pluginProvenance(plugin)
 
 		switch {
+		case provenance.platform:
+			addToGroup("platform", node)
 		case len(provenance.modules) > 0:
 			if len(provenance.modules) > 1 {
 				node.note = cDim("(also for " + strings.Join(provenance.modules[1:], ", ") + ")")
@@ -564,9 +611,10 @@ func writePluginsTree(b *strings.Builder, plugins []mirror.PluginStat) {
 		}
 	}
 
-	// Module groups sort alphabetically; the pseudo-groups (explicit,
-	// dependency orphans) always render after them.
-	pseudo := map[string]int{"dependencies": 1, "explicit": 2, "other": 3}
+	// Module groups sort alphabetically between the pseudo-groups: "platform"
+	// leads (those plugins are in every bundle that carries the platform), the
+	// rest (explicit, dependency orphans) always render after the modules.
+	pseudo := map[string]int{"platform": -1, "dependencies": 1, "explicit": 2, "other": 3}
 
 	sort.Slice(groupNames, func(i, j int) bool {
 		pi, pj := pseudo[groupNames[i]], pseudo[groupNames[j]]

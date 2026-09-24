@@ -76,31 +76,37 @@ func Resolve(ctx context.Context, srcList []string, keepMultiArchIndex bool, cac
 	}
 
 	for _, src := range srcList {
-		desc, err := registry.FetchDescriptor(ctx, src, opts)
+		// The index branch costs one extra manifest GET (classify, then fetch),
+		// which is cheap next to the layer traffic that follows and keeps the
+		// domain surface to "give me an image" / "give me an index" rather than
+		// leaking a registry descriptor to callers.
+		if keepMultiArchIndex && opts.Platform == nil {
+			isIndex, err := registry.IsIndex(ctx, src, opts)
+			if err != nil {
+				return nil, err
+			}
+
+			if isIndex {
+				idx, err := registry.FetchIndex(ctx, src, opts)
+				if err != nil {
+					return nil, err
+				}
+
+				if fsCache != nil {
+					// Without this, --cache-path was a no-op for OCI pulls of
+					// multi-arch images (the most common shape, e.g. alpine).
+					idx = cache.ImageIndex(idx, fsCache)
+				}
+
+				out.Indices[src] = idx
+
+				continue
+			}
+		}
+
+		img, err := registry.Fetch(ctx, src, opts)
 		if err != nil {
 			return nil, err
-		}
-
-		if keepMultiArchIndex && desc.MediaType.IsIndex() && opts.Platform == nil {
-			idx, err := desc.ImageIndex()
-			if err != nil {
-				return nil, fmt.Errorf("read index %s: %w", src, err)
-			}
-
-			if fsCache != nil {
-				// Without this, --cache-path was a no-op for OCI pulls of
-				// multi-arch images (the most common shape, e.g. alpine).
-				idx = cache.ImageIndex(idx, fsCache)
-			}
-
-			out.Indices[src] = idx
-
-			continue
-		}
-
-		img, err := desc.Image()
-		if err != nil {
-			return nil, fmt.Errorf("read image %s: %w", src, err)
 		}
 
 		if fsCache != nil {

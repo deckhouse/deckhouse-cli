@@ -31,3 +31,14 @@ $(PWD)/bin/d8 dist plugins install package
 echo ""
 echo "--- TEST INSTALL SECOND PLUGIN ---"
 $(PWD)/bin/d8 dist plugins install system
+
+echo ""
+echo "--- TEST UPDATE ALL INSTALLED PLUGINS ---"
+$(PWD)/bin/d8 dist plugins install --all
+
+echo ""
+echo "--- TEST --all REJECTS A PLUGIN NAME ---"
+if $(PWD)/bin/d8 dist plugins install --all package; then
+    echo "FAIL: --all accepted a plugin name"
+    exit 1
+fi

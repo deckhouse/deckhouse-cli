@@ -63,6 +63,8 @@ var (
 
 	PluginsWhitelist []string
 
+	DeckhouseCLITag string
+
 	SourceRegistryRepo     = EnterpriseEditionRepo // Fallback to EE if nothing was given as source.
 	SourceRegistryLogin    string
 	SourceRegistryPassword string
@@ -222,6 +224,14 @@ Packages live under the packages/ registry segment, with release metadata under 
 		`Mirror a specific d8 CLI plugin in addition to the automatic selection. Format is "plugin-name[@constraint]", the same dialect as --include-module, quoting included. Use one flag per each plugin.
 
 Plugins live under the deckhouse-cli/plugins registry segment. Without this flag, plugins required by the mirrored modules (and their plugin dependencies) are selected automatically.`,
+	)
+	flagSet.StringVar(
+		&DeckhouseCLITag,
+		"deckhouse-cli-tag",
+		"",
+		`Specific d8 CLI version to mirror, e.g. "v0.13.1". Without this flag the newest published stable version is mirrored.
+
+The CLI binary lives at the deckhouse-cli registry segment, next to the plugins catalog; a registry that publishes no such repository is reported in the summary instead of failing the pull, unless this flag asked for a version.`,
 	)
 	flagSet.Int64VarP(
 		&ImagesBundleChunkSizeGB,

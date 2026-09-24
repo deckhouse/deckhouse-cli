@@ -46,18 +46,22 @@ func NewCatalogCmd(opts *registry.Options) *cobra.Command {
 }
 
 func runCatalog(ctx context.Context, w io.Writer, src string, fullRef bool, opts *registry.Options) error {
-	return registry.ListCatalog(ctx, src, opts, func(repos []string) error {
-		for _, repo := range repos {
-			line := repo
-			if fullRef {
-				line = path.Join(src, repo)
-			}
+	// Collected in full before printing, for the reason given in runLs.
+	repos, err := registry.ListCatalog(ctx, src, opts)
+	if err != nil {
+		return err
+	}
 
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				return err
-			}
+	for _, repo := range repos {
+		line := repo
+		if fullRef {
+			line = path.Join(src, repo)
 		}
 
-		return nil
-	})
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

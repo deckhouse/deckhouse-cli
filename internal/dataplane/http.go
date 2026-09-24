@@ -14,11 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package exporter provides typed HTTP helpers for the data-exporter API exposed by a
-// running DataExport. The API has two endpoints: api/v1/block (block volumes served via
-// http.ServeContent with Range support) and api/v1/files (filesystem volumes: trailing-
-// slash paths return a JSON directory listing; other paths stream file bytes).
-package exporter
+// Package dataplane provides the transport half of a volume transfer, shared by
+// every d8 command that moves volume bytes: a typed client for the data-exporter
+// API, a classifier that decides which transport failures are worth another try,
+// and the bounded retry-with-resume policy built on top of them.
+//
+// The data-exporter API has two endpoints: api/v1/block (block volumes served via
+// http.ServeContent with Range support) and api/v1/files (filesystem volumes:
+// trailing-slash paths return a JSON directory listing; other paths stream file
+// bytes).
+//
+// It deliberately knows nothing about snapshots, chunk geometry, part files or
+// any other caller-specific framing: control-plane concerns (resolving a
+// DataExport, waiting for it to become ready, run-owner annotations) live with
+// their commands, which import this package rather than the other way round.
+package dataplane
 
 import (
 	"bufio"
@@ -36,16 +46,102 @@ import (
 	"time"
 )
 
-// Doer executes a single HTTP request and returns the response.
-// *http.Client and pkg/libsaferequest.SafeClient both satisfy this interface.
+// Doer executes a single HTTP request and returns the response. *http.Client
+// satisfies it directly, and so does the pinned per-origin client the snapshot
+// commands build (internal/snapshot/transport.PersistentHTTPClient, which has
+// both Do and HTTPDo).
+//
+// pkg/libsaferequest/client.SafeClient does NOT satisfy it: its only request
+// method is HTTPDo, and it has no Do at all. A caller holding a SafeClient — the
+// d8 data commands do — therefore needs an adapter, not a direct assignment, and
+// DoerFunc below is that adapter.
 type Doer interface {
 	Do(req *http.Request) (*http.Response, error)
+}
+
+// DoerFunc adapts a plain request function to Doer, so a client whose request
+// method is named something other than Do (SafeClient.HTTPDo) reaches a Fetcher
+// without a bespoke wrapper type per caller.
+type DoerFunc func(req *http.Request) (*http.Response, error)
+
+// Do implements Doer.
+func (d DoerFunc) Do(req *http.Request) (*http.Response, error) {
+	return d(req)
 }
 
 // ErrContentRangeMismatch is returned when a 206 response's Content-Range header does not
 // cover the byte range the caller requested, so the body must not be trusted at the
 // caller's intended offset.
 var ErrContentRangeMismatch = errors.New("server Content-Range does not match requested range")
+
+// ErrRangeIgnored is returned when a request that carried a Range header asking to
+// continue from a non-zero offset is answered with 200 OK — the whole object from
+// offset zero — instead of 206 Partial Content. The body is then not the
+// continuation the caller asked for, so writing it at the caller's resume offset
+// would corrupt the destination.
+var ErrRangeIgnored = errors.New("server ignored the Range header and returned the whole object")
+
+// ErrExportUnauthorized classifies a 401/403 from the data-exporter endpoint.
+// On the public (Ingress) path this is the expected outcome for a
+// certificate-authenticated kubeconfig: Ingress terminates TLS with its own
+// certificate and does not forward the client certificate to the exporter pod, so
+// only bearer-token kubeconfigs authenticate through it.
+var ErrExportUnauthorized = errors.New("data exporter rejected the request as unauthorized")
+
+// exportStatusError wraps err with ErrExportUnauthorized when the HTTP status
+// indicates an authentication or authorization failure, so callers can classify it
+// with errors.Is instead of matching on message text.
+func exportStatusError(code int, err error) error {
+	if code == http.StatusUnauthorized || code == http.StatusForbidden {
+		return fmt.Errorf("%w: %w", ErrExportUnauthorized, err)
+	}
+
+	return err
+}
+
+// statusExplanationLimit bounds how much of a refused response's body reaches the
+// error message. The exporters answer a refusal with one line of plain text
+// (net/http's Error helper), so this is generous; the bound is here because the
+// body is whatever the far end sent, not necessarily what this client expects.
+const statusExplanationLimit = 1000
+
+// statusExplanation returns what the producer SAID about a refusal, ready to be
+// appended to an error message (": <what it said>", or "" when it said nothing
+// usable). The status alone names the class of failure; the body names the cause,
+// and for these endpoints the cause is usually the only thing the caller can act
+// on — the wrong volume mode, or a path that is not there. A HEAD response has no
+// body and yields "", which is why every caller can use this unconditionally
+// (TestStatusExplanation_EveryRefusalCarriesWhatTheProducerSaid holds all six
+// refusals to both halves of that).
+//
+// TWO RULES FOR CALLERS, and each of them is a way to lose the explanation
+// silently — the error still gets built, it just says less:
+//
+//   - call this BEFORE closing the response. A closed body reads as an error,
+//     which lands in the "said nothing usable" branch below;
+//   - call it while the request's context is still live, for the same reason.
+//
+// The read runs under this Fetcher's idle watchdog rather than against the raw
+// body. This path has no overall deadline by design — volume transfers are long
+// — so a producer that sends a status and then goes quiet without closing the
+// connection would otherwise hang the client inside the code that is reporting a
+// failure. When the watchdog trips, the read fails and the error carries the
+// status alone: strictly what it carried before an explanation was ever read.
+//
+// The body is consumed here; the body of a refusal is not read anywhere else.
+func (f *Fetcher) statusExplanation(ctx context.Context, resp *http.Response) string {
+	body, err := io.ReadAll(io.LimitReader(f.guardBody(ctx, resp.Body), statusExplanationLimit))
+	if err != nil {
+		return ""
+	}
+
+	explanation := strings.TrimSpace(string(body))
+	if explanation == "" {
+		return ""
+	}
+
+	return ": " + explanation
+}
 
 // ErrDataPlaneIdle is reported by a Fetcher-issued response body when no bytes
 // arrive for the configured idle window (see idleReadCloser). The data plane
@@ -68,15 +164,20 @@ const (
 	sourceHashMinimumThroughput = int64(1 << 20)
 	sourceHashTimeoutFloor      = 5 * time.Minute
 	sourceHashTimeoutSlack      = 1 * time.Minute
-	sourceHashTimeoutCeiling    = 7 * 24 * time.Hour
 )
+
+// SourceHashTimeoutCeiling caps the size-derived budget SourceMD5 allows a
+// producer for hashing one file. Transports dedicated to source-hash requests
+// size their own response-header timeout from it, so it is exported.
+const SourceHashTimeoutCeiling = 7 * 24 * time.Hour
 
 // Fetcher wraps a Doer and exposes typed methods for the data-exporter HTTP API.
 type Fetcher struct {
-	doer              Doer
-	sourceHashDoer    Doer
-	idleTimeout       time.Duration
-	sourceHashTimeout func(size int64) time.Duration
+	doer                    Doer
+	sourceHashDoer          Doer
+	idleTimeout             time.Duration
+	sourceHashTimeout       func(size int64) time.Duration
+	publishUnauthorizedHint bool
 }
 
 // FetcherOption customizes a Fetcher at construction time.
@@ -98,6 +199,13 @@ func WithSourceHashDoer(doer Doer) FetcherOption {
 			f.sourceHashDoer = doer
 		}
 	}
+}
+
+// WithPublishUnauthorizedHint makes this Fetcher append an actionable hint to
+// ErrExportUnauthorized failures. Only the publish path sets it, so the in-cluster
+// path never advertises an Ingress-specific remedy.
+func WithPublishUnauthorizedHint() FetcherOption {
+	return func(f *Fetcher) { f.publishUnauthorizedHint = true }
 }
 
 // NewFetcher creates a Fetcher backed by the given Doer. Unless overridden via
@@ -125,6 +233,23 @@ func (f *Fetcher) guardBody(ctx context.Context, body io.ReadCloser) io.ReadClos
 	}
 
 	return newIdleReadCloser(ctx, body, f.idleTimeout)
+}
+
+// hintPublishUnauthorized appends an actionable hint to err when it classifies as
+// ErrExportUnauthorized and this Fetcher was built with WithPublishUnauthorizedHint;
+// otherwise err is returned unchanged.
+func (f *Fetcher) hintPublishUnauthorized(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if !f.publishUnauthorizedHint || !errors.Is(err, ErrExportUnauthorized) {
+		return err
+	}
+
+	return fmt.Errorf("%w; --publish streams through the Ingress endpoint, which only accepts "+
+		"a bearer-token kubeconfig (a certificate-based kubeconfig is rejected). Rerun without "+
+		"--publish to use the in-cluster endpoint.", err)
 }
 
 // BlockURL returns the block-volume endpoint for a DataExport base URL.
@@ -163,7 +288,10 @@ func (f *Fetcher) HeadVolume(ctx context.Context, blockURL string) (int64, error
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HEAD %s: unexpected status %s", blockURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("HEAD %s: unexpected status %s%s", blockURL, resp.Status, f.statusExplanation(ctx, resp)))
+
+		return 0, f.hintPublishUnauthorized(statusErr)
 	}
 
 	if resp.ContentLength < 0 {
@@ -196,8 +324,16 @@ func (f *Fetcher) RangeGet(ctx context.Context, blockURL string, start, end int6
 	}
 
 	if resp.StatusCode != http.StatusPartialContent {
+		// The explanation is read BEFORE the body is closed, and the order is
+		// the whole point: a closed body reads as an error, and this would
+		// quietly report the status alone.
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("GET %s (range %d-%d): expected 206, got %s%s",
+				blockURL, start, end, resp.Status, f.statusExplanation(ctx, resp)))
+
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("GET %s (range %d-%d): expected 206, got %s", blockURL, start, end, resp.Status)
+
+		return nil, f.hintPublishUnauthorized(statusErr)
 	}
 
 	if err := validateContentRange(resp.Header.Get("Content-Range"), start, end); err != nil {
@@ -314,7 +450,10 @@ func (f *Fetcher) ListDir(ctx context.Context, filesURL string, yield func(Item)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: unexpected status %s", filesURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("GET %s: unexpected status %s%s", filesURL, resp.Status, f.statusExplanation(ctx, resp)))
+
+		return f.hintPublishUnauthorized(statusErr)
 	}
 
 	// Guard the bounded listing body too: a stalled listing must not hang the
@@ -370,7 +509,10 @@ func (f *Fetcher) SourceMD5(ctx context.Context, fileURL string, size int64) (st
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HEAD source hash for %s: unexpected status %s", fileURL, resp.Status)
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("HEAD source hash for %s: unexpected status %s%s", fileURL, resp.Status, f.statusExplanation(reqCtx, resp)))
+
+		return "", f.hintPublishUnauthorized(statusErr)
 	}
 
 	return resp.Header.Get(sourceHashHeader), nil
@@ -386,9 +528,9 @@ func sourceHashTimeout(size int64) time.Duration {
 		seconds++
 	}
 
-	maxSeconds := int64((sourceHashTimeoutCeiling - sourceHashTimeoutSlack) / time.Second)
+	maxSeconds := int64((SourceHashTimeoutCeiling - sourceHashTimeoutSlack) / time.Second)
 	if seconds >= maxSeconds {
-		return sourceHashTimeoutCeiling
+		return SourceHashTimeoutCeiling
 	}
 
 	timeout := time.Duration(seconds)*time.Second + sourceHashTimeoutSlack
@@ -400,24 +542,124 @@ func sourceHashTimeout(size int64) time.Duration {
 }
 
 // GetFile GETs fileURL and returns the response body for streaming.
-// The caller must close the returned ReadCloser.
+// The caller must close the returned ReadCloser. It is OpenStream from offset
+// zero for a caller with no use for the declared length.
 func (f *Fetcher) GetFile(ctx context.Context, fileURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	body, _, err := f.OpenStream(ctx, fileURL, 0)
+
+	return body, err
+}
+
+// OpenStream GETs the byte range [from, end of object] from rawURL and returns the
+// body together with the length the producer declares for the WHOLE object, or -1
+// when it declares none. The caller must close the returned ReadCloser.
+//
+// It is the resume primitive of this package, and what separates it from RangeGet
+// is what the caller must already know: RangeGet serves a caller holding the
+// object's size and cutting it into bounded chunks, while a caller resuming ONE
+// stream knows only how far it got, asks for "the rest", and learns the size from
+// the answer.
+//
+// from == 0 is sent WITHOUT a Range header, and that is deliberate rather than an
+// omission:
+//
+//   - a producer with no range support at all still serves the whole object on a
+//     plain GET, so a transfer that never breaks keeps working against it. Only
+//     resuming needs ranges, and only a transfer that already broke pays for
+//     their absence;
+//   - it also keeps every EMPTY object out of the disagreement about what a byte
+//     range even means for a zero-length representation. Go's http.ServeContent,
+//     which both exporters serve files and the block device through, carves that
+//     case out and answers 200 (net/http/fs.go handles errNoOverlap with size 0
+//     that way, and TestOpenStream_FirstRequestServesAnEmptyObject holds it to
+//     it), while a producer reading RFC 9110 literally has nothing to satisfy and
+//     answers 416. At offset zero there is nothing to gain by depending on which
+//     of the two is in front of us.
+//
+// from > 0 requires 206 whose Content-Range starts exactly at from. A 200 answer
+// there is ErrRangeIgnored, never a body to append: it is the whole object from
+// offset zero, and appending it to what is already on disk corrupts the
+// destination silently — the one failure of this family that leaves nothing to
+// find later.
+func (f *Fetcher) OpenStream(ctx context.Context, rawURL string, from int64) (io.ReadCloser, int64, error) {
+	if from < 0 {
+		return nil, 0, fmt.Errorf("GET %s: negative resume offset %d", rawURL, from)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build GET request: %w", err)
+		return nil, 0, fmt.Errorf("build GET request: %w", err)
+	}
+
+	if from > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
 	}
 
 	resp, err := f.doer.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", fileURL, err)
+		return nil, 0, fmt.Errorf("GET %s: %w", rawURL, err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	declared, err := f.streamLength(ctx, resp, rawURL, from)
+	if err != nil {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("GET %s: unexpected status %s", fileURL, resp.Status)
+
+		return nil, 0, err
 	}
 
-	return f.guardBody(ctx, resp.Body), nil
+	return f.guardBody(ctx, resp.Body), declared, nil
+}
+
+// streamLength validates one OpenStream response against the offset it was asked
+// to continue from, and reports the length the producer declared for the whole
+// object (-1 when it declared none).
+func (f *Fetcher) streamLength(ctx context.Context, resp *http.Response, rawURL string, from int64) (int64, error) {
+	if from == 0 {
+		if resp.StatusCode != http.StatusOK {
+			statusErr := exportStatusError(resp.StatusCode,
+				fmt.Errorf("GET %s: unexpected status %s%s", rawURL, resp.Status, f.statusExplanation(ctx, resp)))
+
+			return 0, f.hintPublishUnauthorized(statusErr)
+		}
+
+		// ContentLength is already -1 when the producer declared none (a chunked
+		// response), which is exactly this function's "unknown".
+		return resp.ContentLength, nil
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		return 0, fmt.Errorf("GET %s (resume at %d): %w", rawURL, from, ErrRangeIgnored)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent {
+		statusErr := exportStatusError(resp.StatusCode,
+			fmt.Errorf("GET %s (resume at %d): expected 206, got %s%s", rawURL, from, resp.Status, f.statusExplanation(ctx, resp)))
+
+		return 0, f.hintPublishUnauthorized(statusErr)
+	}
+
+	header := resp.Header.Get("Content-Range")
+	if header == "" {
+		return 0, fmt.Errorf("GET %s (resume at %d): %w: 206 response has no Content-Range header",
+			rawURL, from, ErrContentRangeMismatch)
+	}
+
+	start, end, total, err := parseContentRange(header)
+	if err != nil {
+		return 0, fmt.Errorf("GET %s (resume at %d): %w: %w", rawURL, from, ErrContentRangeMismatch, err)
+	}
+
+	if start != from {
+		return 0, fmt.Errorf("%w: resumed %s at %d, server returned Content-Range %q",
+			ErrContentRangeMismatch, rawURL, from, header)
+	}
+
+	if total >= 0 && end >= total {
+		return 0, fmt.Errorf("%w: Content-Range %q reports total %d not greater than end %d",
+			ErrContentRangeMismatch, header, total, end)
+	}
+
+	return total, nil
 }
 
 // withAttributes appends one "attribute" query parameter per entry in attrs to rawURL.

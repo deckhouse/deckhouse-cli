@@ -408,18 +408,19 @@ func TestRenderPullSummary(t *testing.T) {
 			skippedCount: -1,
 		},
 		{
-			name: "everything skipped renders six skipped lines and no body",
+			name: "everything skipped renders seven skipped lines and no body",
 			summary: &mirror.PullSummary{
-				Platform:  mirror.ComponentStats{Skipped: true},
-				Installer: mirror.ComponentStats{Skipped: true},
-				Security:  mirror.SecurityStats{Skipped: true},
-				Modules:   mirror.ModulesStats{Skipped: true},
-				Packages:  mirror.PackagesStats{Skipped: true},
-				Plugins:   mirror.PluginsStats{Skipped: true},
+				Platform:     mirror.ComponentStats{Skipped: true},
+				Installer:    mirror.ComponentStats{Skipped: true},
+				Security:     mirror.SecurityStats{Skipped: true},
+				Modules:      mirror.ModulesStats{Skipped: true},
+				Packages:     mirror.PackagesStats{Skipped: true},
+				DeckhouseCLI: mirror.DeckhouseCLIStats{Skipped: true},
+				Plugins:      mirror.PluginsStats{Skipped: true},
 			},
-			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:", "Plugins:"},
+			contains:     []string{"Platform:", "Installer:", "Security:", "Modules:", "Packages:", "d8 dist:", "d8 plugins:"},
 			notContains:  []string{"Bundle artifacts", "VEX", "not pulled"},
-			skippedCount: 6,
+			skippedCount: 7,
 		},
 		{
 			name: "moved modules path with modules pulled is warned about",
@@ -506,6 +507,14 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		Attempted: true,
 		Plugins: []mirror.PluginStat{
 			{
+				Name:   "package",
+				Images: 1,
+				Versions: []mirror.PluginVersionStat{{
+					Version: "v0.0.34",
+					Reasons: []mirror.PluginReason{{Kind: "platform", Subject: "platform"}},
+				}},
+			},
+			{
 				Name:   "db-connector",
 				Images: 1,
 				Versions: []mirror.PluginVersionStat{{
@@ -536,7 +545,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		Warnings: []string{
 			`plugin velero-helper@v0.3.0 (explicitly included): requires module "velero" which is not in the bundle; the target cluster must provide it`,
 		},
-		TotalImages: 4,
+		TotalImages: 5,
 	}
 
 	base := func() *mirror.PullSummary {
@@ -553,7 +562,8 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 	t.Run("aggregate line with provenance breakdown", func(t *testing.T) {
 		out := renderPullSummary(base(), false)
 
-		require.Contains(t, out, "Plugins:")
+		require.Contains(t, out, "d8 plugins:")
+		require.Contains(t, out, "1 with the platform")
 		require.Contains(t, out, "1 for modules")
 		require.Contains(t, out, "1 dependency")
 		require.Contains(t, out, "1 explicit")
@@ -591,7 +601,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{Skipped: true}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+skipped`, out)
+		require.Regexp(t, `d8 plugins:\s+skipped`, out)
 	})
 
 	t.Run("phase never ran renders not pulled", func(t *testing.T) {
@@ -599,7 +609,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+not pulled`, out)
+		require.Regexp(t, `d8 plugins:\s+not pulled`, out)
 	})
 
 	t.Run("zero plugins render a bare count", func(t *testing.T) {
@@ -607,7 +617,7 @@ func TestRenderPullSummary_Plugins(t *testing.T) {
 		s.Plugins = mirror.PluginsStats{Attempted: true}
 
 		out := renderPullSummary(s, false)
-		require.Regexp(t, `Plugins:\s+0`, out)
+		require.Regexp(t, `d8 plugins:\s+0`, out)
 	})
 }
 
@@ -748,4 +758,48 @@ func TestPhysicalFileCount(t *testing.T) {
 			require.Equal(t, tc.want, physicalFileCount(mirror.BundleStats{Files: tc.files}))
 		})
 	}
+}
+
+// TestRenderPullSummary_PlatformPluginGroup: plugins that ship with the platform get
+// their own tree group, rendered before the module groups - they are in every bundle
+// that carries the platform, so they are not "other".
+func TestRenderPullSummary_PlatformPluginGroup(t *testing.T) {
+	color.NoColor = true
+
+	summary := &mirror.PullSummary{
+		Elapsed:  time.Minute,
+		Platform: mirror.ComponentStats{Attempted: true},
+		Security: mirror.SecurityStats{Attempted: true, Available: true},
+		Modules:  mirror.ModulesStats{Attempted: true},
+		Packages: mirror.PackagesStats{Attempted: true},
+		Plugins: mirror.PluginsStats{
+			Attempted: true,
+			Plugins: []mirror.PluginStat{
+				{
+					Name:   "system",
+					Images: 1,
+					Versions: []mirror.PluginVersionStat{{
+						Version: "v1.2.0",
+						Reasons: []mirror.PluginReason{{Kind: "platform", Subject: "platform"}},
+					}},
+				},
+				{
+					Name:   "postgresql-mgr",
+					Images: 1,
+					Versions: []mirror.PluginVersionStat{{
+						Version: "v1.2.0",
+						Reasons: []mirror.PluginReason{{Kind: "module", Subject: "postgresql", Constraint: ">=1.5.0"}},
+					}},
+				},
+			},
+			TotalImages: 2,
+		},
+	}
+
+	out := renderPullSummary(summary, true)
+
+	require.Contains(t, out, "platform")
+	require.Contains(t, out, "system")
+	require.Less(t, strings.Index(out, "platform\n"), strings.Index(out, "postgresql\n"),
+		"the platform group leads the module groups")
 }

@@ -37,9 +37,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
@@ -114,7 +114,7 @@ func TestDownloadBlockChunks_Basic(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func TestDownloadBlockChunks_ConcatDecodesCorrectly(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -205,7 +205,7 @@ func TestDownloadBlockChunks_SkipsExistingChunks(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -308,7 +308,7 @@ func TestDownloadBlockChunks_ProgressIsIncremental(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -361,7 +361,7 @@ func TestDownloadBlockChunks_CleansStaleTemp(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestDownloadBlockChunks_ChunkBoundaries(t *testing.T) {
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -489,7 +489,7 @@ func TestDownloadBlockChunks_ChunkSizeChanged_PurgesStaleChunks(t *testing.T) {
 			defer srv.Close()
 
 			blockURL := srv.URL + "/api/v1/block"
-			fetcher := exporter.NewFetcher(srv.Client())
+			fetcher := dataplane.NewFetcher(srv.Client())
 
 			codec, err := compress.New("zstd", int(compress.LevelFastest))
 			require.NoError(t, err)
@@ -565,7 +565,7 @@ func TestDownloadBlockChunks_ChunkSizeChanged_PurgesStaleChunks(t *testing.T) {
 		defer srv.Close()
 
 		blockURL := srv.URL + "/api/v1/block"
-		fetcher := exporter.NewFetcher(srv.Client())
+		fetcher := dataplane.NewFetcher(srv.Client())
 
 		codec, err := compress.New("zstd", int(compress.LevelFastest))
 		require.NoError(t, err)
@@ -641,7 +641,7 @@ func TestDownloadBlockChunks_CorruptChunkMeta_PurgesAndRedownloads(t *testing.T)
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -702,49 +702,69 @@ func TestDownloadBlockChunks_CorruptChunkMeta_PurgesAndRedownloads(t *testing.T)
 }
 
 // errSimulatedInterrupt is returned by truncatingBody once its byte budget is
-// exhausted, standing in for a real Ctrl-C/connection-drop mid-transfer
-// without any real sleeps, timeouts, or network flakiness.
-var errSimulatedInterrupt = errors.New("simulated interrupt: connection dropped mid-chunk")
+// exhausted, standing in for a real Ctrl-C mid-transfer without any real
+// sleeps, timeouts, or network flakiness.
+//
+// It wraps context.Canceled because the tests that use it are about resuming
+// across RUNS: they need the first run to stop for good, and only a
+// cancellation does that now. An ordinary broken connection no longer ends a
+// run — the retry policy resumes it in place, which is the whole point of
+// that policy — so an arbitrary error here would quietly turn those tests
+// into single-run tests that never reach their second run at all.
+//
+// This is also what the Read error looks like when a request context is
+// cancelled while the body is streaming, so the stand-in stays faithful.
+var errSimulatedInterrupt = fmt.Errorf(
+	"simulated interrupt: transfer cancelled mid-chunk: %w", context.Canceled)
 
-// truncatingBody wraps an http response body and returns errSimulatedInterrupt
-// after delivering exactly budget bytes, deterministically simulating an
-// interrupt partway through a chunk's Range GET body.
+// truncatingBody wraps an http response body and returns cutErr (defaulting
+// to errSimulatedInterrupt when nil) after delivering exactly budget bytes,
+// deterministically simulating an interrupt partway through a chunk's Range
+// GET body.
 type truncatingBody struct {
 	r      io.ReadCloser
 	budget int64
+	cutErr error
 }
 
 func (b *truncatingBody) Read(p []byte) (int, error) {
+	err := b.cutErr
+	if err == nil {
+		err = errSimulatedInterrupt
+	}
+
 	if b.budget <= 0 {
-		return 0, errSimulatedInterrupt
+		return 0, err
 	}
 
 	if int64(len(p)) > b.budget {
 		p = p[:b.budget]
 	}
 
-	n, err := b.r.Read(p)
+	n, readErr := b.r.Read(p)
 	b.budget -= int64(n)
 
-	if err == nil && b.budget <= 0 {
-		err = errSimulatedInterrupt
+	if readErr == nil && b.budget <= 0 {
+		readErr = err
 	}
 
-	return n, err
+	return n, readErr
 }
 
 func (b *truncatingBody) Close() error {
 	return b.r.Close()
 }
 
-// recordingDoer wraps a real exporter.Doer, recording every request's Range
+// recordingDoer wraps a real dataplane.Doer, recording every request's Range
 // header in call order and optionally truncating the response body of one
 // designated call (cutOnCall, 1-based; 0 disables truncation) after
-// cutBytes bytes to simulate a mid-transfer interrupt.
+// cutBytes bytes to simulate a mid-transfer interrupt. cutErr selects the
+// error the truncated body reports; nil defaults to errSimulatedInterrupt.
 type recordingDoer struct {
-	inner     exporter.Doer
+	inner     dataplane.Doer
 	cutOnCall int
 	cutBytes  int64
+	cutErr    error
 
 	mu     sync.Mutex
 	calls  int
@@ -764,7 +784,7 @@ func (d *recordingDoer) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	if callIdx == d.cutOnCall {
-		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes}
+		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: d.cutErr}
 	}
 
 	return resp, nil
@@ -823,7 +843,7 @@ func TestDownloadBlockChunks_ResumesPartialChunkFromOffset(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 
 	doer := &recordingDoer{inner: srv.Client(), cutOnCall: 1, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -935,7 +955,7 @@ func TestDownloadBlockChunks_FullPartFinalizesWithoutNetwork(t *testing.T) {
 	require.NoError(t, os.WriteFile(partPath, payload, 0o644))
 	require.NoError(t, os.WriteFile(partPath+".offset", []byte(fmt.Sprintf("%d", totalSize)), 0o644))
 
-	fetcher := exporter.NewFetcher(&failIfCalledDoer{t: t})
+	fetcher := dataplane.NewFetcher(&failIfCalledDoer{t: t})
 
 	var (
 		mu       sync.Mutex
@@ -1081,7 +1101,7 @@ func TestDownloadBlockChunks_OversizedPartStillHandledOnDownloadPath(t *testing.
 	defer srv.Close()
 
 	blockURL := srv.URL + "/api/v1/block"
-	fetcher := exporter.NewFetcher(srv.Client())
+	fetcher := dataplane.NewFetcher(srv.Client())
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -1138,7 +1158,7 @@ func (b *overservingBody) Close() error {
 // body via overservingBody, standing in for a server/proxy that over-sends
 // past a requested Range.
 type overservingDoer struct {
-	inner exporter.Doer
+	inner dataplane.Doer
 	extra []byte
 }
 
@@ -1172,7 +1192,7 @@ func TestDownloadBlockChunks_ServerOverSends_BoundedAtRawLen(t *testing.T) {
 	blockURL := srv.URL + "/api/v1/block"
 
 	doer := &overservingDoer{inner: srv.Client(), extra: bytes.Repeat([]byte("Z"), 4096)}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -1237,7 +1257,7 @@ func (b *cleanEOFBody) Close() error {
 // designated call (cutOnCall, 1-based) to cutBytes via cleanEOFBody, always
 // ending that body with a clean EOF rather than an error.
 type shortSendDoer struct {
-	inner     exporter.Doer
+	inner     dataplane.Doer
 	cutOnCall int
 	cutBytes  int64
 
@@ -1281,7 +1301,7 @@ func TestDownloadBlockChunks_ServerShortSends_ReturnsErrShortChunkRead(t *testin
 	blockURL := srv.URL + "/api/v1/block"
 
 	doer := &shortSendDoer{inner: srv.Client(), cutOnCall: 1, cutBytes: cutBytes}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -1331,7 +1351,7 @@ func TestDownloadBlockChunks_PartSizeAheadOfDurableOffset_TruncatesToTrusted(t *
 	blockURL := srv.URL + "/api/v1/block"
 
 	doer := &recordingDoer{inner: srv.Client()}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -1386,7 +1406,7 @@ func TestDownloadBlockChunks_PartSizeMatchesDurableOffset_ResumesWithoutTruncati
 	blockURL := srv.URL + "/api/v1/block"
 
 	doer := &recordingDoer{inner: srv.Client()}
-	fetcher := exporter.NewFetcher(doer)
+	fetcher := dataplane.NewFetcher(doer)
 
 	codec, err := compress.New("zstd", int(compress.LevelFastest))
 	require.NoError(t, err)
@@ -1423,7 +1443,7 @@ func TestDownloadBlockChunks_PartSizeMatchesDurableOffset_ResumesWithoutTruncati
 	controlChunkDir := filepath.Join(controlDir, archive.BlockChunksDirName)
 	require.NoError(t, volume.DownloadBlockChunks(
 		context.Background(), slog.Default(), controlChunkDir, blockURL, totalSize, chunkSize, 1,
-		exporter.NewFetcher(srv.Client()), codec, nil))
+		dataplane.NewFetcher(srv.Client()), codec, nil))
 
 	resumedFrame, err := os.ReadFile(finalPath)
 	require.NoError(t, err)
@@ -1520,7 +1540,7 @@ func TestDownloadBlockChunks_FinalizeStreamsFromPartFile(t *testing.T) {
 
 	err = volume.DownloadBlockChunks(
 		context.Background(), slog.Default(), chunkDir, srv.URL+"/api/v1/block",
-		int64(len(payload)), chunkSize, 1, exporter.NewFetcher(srv.Client()), codec, nil)
+		int64(len(payload)), chunkSize, 1, dataplane.NewFetcher(srv.Client()), codec, nil)
 	require.NoError(t, err)
 
 	assert.False(t, codec.encodeFrameCalled, "finalize must not call the whole-buffer EncodeFrame")
@@ -1558,7 +1578,7 @@ func TestDownloadBlockChunks_StreamedFrameContract(t *testing.T) {
 
 			err = volume.DownloadBlockChunks(
 				context.Background(), slog.Default(), chunkDir, srv.URL+"/api/v1/block",
-				int64(len(blockPayload)), chunkSize, 2, exporter.NewFetcher(srv.Client()), codec, nil)
+				int64(len(blockPayload)), chunkSize, 2, dataplane.NewFetcher(srv.Client()), codec, nil)
 			require.NoError(t, err)
 
 			numChunks := (len(blockPayload) + chunkSize - 1) / chunkSize
@@ -1600,4 +1620,193 @@ func TestDownloadBlockChunks_StreamedFrameContract(t *testing.T) {
 				"%s: streamed-finalize merged output must match whole-buffer EncodeFrame reference byte-for-byte", name)
 		})
 	}
+}
+
+// onceFlakyDoer wraps a real dataplane.Doer and cuts the response body of the
+// FIRST request whose Range header exactly matches trigger, standing in for
+// one broken connection mid-chunk. Every other request — including the
+// retried request that resumes from a later offset and so carries a
+// different Range value — passes through untouched.
+type onceFlakyDoer struct {
+	inner    dataplane.Doer
+	trigger  string
+	cutBytes int64
+	// cutErr is the error the truncated body reports. nil means
+	// io.ErrUnexpectedEOF, the shape the shared classifier already names as
+	// transient; a test wanting to exercise the progress rule instead — the one
+	// that carries breaks NOTHING can name — sets an unrecognized error here.
+	cutErr error
+
+	mu        sync.Mutex
+	triggered bool
+	calls     int
+}
+
+func (d *onceFlakyDoer) Do(req *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.calls++
+
+	fireNow := !d.triggered && req.Header.Get("Range") == d.trigger
+	if fireNow {
+		d.triggered = true
+	}
+
+	d.mu.Unlock()
+
+	resp, err := d.inner.Do(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if fireNow {
+		cutErr := d.cutErr
+		if cutErr == nil {
+			cutErr = io.ErrUnexpectedEOF
+		}
+
+		resp.Body = &truncatingBody{r: resp.Body, budget: d.cutBytes, cutErr: cutErr}
+	}
+
+	return resp, nil
+}
+
+func (d *onceFlakyDoer) callCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.calls
+}
+
+// TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy proves the
+// classification fix reaches the snapshot download as the COMMAND assembles it, not merely
+// as chunk_retry_internal_test.go assembles it.
+//
+// The distinction is the whole point of the test. The guard next door
+// (TestChunkRetrier_ResumesAfterUnrecognizedTransportBreak) drives chunkRetrier.fetchChunk
+// with a policy of its own; this one goes through volume.DownloadBlockChunks, which is what
+// the command calls and which names the policy itself — so it is the line in block.go
+// wiring dataplane.DefaultRetryPolicy into newChunkRetrier that this covers and that one
+// does not. A download that stopped using the shared retrier, or wired it to a policy
+// without the progress rule, would leave that guard green and this one red.
+//
+// The break is deliberately of a shape no classifier names: an HTTP/2 session torn down
+// mid-body, whose concrete type net/http keeps inside its own unexported copy of the http2
+// package, so nothing outside it can reach the type with errors.As. What licenses the
+// retry is therefore not the error at all but the bytes already delivered.
+//
+// Cost note: this runs under the production backoff, so the single retry it provokes costs
+// roughly a second. One break is enough — the budget's own arithmetic is proven in
+// internal/dataplane, not here.
+func TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 5
+
+	payload := []byte("ABCDEFGHIJKLMNOPQRST") // 20 bytes -> 4 chunks of 5
+
+	broken := errors.New("http2: server sent GOAWAY and closed the connection; LastStreamID=1, ErrCode=NO_ERROR")
+
+	// The premise: this error really is unrecognized. Should a later change teach the
+	// classifier this shape, the test would keep passing while no longer saying anything
+	// about the progress rule — so it says so instead.
+	require.False(t, dataplane.IsTransientDataPlaneError(broken),
+		"premise broken: this failure is now a recognized transient error, so delivered bytes are no longer what carries it")
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	// Chunk 1 covers bytes [5,9]; its first Range GET is cut after 2 delivered bytes.
+	doer := &onceFlakyDoer{inner: srv.Client(), trigger: "bytes=5-9", cutBytes: 2, cutErr: broken}
+	fetcher := dataplane.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, int64(len(payload)), chunkSize, 4, fetcher, codec, nil)
+	require.NoError(t, err, "a break after delivered bytes must be resumed whatever its type")
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(
+		context.Background(), chunkDir, outPath, int64(len(payload)), chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must be byte-identical despite the mid-chunk break")
+
+	// Four clean fetches plus the one retried chunk's second attempt. Counting the
+	// requests is what separates "resumed" from "never broke": both leave the bytes
+	// right, and only the count says the retry happened.
+	assert.Equal(t, 5, doer.callCount(), "expected exactly one retried request across all 4 chunks")
+}
+
+// TestDownloadBlockChunks_RetryIsPerChunk proves the in-run retry is scoped
+// to the one chunk that hits a transient failure: three chunks download
+// cleanly on the first attempt while a fourth is interrupted mid-stream and
+// must recover via a resumed retry, without disturbing the others or
+// corrupting the merged output. It deliberately exercises the DEFAULT retry
+// policy, via the public DownloadBlockChunks entry point with no policy
+// override available, rather than a hand-rolled test policy.
+//
+// What it proves about that wiring has one limit, and the test next door exists
+// because of it: the failure injected here is io.ErrUnexpectedEOF, which the
+// shared classifier already names as transient, so a retrier wired to a policy
+// WITHOUT the progress rule still passes this test. Removing that rule was
+// measured to leave this test green and
+// TestDownloadBlockChunks_SurvivesUnrecognizedBreak_ProductionPolicy red.
+func TestDownloadBlockChunks_RetryIsPerChunk(t *testing.T) {
+	t.Parallel()
+
+	const chunkSize = 5
+	payload := []byte("ABCDEFGHIJKLMNOPQRST") // 20 bytes -> 4 chunks of 5
+
+	srv := newBlockServer(t, payload)
+	defer srv.Close()
+
+	blockURL := srv.URL + "/api/v1/block"
+
+	// Chunk 1 covers bytes [5,9]; its very first (unresumed) Range GET is cut
+	// after 2 bytes with a transient error. Every other chunk, and chunk 1's
+	// resumed retry, must succeed untouched.
+	doer := &onceFlakyDoer{inner: srv.Client(), trigger: "bytes=5-9", cutBytes: 2}
+	fetcher := dataplane.NewFetcher(doer)
+
+	codec, err := compress.New("zstd", int(compress.LevelFastest))
+	require.NoError(t, err)
+
+	nodeDir := t.TempDir()
+	chunkDir := filepath.Join(nodeDir, archive.BlockChunksDirName)
+
+	err = volume.DownloadBlockChunks(
+		context.Background(), slog.Default(), chunkDir, blockURL, int64(len(payload)), chunkSize, 4, fetcher, codec, nil)
+	require.NoError(t, err, "a single transient failure on one chunk must not fail the whole volume")
+
+	names := listChunkFiles(t, chunkDir)
+	require.Len(t, names, 4, "expected 4 chunks")
+
+	wantSlices := [][]byte{
+		payload[0:5],
+		payload[5:10],
+		payload[10:15],
+		payload[15:20],
+	}
+
+	for i, name := range names {
+		got := decodeAll(t, filepath.Join(chunkDir, name))
+		assert.Equal(t, wantSlices[i], got, "chunk %d content mismatch", i)
+	}
+
+	outPath := filepath.Join(nodeDir, archive.DataBlockName(codec.Ext()))
+	require.NoError(t, volume.MergeBlockChunks(context.Background(), chunkDir, outPath, int64(len(payload)), chunkSize, codec.Ext()))
+
+	merged := decodeAll(t, outPath)
+	assert.Equal(t, payload, merged, "merged output must be byte-identical despite the mid-chunk retry")
+
+	// Each of the 3 clean chunks is fetched exactly once; the flaky chunk is
+	// fetched exactly twice (the interrupted attempt plus its resumed retry).
+	assert.Equal(t, 5, doer.callCount(), "expected exactly one retried request across all 4 chunks")
 }

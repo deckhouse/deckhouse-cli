@@ -64,6 +64,11 @@ func newRppPluginSource(client *rpp.Client, logger *dkplog.Logger) *rppPluginSou
 
 var _ pluginSource = (*rppPluginSource)(nil)
 
+// Transport reports that this source reaches the registry through the proxy. It
+// deliberately does not implement pluginCatalog: the proxy allowlist refuses the
+// bare deckhouse-cli/plugins path, so enumeration is not attempted over it.
+func (s *rppPluginSource) Transport() Transport { return TransportRPP }
+
 func (s *rppPluginSource) ListPluginTags(ctx context.Context, pluginName string) ([]string, error) {
 	ref, err := rpp.PluginImage(pluginName)
 	if err != nil {

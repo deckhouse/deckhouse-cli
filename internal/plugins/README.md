@@ -20,22 +20,52 @@ machinery/commands split `internal/selfupdate` / `internal/dist/cmd` uses.
 
 | Command | What it does |
 |---|---|
-| `d8 dist plugins install <name> [--version X] [--use-major N] [--force]` | install or switch a plugin version |
-| `d8 dist plugins update <name> [--use-major N]` | update to the newest cluster-compatible version within the current major |
-| `d8 dist plugins update all` | the same for every installed plugin |
-| `d8 dist plugins list` | list installed plugins (the proxy serves no catalog, so available plugins cannot be listed) |
-| `d8 dist plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 dist versions`) |
+| `d8 dist plugins install <name> [--version X] [--use-major N] [--force]` | install a plugin, switch its version, or update it - installing one that is already present updates it to the newest cluster-compatible version within its current major |
+| `d8 dist plugins install --all [--force]` | the same for every installed plugin at once, each within its own major. Rejects `--version` and `--use-major`, which pin a single plugin |
+| `d8 dist plugins list` | the plugins installed on disk, plus - only on a transport that can enumerate, i.e. `--source` - those published in the registry and ready to install |
+| `d8 dist plugins versions <name>` | list all published versions of one plugin (installed one marked; same verb as `d8 dist versions`). A release is published one tag per platform; those are collapsed into one line per version listing the platforms it was built for |
 | `d8 dist plugins contract <name>` | show a plugin's contract |
 | `d8 dist plugins remove <name>` | remove an installed plugin |
-| `d8 <plugin> ...` *(wrapper, with `DECKHOUSE_PLUGINS_ENABLED=true`)* | run an installed plugin; auto-installs it on first use |
+| `d8 <plugin> ...` *(wrapper)* | run an installed plugin; auto-installs it on first use |
 
-## Plugin source
+## Overriding a built-in command
 
-The `pluginSource` interface (`source.go`) has two implementations, chosen in
-`InitPluginServices` (`init.go`) by whether the hidden `--source` flag is set:
+A handful of top-level commands are **overridable**: `delivery-kit`, `data`, `snapshot`, `iam`, `network`, `v`, `stronghold`, `package` and `system`. Install a plugin named exactly like one of them and it takes the command over; with no such plugin installed, the built-in implementation serves it. The table lives in `overridableCommands` (`cmd/d8/root.go`).
 
-- **`rppPluginSource` (`rpp_source.go`) - the default and only supported
-  source.** Plugins are pulled through the in-cluster registry-packages-proxy
+Details worth knowing:
+
+- **Already-installed only.** The override never reaches the registry: a plugin that exists upstream but is not installed locally does not displace a built-in, so `d8` starts with no network access and no surprises. Auto-install on first use therefore applies only to plugins that are *not* shadowing a built-in.
+- **Canonical names only.** A plugin must match the command's own name, never one of its aliases - there is no `dk` plugin, only `delivery-kit`. The built-in's aliases carry over to the wrapper, so `d8 dk` and `d8 s` keep working after an override.
+- **Resolved before flag parsing.** Which commands get registered is decided at startup, so `--plugins-dir` cannot influence it; only the `DECKHOUSE_CLI_PATH` env var can. Both the configured root and the `~/.deckhouse-cli` fallback are searched.
+- **Dependency bookkeeping.** `delivery-kit` and `package` satisfy a plugin's dependency on that name while they ship as built-ins. Once a plugin takes one over, the name drops off that list and the dependency resolves against the real plugin, version constraints included.
+
+## Transports
+
+Plugins reach the registry over one of two transports, chosen in
+`InitPluginServices` (`init.go`) by whether the hidden `--source` flag is set. Both
+implement `pluginSource` (`source.go`) and report which one they are via
+`Transport()`, so a message can name the transport instead of leaving it implicit.
+
+They differ in one capability, expressed as the separate `pluginCatalog` interface:
+
+| | `TransportRPP` | `TransportRegistry` |
+|---|---|---|
+| selected by | default | `--source` |
+| credentials | none (kubeconfig identity) | registry login / license |
+| install, update, versions, contract (by exact name) | yes | yes |
+| **enumerate published plugins** (`pluginCatalog`) | **no** | yes |
+| cluster-side requirement checks | enforced | force-skipped |
+
+Enumeration is a property of the transport, not a runtime failure. The catalog is
+the tag list of the `deckhouse-cli/plugins` repository, and the proxy allowlist
+(`isAllowedCLIImagePath` in the Deckhouse repo) admits only `deckhouse-cli` and
+`deckhouse-cli/plugins/<name>`, explicitly refusing the bare `deckhouse-cli/plugins`
+path. So `rppPluginSource` does not implement `pluginCatalog` and never issues the
+request; `AvailablePlugins` returns `ErrCatalogUnsupported` naming the transport, and
+`d8 dist plugins list` prints its installed half as usual.
+
+- **`rppPluginSource` (`rpp_source.go`) - `TransportRPP`, the default and only
+  supported source.** Plugins are pulled through the in-cluster registry-packages-proxy
   using the **kubeconfig identity**, with no registry credentials on the user
   side (ADR #386: deckhouse-cli reaches the registry exclusively through the
   proxy, so every command needs a reachable cluster). See
@@ -44,8 +74,8 @@ The `pluginSource` interface (`source.go`) has two implementations, chosen in
   ClusterRole as self-update, because both travel the `/v1/images/` route. The
   plugin routes are
   `/v1/images/deckhouse-cli/plugins/<name>/{tags,manifests/<ref>,images/<version>}`.
-- **`registryPluginSource` (`source_legacy.go`) - a temporary, hidden `--source`
-  bypass.** It pulls straight from a registry repo with go-containerregistry,
+- **`registryPluginSource` (`source_legacy.go`) - `TransportRegistry`, a temporary,
+  hidden `--source` bypass.** It pulls straight from a registry repo with go-containerregistry,
   skipping the proxy and the cluster, and force-sets `--skip-cluster-checks`. It
   exists for pre-#386 workflows and is documented for removal (grep marker
   `legacy --source`).
@@ -169,8 +199,9 @@ them - install/update work as usual. See `internal/mirror/README.MD`
 
 ## Boundaries and deliberate decisions
 
-- Listing the full plugin catalog over RPP is not supported (the proxy has no
-  catalog endpoint); install/update by name works.
+- Enumerating the published plugins works only over `TransportRegistry`; the proxy
+  allowlist refuses the plugins-repository path, so `list` reports that half as
+  unsupported and still prints the installed half. See **Transports** above.
 - Idempotency compares the version reported by the binary itself; a plugin that
   prints a non-semver banner is re-pulled on every explicit `update`.
 - Dependency resolution is dry-run during selection (a candidate whose chain
@@ -192,7 +223,7 @@ them - install/update work as usual. See `internal/mirror/README.MD`
 | `install.go` | the install pipeline: lock, staged download, smoke, atomic swap, idempotency |
 | `select.go` | newest-compatible version selection, contract memoization |
 | `planner.go` | plugin-to-plugin dependency resolution: constraint-aware planning, conflict/cycle/depth guards, upgrade-only |
-| `update.go` | `UpdateAll`, installed-plugin discovery, home-fallback switch |
+| `update.go` | `UpdateAll` (behind `install --all`), installed-plugin discovery, home-fallback switch |
 | `remove.go` | `Remove` / `RemoveAll` |
 | `validators.go` | plugin-to-plugin requirement checks + the Manager glue over `requirements/` (snapshot cache, kubeconfig clients, `--skip-cluster-checks`) |
 | `requirements/` | cluster-side requirements: the one-shot cluster snapshot (k8s / Deckhouse / modules) and the named checks against it |

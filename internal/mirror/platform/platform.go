@@ -115,6 +115,11 @@ type Service struct {
 	// are set before any download, so they are populated in dry-run too.
 	resolvedVersions []string
 	resolvedChannels []string
+	// resolvedChannelTags pairs every channel in resolvedChannels with the
+	// version tag it resolves to upstream. Channel tags in the platform
+	// repositories are aliases of that version tag, which is what
+	// propagateChannelAliases re-tags against.
+	resolvedChannelTags []ChannelVersionTag
 
 	// logger is for internal debug logging
 	logger *dkplog.Logger
@@ -190,7 +195,7 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 		return fmt.Errorf("validate platform access: %w", err)
 	}
 
-	tagsToMirror, channelsToMirror, err := svc.findTagsToMirror(ctx)
+	tagsToMirror, channelsToMirror, channelTags, err := svc.findTagsToMirror(ctx)
 	if err != nil {
 		return fmt.Errorf("find tags to mirror: %w", err)
 	}
@@ -199,6 +204,7 @@ func (svc *Service) PullPlatform(ctx context.Context) error {
 	// download, so the data is available in dry-run as well.
 	svc.resolvedVersions = tagsToMirror
 	svc.resolvedChannels = channelsToMirror
+	svc.resolvedChannelTags = channelTags
 
 	svc.downloadList.FillDeckhouseImages(tagsToMirror)
 	svc.downloadList.FillForChannels(channelsToMirror)
@@ -308,7 +314,7 @@ func (svc *Service) validateReleaseChannelAccess(ctx context.Context, channel st
 // findTagsToMirror determines which Deckhouse release tags should be mirrored
 // If a specific target tag is set, it returns only that tag
 // Otherwise, it finds all relevant versions that should be mirrored based on channels and version ranges
-func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, error) {
+func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, []ChannelVersionTag, error) {
 	strickTags := []string{}
 	if svc.options.TargetTag != "" {
 		strickTags = append(strickTags, svc.options.TargetTag)
@@ -316,7 +322,7 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, e
 
 	result, err := svc.versionsToMirror(ctx, strickTags)
 	if err != nil {
-		return nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
+		return nil, nil, nil, fmt.Errorf("Find versions to mirror: %w", err)
 	}
 
 	svc.userLogger.Infof("Deckhouse releases to pull: %+v", result.Versions)
@@ -328,7 +334,7 @@ func (svc *Service) findTagsToMirror(ctx context.Context) ([]string, []string, e
 	// Add custom tags as-is (without "v" prefix)
 	vers = append(vers, result.CustomTags...)
 
-	return vers, result.Channels, nil
+	return vers, result.Channels, result.ChannelVersions, nil
 }
 
 type releaseChannelVersionResult struct {
@@ -342,6 +348,10 @@ type VersionsToMirrorResult struct {
 	Versions []semver.Version
 	// Channels contains release channels to mirror
 	Channels []string
+	// ChannelVersions pairs every channel in Channels with the version tag it
+	// points at, so callers can re-tag the pulled images with channel aliases
+	// without asking the registry again.
+	ChannelVersions []ChannelVersionTag
 	// CustomTags contains custom tags (non-semver, non-channel tags) to mirror
 	CustomTags []string
 }
@@ -397,9 +407,10 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	// If specific tags requested, return immediately
 	if isTagsMirror {
 		return &VersionsToMirrorResult{
-			Versions:   deduplicateVersions(versions),
-			Channels:   matchedChannels,
-			CustomTags: parsed.customTags,
+			Versions:        deduplicateVersions(versions),
+			Channels:        matchedChannels,
+			ChannelVersions: channelVersionTags(matchedChannels, channelVersions),
+			CustomTags:      parsed.customTags,
 		}, nil
 	}
 
@@ -437,10 +448,38 @@ func (svc *Service) versionsToMirror(ctx context.Context, tagsToMirror []string)
 	}
 
 	return &VersionsToMirrorResult{
-		Versions:   deduplicateVersions(expandedVersions),
-		Channels:   filteredChannels,
-		CustomTags: parsed.customTags,
+		Versions:        deduplicateVersions(expandedVersions),
+		Channels:        filteredChannels,
+		ChannelVersions: channelVersionTags(filteredChannels, channelVersions),
+		CustomTags:      parsed.customTags,
 	}, nil
+}
+
+// ChannelVersionTag pairs a release channel with the version tag it currently
+// resolves to ("stable" -> "v1.69.0").
+type ChannelVersionTag struct {
+	Channel string
+	Tag     string
+}
+
+// channelVersionTags renders the channel -> version snapshot as the version
+// tags used everywhere else in the pull ("v" + semver), keeping only channels
+// that survived filtering and preserving their order. A channel whose version
+// is unknown is dropped: an alias without a version tag to point at has
+// nothing to re-tag.
+func channelVersionTags(channels []string, versions channelVersions) []ChannelVersionTag {
+	tags := make([]ChannelVersionTag, 0, len(channels))
+
+	for _, channel := range channels {
+		version, ok := versions[channel]
+		if !ok || version == nil {
+			continue
+		}
+
+		tags = append(tags, ChannelVersionTag{Channel: channel, Tag: "v" + version.String()})
+	}
+
+	return tags
 }
 
 // parseInputTags categorizes input tags into semver versions and custom tags
@@ -1006,35 +1045,12 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	}
 
 	err = logger.Process("Processing image indexes", func() error {
-		if svc.options.TargetTag != "" {
-			// If we are pulling some build by tag, propagate release channel image of it to all channels if it exists.
-			releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.options.TargetTag)
-
-			switch {
-			case errors.Is(err, image.ErrImageMetaNotFound):
-				logger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
-				// TODO: remove goto
-				goto sortManifests
-			case err != nil:
-				return fmt.Errorf("Find release-%s channel descriptor: %w", svc.options.TargetTag, err)
-			}
-
-			digest, err := releaseChannel.Digest()
-			if err != nil {
-				return fmt.Errorf("cannot get release channel image digest: %w", err)
-			}
-
-			for _, channel := range internal.GetAllDefaultReleaseChannels() {
-				if err = svc.layout.DeckhouseReleaseChannel.TagImage(digest, channel); err != nil {
-					return fmt.Errorf("tag release channel: %w", err)
-				}
-			}
+		if err := svc.propagateChannelAliases(tagsToMirror); err != nil {
+			return err
 		}
 
-	sortManifests:
 		for _, l := range svc.layout.AsList() {
-			err = layouts.SortIndexManifests(l)
-			if err != nil {
+			if err := layouts.SortIndexManifests(l); err != nil {
 				return fmt.Errorf("Sorting index manifests of %s: %w", l, err)
 			}
 		}
@@ -1056,6 +1072,115 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 		})
 	}); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// propagateChannelAliases tags the pulled installer images with release
+// channel names, so that <repo>/install:stable resolves in a registry filled
+// by `d8 mirror push`. Without it the documented air-gapped install flow
+// (`docker run <repo>/install:<channel>`) has no tag to run.
+//
+// A channel name is a pure alias of a version tag, so the aliases are produced
+// by re-tagging images that are already in the layout instead of enqueueing
+// <repo>:<channel> downloads. That keeps this free of extra traffic and, more
+// importantly, independent of whether the source registry publishes channel
+// tags in those repositories at all: LTS-only (CSE) registries and
+// intermediate registries fed by a previous `d8 mirror push` do not, and
+// downloading channel tags there is the 404 that made
+// pull -> push -> pull cycles fail.
+//
+// Only the install repository is aliased. The main Deckhouse repository is
+// addressed by version everywhere that matters (the release controller reads
+// release-channel, which carries the aliases already), and install-standalone
+// publishes no channel tags upstream, so neither gets them here.
+func (svc *Service) propagateChannelAliases(tagsToMirror []string) error {
+	// Tag-pinned pull: every default channel is re-pointed at the pinned
+	// build, but only when the source serves a release-channel image for it.
+	// Without that image there is no release metadata behind the alias, and
+	// inventing channels the source never published would be wrong.
+	if svc.options.TargetTag != "" {
+		releaseChannel, err := svc.layout.DeckhouseReleaseChannel.GetImage(svc.options.TargetTag)
+
+		switch {
+		case errors.Is(err, image.ErrImageMetaNotFound):
+			svc.userLogger.WarnLn("Registry does not contain release channels, release channels images will not be added to bundle")
+
+			return nil
+		case err != nil:
+			return fmt.Errorf("Find release-%s channel descriptor: %w", svc.options.TargetTag, err)
+		}
+
+		digest, err := releaseChannel.Digest()
+		if err != nil {
+			return fmt.Errorf("cannot get release channel image digest: %w", err)
+		}
+
+		channels := internal.GetAllDefaultReleaseChannels()
+
+		for _, channel := range channels {
+			if err = svc.layout.DeckhouseReleaseChannel.TagImage(digest, channel); err != nil {
+				return fmt.Errorf("tag release channel: %w", err)
+			}
+		}
+
+		// A tag-pinned pull resolves to exactly one build. Anything else means
+		// the pin did not identify a single image, and aliasing the channels
+		// to an arbitrary member of that set would be a guess.
+		if len(tagsToMirror) != 1 {
+			return nil
+		}
+
+		return tagImageAliases(svc.layout.DeckhouseInstall, tagsToMirror[0], channels)
+	}
+
+	// Full discovery: every channel keeps pointing at the version it resolves
+	// to upstream.
+	for _, resolved := range svc.resolvedChannelTags {
+		if err := tagImageAliases(svc.layout.DeckhouseInstall, resolved.Tag, []string{resolved.Channel}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// tagImageAliases points every alias at the image stored under versionTag.
+// A version that never landed in the layout is skipped instead of failing the
+// pull: installers are pulled with AllowMissingTags, so a release without one
+// is an expected state rather than an error.
+//
+// Aliasing is index-only - it appends a descriptor for a manifest the layout
+// already holds, so it costs no traffic and does not require the source
+// registry to publish <repo>/install:<channel> itself.
+func tagImageAliases(l *image.ImageLayout, versionTag string, aliases []string) error {
+	if l == nil {
+		return nil
+	}
+
+	img, err := l.GetImage(versionTag)
+
+	switch {
+	case errors.Is(err, image.ErrImageMetaNotFound):
+		return nil
+	case err != nil:
+		return fmt.Errorf("find image %q to alias: %w", versionTag, err)
+	}
+
+	digest, err := img.Digest()
+	if err != nil {
+		return fmt.Errorf("get digest of image %q: %w", versionTag, err)
+	}
+
+	for _, alias := range aliases {
+		if alias == versionTag {
+			continue
+		}
+
+		if err = l.TagImage(digest, alias); err != nil {
+			return fmt.Errorf("tag image %q as %q: %w", versionTag, alias, err)
+		}
 	}
 
 	return nil

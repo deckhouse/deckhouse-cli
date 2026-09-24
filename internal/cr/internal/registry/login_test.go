@@ -25,8 +25,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/google/go-containerregistry/pkg/name"
 )
 
 const (
@@ -135,7 +133,5 @@ func TestLoginVerifiesCredentials(t *testing.T) {
 // insecureOptions parses the httptest host as plain HTTP (it serves no TLS),
 // matching how `--insecure` / a localhost target is handled in real use.
 func insecureOptions() *Options {
-	o := New()
-	o.Name = append(o.Name, name.Insecure)
-	return o
+	return New().WithInsecure()
 }

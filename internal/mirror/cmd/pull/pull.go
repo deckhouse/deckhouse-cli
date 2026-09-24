@@ -437,6 +437,7 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 			PlatformConstraint: pullflags.PlatformConstraint,
 			ModuleFilter:       filter,
 			PackageFilter:      packageFilter,
+			DeckhouseCLITag:    pullflags.DeckhouseCLITag,
 			PluginFilter:       pluginFilter,
 			PluginBuiltins:     pluginBuiltinCommands,
 			BundleDir:          pullflags.ImagesBundlePath,

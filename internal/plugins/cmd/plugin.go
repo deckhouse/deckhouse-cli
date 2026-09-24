@@ -29,26 +29,55 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/plugins"
 )
 
+// SystemPluginName and PackagePluginName name the two capabilities that are both
+// overridable commands and possible plugin dependencies (see overridableCommands in
+// cmd/d8/root.go): each is served by an installed plugin of that name, or by its
+// built-in implementation when no such plugin is installed. While `package` is
+// served by the built-in it is passed to SetBuiltinCommands, so a plugin depending
+// on "package" is satisfied without a registry lookup.
 const (
-	SystemPluginName = "system"
-	// PackagePluginName names the capability, not a wrapper command: `d8 package`
-	// is always built in (cmd/d8/root.go). It is passed to SetBuiltinCommands so a
-	// plugin depending on "package" is satisfied without a registry lookup.
-	// TODO(Glitchy-Sheep): swap the built-in for NewPluginCommand during full plugin system implementation.
+	SystemPluginName  = "system"
 	PackagePluginName = "package"
 )
 
+// PluginCommandOption configures the wrapper returned by NewPluginCommand.
+type PluginCommandOption func(*pluginCommandOptions)
+
+type pluginCommandOptions struct {
+	installRoot string
+}
+
+// WithInstallRoot pins the wrapper to an install root already known to hold the
+// plugin, skipping the EnsureInstallRoot probe and its home-fallback switch.
+//
+// Without it the wrapper starts from the configured root, which is the wrong one
+// whenever the installs live in the ~/.deckhouse-cli fallback: EnsureInstallRoot
+// switches over only on a permission error, so a configured root that exists but
+// is empty keeps the wrapper looking in a directory holding no plugin at all.
+func WithInstallRoot(root string) PluginCommandOption {
+	return func(o *pluginCommandOptions) { o.installRoot = root }
+}
+
 // NewPluginCommand returns the wrapper command that runs an installed plugin
 // (e.g. `d8 system`), installing it first when missing.
-// TODO: add options pattern
-func NewPluginCommand(commandName, description string, aliases []string, logger *dkplog.Logger) *cobra.Command {
+func NewPluginCommand(commandName, description string, aliases []string, logger *dkplog.Logger, opts ...PluginCommandOption) *cobra.Command {
+	var options pluginCommandOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	manager := plugins.NewManager(logger.Named("plugins-command"))
 
-	if err := manager.EnsureInstallRoot(); err != nil {
-		// Warn but keep building the command: a nil return makes the caller's
-		// cobra.AddCommand panic and takes down the whole CLI. RunInstalled
-		// surfaces the root error at invocation time.
-		logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
+	switch {
+	case options.installRoot != "":
+		manager.SetDirectory(options.installRoot)
+	default:
+		if err := manager.EnsureInstallRoot(); err != nil {
+			// Warn but keep building the command: a nil return makes the caller's
+			// cobra.AddCommand panic and takes down the whole CLI. RunInstalled
+			// surfaces the root error at invocation time.
+			logger.Warn("failed to ensure plugin root directory", slog.String("error", err.Error()))
+		}
 	}
 
 	// Drive the help text from the cached contract (description + declared flags/env).

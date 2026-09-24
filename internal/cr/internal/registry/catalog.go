@@ -18,45 +18,32 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
+	dkpreg "github.com/deckhouse/deckhouse/pkg/registry"
 )
 
-// ListCatalog invokes visit for every repository page on the given registry.
-// Not every registry implements /v2/_catalog - the underlying call will
-// surface a 404 through the error chain.
-func ListCatalog(ctx context.Context, regRef string, opts *Options, visit func(repos []string) error) error {
-	reg, err := name.NewRegistry(regRef, opts.Name...)
+// ListCatalog returns every repository on the given registry.
+//
+// Registries that do not implement /v2/_catalog - Docker Hub, GCR and Artifact
+// Registry among them - are reported as such rather than as a bare 404, which
+// otherwise reads like a missing repository and sends users hunting for a
+// permissions problem they do not have.
+func ListCatalog(ctx context.Context, regRef string, opts *Options) ([]string, error) {
+	client, err := clientForRegistryRef(regRef, opts)
 	if err != nil {
-		return fmt.Errorf("parse registry %q: %w", regRef, err)
+		return nil, err
 	}
 
-	puller, err := remote.NewPuller(opts.remoteWithContext(ctx)...)
+	repos, err := client.ListRepositories(ctx)
 	if err != nil {
-		return fmt.Errorf("create puller: %w", err)
-	}
-
-	catalogger, err := puller.Catalogger(ctx, reg)
-	if err != nil {
-		return fmt.Errorf("read catalog for %s: %w", reg, err)
-	}
-
-	for catalogger.HasNext() {
-		if err := ctx.Err(); err != nil {
-			return err
+		if errors.Is(err, dkpreg.ErrCatalogNotSupported) {
+			return nil, fmt.Errorf("%s does not support listing repositories (no /v2/_catalog): %w", regRef, err)
 		}
 
-		page, err := catalogger.Next(ctx)
-		if err != nil {
-			return fmt.Errorf("read next catalog page: %w", err)
-		}
-
-		if err := visit(page.Repos); err != nil {
-			return err
-		}
+		return nil, fmt.Errorf("read catalog for %s: %w", regRef, err)
 	}
 
-	return nil
+	return repos, nil
 }

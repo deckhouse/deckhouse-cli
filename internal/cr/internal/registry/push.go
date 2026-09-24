@@ -20,39 +20,37 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
 // Push writes obj (v1.Image or v1.ImageIndex) under ref and returns the
 // resulting digest. Anything else is a programmer error.
 func Push(ctx context.Context, ref string, obj partial.WithRawManifest, opts *Options) (v1.Hash, error) {
-	// A literal-nil and a typed-nil v1.Image/v1.ImageIndex both land here
-	// as a nil interface (since v1.Image and v1.ImageIndex are themselves
-	// interfaces). Catching it up front keeps the type switch from doing
-	// remote.Write on a nil object and panicking inside go-containerregistry.
+	// A literal-nil and a typed-nil v1.Image/v1.ImageIndex both land here as a
+	// nil interface, since v1.Image and v1.ImageIndex are themselves
+	// interfaces. Catching it up front keeps the type switch from pushing a nil
+	// object and panicking deeper down.
 	if obj == nil {
 		return v1.Hash{}, fmt.Errorf("push %s: object is nil", ref)
 	}
 
-	parsed, err := name.ParseReference(ref, opts.Name...)
+	client, id, err := clientForRef(ref, opts)
 	if err != nil {
-		return v1.Hash{}, fmt.Errorf("parse reference %q: %w", ref, err)
+		return v1.Hash{}, err
 	}
 
-	remoteOpts := opts.remoteWithContext(ctx)
+	pushOpts := opts.pushOptions()
 
 	switch t := obj.(type) {
 	case v1.Image:
-		if err := remote.Write(parsed, t, remoteOpts...); err != nil {
+		if err := client.PushImage(ctx, id, t, pushOpts...); err != nil {
 			return v1.Hash{}, fmt.Errorf("push image %s: %w", ref, err)
 		}
 
 		return t.Digest()
 	case v1.ImageIndex:
-		if err := remote.WriteIndex(parsed, t, remoteOpts...); err != nil {
+		if err := client.PushIndex(ctx, id, t, pushOpts...); err != nil {
 			return v1.Hash{}, fmt.Errorf("push index %s: %w", ref, err)
 		}
 

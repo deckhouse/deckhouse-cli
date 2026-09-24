@@ -313,6 +313,93 @@ func TestClient_SetTLSCAData_PassThroughNonTransport(t *testing.T) {
 	}
 }
 
+// TestClient_SetTLSCAData_ForcesVerification is the regression guard for the
+// insecure-skip-tls-verify/tls-server-name bypass: SetTLSCAData builds a merged
+// trust pool, but an inherited Insecure or ServerName from kubeconfig can make
+// verification a no-op (InsecureSkipVerify) or check the wrong hostname
+// regardless of how large that pool is. SetTLSCAData must force both off — on
+// the rest.Config itself AND on the transport clone that carries RootCAs, since
+// client-go may already have baked the inherited values into a base
+// *http.Transport before WrapTransport runs.
+func TestClient_SetTLSCAData_ForcesVerification(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		caData []byte
+	}{
+		{
+			name:   "nil CA data",
+			caData: nil,
+		},
+		{
+			name:   "valid CA data",
+			caData: testCACertificatePEM(t),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sc := &Client{
+				restConfig: &rest.Config{
+					TLSClientConfig: rest.TLSClientConfig{
+						Insecure:   true,
+						ServerName: "api.example",
+					},
+				},
+			}
+
+			sc.SetTLSCAData(tc.caData)
+
+			if sc.restConfig.TLSClientConfig.Insecure {
+				t.Error("restConfig.TLSClientConfig.Insecure = true, want false after SetTLSCAData")
+			}
+
+			if sc.restConfig.TLSClientConfig.ServerName != "" {
+				t.Errorf("restConfig.TLSClientConfig.ServerName = %q, want empty after SetTLSCAData",
+					sc.restConfig.TLSClientConfig.ServerName)
+			}
+
+			orig := &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true, // exercising the inherited-insecure bypass this test guards against
+					ServerName:         "api.example",
+				},
+			}
+
+			got := sc.restConfig.WrapTransport(orig)
+
+			wrapped, ok := got.(*http.Transport)
+			if !ok {
+				t.Fatalf("wrapped transport is not an *http.Transport: %T", got)
+			}
+
+			if wrapped.TLSClientConfig.InsecureSkipVerify {
+				t.Error("cloned transport TLSClientConfig.InsecureSkipVerify = true, want false")
+			}
+
+			if wrapped.TLSClientConfig.ServerName != "" {
+				t.Errorf("cloned transport TLSClientConfig.ServerName = %q, want empty", wrapped.TLSClientConfig.ServerName)
+			}
+
+			if wrapped.TLSClientConfig.RootCAs == nil {
+				t.Error("cloned transport TLSClientConfig.RootCAs is nil")
+			}
+
+			if !orig.TLSClientConfig.InsecureSkipVerify {
+				t.Error("original transport TLSClientConfig.InsecureSkipVerify was mutated, want it untouched")
+			}
+
+			if orig.TLSClientConfig.ServerName != "api.example" {
+				t.Errorf("original transport TLSClientConfig.ServerName = %q, want it untouched (\"api.example\")",
+					orig.TLSClientConfig.ServerName)
+			}
+		})
+	}
+}
+
 // TestClient_SetResponseHeaderTimeout_FailsFastOnHeaderStall asserts the
 // configured transport aborts a request whose server accepts the connection but
 // never sends response headers, within the response-header timeout.
@@ -586,6 +673,16 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) {
 	t.Parallel()
 
+	// The short request must end on its own timeout, long before the long
+	// timeout could end it, so leaking either timeout into the other client
+	// fails the test. The two stay far apart so that a stall on a loaded
+	// machine cannot push the short request past maxShortElapsed.
+	const (
+		shortTimeout    = 50 * time.Millisecond
+		longTimeout     = 10 * time.Second
+		maxShortElapsed = 5 * time.Second
+	)
+
 	shortStarted := make(chan struct{})
 	longStarted := make(chan struct{})
 	releaseLong := make(chan struct{}, 1)
@@ -614,13 +711,13 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 	})
 
 	sc := newSharedHTTP2Client(t, srv)
-	shortClient, err := newPersistentTestClient(sc, srv, 50*time.Millisecond)
+	shortClient, err := newPersistentTestClient(sc, srv, shortTimeout)
 	if err != nil {
 		t.Fatalf("build short-timeout client: %v", err)
 	}
 	t.Cleanup(shortClient.CloseIdleConnections)
 
-	longClient, err := newPersistentTestClient(sc, srv, time.Second)
+	longClient, err := newPersistentTestClient(sc, srv, longTimeout)
 	if err != nil {
 		t.Fatalf("build long-timeout client: %v", err)
 	}
@@ -650,12 +747,12 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 		t.Fatalf("short HTTP/2 request error = %v, want response-header timeout", err)
 	}
 
-	if elapsed < 25*time.Millisecond {
+	if elapsed < shortTimeout/2 {
 		t.Fatalf("short HTTP/2 response-header timeout took only %v", elapsed)
 	}
 
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("short HTTP/2 response-header timeout took %v, want under 500ms", elapsed)
+	if elapsed > maxShortElapsed {
+		t.Fatalf("short HTTP/2 response-header timeout took %v, want under %v", elapsed, maxShortElapsed)
 	}
 
 	<-shortStarted
@@ -1212,6 +1309,64 @@ func TestTLSIdentityClient_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestValidateHTTPSURL verifies ValidateHTTPSURL accepts only a well-formed HTTPS origin,
+// without requiring a CA argument (unlike ValidateHTTPSIdentity) -- the publish upload path
+// (status.ca empty by design behind Ingress) relies on this weaker check.
+func TestValidateHTTPSURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{
+			name:   "success: well-formed HTTPS origin",
+			rawURL: "https://importer.example.test:8443",
+		},
+		{
+			name:    "error: plaintext HTTP origin",
+			rawURL:  "http://importer.example.test",
+			wantErr: true,
+		},
+		{
+			name:    "error: empty string",
+			rawURL:  "",
+			wantErr: true,
+		},
+		{
+			name:    "error: malformed URL",
+			rawURL:  "://bad-url",
+			wantErr: true,
+		},
+		{
+			name:    "error: scheme-less host",
+			rawURL:  "importer.example.test",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateHTTPSURL(tc.rawURL)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateHTTPSURL(%q) = nil, want error", tc.rawURL)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ValidateHTTPSURL(%q) = %v, want nil", tc.rawURL, err)
+			}
+		})
+	}
+}
+
 func newPersistentTLSServer(
 	t *testing.T,
 	serial int64,
@@ -1246,6 +1401,18 @@ func newPersistentTLSServer(
 	t.Cleanup(server.Close)
 
 	return server
+}
+
+// testCACertificatePEM returns a PEM-encoded certificate suitable as a valid,
+// well-formed CA bundle input, without requiring the caller to stand up and
+// tear down a dedicated TLS server just to obtain one.
+func testCACertificatePEM(t *testing.T) []byte {
+	t.Helper()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(srv.Close)
+
+	return certificatePEM(t, srv)
 }
 
 func certificatePEM(t *testing.T, server *httptest.Server) []byte {

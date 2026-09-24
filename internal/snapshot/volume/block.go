@@ -32,9 +32,9 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/deckhouse/deckhouse-cli/internal/dataplane"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
-	"github.com/deckhouse/deckhouse-cli/internal/snapshot/exporter"
 )
 
 // DefaultChunkSize is the default raw-byte size of each block-volume chunk.
@@ -112,6 +112,14 @@ var ErrShortChunkRead = errors.New("chunk range body ended before the requested 
 // DATA. The final codec frame is produced, and the ".part" file consumed,
 // only once the raw bytes are fully durable on disk.
 //
+// The same durable-resume mechanism now also backs an IN-RUN retry: a
+// transient transport failure (see dataplane.IsTransientDataPlaneError) does
+// not fail the whole chunk. chunkRetrier re-issues the Range GET from the
+// exact durable offset the interrupted attempt persisted, with bounded
+// exponential backoff, so one broken connection mid-chunk no longer forces a
+// second process run to make progress — resuming across attempts within a
+// single call is exactly the same mechanism as resuming across runs.
+//
 // Memory note: once a chunk's ".part" file is complete, finalizeChunkFrame
 // streams it through codec.EncodeFrameStream directly into the final chunk's
 // AtomicWriter — the whole raw chunk is never read into memory as a []byte
@@ -127,7 +135,7 @@ func DownloadBlockChunks(
 	totalSize int64,
 	chunkSize int64,
 	workers int,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
@@ -156,7 +164,7 @@ func DownloadBlockChunksRooted(
 	totalSize int64,
 	chunkSize int64,
 	workers int,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
@@ -184,7 +192,7 @@ func downloadBlockChunks(
 	totalSize int64,
 	chunkSize int64,
 	workers int,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
 	onProgress func(n int),
 ) error {
@@ -211,6 +219,8 @@ func downloadBlockChunks(
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 
+	retrier := newChunkRetrier(dataplane.DefaultRetryPolicy())
+
 	for i := range numChunks {
 		chunkIdx := i
 
@@ -226,12 +236,23 @@ func downloadBlockChunks(
 				totalSize,
 				fetcher,
 				codec,
+				retrier,
 				onProgress,
 			)
 		})
 	}
 
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	if recovered := retrier.Recovered(); recovered > 0 {
+		log.Warn("block chunk downloads completed after transient transport failures",
+			slog.String("dir", chunkDir),
+			slog.Int64("retries", recovered))
+	}
+
+	return nil
 }
 
 // ensureChunkGeometry guards against resuming a chunk directory that was
@@ -343,8 +364,9 @@ func downloadChunk(
 	chunkIdx int,
 	chunkSize int64,
 	totalSize int64,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	codec compress.Codec,
+	retrier *chunkRetrier,
 	onProgress func(n int),
 ) error {
 	finalPath := filepath.Join(chunkDir, archive.ChunkFileName(chunkIdx, codec.Ext()))
@@ -383,7 +405,7 @@ func downloadChunk(
 		return fmt.Errorf("remove stale tmp %s: %w", tmpPath, err)
 	}
 
-	if err := fetchChunkRaw(
+	if err := retrier.fetchChunk(
 		ctx,
 		destination,
 		log,
@@ -490,21 +512,39 @@ func finalizeChunkFrame(
 // resulting partPath size is asserted to equal rawLen; a server that
 // under-sends (a short read) is reported as ErrShortChunkRead rather than
 // silently finalizing a truncated chunk.
+//
+// fetchChunkRaw remains a SINGLE attempt: it never retries internally. The
+// returned dataplane.Progress reports, in chunk-relative offsets, where this
+// attempt resumed from (Start) and what is durable in partPath now (Durable);
+// its difference is the bytes THIS attempt delivered, which is what the retry
+// policy decides on. Both are a PROGRESS REPORT only — never a resume point:
+// the next attempt (or the next process run) always recomputes the
+// authoritative offset via partialChunkSize, which trusts only the
+// fsync-proven sidecar.
+//
+// Start is reported even on the error paths that never reach the network, so
+// an attempt that failed before delivering anything is reported as delivering
+// nothing rather than as the whole durable prefix it inherited.
 func fetchChunkRaw(
 	ctx context.Context,
 	destination *archive.RootedDestination,
 	log *slog.Logger,
-	fetcher *exporter.Fetcher,
+	fetcher *dataplane.Fetcher,
 	blockURL string,
 	partPath string,
 	chunkIdx int,
 	startByte, endByte, rawLen int64,
 	onProgress func(n int),
-) error {
+) (dataplane.Progress, error) {
 	have, err := partialChunkSize(destination, partPath, rawLen)
 	if err != nil {
-		return fmt.Errorf("stat partial chunk %d: %w", chunkIdx, err)
+		return dataplane.Progress{}, fmt.Errorf("stat partial chunk %d: %w", chunkIdx, err)
 	}
+
+	// resumed is what every return below reports as Start: the durable prefix
+	// this attempt inherited, and therefore the baseline its own delivery is
+	// measured against.
+	resumed := dataplane.Progress{Start: have, Durable: have}
 
 	if onProgress != nil && have > 0 {
 		onProgress(int(have))
@@ -514,7 +554,7 @@ func fetchChunkRaw(
 		// The durable partial already covers the whole chunk (e.g. a crash
 		// between finishing the raw download and finalizing the frame on a
 		// previous run): nothing left to fetch.
-		return nil
+		return resumed, nil
 	}
 
 	log.Debug("fetching chunk",
@@ -525,14 +565,14 @@ func fetchChunkRaw(
 
 	body, err := fetcher.RangeGet(ctx, blockURL, startByte+have, endByte)
 	if err != nil {
-		return fmt.Errorf("range get chunk %d: %w", chunkIdx, err)
+		return resumed, fmt.Errorf("range get chunk %d: %w", chunkIdx, err)
 	}
 
 	defer func() { _ = body.Close() }()
 
 	f, err := blockPathOpenAppend(destination, partPath)
 	if err != nil {
-		return fmt.Errorf("open partial chunk %d: %w", chunkIdx, err)
+		return resumed, fmt.Errorf("open partial chunk %d: %w", chunkIdx, err)
 	}
 
 	sw := &syncingWriter{
@@ -556,29 +596,30 @@ func fetchChunkRaw(
 	_, copyErr := io.Copy(sw, cr)
 	finishErr := sw.finish()
 	closeErr := f.Close()
+	durable := dataplane.Progress{Start: have, Durable: have + sw.written}
 
 	if copyErr != nil {
-		return fmt.Errorf("stream chunk %d body: %w", chunkIdx, copyErr)
+		return durable, fmt.Errorf("stream chunk %d body: %w", chunkIdx, copyErr)
 	}
 
 	if finishErr != nil {
-		return fmt.Errorf("finalize partial chunk %d: %w", chunkIdx, finishErr)
+		return durable, fmt.Errorf("finalize partial chunk %d: %w", chunkIdx, finishErr)
 	}
 
 	if closeErr != nil {
-		return fmt.Errorf("close partial chunk %d: %w", chunkIdx, closeErr)
+		return durable, fmt.Errorf("close partial chunk %d: %w", chunkIdx, closeErr)
 	}
 
 	info, statErr := blockPathStat(destination, partPath)
 	if statErr != nil {
-		return fmt.Errorf("stat finalized partial chunk %d: %w", chunkIdx, statErr)
+		return durable, fmt.Errorf("stat finalized partial chunk %d: %w", chunkIdx, statErr)
 	}
 
 	if info.Size() != rawLen {
-		return fmt.Errorf("chunk %d: %w: partial file holds %d bytes, want %d", chunkIdx, ErrShortChunkRead, info.Size(), rawLen)
+		return durable, fmt.Errorf("chunk %d: %w: partial file holds %d bytes, want %d", chunkIdx, ErrShortChunkRead, info.Size(), rawLen)
 	}
 
-	return nil
+	return dataplane.Progress{Start: have, Durable: rawLen}, nil
 }
 
 // ScanBlockChunkProgress computes durably-committed raw bytes and the raw

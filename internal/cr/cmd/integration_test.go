@@ -37,8 +37,10 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 
 	cr "github.com/deckhouse/deckhouse-cli/internal/cr/cmd"
 )
@@ -585,4 +587,114 @@ func TestIntegration_PushRoundTrip(t *testing.T) {
 			t.Fatalf("expected index/manifest.list, got %q", mt)
 		}
 	})
+}
+
+// ---------- multi-arch ----------
+
+// The global --platform used to be silently ignored by manifest and digest:
+// both went through the remote descriptor, which is the index itself, so a user
+// pinning a deployment got the index digest instead of the digest of the image
+// that would actually run.
+func TestIntegration_PlatformResolvesIndex(t *testing.T) {
+	env := setupEnv(t)
+	ref := env.Host + "/multiarch:v1"
+
+	base, err := random.Index(1, 1, 0)
+	if err != nil {
+		t.Fatalf("random.Index: %v", err)
+	}
+
+	idx := mutate.IndexMediaType(
+		mutate.AppendManifests(base, platformImage(t, "amd64"), platformImage(t, "arm64")),
+		types.OCIImageIndex,
+	)
+
+	parsed, err := name.ParseReference(ref, name.Insecure)
+	if err != nil {
+		t.Fatalf("parse %s: %v", ref, err)
+	}
+
+	if err := remote.WriteIndex(parsed, idx); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+
+	indexDigest, err := idx.Digest()
+	if err != nil {
+		t.Fatalf("index digest: %v", err)
+	}
+
+	manifests, err := idx.IndexManifest()
+	if err != nil {
+		t.Fatalf("index manifest: %v", err)
+	}
+
+	want := map[string]string{}
+	for _, child := range manifests.Manifests {
+		want[child.Platform.Architecture] = child.Digest.String()
+	}
+
+	t.Run("digest without a platform is the index", func(t *testing.T) {
+		got := strings.TrimSpace(mustRun(t, "digest", ref))
+		if got != indexDigest.String() {
+			t.Errorf("digest = %s, want the index %s", got, indexDigest)
+		}
+	})
+
+	t.Run("digest with a platform is that child", func(t *testing.T) {
+		got := strings.TrimSpace(mustRun(t, "--platform", "linux/arm64", "digest", ref))
+		if got != want["arm64"] {
+			t.Errorf("digest = %s, want the arm64 child %s", got, want["arm64"])
+		}
+
+		if got == indexDigest.String() {
+			t.Errorf("--platform was ignored: got the index digest")
+		}
+	})
+
+	t.Run("manifest with a platform is an image manifest", func(t *testing.T) {
+		out := mustRun(t, "--platform", "linux/arm64", "manifest", ref)
+
+		var probe struct {
+			MediaType string `json:"mediaType"`
+		}
+		if err := json.Unmarshal([]byte(out), &probe); err != nil {
+			t.Fatalf("unmarshal manifest: %v", err)
+		}
+
+		if types.MediaType(probe.MediaType).IsIndex() {
+			t.Errorf("--platform was ignored: still an index (%s)", probe.MediaType)
+		}
+	})
+
+	t.Run("a platform the index does not carry fails", func(t *testing.T) {
+		mustFail(t, "--platform", "windows/amd64", "digest", ref)
+	})
+}
+
+// platformImage builds an index entry whose config and descriptor both name the
+// given architecture, so --platform has something real to match on.
+func platformImage(t *testing.T, arch string) mutate.IndexAddendum {
+	t.Helper()
+
+	img, err := random.Image(64, 1)
+	if err != nil {
+		t.Fatalf("random.Image: %v", err)
+	}
+
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		t.Fatalf("ConfigFile: %v", err)
+	}
+
+	cfg.OS, cfg.Architecture = "linux", arch
+
+	img, err = mutate.ConfigFile(img, cfg)
+	if err != nil {
+		t.Fatalf("mutate.ConfigFile: %v", err)
+	}
+
+	return mutate.IndexAddendum{
+		Add:        img,
+		Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: arch}},
+	}
 }

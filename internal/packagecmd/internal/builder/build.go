@@ -49,6 +49,8 @@ const (
 	flagRegistryPassword execute.Arg = "--password"
 	// flagDevBuild enables development build mode.
 	flagDevBuild execute.Arg = "--dev"
+	// flagInsecureRegistry allows plain HTTP requests to the registry.
+	flagInsecureRegistry execute.Arg = "--insecure-registry"
 
 	// envPackageVersion is consumed by werf templates as the package version.
 	envPackageVersion = "PACKAGE_TAG"
@@ -68,6 +70,10 @@ const (
 	envWerfSignCert = "WERF_SIGN_CERT"
 	// envWerfSignKey is the private key used for signing (file path, Base64-encoded value, or Vault URL, e.g. hashivault://dh-2025-aug-ec).
 	envWerfSignKey = "WERF_SIGN_KEY"
+	// envInsecureRegistry allows plain HTTP requests to the registry.
+	envInsecureRegistry = "WERF_INSECURE_REGISTRY"
+	// envSkipTLSVerifyRegistry skips TLS certificate verification of the registry.
+	envSkipTLSVerifyRegistry = "WERF_SKIP_TLS_VERIFY_REGISTRY"
 	// envSignIntermediates holds intermediate certificates used in the signing chain (file path or Base64-encoded value).
 	envSignIntermediates = "WERF_SIGN_INTERMEDIATES"
 
@@ -87,6 +93,8 @@ type Options struct {
 	Force bool
 	// Debug keeps generated build files in the package root after build.
 	Debug bool
+	// Insecure allows plain HTTP registries and skips TLS certificate verification.
+	Insecure bool
 	// Sign configures image signing during the build.
 	Sign SignOptions
 }
@@ -144,6 +152,11 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 		return fmt.Errorf("invalid semantic version '%s': %w", version, err)
 	}
 
+	var regOpts []registry.Option
+	if opts.Insecure {
+		regOpts = append(regOpts, registry.WithInsecure())
+	}
+
 	// Construct full repository path with package name
 	repo := opts.RepositoryCredentials.Repository
 	if len(repo) > 0 {
@@ -153,7 +166,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 	if len(opts.RepositoryCredentials.Username) > 0 && len(opts.RepositoryCredentials.Token) > 0 {
 		logger.Info("✨ Login registry '%s'", repo)
 
-		if err = login(ctx, repo, opts.RepositoryCredentials.Username, opts.RepositoryCredentials.Token); err != nil {
+		if err = login(ctx, repo, opts.RepositoryCredentials.Username, opts.RepositoryCredentials.Token, opts.Insecure); err != nil {
 			return fmt.Errorf("login registry: %w", err)
 		}
 	}
@@ -166,7 +179,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 	if len(opts.FinalRepositoryCredentials.Username) > 0 && len(opts.FinalRepositoryCredentials.Token) > 0 {
 		logger.Info("✨ Login final registry '%s'", finalRepo)
 
-		if err = login(ctx, finalRepo, opts.FinalRepositoryCredentials.Username, opts.FinalRepositoryCredentials.Token); err != nil {
+		if err = login(ctx, finalRepo, opts.FinalRepositoryCredentials.Username, opts.FinalRepositoryCredentials.Token, opts.Insecure); err != nil {
 			return fmt.Errorf("login final registry: %w", err)
 		}
 	}
@@ -181,7 +194,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 	}
 
 	if repoLog != "local" {
-		if err = registry.Exists(ctx, fmt.Sprintf("%s:%s", repoLog, version)); !opts.Force && err == nil {
+		if err = registry.Exists(ctx, fmt.Sprintf("%s:%s", repoLog, version), regOpts...); !opts.Force && err == nil {
 			logger.Info("✅ Version '%s' already exists in the registry", version)
 			return nil
 		}
@@ -210,7 +223,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 
 	logger.Info("✨ Build and push images to '%s'...", repoLog)
 
-	if err = build(ctx, finalRepo, repo, path, version, opts.Sign); err != nil {
+	if err = build(ctx, finalRepo, repo, path, version, opts.Sign, opts.Insecure); err != nil {
 		return fmt.Errorf("failed to build package: %w", err)
 	}
 
@@ -218,13 +231,13 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 
 	// Skip publishing steps for local builds
 	if repoLog != "local" {
-		if err = registry.PushPackageIndex(ctx, repoLog); err != nil {
+		if err = registry.PushPackageIndex(ctx, repoLog, regOpts...); err != nil {
 			return fmt.Errorf("failed to register index: %w", err)
 		}
 
 		logger.Info("✨ Publish version '%s'...", version)
 
-		if err = publishVersionImage(ctx, repoLog, version, path); err != nil {
+		if err = publishVersionImage(ctx, repoLog, version, path, regOpts...); err != nil {
 			return fmt.Errorf("failed to publish version: %w", err)
 		}
 	}
@@ -235,7 +248,7 @@ func Build(ctx context.Context, version string, opts Options, logger *logs.Logge
 }
 
 // login authenticates with the container registry using the d8 delivery-kit CLI.
-func login(ctx context.Context, registry, username, token string) error {
+func login(ctx context.Context, registry, username, token string, insecure bool) error {
 	args := []execute.Arg{
 		argDeliveryPlugin,
 		argContainerRegistry,
@@ -250,12 +263,19 @@ func login(ctx context.Context, registry, username, token string) error {
 		execute.Arg(token),
 	}
 
+	// The flag marks the registry insecure in the docker sense: HTTPS without
+	// certificate verification first, plain HTTP as a fallback. Self-signed
+	// HTTPS registries therefore work here too.
+	if insecure {
+		args = append(args, flagInsecureRegistry)
+	}
+
 	return commandCli.Execute(ctx, execute.WithArgs(args...))
 }
 
 // build executes the package build process using d8 delivery-kit.
 // For local builds, it skips the image-spec-stage; for registry builds, it sets WERF_REPO.
-func build(ctx context.Context, finalRegistry, registry, packageDir, version string, signOpts SignOptions) error {
+func build(ctx context.Context, finalRegistry, registry, packageDir, version string, signOpts SignOptions, insecure bool) error {
 	args := []execute.Arg{
 		argDeliveryPlugin,
 		argBuild,
@@ -267,6 +287,16 @@ func build(ctx context.Context, finalRegistry, registry, packageDir, version str
 
 	env := []execute.Env{
 		execute.NewEnv(envPackageVersion, version),
+	}
+
+	// delivery-kit reads both settings as flag defaults, so the environment is
+	// enough to configure them.
+	if insecure {
+		env = append(
+			env,
+			execute.NewEnv(envInsecureRegistry, "1"),
+			execute.NewEnv(envSkipTLSVerifyRegistry, "1"),
+		)
 	}
 
 	if signOpts.Enabled {
@@ -300,7 +330,7 @@ func build(ctx context.Context, finalRegistry, registry, packageDir, version str
 
 // publishVersionImage reads the build report and copies bundle and release images to their final destinations.
 // Bundle image is tagged as repo:version, release image as repo/version:version.
-func publishVersionImage(ctx context.Context, repo, version, path string) error {
+func publishVersionImage(ctx context.Context, repo, version, path string, opts ...registry.Option) error {
 	raw, err := os.ReadFile(filepath.Join(path, reportFile))
 	if err != nil {
 		return fmt.Errorf("failed to read report file: %w", err)
@@ -320,7 +350,7 @@ func publishVersionImage(ctx context.Context, repo, version, path string) error 
 	src := bundle.DockerImageName
 	dest := fmt.Sprintf("%s:%s", repo, version)
 
-	if err = registry.Copy(ctx, src, dest); err != nil {
+	if err = registry.Copy(ctx, src, dest, opts...); err != nil {
 		return fmt.Errorf("failed to copy image: %w", err)
 	}
 
@@ -333,7 +363,7 @@ func publishVersionImage(ctx context.Context, repo, version, path string) error 
 	src = release.DockerImageName
 	dest = fmt.Sprintf("%s/version:%s", repo, version)
 
-	if err = registry.Copy(ctx, src, dest); err != nil {
+	if err = registry.Copy(ctx, src, dest, opts...); err != nil {
 		return fmt.Errorf("failed to copy image: %w", err)
 	}
 

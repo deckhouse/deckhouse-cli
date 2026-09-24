@@ -306,7 +306,7 @@ type fakeManifestClient struct {
 	gotTags []string
 }
 
-func (c *fakeManifestClient) GetManifest(_ context.Context, tag string) (dkpreg.ManifestResult, error) {
+func (c *fakeManifestClient) GetManifest(_ context.Context, tag string, _ ...dkpreg.ManifestGetOption) (dkpreg.ManifestResult, error) {
 	c.gotTags = append(c.gotTags, tag)
 
 	res, ok := c.byTag[tag]

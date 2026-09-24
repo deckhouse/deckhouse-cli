@@ -25,11 +25,11 @@ import (
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/dist"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/packages"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/platform"
-	"github.com/deckhouse/deckhouse-cli/internal/mirror/plugins"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/security"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	registryservice "github.com/deckhouse/deckhouse-cli/pkg/registry/service"
@@ -69,6 +69,9 @@ type PullServiceOptions struct {
 	// PluginBuiltins are d8 built-in command names that satisfy a same-named
 	// plugin dependency by presence (never pulled).
 	PluginBuiltins []string
+	// DeckhouseCLITag pins the d8 CLI version to mirror. Empty means the
+	// newest published stable one.
+	DeckhouseCLITag string
 	// BundleDir is the directory to store the bundle
 	BundleDir string
 	// BundleChunkSize is the max size of bundle chunks in bytes (0 = no chunking)
@@ -95,7 +98,7 @@ type PullService struct {
 	modulesService   *modules.Service
 	packagesService  *packages.Service
 	installerService *installer.Service
-	pluginsService   *plugins.Service
+	distService      *dist.Service
 
 	options *PullServiceOptions
 
@@ -184,10 +187,11 @@ func NewPullService(
 			logger,
 			userLogger,
 		),
-		pluginsService: plugins.NewService(
+		distService: dist.NewService(
 			registryService,
 			tmpDir,
-			&plugins.Options{
+			&dist.Options{
+				CLITag:          options.DeckhouseCLITag,
 				Filter:          options.PluginFilter,
 				Builtins:        builtinsSet(options.PluginBuiltins),
 				BundleDir:       options.BundleDir,
@@ -294,16 +298,24 @@ func (svc *PullService) Pull(ctx context.Context) (*PullSummary, error) {
 		return summary, fmt.Errorf("pull package release images: %w", err)
 	}
 
-	// Plugins resolve against what the earlier phases put into the bundle
-	// (module and platform versions), so this phase runs last.
+	// The d8 CLI distribution comes last: plugins resolve against what the
+	// earlier phases put into the bundle (module and platform versions), and
+	// the binary travels with them.
 	if svc.options.OnlyExtraImages {
+		summary.DeckhouseCLI.Skipped = true
 		summary.Plugins.Skipped = true
 	} else {
-		if err := svc.pluginsService.PullPlugins(ctx, svc.pluginsInput()); err != nil {
+		if err := svc.distService.PullCLI(ctx); err != nil {
+			return summary, fmt.Errorf("pull deckhouse-cli: %w", err)
+		}
+
+		summary.DeckhouseCLI = toDeckhouseCLIStats(svc.distService.CLIStats())
+
+		if err := svc.distService.PullPlugins(ctx, svc.pluginsInput()); err != nil {
 			return summary, fmt.Errorf("pull plugins: %w", err)
 		}
 
-		summary.Plugins = toPluginsStats(svc.pluginsService.Stats())
+		summary.Plugins = toPluginsStats(svc.distService.PluginStats())
 	}
 
 	return summary, nil
@@ -313,12 +325,12 @@ func (svc *PullService) Pull(ctx context.Context) (*PullSummary, error) {
 // actually selected: module versions from the modules stats, platform
 // versions from the platform stats. Both are recorded at resolution time, so
 // the handoff works in dry-run too.
-func (svc *PullService) pluginsInput() plugins.PullInput {
+func (svc *PullService) pluginsInput() dist.PullInput {
 	return buildPluginsInput(svc.modulesService.Stats(), svc.platformService.Stats().Versions)
 }
 
-func buildPluginsInput(modulesStats modules.ModulesStats, platformVersions []string) plugins.PullInput {
-	in := plugins.PullInput{}
+func buildPluginsInput(modulesStats modules.ModulesStats, platformVersions []string) dist.PullInput {
+	in := dist.PullInput{}
 
 	for _, module := range modulesStats.Modules {
 		versions := parseSemvers(module.Versions)
@@ -326,7 +338,7 @@ func buildPluginsInput(modulesStats modules.ModulesStats, platformVersions []str
 			continue
 		}
 
-		in.Modules = append(in.Modules, plugins.ModuleInBundle{Name: module.Name, Versions: versions})
+		in.Modules = append(in.Modules, dist.ModuleInBundle{Name: module.Name, Versions: versions})
 	}
 
 	in.PlatformVersions = parseSemvers(platformVersions)
@@ -393,7 +405,16 @@ func toModulesStats(s modules.ModulesStats) ModulesStats {
 	}
 }
 
-func toPluginsStats(s plugins.PluginsStats) PluginsStats {
+func toDeckhouseCLIStats(s dist.CLIStats) DeckhouseCLIStats {
+	return DeckhouseCLIStats{
+		Attempted:  s.Attempted,
+		Version:    s.Version,
+		Images:     s.Images,
+		SkipReason: s.SkipReason,
+	}
+}
+
+func toPluginsStats(s dist.PluginsStats) PluginsStats {
 	stats := PluginsStats{
 		Attempted:   s.Attempted,
 		Warnings:    s.Warnings,

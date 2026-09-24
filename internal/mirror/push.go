@@ -88,8 +88,10 @@ type PushServiceOptions struct {
 //	│       ├── index.json
 //	│       ├── version/
 //	│       └── <extra-name>/
-//	└── deckhouse-cli/                 # d8 CLI plugins
-//	    └── plugins/
+//	└── deckhouse-cli/                 # d8 CLI binary
+//	    ├── index.json
+//	    ├── blobs/
+//	    └── plugins/                   # d8 CLI plugins
 //	        └── <plugin-name>/
 //	            ├── index.json
 //	            └── blobs/
@@ -388,7 +390,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 // segment. Modules, packages, and plugins are counted from their index steps,
 // so their layouts are ignored here.
 func recordPushedComponent(summary *PushSummary, segment string) {
-	first, _, _ := strings.Cut(segment, "/")
+	first, rest, _ := strings.Cut(segment, "/")
 
 	switch first {
 	case "", internal.InstallSegment, internal.InstallStandaloneSegment, internal.ReleaseChannelSegment:
@@ -398,7 +400,11 @@ func recordPushedComponent(summary *PushSummary, segment string) {
 	case internal.SecuritySegment:
 		summary.SecurityDatabases++
 	case internal.D8CLISegment:
-		// Plugins are counted by createPluginsIndex.
+		// The d8 binary sits at the deckhouse-cli root; everything below it
+		// belongs to the plugins catalog, which createPluginsIndex counts.
+		if rest == "" {
+			summary.DeckhouseCLIPushed = true
+		}
 	}
 }
 

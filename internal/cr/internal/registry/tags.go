@@ -19,43 +19,23 @@ package registry
 import (
 	"context"
 	"fmt"
-
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// ListTags invokes visit for every tag page of repo. Stopping early: return
-// a non-nil error (context.Canceled is reasonable for user abort).
-func ListTags(ctx context.Context, repoRef string, opts *Options, visit func(tags []string) error) error {
-	repo, err := name.NewRepository(repoRef, opts.Name...)
+// ListTags returns every tag of repoRef.
+//
+// The registry's page-by-page protocol is the client's business and has no
+// console equivalent - there is no way for a user to ask for "the next range" -
+// so callers get the complete list or an error, never a truncated one.
+func ListTags(ctx context.Context, repoRef string, opts *Options) ([]string, error) {
+	client, err := clientForRepoRef(repoRef, opts)
 	if err != nil {
-		return fmt.Errorf("parse repository %q: %w", repoRef, err)
+		return nil, err
 	}
 
-	puller, err := remote.NewPuller(opts.remoteWithContext(ctx)...)
+	tags, err := client.ListTags(ctx)
 	if err != nil {
-		return fmt.Errorf("create puller: %w", err)
+		return nil, fmt.Errorf("read tags for %s: %w", repoRef, err)
 	}
 
-	lister, err := puller.Lister(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("read tags for %s: %w", repo, err)
-	}
-
-	for lister.HasNext() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		page, err := lister.Next(ctx)
-		if err != nil {
-			return fmt.Errorf("read next tag page: %w", err)
-		}
-
-		if err := visit(page.Tags); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return tags, nil
 }

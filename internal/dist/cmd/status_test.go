@@ -45,7 +45,7 @@ func TestRenderSummaryFull(t *testing.T) {
 		"  NAME    VERSION  LATEST  STATUS",
 		"  dk      0.5.1    0.5.1   up to date",
 		"  system  1.2.0    1.3.0   update available",
-		"Update a plugin with 'd8 dist plugins update <name>' or 'd8 dist plugins update all'.",
+		"Update a plugin with 'd8 dist plugins install <name>' or 'd8 dist plugins install --all'.",
 		"",
 	}, "\n"), out)
 }

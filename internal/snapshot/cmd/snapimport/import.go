@@ -35,12 +35,14 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	snapshotapi "github.com/deckhouse/deckhouse-cli/internal/snapshot/api/v1alpha1"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/snapimport"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -55,6 +57,7 @@ const (
 	flagAllowExisting              = "allow-existing"
 	flagAllowUnauthenticatedLegacy = "allow-unauthenticated-legacy"
 	flagSkipUnsupportedFSEntries   = "skip-unsupported-fs-entries"
+	flagPublish                    = "publish"
 
 	defaultImportWorkers = 5
 
@@ -133,7 +136,18 @@ Scope and limitations:
     downgraded and tampered current archive.
   - Uploading requires RBAC to create DataImport (storage-volume-data-manager) and to call
     the manifests-and-children-refs-upload subresource (e.g. an admin kubeconfig); the
-    read-only snapshot admin role is not sufficient.`,
+    read-only snapshot admin role is not sufficient.
+
+--publish selects how each data leaf's bytes are streamed to its DataImport importer pod.
+With --publish=false (or when autodetection picks it), bytes go straight to the importer's
+in-cluster service, trusting only its internal CA (status.ca). With --publish=true, bytes go
+through the storage-foundation-published Ingress endpoint (status.publicURL) instead, so a
+kubeconfig without direct network access to the cluster's internal service network can still
+upload. If --publish is not given, the command probes whether the in-cluster importer endpoint
+is reachable and picks accordingly. IMPORTANT: the publish path works only with a kubeconfig
+authenticated by a bearer token. Ingress terminates TLS with its own certificate and does not
+forward the client's TLS certificate to the importer pod, so a certificate-based kubeconfig
+receives a 401 when --publish=true.`,
 		Example: `  # Upload the archive in ./out into namespace "restored"
   d8 snapshot upload -n restored -i ./out
 
@@ -141,7 +155,10 @@ Scope and limitations:
   d8 snapshot upload -n restored -i ./out --node VolumeSnapshot/pvc-1
 
   # Upload with a longer DataImport TTL and overall timeout
-  d8 snapshot upload -n restored -i ./out --ttl 4h --timeout 30m`,
+  d8 snapshot upload -n restored -i ./out --ttl 4h --timeout 30m
+
+  # Upload through the published Ingress endpoint (requires a bearer-token kubeconfig)
+  d8 snapshot upload -n restored -i ./out --publish=true`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return Run(log, cmd, args)
@@ -159,6 +176,8 @@ Scope and limitations:
 	cmd.Flags().Bool(flagAllowExisting, false, "downgrade namespace preflight conflict check to a warning (import-mode markers from a prior run are never conflicts regardless of this flag)")
 	cmd.Flags().Bool(flagAllowUnauthenticatedLegacy, false, "allow trusted pre-version archives whose snapshot.yaml metadata is unauthenticated (unsafe; explicit compatibility mode)")
 	cmd.Flags().Bool(flagSkipUnsupportedFSEntries, false, "skip unsupported filesystem entries and report them after upload (causes data loss for skipped paths)")
+	cmd.Flags().Bool(flagPublish, false, "upload volume data through the published (ingress) importer endpoint instead of the in-cluster service; "+
+		"if unset, the in-cluster endpoint's reachability is auto-detected")
 
 	return cmd
 }
@@ -279,6 +298,21 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 
 	dataPlaneClient := transport.NewClientForConfig(restConfig)
 
+	publishFlag, err := dataio.ParsePublishFlag(cmd.Flags())
+	if err != nil {
+		return fmt.Errorf("resolving --%s: %w", flagPublish, err)
+	}
+
+	// Probe from the command's already-resolved restConfig, not a fresh parse of
+	// --kubeconfig/--context: reparsing could target a different cluster than the one this
+	// command is actually uploading into.
+	probeClient := safeClient.NewSafeClientForConfig(restConfig)
+
+	publish, err := dataio.ResolvePublish(ctx, publishFlag, kubeClient, probeClient, log)
+	if err != nil {
+		return fmt.Errorf("resolving --%s: %w", flagPublish, err)
+	}
+
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 
 	// Upload shows Upload/Uploading/DataImport wording instead of progress.New's
@@ -298,7 +332,15 @@ func Run(log *slog.Logger, cmd *cobra.Command, _ []string) error {
 		runLog = slog.New(slog.NewTextHandler(sink.LogWriter(), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
-	volumes := snapimport.NewClusterVolumeImporter(dynClient, dataPlaneClient, ttl, timeout, 3*time.Second, runLog)
+	volumes := snapimport.NewClusterVolumeImporter(snapimport.ClusterVolumeImporterOptions{
+		Dynamic:   dynClient,
+		Transport: dataPlaneClient,
+		TTL:       ttl,
+		Publish:   publish,
+		Wait:      timeout,
+		Poll:      3 * time.Second,
+		Log:       runLog,
+	})
 
 	cfg := snapimport.Config{
 		Namespace:                  namespace,

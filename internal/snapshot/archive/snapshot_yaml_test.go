@@ -18,6 +18,8 @@ package archive_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1249,5 +1251,261 @@ func TestSnapshotYAML_ChecksumUnaffectedByVolumeField(t *testing.T) {
 	// VerifyNode must also pass.
 	if err := archive.VerifyNode(dir); err != nil {
 		t.Errorf("VerifyNode must pass after adding Volume field: %v", err)
+	}
+}
+
+// TestSnapshotYAML_RoundTripV3 verifies that a fresh write stamps
+// SnapshotFormatVersionCurrent (3) and that the new payload-size fields round-trip.
+func TestSnapshotYAML_RoundTripV3(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	checksum, err := archive.ComputeNodeChecksum(dir)
+	if err != nil {
+		t.Fatalf("ComputeNodeChecksum: %v", err)
+	}
+
+	want := archive.SnapshotYAML{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshot",
+		Name:       "d8-ss-v3",
+		Checksum:   checksum,
+		Volumes: []archive.VolumeInfo{{
+			Target:           archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-v3"},
+			Artifact:         archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-v3"},
+			VolumeMode:       archive.VolumeModeBlock,
+			StorageClassName: "sc-thin",
+			Size:             "1Gi",
+			RawSizeBytes:     1077665792,
+			StoredSizeBytes:  900000000,
+		}},
+	}
+
+	if err := archive.WriteSnapshotYAML(dir, want); err != nil {
+		t.Fatalf("WriteSnapshotYAML: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("ReadSnapshotYAML: %v", err)
+	}
+
+	if got.FormatVersion != archive.SnapshotFormatVersionCurrent {
+		t.Errorf("FormatVersion = %d, want %d (SnapshotFormatVersionCurrent)", got.FormatVersion, archive.SnapshotFormatVersionCurrent)
+	}
+
+	if got.MetadataChecksum == nil {
+		t.Fatal("MetadataChecksum must be set on a current-format write")
+	}
+
+	if err := validateChecksumFieldTest(*got.MetadataChecksum); err != nil {
+		t.Errorf("MetadataChecksum invalid: %v", err)
+	}
+
+	if len(got.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(got.Volumes))
+	}
+
+	gotVol := got.Volumes[0]
+	if gotVol.RawSizeBytes != 1077665792 {
+		t.Errorf("RawSizeBytes = %d, want 1077665792", gotVol.RawSizeBytes)
+	}
+
+	if gotVol.StoredSizeBytes != 900000000 {
+		t.Errorf("StoredSizeBytes = %d, want 900000000", gotVol.StoredSizeBytes)
+	}
+}
+
+// validateChecksumFieldTest mirrors validateChecksum's invariants (algorithm/hex
+// length/short consistency) without depending on unexported archive internals.
+func validateChecksumFieldTest(c archive.NodeChecksum) error {
+	if c.Algorithm != archive.ChecksumAlgorithmSHA256 {
+		return fmt.Errorf("algorithm = %q, want %q", c.Algorithm, archive.ChecksumAlgorithmSHA256)
+	}
+
+	if len(c.Hex) != 64 {
+		return fmt.Errorf("hex length = %d, want 64", len(c.Hex))
+	}
+
+	if c.Short != archive.ShortChecksum(c.Hex) {
+		return fmt.Errorf("short = %q, inconsistent with hex", c.Short)
+	}
+
+	return nil
+}
+
+// TestSnapshotYAML_RejectsUnsupportedVersion proves a format version beyond
+// SnapshotFormatVersionCurrent is rejected outright, even with AllowUnauthenticatedLegacy.
+func TestSnapshotYAML_RejectsUnsupportedVersion(t *testing.T) {
+	t.Parallel()
+
+	dir := makeSnapshotNodeDir(t)
+
+	future := archive.SnapshotFormatVersionCurrent + 1
+	data := fmt.Appendf(nil,
+		"formatVersion: %d\napiVersion: snapshot.example.io/v1\nkind: Snapshot\nname: future\n"+
+			"childrenChecksum: {algorithm: %s, hex: %q, short: %q}\n",
+		future,
+		archive.EmptyChildrenChecksum().Algorithm,
+		archive.EmptyChildrenChecksum().Hex,
+		archive.EmptyChildrenChecksum().Short)
+
+	if err := os.WriteFile(filepath.Join(dir, archive.SnapshotYAMLName), data, 0o600); err != nil {
+		t.Fatalf("write future snapshot.yaml: %v", err)
+	}
+
+	if _, err := archive.ReadSnapshotYAML(dir); !errors.Is(err, archive.ErrUnsupportedSnapshotFormat) {
+		t.Fatalf("ReadSnapshotYAML error = %v, want ErrUnsupportedSnapshotFormat", err)
+	}
+
+	if _, err := archive.ReadSnapshotYAMLWithOptions(dir, archive.SnapshotYAMLReadOptions{AllowUnauthenticatedLegacy: true}); !errors.Is(err, archive.ErrUnsupportedSnapshotFormat) {
+		t.Fatalf("ReadSnapshotYAMLWithOptions(AllowUnauthenticatedLegacy) error = %v, want ErrUnsupportedSnapshotFormat "+
+			"(the legacy opt-in must not widen acceptance of an unknown future major version)", err)
+	}
+}
+
+// TestVolumeInfo_ZeroSizesOmittedFromJSON proves RawSizeBytes/StoredSizeBytes at their zero
+// value are omitted from JSON entirely (omitempty), not serialized as 0 — required for a v2
+// archive's MetadataChecksum, computed over JSON that never had these keys, to stay stable.
+func TestVolumeInfo_ZeroSizesOmittedFromJSON(t *testing.T) {
+	t.Parallel()
+
+	vol := archive.VolumeInfo{
+		Target:           archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc"},
+		Artifact:         archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+		VolumeMode:       archive.VolumeModeBlock,
+		StorageClassName: "sc",
+		Size:             "1Gi",
+		// RawSizeBytes/StoredSizeBytes deliberately left at their zero value.
+	}
+
+	data, err := json.Marshal(vol)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	for _, key := range []string{"rawSizeBytes", "storedSizeBytes"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("marshaled VolumeInfo contains key %q with a zero value; want it omitted entirely (omitempty): %s", key, data)
+		}
+	}
+
+	// Sanity: a non-zero value IS present.
+	vol.RawSizeBytes = 42
+	data, err = json.Marshal(vol)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"rawSizeBytes":42`) {
+		t.Errorf("marshaled VolumeInfo with RawSizeBytes=42 must contain the key: %s", data)
+	}
+}
+
+// snapshotYAMLShadowV2 mirrors the private snapshotYAMLWire shape field-for-field, but
+// without rawSizeBytes/storedSizeBytes — exactly what a real pre-fix v2 archive produced.
+// Needed because SnapshotYAML.MarshalJSON always stamps the current version, so it can't
+// itself produce v2 bytes.
+type snapshotYAMLShadowV2 struct {
+	FormatVersion    int                      `json:"formatVersion,omitempty"`
+	APIVersion       string                   `json:"apiVersion"`
+	Kind             string                   `json:"kind"`
+	Name             string                   `json:"name"`
+	Namespace        string                   `json:"namespace,omitempty"`
+	UID              string                   `json:"uid,omitempty"`
+	SourceName       string                   `json:"sourceName,omitempty"`
+	SourceObjectRef  *archive.SourceObjectRef `json:"sourceObjectRef,omitempty"`
+	Checksum         archive.NodeChecksum     `json:"checksum"`
+	ChildrenChecksum *archive.NodeChecksum    `json:"childrenChecksum,omitempty"`
+	MetadataChecksum *archive.NodeChecksum    `json:"metadataChecksum,omitempty"`
+	Volumes          []archive.VolumeInfo     `json:"volumes,omitempty"`
+}
+
+// TestSnapshotYAML_V2ArchiveStillValidates is the decisive compatibility test for this fix:
+// it reproduces, byte for byte, a REAL pre-fix archive (formatVersion 2, no
+// rawSizeBytes/storedSizeBytes keys in its JSON, metadataChecksum computed over exactly that
+// canonical JSON) and proves it still validates.
+//
+// Without `omitempty` on RawSizeBytes/StoredSizeBytes, computeSnapshotMetadataChecksum would
+// now serialize them as 0 even for this old document, disagreeing with the checksum the
+// archive carries — failing every v2 archive in the wild with
+// ErrSnapshotMetadataChecksumMismatch. This test proves that did not happen.
+func TestSnapshotYAML_V2ArchiveStillValidates(t *testing.T) {
+	t.Parallel()
+
+	childrenChecksum := archive.EmptyChildrenChecksum()
+
+	shadow := snapshotYAMLShadowV2{
+		FormatVersion:    archive.SnapshotFormatVersionAuthenticatedChildren,
+		APIVersion:       "snapshot.storage.k8s.io/v1",
+		Kind:             "VolumeSnapshot",
+		Name:             "pre-fix-v2-node",
+		Namespace:        "ns-legacy",
+		Checksum:         validChecksum(),
+		ChildrenChecksum: &childrenChecksum,
+		Volumes: []archive.VolumeInfo{{
+			Target:           archive.VolumeObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-legacy"},
+			Artifact:         archive.VolumeObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-legacy"},
+			VolumeMode:       archive.VolumeModeBlock,
+			StorageClassName: "sc-legacy",
+			Size:             "1Gi",
+			// RawSizeBytes/StoredSizeBytes intentionally absent: the pre-fix wire type has no
+			// such fields — this is byte-for-byte what a real pre-fix archive wrote to disk.
+		}},
+	}
+
+	// canonicalWithoutChecksum is exactly what computeSnapshotMetadataChecksum hashes:
+	// the canonical envelope with metadataChecksum itself absent/nil.
+	canonicalWithoutChecksum, err := json.Marshal(shadow)
+	if err != nil {
+		t.Fatalf("json.Marshal shadow envelope: %v", err)
+	}
+
+	for _, key := range []string{"rawSizeBytes", "storedSizeBytes"} {
+		if strings.Contains(string(canonicalWithoutChecksum), key) {
+			t.Fatalf("test fixture bug: canonical v2 bytes must not contain %q: %s", key, canonicalWithoutChecksum)
+		}
+	}
+
+	sum := sha256.Sum256(canonicalWithoutChecksum)
+	hexDigest := fmt.Sprintf("%x", sum)
+
+	metadataChecksum := archive.NodeChecksum{
+		Algorithm: archive.ChecksumAlgorithmSHA256,
+		Hex:       hexDigest,
+		Short:     archive.ShortChecksum(hexDigest),
+	}
+	shadow.MetadataChecksum = &metadataChecksum
+
+	final, err := json.Marshal(shadow)
+	if err != nil {
+		t.Fatalf("json.Marshal final shadow envelope: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, archive.SnapshotYAMLName), final, 0o600); err != nil {
+		t.Fatalf("write v2 snapshot.yaml fixture: %v", err)
+	}
+
+	got, err := archive.ReadSnapshotYAML(dir)
+	if err != nil {
+		t.Fatalf("CRITICAL: a real pre-fix v2 archive failed to validate after this fix: %v\n"+
+			"this means RawSizeBytes/StoredSizeBytes are missing `omitempty` (or some other change "+
+			"altered the canonical JSON shape), and EVERY v2 archive in the wild would now fail "+
+			"ErrSnapshotMetadataChecksumMismatch on read", err)
+	}
+
+	if got.FormatVersion != archive.SnapshotFormatVersionAuthenticatedChildren {
+		t.Errorf("FormatVersion = %d, want %d", got.FormatVersion, archive.SnapshotFormatVersionAuthenticatedChildren)
+	}
+
+	if len(got.Volumes) != 1 {
+		t.Fatalf("Volumes length: got %d, want 1", len(got.Volumes))
+	}
+
+	if got.Volumes[0].RawSizeBytes != 0 || got.Volumes[0].StoredSizeBytes != 0 {
+		t.Errorf("a v2 archive's Volumes[0] payload sizes must read back as zero (never recorded), got RawSizeBytes=%d StoredSizeBytes=%d",
+			got.Volumes[0].RawSizeBytes, got.Volumes[0].StoredSizeBytes)
 	}
 }

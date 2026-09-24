@@ -22,7 +22,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/cr/cmd/completion"
@@ -60,9 +59,9 @@ func runPush(ctx context.Context, w io.Writer, path, tagRef string, asIndex bool
 	// Validate tagRef before reading any OCI layout from disk - layouts can
 	// be tens of GB, and a typo in the destination ref should not require
 	// loading the source first.
-	parsed, err := name.ParseReference(tagRef, opts.Name...)
+	parsed, err := registry.ParseReference(tagRef, opts)
 	if err != nil {
-		return fmt.Errorf("parse reference %q: %w", tagRef, err)
+		return err
 	}
 
 	obj, err := imageio.LoadLocal(path, asIndex)

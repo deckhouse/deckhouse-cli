@@ -43,8 +43,9 @@ import "path"
 //	<root>/packages/<package-name>/version:<channel>            - Package version channel metadata
 //	<root>/packages/<package-name>/extra/<extra-name>:<version> - Package extra images
 //
-// Deckhouse CLI plugins (at the bare root, outside the edition segment, like installer):
+// Deckhouse CLI (at the bare root, outside the edition segment, like installer):
 //
+//	<root>/deckhouse-cli:<version>                       - d8 binary image (multi-platform OCI index)
 //	<root>/deckhouse-cli/plugins/<plugin-name>:<version> - Plugin image (multi-platform OCI index)
 const (
 	InstallSegment           = "install"

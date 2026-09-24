@@ -315,16 +315,24 @@ func (c *Client) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		var (
 			clonedHTTPTransport *http.Transport
 			enableHTTP2         bool
+			protocols           *http.Protocols
 		)
 
 		if transport, ok := rt.(*http.Transport); ok {
 			cloned := transport.Clone()
-			enableHTTP2 = cloned.ForceAttemptHTTP2 || cloned.TLSNextProto["h2"] != nil
+			enableHTTP2 = cloned.ForceAttemptHTTP2 || cloned.TLSNextProto["h2"] != nil ||
+				(cloned.Protocols != nil && cloned.Protocols.HTTP2())
+			protocols = cloned.Protocols
 			// Clone copies client-go's x/net/http2 TLSNextProto closures. An
 			// empty map prevents intermediate caller wrappers from enabling or
-			// copying HTTP/2 while they clone this transport.
+			// copying HTTP/2 while they clone this transport. Since Go 1.27
+			// x/net/http2 enables HTTP/2 through Protocols instead, and each
+			// clone that keeps it enabled gets a TLSNextProto["h2"] stub that
+			// the next clone copies but cannot serve h2 with, so Protocols is
+			// dropped here as well and restored on the final transport.
 			cloned.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 			cloned.ForceAttemptHTTP2 = false
+			cloned.Protocols = nil
 			clonedHTTPTransport = cloned
 			rt = cloned
 		}
@@ -343,6 +351,7 @@ func (c *Client) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		if ownedHTTPTransport != nil && enableHTTP2 {
 			ownedHTTPTransport.TLSNextProto = nil
 			ownedHTTPTransport.ForceAttemptHTTP2 = true
+			ownedHTTPTransport.Protocols = protocols
 			utilnet.SetTransportDefaults(ownedHTTPTransport)
 		}
 
@@ -1179,7 +1188,26 @@ func (c *Client) NewRTClient(schemeFuncs ...func(s *apiruntime.Scheme) error) (c
 	return NewRuntimeClient(c.restConfig, schemeFuncs...)
 }
 
+// SetTLSCAData extends inherited server trust with a merged pool: system roots,
+// the supplied caData, and any CA already configured on this Client's rest.Config
+// (e.g. from kubeconfig). Unlike SetTLSIdentityCAData, which REPLACES trust with
+// exactly one endpoint-specific CA, this widens it — appropriate only where
+// endpoint-specific pinning is impossible (see the publish path in
+// internal/snapshot/snapimport/volume.go).
+//
+// Because the merged pool only adds trust, it must never be reachable through a
+// bypass: an inherited insecure-skip-tls-verify or tls-server-name from kubeconfig
+// would make certificate verification a no-op regardless of how large RootCAs is,
+// so both are forced off here — on the rest.Config itself and, since client-go may
+// have already built a base *http.Transport with those values baked in before this
+// WrapTransport runs, again on the transport clone that carries RootCAs. This must
+// run unconditionally, not only when caData is non-empty: an empty caData is the
+// normal case on the publish path (the ingress does not expose the importer pod's
+// internal CA), and verification must stay on even then.
 func (c *Client) SetTLSCAData(caData []byte) {
+	// Keep in sync with the twin implementation in
+	// pkg/libsaferequest/client/http.go (SafeClient.SetTLSCAData); the two are
+	// deliberately separate copies.
 	sysPool, err := x509.SystemCertPool()
 	if err != nil || sysPool == nil {
 		sysPool = x509.NewCertPool()
@@ -1195,6 +1223,8 @@ func (c *Client) SetTLSCAData(caData []byte) {
 
 	c.restConfig.TLSClientConfig.CAData = nil
 	c.restConfig.TLSClientConfig.CAFile = ""
+	c.restConfig.TLSClientConfig.Insecure = false
+	c.restConfig.TLSClientConfig.ServerName = ""
 	prev := c.restConfig.WrapTransport
 
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
@@ -1216,9 +1246,19 @@ func (c *Client) SetTLSCAData(caData []byte) {
 		}
 
 		clonedTransport.TLSClientConfig.RootCAs = sysPool
+		clonedTransport.TLSClientConfig.InsecureSkipVerify = false
+		clonedTransport.TLSClientConfig.ServerName = ""
 
 		return clonedTransport
 	}
+}
+
+// ValidateHTTPSURL requires rawURL to be a well-formed HTTPS origin, without
+// requiring a CA (unlike ValidateHTTPSIdentity, whose CA argument may be empty
+// on the publish path).
+func ValidateHTTPSURL(rawURL string) error {
+	_, err := parseHTTPSOrigin(rawURL)
+	return err
 }
 
 // ValidateHTTPSIdentity requires an HTTPS origin and a strictly parseable,

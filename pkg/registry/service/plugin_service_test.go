@@ -69,6 +69,29 @@ func TestPluginsService_Scoping(t *testing.T) {
 	})
 }
 
+// TestCLIService_Scoping pins the registry path of the d8 binary: it lives at
+// <root>/deckhouse-cli, the parent of the plugins catalog, and is no more
+// edition-scoped than the catalog under it. Routing it under an edition would
+// point mirror pull at a path the proxy never serves.
+func TestCLIService_Scoping(t *testing.T) {
+	logger := log.NewNop()
+
+	const host = "registry.deckhouse.ru/deckhouse"
+
+	t.Run("the binary is NOT edition-scoped", func(t *testing.T) {
+		svc := registryservice.NewService(pkgclient.NewFromOptions(host), pkg.FEEdition, logger)
+
+		assert.Equal(t, host+"/deckhouse-cli", svc.CLIService().GetRoot(),
+			"the d8 binary must live at the bare root, never under the edition segment")
+	})
+
+	t.Run("the plugins catalog hangs under the binary repository", func(t *testing.T) {
+		svc := registryservice.NewService(pkgclient.NewFromOptions(host), pkg.NoEdition, logger)
+
+		assert.Equal(t, svc.CLIService().GetRoot()+"/plugins", svc.PluginService().GetRoot())
+	})
+}
+
 // TestPluginService_ContractAnnotation covers the contract resolution order:
 // single manifest -> its annotation; index -> index annotation first, first
 // child only as a fallback; no contract anywhere -> empty string, no error.
@@ -191,7 +214,7 @@ type fakeManifestClient struct {
 	gotTags []string
 }
 
-func (c *fakeManifestClient) GetManifest(_ context.Context, tag string) (dkpreg.ManifestResult, error) {
+func (c *fakeManifestClient) GetManifest(_ context.Context, tag string, _ ...dkpreg.ManifestGetOption) (dkpreg.ManifestResult, error) {
 	c.gotTags = append(c.gotTags, tag)
 
 	res, ok := c.byTag[tag]

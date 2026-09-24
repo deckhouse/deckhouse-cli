@@ -18,6 +18,8 @@
 > Plugin management (`d8 dist plugins`) uses the same access model and is
 > covered in [plugins.md](plugins.md).
 
+> In an air-gapped cluster this works off the mirrored bundle: `d8 mirror pull` carries one d8 version (`deckhouse-cli.tar`) and `d8 mirror push` places it where the proxy looks. See [plugins.md - Air-gapped installs](plugins.md#air-gapped-installs-via-d8-mirror).
+
 ## Getting started
 
 You need a kubeconfig that authenticates with a **Bearer token**, and an identity

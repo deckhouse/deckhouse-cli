@@ -20,8 +20,7 @@ limitations under the License.
 //	d8 dist plugins list       list installed plugins
 //	d8 dist plugins versions   list published versions of a plugin
 //	d8 dist plugins contract   show a plugin's contract
-//	d8 dist plugins install    install a plugin
-//	d8 dist plugins update     update installed plugins
+//	d8 dist plugins install    install a plugin, or update one (--all: every installed)
 //	d8 dist plugins remove     remove an installed plugin
 //
 // The subtree is mounted under `d8 dist` (internal/dist/cmd) and inherits the

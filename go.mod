@@ -6,8 +6,8 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
-	github.com/deckhouse/deckhouse/pkg/registry v0.0.0-20260414112803-53a5662881d9
-	github.com/deckhouse/virtualization/src/cli v0.0.0-20260411164351-43c8e331b69d //  fix/cli/mute-warnings-during-cobra-init-release-1-6-2 (Change to version 1.8.0 after updating Kubernetes to 0.34)
+	github.com/deckhouse/deckhouse/pkg/registry v0.0.1
+	github.com/deckhouse/virtualization/src/cli v1.11.1
 	github.com/fatih/color v1.19.0
 	github.com/fluxcd/flagger v1.36.1
 	github.com/go-logr/logr v1.4.3
@@ -36,14 +36,14 @@ require (
 	github.com/vbauerster/mpb/v8 v8.7.5
 	github.com/werf/3p-helm v0.0.0-20260211143448-0b619e3cc3bf
 	github.com/werf/common-go v0.0.0-20260414103517-0558f83edc6d
-	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v1.24.1
-	github.com/werf/werf/v2 v2.69.0
+	github.com/werf/logboek v0.7.1
+	github.com/werf/nelm v1.30.5-0.20260918172005-312d2f269472
+	github.com/werf/werf/v2 v2.79.1
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.15.0
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8
-	golang.org/x/image v0.44.0
+	golang.org/x/image v0.45.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.34.8
@@ -62,6 +62,12 @@ require (
 	github.com/docker/cli v29.3.0+incompatible
 	golang.org/x/sync v0.22.0
 	k8s.io/klog/v2 v2.140.0
+)
+
+require (
+	github.com/alessio/shellescape v1.4.2 // indirect
+	github.com/deckhouse/elfedit v0.1.1 // indirect
+	github.com/facebookincubator/nvdtools v0.1.5 // indirect
 )
 
 require (
@@ -199,8 +205,8 @@ require (
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
-	github.com/deckhouse/delivery-kit-sdk v1.2.0 // indirect
-	github.com/deckhouse/virtualization/api v1.5.1 // indirect
+	github.com/deckhouse/delivery-kit-sdk v1.4.2 // indirect
+	github.com/deckhouse/virtualization/api v1.11.1 // indirect; must match src/cli
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
 	github.com/denverdino/aliyungo v0.0.0-20190125010748-a747050bb1ba // indirect
@@ -521,7 +527,6 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/posener/complete v1.2.3 // indirect
-	github.com/povsister/scp v0.0.0-20250504051308-e467f71ea63c // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/pquerna/otp v1.2.1-0.20191009055518-468c2dd2b58d // indirect
 	github.com/proglottis/gpgme v0.1.3 // indirect
@@ -593,8 +598,8 @@ require (
 	github.com/wI2L/jsondiff v0.5.0 // indirect
 	github.com/walle/targz v0.0.0-20140417120357-57fe4206da5a // indirect
 	github.com/werf/3p-helm-for-werf-helm v0.0.0-20241217155820-089f92cd5c9d // indirect
-	github.com/werf/copy-recurse v0.2.7 // indirect
-	github.com/werf/kubedog v0.13.1-0.20260212122756-5d3f8c0f1827 // indirect
+	github.com/werf/copy-recurse v0.3.1 // indirect
+	github.com/werf/kubedog v0.13.1-0.20260912145640-ad1e8a134607 // indirect
 	github.com/werf/kubedog-for-werf-helm v0.0.0-20241217155728-9d45c48b82b6 // indirect
 	github.com/werf/lockgate v0.1.1 // indirect
 	github.com/werf/nelm-for-werf-helm v0.0.0-20241217155925-b0e6734d1dbf // indirect
@@ -626,17 +631,17 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.46.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v0.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v0.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.34.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/prometheus v0.44.0 // indirect
-	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	go.opentelemetry.io/otel/metric v1.44.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.44.0 // indirect
+	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
@@ -644,21 +649,20 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/mod v0.40.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/tools v0.49.0 // indirect
 	google.golang.org/api v0.271.0 // indirect
 	google.golang.org/genproto v0.0.0-20260217215200-42d3e9bedb6d // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
-	google.golang.org/grpc v1.82.1 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
-	gopkg.in/evanphx/json-patch.v5 v5.8.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/oleiade/reflections.v1 v1.0.0 // indirect
@@ -699,7 +703,7 @@ replace (
 	github.com/hashicorp/vault/sdk => flant.internal/deckhouse/stronghold.git/images/stronghold/sdk v1.18.6
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
-	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.69.0-dk
+	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.79.1-dk.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0 => github.com/deckhouse/gogost/v5 v5.15.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc => go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0
 )

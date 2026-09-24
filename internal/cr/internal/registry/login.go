@@ -18,6 +18,7 @@ package registry
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 
@@ -54,17 +55,14 @@ func Login(ctx context.Context, host, username, password string, opts *Options) 
 		host = name.DefaultRegistry
 	}
 
-	reg, err := name.NewRegistry(host, opts.Name...)
+	reg, err := name.NewRegistry(host, opts.nameOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("parse registry %q: %w", host, err)
 	}
 
 	auth := authn.FromConfig(authn.AuthConfig{Username: username, Password: password})
 
-	rt := opts.Transport
-	if rt == nil {
-		rt = remote.DefaultTransport
-	}
+	rt := loginTransport(opts)
 
 	// Build the registry's auth transport. Empty scope keeps this a
 	// registry-level check (a repository/catalog scope would demand
@@ -128,6 +126,34 @@ func verifyCredentials(ctx context.Context, reg name.Registry, rt http.RoundTrip
 	defer resp.Body.Close()
 
 	return transport.CheckError(resp, http.StatusOK)
+}
+
+// loginTransport builds the HTTP transport for the credential probe.
+//
+// Login stays outside the registry client on purpose: it writes to the Docker
+// config, which is a CLI concern the client has no notion of, and it probes
+// /v2/ rather than any repository. That leaves it needing its own transport.
+func loginTransport(opts *Options) http.RoundTripper {
+	if !opts.TLSSkipVerify {
+		return remote.DefaultTransport
+	}
+
+	base, ok := remote.DefaultTransport.(*http.Transport)
+	if !ok {
+		// Upstream changed DefaultTransport's concrete type. Better to verify
+		// certificates against a default we do not recognise than to panic on
+		// an unchecked type assertion.
+		return remote.DefaultTransport
+	}
+
+	t := base.Clone()
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{} //nolint:gosec // MinVersion comes from the cloned default
+	}
+
+	t.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // user-opted via --insecure
+
+	return t
 }
 
 // dockerServerAddress maps a parsed registry to the key Docker stores

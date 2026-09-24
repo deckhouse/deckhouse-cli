@@ -101,6 +101,12 @@ type Config struct {
 	// fresh RunID via crypto/rand when it is empty; tests may set it explicitly.
 	RunID string
 
+	// Publish routes each leaf's volume bytes through the storage-foundation-published
+	// (Ingress) exporter endpoint (status.publicURL) instead of the in-cluster service
+	// (status.url). It is forwarded verbatim to exporter.WithPublish; the exporter
+	// derives both the DataExport spec value and the readiness/transport mode from it.
+	Publish bool
+
 	// KeepExports, when true, leaves the per-volume DataExport CR (and the
 	// server-side export chain it owns: export VolumeSnapshot/VolumeSnapshotContent/
 	// export PVC) in the cluster after each volume stream completes, instead of
@@ -273,6 +279,7 @@ func applyDefaults(cfg Config) Config {
 		timeout := cfg.ReadinessTimeout
 		aggClient := cfg.AggClient
 		runID := cfg.RunID
+		publish := cfg.Publish
 
 		cfg.OpenExportWithTargetAcquisition = func(
 			ctx context.Context,
@@ -289,6 +296,7 @@ func applyDefaults(cfg Config) Config {
 			owner := exporter.WithRunOwner(runID, log)
 			target := exporter.WithTargetUID(targetUID)
 			termWait := exporter.WithTerminatingWaitTimeout(timeout)
+			publishOpt := exporter.WithPublish(publish)
 
 			var acquisition *exporter.DataExportAcquisition
 
@@ -309,6 +317,7 @@ func applyDefaults(cfg Config) Config {
 				target,
 				owner,
 				termWait,
+				publishOpt,
 				exporter.WithAcquisition(&acquisition),
 			)
 			if openErr != nil {

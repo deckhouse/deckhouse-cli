@@ -43,14 +43,14 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 		Long: "Manage Deckhouse CLI plugins.\n\n" +
 			"Plugins are pulled from the in-cluster registry-packages-proxy, authenticated by the\n" +
 			"current kubeconfig identity.\n\n" +
-			"Update on demand with 'd8 dist plugins update <name>' or 'd8 dist plugins update all'.\n\n" +
+			"Installing a plugin that is already present updates it: 'd8 dist plugins install <name>',\n" +
+			"or 'd8 dist plugins install --all' for every installed plugin at once.\n\n" +
 			"Environment variables:\n" +
 			"  " + flags.EnvSkipClusterChecks + "=1  skip cluster-side plugin requirement checks\n" +
 			"  " + flags.EnvPluginsDir + "                plugins directory (same as --plugins-dir)\n" +
 			"  " + rppflags.EnvEndpoint + "                   registry-packages-proxy base URL\n" +
 			"  " + rppflags.EnvCAFile + "                    PEM CA bundle for proxy TLS verification\n" +
 			"  KUBECONFIG                        path to the kubeconfig file",
-		Hidden: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			// The plugins directory was captured at registration time, BEFORE flag
 			// parsing - re-read it here so --plugins-dir is honored (the env
@@ -76,11 +76,10 @@ func NewCommand(logger *dkplog.Logger, builtinCommands []string) *cobra.Command 
 		},
 	}
 
-	cmd.AddCommand(newListCommand(manager))
+	cmd.AddCommand(newListCommand(manager, logger))
 	cmd.AddCommand(newVersionsCommand(manager))
 	cmd.AddCommand(newContractCommand(manager, logger))
 	cmd.AddCommand(newInstallCommand(manager))
-	cmd.AddCommand(newUpdateCommand(manager))
 	cmd.AddCommand(newRemoveCommand(manager))
 
 	// Only the plugin-specific flags: the cluster access flags (kubeconfig/

@@ -1192,6 +1192,78 @@ func TestBuildPlan_LeafStorageParams(t *testing.T) {
 	}
 }
 
+// TestBuildPlan_ReadsPayloadSizeFields verifies that PlannedNode.PayloadRawSizeBytes/
+// PayloadStoredSizeBytes/FormatVersion are read verbatim from snapshot.yaml's
+// Volumes[0].RawSizeBytes/StoredSizeBytes and its own formatVersion.
+func TestBuildPlan_ReadsPayloadSizeFields(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeArchiveNode(t, root, archiveNode{
+		apiVersion: "state-snapshotter.deckhouse.io/v1alpha1",
+		kind:       "Snapshot",
+		name:       "root",
+	})
+
+	leafDir := childDir(root, "VolumeSnapshot", "pvc-1")
+	writeArchiveNode(t, leafDir, archiveNode{
+		apiVersion: "snapshot.storage.k8s.io/v1",
+		kind:       "VolumeSnapshot",
+		name:       "pvc-1",
+		blockData:  []byte("rawbytes"),
+		blockExt:   ".zst",
+		volumes: []archive.VolumeInfo{{
+			StorageClassName: "sc-fast",
+			Size:             "1Gi",
+			VolumeMode:       "Block",
+			RawSizeBytes:     1077665792,
+			StoredSizeBytes:  900000000,
+		}},
+	})
+	finalizeArchiveChildrenChecksums(t, root)
+
+	plan, err := BuildPlan(root)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+
+	var leaf *PlannedNode
+
+	for i := range plan {
+		if plan[i].Kind == "VolumeSnapshot" {
+			leaf = &plan[i]
+
+			break
+		}
+	}
+
+	if leaf == nil {
+		t.Fatal("VolumeSnapshot node not found in plan")
+	}
+
+	if leaf.FormatVersion != archive.SnapshotFormatVersionCurrent {
+		t.Errorf("FormatVersion = %d, want %d", leaf.FormatVersion, archive.SnapshotFormatVersionCurrent)
+	}
+
+	if leaf.PayloadRawSizeBytes != 1077665792 {
+		t.Errorf("PayloadRawSizeBytes = %d, want 1077665792", leaf.PayloadRawSizeBytes)
+	}
+
+	if leaf.PayloadStoredSizeBytes != 900000000 {
+		t.Errorf("PayloadStoredSizeBytes = %d, want 900000000", leaf.PayloadStoredSizeBytes)
+	}
+
+	// The nominal Size/SizeBytes fields (feeding scratch-volume provisioning and resume
+	// identity) must be entirely unaffected by the new payload-size fields.
+	if leaf.Size != "1Gi" {
+		t.Errorf("Size = %q, want %q", leaf.Size, "1Gi")
+	}
+
+	if leaf.SizeBytes != 1024*1024*1024 {
+		t.Errorf("SizeBytes = %d, want %d", leaf.SizeBytes, int64(1024*1024*1024))
+	}
+}
+
 func TestDataImportIdentity_CanonicalAndDimensionComplete(t *testing.T) {
 	base := PlannedNode{
 		APIVersion:       "snapshot.storage.k8s.io/v1",
@@ -1650,7 +1722,7 @@ func TestLinuxMountedPlanEscapeHelper(t *testing.T) {
 	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
 
 	mount := func() error {
-		return bindMountForTest(sourcePath, targetPath)
+		return bindMountForTest(t, sourcePath, targetPath)
 	}
 
 	var err error
@@ -1737,11 +1809,22 @@ func matchingOutsideMountFixture(t *testing.T, root string, regularFile bool) (s
 	return source, target
 }
 
-func bindMountForTest(source, target string) error {
+func bindMountForTest(t *testing.T, source, target string) error {
+	t.Helper()
+
 	output, err := exec.Command("mount", "--bind", source, target).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mount --bind: %w: %s", err, output)
 	}
+
+	// The TempDir cleanup cannot unlink a mount point (EBUSY), so detach the
+	// bind mount first: cleanups run last-in first-out, and the TempDir one
+	// was registered before this mount.
+	t.Cleanup(func() {
+		if output, err := exec.Command("umount", target).CombinedOutput(); err != nil {
+			t.Errorf("umount %s: %v: %s", target, err, output)
+		}
+	})
 
 	return nil
 }
