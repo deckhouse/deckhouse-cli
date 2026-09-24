@@ -54,14 +54,10 @@ func NewCommand() *cobra.Command {
 	)
 
 	collectDebugInfoCmd := &cobra.Command{
-		Use:     `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
-		Short:   "Collect debug info.",
-		Long:    collectDebugInfoCmdLong,
-		Example: collectDebugInfoCmdExample,
-		// Without this, an unknown positional argument (a misspelled
-		// subcommand, say) is silently accepted by the parent and the full
-		// cluster-wide collection runs instead: cobra only reports unknown
-		// commands for the root command, and this one has a parent.
+		Use:           `collect-debug-info [flags] > deckhouse-debug-$(date +"%Y_%m_%d").tar.gz`,
+		Short:         "Collect debug info.",
+		Long:          collectDebugInfoCmdLong,
+		Example:       collectDebugInfoCmdExample,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,

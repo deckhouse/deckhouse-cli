@@ -77,7 +77,7 @@ func ExecCommandInPod(
 	kubeCl kubernetes.Interface,
 	cmdLine []string,
 	podName, namespace, containerName string,
-) (stdout []byte, stderr string, err error) {
+) ([]byte, string, error) {
 	executor, err := ExecInPod(config, kubeCl, cmdLine, podName, namespace, containerName)
 	if err != nil {
 		return nil, "", err
@@ -89,7 +89,6 @@ func ExecCommandInPod(
 		Stdout: &stdoutBuf,
 		Stderr: &stderrBuf,
 	})
-
 	if streamErr != nil {
 		return stdoutBuf.Bytes(), stderrBuf.String(), streamErr
 	}

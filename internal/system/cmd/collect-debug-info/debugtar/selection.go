@@ -10,21 +10,9 @@ import (
 // excluded on the command line. It also returns every name --exclude accepts
 // for this run, including the names of entries these very excludes dropped, so
 // a valid name is never reported as unknown.
-//
-// Exclusion happens here, and not further down, because this is the only place
-// where both spellings of an entry are known at once: the resolved archive name
-// (d8-cloud-provider-aws-ccm-logs.txt) and the module-independent token printed
-// by --list-exclude (ccm-logs).
-//
-// modulesKnown reports whether activeModules actually describes the cluster. It
-// is false when the module list could not be fetched: module-gated commands are
-// then collected anyway (an empty file beats a silently missing one), except
-// those whose File carries the {module-name} placeholder — their archive entry
-// name cannot be resolved, so they are skipped rather than stored under a
-// literal placeholder name.
-func filterAndExpandCommands(commands []command, activeModules map[string]bool, modulesKnown bool, excludeSet map[string]bool) (selected []command, acceptedNames []string) {
-	selected = make([]command, 0, len(commands))
-	acceptedNames = make([]string, 0, len(commands))
+func filterAndExpandCommands(commands []command, activeModules map[string]bool, modulesKnown bool, excludeSet map[string]bool) ([]command, []string) {
+	selected := make([]command, 0, len(commands))
+	acceptedNames := make([]string, 0, len(commands))
 
 	for _, cmd := range commands {
 		// The token stays accepted even when the command is gated out below:
