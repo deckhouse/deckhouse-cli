@@ -114,15 +114,15 @@ func (svc *Service) PullCLI(ctx context.Context) error {
 // newest published stable one.
 //
 // A registry that simply does not offer the binary is not a failure: it yields
-// an empty tag and a short skipReason for the summary, the way an absent
+// an empty tag and a short skip reason for the summary, the way an absent
 // platform plugin yields a warning. The registry's own error text goes to the
 // debug log rather than the summary - a wrapped NAME_UNKNOWN chain names the
 // repository the label already names, and buries the one fact the operator
 // needs behind four levels of transport detail.
 //
-// err is reserved for a pinned version that cannot be resolved: the user asked
-// for it by name, so it stops the pull.
-func (svc *Service) resolveCLITag(ctx context.Context) (tag versionTag, skipReason string, err error) {
+// The error is reserved for a pinned version that cannot be resolved: the user
+// asked for it by name, so it stops the pull.
+func (svc *Service) resolveCLITag(ctx context.Context) (versionTag, string, error) {
 	if pinned := svc.options.CLITag; pinned != "" {
 		// An explicit version is checked before the pull so a typo fails
 		// immediately instead of after the transfer retries are exhausted.

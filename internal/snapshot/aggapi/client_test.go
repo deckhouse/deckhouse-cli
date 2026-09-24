@@ -1027,7 +1027,10 @@ func TestAggregatedAPICalls_RejectOversizedChunkedResponses(t *testing.T) {
 
 	for _, tc := range aggregatedAPICallCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			client := newBoundedTestClient(t, handler, 5*time.Second, maxResponseBytes)
+			// The timeout only guards against a hang; the call answers at once,
+			// but a loaded machine running the whole module can stall it for
+			// seconds.
+			client := newBoundedTestClient(t, handler, 30*time.Second, maxResponseBytes)
 
 			err := tc.call(context.Background(), client)
 			if !errors.Is(err, ErrResponseTooLarge) {
