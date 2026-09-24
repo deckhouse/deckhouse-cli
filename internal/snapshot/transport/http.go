@@ -315,16 +315,24 @@ func (c *Client) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		var (
 			clonedHTTPTransport *http.Transport
 			enableHTTP2         bool
+			protocols           *http.Protocols
 		)
 
 		if transport, ok := rt.(*http.Transport); ok {
 			cloned := transport.Clone()
-			enableHTTP2 = cloned.ForceAttemptHTTP2 || cloned.TLSNextProto["h2"] != nil
+			enableHTTP2 = cloned.ForceAttemptHTTP2 || cloned.TLSNextProto["h2"] != nil ||
+				(cloned.Protocols != nil && cloned.Protocols.HTTP2())
+			protocols = cloned.Protocols
 			// Clone copies client-go's x/net/http2 TLSNextProto closures. An
 			// empty map prevents intermediate caller wrappers from enabling or
-			// copying HTTP/2 while they clone this transport.
+			// copying HTTP/2 while they clone this transport. Since Go 1.27
+			// x/net/http2 enables HTTP/2 through Protocols instead, and each
+			// clone that keeps it enabled gets a TLSNextProto["h2"] stub that
+			// the next clone copies but cannot serve h2 with, so Protocols is
+			// dropped here as well and restored on the final transport.
 			cloned.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 			cloned.ForceAttemptHTTP2 = false
+			cloned.Protocols = nil
 			clonedHTTPTransport = cloned
 			rt = cloned
 		}
@@ -343,6 +351,7 @@ func (c *Client) NewPersistentHTTPClient() (*PersistentHTTPClient, error) {
 		if ownedHTTPTransport != nil && enableHTTP2 {
 			ownedHTTPTransport.TLSNextProto = nil
 			ownedHTTPTransport.ForceAttemptHTTP2 = true
+			ownedHTTPTransport.Protocols = protocols
 			utilnet.SetTransportDefaults(ownedHTTPTransport)
 		}
 

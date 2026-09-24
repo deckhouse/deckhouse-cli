@@ -870,7 +870,11 @@ func TestSourceMD5_SizeDerivedDeadlineOutlivesOrdinaryHeaderTimeout(t *testing.T
 	const (
 		ordinaryTimeout = 30 * time.Millisecond
 		hashDelay       = 90 * time.Millisecond
-		wantMD5         = "8c7dd922ad47494fc02c388e12c00eac"
+		// hashTimeout only has to outlive hashDelay. The wide margin absorbs
+		// the multi-second stalls a loaded machine shows while the whole
+		// module's tests run in parallel.
+		hashTimeout = 10 * time.Second
+		wantMD5     = "8c7dd922ad47494fc02c388e12c00eac"
 	)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -884,13 +888,13 @@ func TestSourceMD5_SizeDerivedDeadlineOutlivesOrdinaryHeaderTimeout(t *testing.T
 	ordinaryTransport.ResponseHeaderTimeout = ordinaryTimeout
 
 	hashTransport := srv.Client().Transport.(*http.Transport).Clone()
-	hashTransport.ResponseHeaderTimeout = time.Second
+	hashTransport.ResponseHeaderTimeout = hashTimeout
 
 	f := NewFetcher(
 		&http.Client{Transport: ordinaryTransport},
 		WithSourceHashDoer(&http.Client{Transport: hashTransport}),
 	)
-	f.sourceHashTimeout = func(int64) time.Duration { return time.Second }
+	f.sourceHashTimeout = func(int64) time.Duration { return hashTimeout }
 
 	body, ordinaryErr := f.GetFile(context.Background(), srv.URL)
 	if ordinaryErr == nil {

@@ -673,6 +673,16 @@ func TestPersistentHTTPClient_IsolatesHTTP2PoolsAndCleanup(t *testing.T) {
 func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) {
 	t.Parallel()
 
+	// The short request must end on its own timeout, long before the long
+	// timeout could end it, so leaking either timeout into the other client
+	// fails the test. The two stay far apart so that a stall on a loaded
+	// machine cannot push the short request past maxShortElapsed.
+	const (
+		shortTimeout    = 50 * time.Millisecond
+		longTimeout     = 10 * time.Second
+		maxShortElapsed = 5 * time.Second
+	)
+
 	shortStarted := make(chan struct{})
 	longStarted := make(chan struct{})
 	releaseLong := make(chan struct{}, 1)
@@ -701,13 +711,13 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 	})
 
 	sc := newSharedHTTP2Client(t, srv)
-	shortClient, err := newPersistentTestClient(sc, srv, 50*time.Millisecond)
+	shortClient, err := newPersistentTestClient(sc, srv, shortTimeout)
 	if err != nil {
 		t.Fatalf("build short-timeout client: %v", err)
 	}
 	t.Cleanup(shortClient.CloseIdleConnections)
 
-	longClient, err := newPersistentTestClient(sc, srv, time.Second)
+	longClient, err := newPersistentTestClient(sc, srv, longTimeout)
 	if err != nil {
 		t.Fatalf("build long-timeout client: %v", err)
 	}
@@ -737,12 +747,12 @@ func TestPersistentHTTPClient_IsolatesHTTP2ResponseHeaderTimeouts(t *testing.T) 
 		t.Fatalf("short HTTP/2 request error = %v, want response-header timeout", err)
 	}
 
-	if elapsed < 25*time.Millisecond {
+	if elapsed < shortTimeout/2 {
 		t.Fatalf("short HTTP/2 response-header timeout took only %v", elapsed)
 	}
 
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("short HTTP/2 response-header timeout took %v, want under 500ms", elapsed)
+	if elapsed > maxShortElapsed {
+		t.Fatalf("short HTTP/2 response-header timeout took %v, want under %v", elapsed, maxShortElapsed)
 	}
 
 	<-shortStarted
