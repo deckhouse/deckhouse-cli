@@ -94,8 +94,8 @@ func writeArchive(
 	fmt.Fprintf(os.Stderr, "%s\n", doneBanner)
 
 	if len(failures) > 0 {
-		fmt.Fprintf(os.Stderr, "%d of %d commands failed or timed out, see %s inside the archive\n",
-			len(failures), len(commands), collectionErrorsFile)
+		fmt.Fprintf(os.Stderr, "%d command(s) failed or timed out, see %s inside the archive\n",
+			len(failures), collectionErrorsFile)
 	}
 
 	return nil
@@ -159,46 +159,30 @@ func runCommands(
 	}
 
 	for i, cmd := range commands {
-		// The interval separates executions from one another, so the first one
-		// does not wait for it: the ticker starts before the loop, and waiting
-		// for its first tick is idle time that protects nothing.
 		if tickCh != nil && i > 0 {
 			<-tickCh
 		}
 
 		fullCommand := append([]string{cmd.Cmd}, cmd.Args...)
 
-		started := time.Now()
-
 		cmdCtx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 		output, stderrOutput, streamErr := utilk8s.ExecCommandInPod(cmdCtx, config, kubeCl, fullCommand, podName, namespace, containerName)
 
 		cancel()
 
-		// One line per command: the collection otherwise prints a banner and then
-		// goes silent for minutes, with no way to tell a slow command from a stuck
-		// one, and no evidence afterwards about where the time went.
-		fmt.Fprintf(os.Stderr, "  [%d/%d] %s (%s, %d bytes)\n",
-			i+1, len(commands), cmd.File, time.Since(started).Round(time.Millisecond), len(output))
-
 		if streamErr != nil {
 			timedOut := errors.Is(streamErr, context.DeadlineExceeded)
 
-			// Report the error itself, the command that produced it and how much
-			// output survived: the entry is written either way, so without the
-			// byte count an operator cannot tell an empty file from a truncated
-			// one, and without the error a non-zero exit code looks the same as a
-			// broken stream.
 			if timedOut {
-				fmt.Fprintf(os.Stderr, "    WARNING: timed out collecting %s after %s, keeping %d bytes collected so far\n",
+				fmt.Fprintf(os.Stderr, "  WARNING: timed out collecting %s after %s, keeping %d bytes collected so far\n",
 					cmd.File, commandTimeout, len(output))
 			} else {
-				fmt.Fprintf(os.Stderr, "    ERROR: collecting %s: %v, keeping %d bytes\n      command: %s\n",
+				fmt.Fprintf(os.Stderr, "  ERROR: collecting %s: %v, keeping %d bytes\n    command: %s\n",
 					cmd.File, streamErr, len(output), strings.Join(fullCommand, " "))
 			}
 
 			if trimmed := strings.TrimSpace(stderrOutput); trimmed != "" {
-				fmt.Fprintf(os.Stderr, "      stderr: %s\n", trimmed)
+				fmt.Fprintf(os.Stderr, "    stderr: %s\n", trimmed)
 			}
 
 			failures = append(failures, commandFailure{
