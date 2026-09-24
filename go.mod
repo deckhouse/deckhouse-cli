@@ -36,9 +36,9 @@ require (
 	github.com/vbauerster/mpb/v8 v8.7.5
 	github.com/werf/3p-helm v0.0.0-20260211143448-0b619e3cc3bf
 	github.com/werf/common-go v0.0.0-20260414103517-0558f83edc6d
-	github.com/werf/logboek v0.6.1
-	github.com/werf/nelm v1.24.1
-	github.com/werf/werf/v2 v2.69.0
+	github.com/werf/logboek v0.7.1
+	github.com/werf/nelm v1.30.5-0.20260918172005-312d2f269472
+	github.com/werf/werf/v2 v2.79.1
 	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.15.0
 	golang.org/x/crypto v0.55.0
@@ -62,6 +62,12 @@ require (
 	github.com/docker/cli v29.3.0+incompatible
 	golang.org/x/sync v0.22.0
 	k8s.io/klog/v2 v2.140.0
+)
+
+require (
+	github.com/alessio/shellescape v1.4.2 // indirect
+	github.com/deckhouse/elfedit v0.1.1 // indirect
+	github.com/facebookincubator/nvdtools v0.1.5 // indirect
 )
 
 require (
@@ -199,7 +205,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
-	github.com/deckhouse/delivery-kit-sdk v1.2.0 // indirect
+	github.com/deckhouse/delivery-kit-sdk v1.4.2 // indirect
 	github.com/deckhouse/virtualization/api v1.11.1 // indirect; must match src/cli
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
@@ -592,8 +598,8 @@ require (
 	github.com/wI2L/jsondiff v0.5.0 // indirect
 	github.com/walle/targz v0.0.0-20140417120357-57fe4206da5a // indirect
 	github.com/werf/3p-helm-for-werf-helm v0.0.0-20241217155820-089f92cd5c9d // indirect
-	github.com/werf/copy-recurse v0.2.7 // indirect
-	github.com/werf/kubedog v0.13.1-0.20260212122756-5d3f8c0f1827 // indirect
+	github.com/werf/copy-recurse v0.3.1 // indirect
+	github.com/werf/kubedog v0.13.1-0.20260912145640-ad1e8a134607 // indirect
 	github.com/werf/kubedog-for-werf-helm v0.0.0-20241217155728-9d45c48b82b6 // indirect
 	github.com/werf/lockgate v0.1.1 // indirect
 	github.com/werf/nelm-for-werf-helm v0.0.0-20241217155925-b0e6734d1dbf // indirect
@@ -657,7 +663,6 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
-	gopkg.in/evanphx/json-patch.v5 v5.8.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/oleiade/reflections.v1 v1.0.0 // indirect
@@ -698,7 +703,7 @@ replace (
 	github.com/hashicorp/vault/sdk => flant.internal/deckhouse/stronghold.git/images/stronghold/sdk v1.18.6
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
-	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.69.0-dk
+	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.79.1-dk.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0 => github.com/deckhouse/gogost/v5 v5.15.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc => go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0
 )
