@@ -26,6 +26,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/debugtar"
+	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info/virtualizationtar"
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
@@ -57,6 +58,7 @@ func NewCommand() *cobra.Command {
 		Short:         "Collect debug info.",
 		Long:          collectDebugInfoCmdLong,
 		Example:       collectDebugInfoCmdExample,
+		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		PreRunE: func(_ *cobra.Command, _ []string) error {
@@ -74,10 +76,12 @@ func NewCommand() *cobra.Command {
 			return collectDebugInfo(cmd, listExclude, excludeList, commandTimeout, requestInterval)
 		},
 	}
-	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated values")
-	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive")
+	collectDebugInfoCmd.Flags().StringSliceVar(&excludeList, "exclude", []string{}, "Exclude specific files from the debug archive. Use comma-separated names as printed by --list-exclude; the file extension is optional. An unknown name is an error")
+	collectDebugInfoCmd.Flags().BoolVarP(&listExclude, "list-exclude", "l", false, "List all files that can be excluded from the debug archive, then exit")
 	collectDebugInfoCmd.Flags().DurationVar(&commandTimeout, "command-timeout", 2*time.Minute, "Timeout for each individual debug command execution")
 	collectDebugInfoCmd.Flags().DurationVar(&requestInterval, "request-interval", 0, "Minimum interval between debug command executions to avoid overloading the cluster (e.g. 200ms, 500ms, 1s). Zero disables rate limiting (default 0s)")
+
+	collectDebugInfoCmd.AddCommand(virtualizationtar.NewCommand())
 
 	return collectDebugInfoCmd
 }
@@ -96,19 +100,9 @@ func collectDebugInfo(cmd *cobra.Command, listExclude bool, excludeList []string
 		return nil
 	}
 
-	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
+	config, kubeCl, err := utilk8s.NewClientSet(cmd)
 	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	contextName, err := cmd.Flags().GetString("context")
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
-	}
-
-	config, kubeCl, err := utilk8s.SetupK8sClientSet(kubeconfigPath, contextName)
-	if err != nil {
-		return fmt.Errorf("Failed to setup Kubernetes client: %w", err)
+		return err
 	}
 
 	if err = debugtar.Tarball(config, kubeCl, excludeList, commandTimeout, requestInterval); err != nil {

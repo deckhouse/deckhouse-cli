@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -35,6 +36,20 @@ func WithInsecureSkipTLSVerify(insecure bool) ClientOption {
 	return func(overrides *clientcmd.ConfigOverrides) {
 		overrides.ClusterInfo.InsecureSkipTLSVerify = insecure
 	}
+}
+
+// NewClientSet builds a clientset from the global --kubeconfig/--context flags
+// of cmd, the way NewDynamicClient does for the dynamic client.
+func NewClientSet(cmd *cobra.Command) (*rest.Config, *kubernetes.Clientset, error) {
+	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
+	contextName, _ := cmd.Flags().GetString("context")
+
+	config, kubeCl, err := SetupK8sClientSet(kubeconfigPath, contextName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to setup Kubernetes client: %w", err)
+	}
+
+	return config, kubeCl, nil
 }
 
 // SetupK8sClientSet reads kubeconfig file at kubeconfigPath and constructs a kubernetes clientset from it.
