@@ -66,7 +66,7 @@ func Acquire(path string, staleAfter time.Duration, onReclaim func(age time.Dura
 // reclaim removes the orphaned lock described by stale.
 //
 //   - Renames path to a unique scratch path; exactly one concurrent reclaimer wins.
-//   - Checks file identity: if the moved file is not stale, a concurrent acquirer
+//   - Checks file identity (inode and mtime): if the moved file is not stale, a concurrent acquirer
 //     created a fresh lock after our staleness check - restore it and return ErrLocked.
 //   - Otherwise removes the scratch file and optionally calls onReclaim.
 func reclaim(path string, stale os.FileInfo, onReclaim func(age time.Duration)) error {
@@ -84,7 +84,10 @@ func reclaim(path string, stale os.FileInfo, onReclaim func(age time.Duration)) 
 
 	moved, err := os.Stat(reclaimScratch)
 	// Rename may have moved a fresh lock created after our Stat in Acquire.
-	grabbedFresh := err == nil && !os.SameFile(stale, moved)
+	// The inode alone cannot tell: ext4 hands a freed inode number straight to
+	// the next file, so the fresh lock may reuse the stale one's. Rename keeps
+	// mtime, and a re-created lock cannot carry the stale lock's old mtime.
+	grabbedFresh := err == nil && (!os.SameFile(stale, moved) || !moved.ModTime().Equal(stale.ModTime()))
 
 	if grabbedFresh {
 		if err := os.Rename(reclaimScratch, path); err != nil {
