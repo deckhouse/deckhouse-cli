@@ -22,6 +22,7 @@ require (
 	github.com/hashicorp/vault v1.14.8
 	github.com/iancoleman/strcase v0.3.0
 	github.com/int128/kubelogin v1.28.0
+	github.com/mattn/go-runewidth v0.0.16
 	github.com/mitchellh/go-wordwrap v1.0.1
 	github.com/mitchellh/mapstructure v1.5.1-0.20231216201459-8508981c8b6c
 	github.com/muesli/termenv v0.16.0
@@ -523,7 +524,6 @@ require (
 	github.com/mattermost/xml-roundtrip-validator v0.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/mattn/go-sqlite3 v2.0.1+incompatible // indirect
 	github.com/mediocregopher/radix/v4 v4.1.4 // indirect
