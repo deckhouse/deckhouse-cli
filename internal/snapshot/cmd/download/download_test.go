@@ -41,6 +41,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/aggapi"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/compress"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/progress"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/transport"
 )
 
@@ -1031,5 +1032,81 @@ func TestNewCommand_UsesExecutionContextInstalledAfterConstruction(t *testing.T)
 	err := cmd.Execute()
 	if !errors.Is(err, cancelCause) {
 		t.Fatalf("execute error = %v, want cancellation cause %v", err, cancelCause)
+	}
+}
+
+// countingSink is a progress.Sink that only counts Wait calls.
+type countingSink struct {
+	waits int
+}
+
+func (s *countingSink) NewStream(string, int64) progress.Stream { return nil }
+func (s *countingSink) SetVolumeTotal(int)                      {}
+func (s *countingSink) Wait()                                   { s.waits++ }
+func (s *countingSink) LogWriter() io.Writer                    { return io.Discard }
+
+func TestFinishDownload(t *testing.T) {
+	t.Parallel()
+
+	runErr := errors.New("pipeline failed")
+	lockErr := errors.New("lock file replaced")
+
+	cases := []struct {
+		name     string
+		runErr   error
+		lockErr  error
+		wantIs   []error
+		wantText []string
+	}{
+		{
+			name: "success: no errors returns nil",
+		},
+		{
+			name:     "Summary mark follows volume count, not exit status",
+			lockErr:  lockErr,
+			wantIs:   []error{lockErr},
+			wantText: []string{"verify locked output directory after download"},
+		},
+		{
+			name:     "error: transfer failure is reported",
+			runErr:   runErr,
+			wantIs:   []error{runErr},
+			wantText: []string{"snapshot download failed"},
+		},
+		{
+			name:     "error: transfer and lock failures are both reported",
+			runErr:   runErr,
+			lockErr:  lockErr,
+			wantIs:   []error{runErr, lockErr},
+			wantText: []string{"snapshot download failed", "verify locked output directory after download"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := &countingSink{}
+
+			err := finishDownload(sink, tc.runErr, tc.lockErr)
+
+			assert.Equal(t, 1, sink.waits, "Wait must be called exactly once")
+
+			if len(tc.wantIs) == 0 {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.Error(t, err)
+
+			for _, target := range tc.wantIs {
+				assert.ErrorIs(t, err, target)
+			}
+
+			for _, text := range tc.wantText {
+				assert.Contains(t, err.Error(), text)
+			}
+		})
 	}
 }

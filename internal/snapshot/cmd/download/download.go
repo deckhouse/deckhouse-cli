@@ -369,17 +369,9 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 
 	runErr := pipeline.RunRooted(ctx, cfg, destination)
 
-	lockErr := outputLock.Verify()
-	if runErr != nil || lockErr != nil {
-		sink.Wait()
-
-		return errors.Join(
-			wrapDownloadError(runErr),
-			wrapOutputLockVerifyError(lockErr),
-		)
+	if err := finishDownload(sink, runErr, outputLock.Verify()); err != nil {
+		return err
 	}
-
-	sink.Wait()
 
 	log.Info("snapshot download complete", slog.String("output_dir", outputDir))
 
@@ -504,6 +496,17 @@ func acquireOutputLockContext(ctx context.Context, outputDir string) (*archive.L
 	}
 
 	return lock, nil
+}
+
+// finishDownload settles the progress display on every exit path and then
+// reports the transfer and post-transfer lock-check failures together.
+func finishDownload(sink progress.Sink, runErr, lockErr error) error {
+	sink.Wait()
+
+	return errors.Join(
+		wrapDownloadError(runErr),
+		wrapOutputLockVerifyError(lockErr),
+	)
 }
 
 func wrapDownloadError(err error) error {
