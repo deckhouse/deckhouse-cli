@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	olcedar "github.com/deckhouse/deckhouse-cli/internal/olcedar/cmd"
 	collectdebuginfo "github.com/deckhouse/deckhouse-cli/internal/system/cmd/collect-debug-info"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/edit"
 	"github.com/deckhouse/deckhouse-cli/internal/system/cmd/get"
@@ -53,6 +54,7 @@ func NewCommand() *cobra.Command {
 		collectdebuginfo.NewCommand(),
 		queue.NewCommand(),
 		logs.NewCommand(),
+		olcedar.NewCommand(),
 	)
 
 	flags.AddPersistentFlags(systemCmd)
