@@ -1,0 +1,374 @@
+name: CVE Scan
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled, synchronize]
+  push:
+    branches:
+      - main
+#   workflow_dispatch:
+#     inputs:
+#       tag_type:
+#         type: choice
+#         description: Tag type
+#         required: false
+#         options:
+#         - release
+#         - dev
+#       tag_name:
+#         description: "release version in semver minor format (example: 1.68) or specified tag from dev registry"
+#         required: false
+#       scan_several_lastest_releases:
+#         description: 'Optional. Whether to scan last several releases or not. true/false. For scheduled pipelines it is always true. Default is: false.'
+#         required: false
+#       latest_releases_amount:
+#         description: 'Optional. Number of latest releases to scan. Default is: 3'
+#         required: false
+#       severity:
+#         description: 'Optional. Vulnerabilities severity to scan. Default is: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL'
+#         required: false
+
+# jobs:
+#   cve_scan_on_pr:
+#     if: github.event_name == 'pull_request'
+#     name: CVE scan for PR
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: deckhouse/modules-actions/cve_scan@v5
+#         with:
+#           tag: pr${{ github.event.number }}
+#           module_name: ${{ vars.MODULE_NAME }}
+#           dd_url: ${{ secrets.DEFECTDOJO_HOST }}
+#           dd_token: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+#           prod_registry: ${{ secrets.PROD_READ_REGISTRY }}
+#           prod_registry_user: ${{ secrets.PROD_READ_REGISTRY_LOGIN }}
+#           prod_registry_password: ${{ secrets.PROD_READ_REGISTRY_PASSWORD }}
+#           dev_registry: ${{ secrets.DEV_REGISTRY }}
+#           dev_registry_user: ${{ secrets.DEV_REGISTRY_LOGIN }}
+#           dev_registry_password: ${{ secrets.DEV_REGISTRY_PASSWORD }}
+#           deckhouse_private_repo: ${{ secrets.DECKHOUSE_PRIVATE_REPO }}
+#           severity: "HIGH,CRITICAL"
+#   cve_scan:
+#     if: github.event_name != 'pull_request'
+#     name: Regular CVE scan
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: deckhouse/modules-actions/cve_scan@v5
+#         with:
+#           tag: ${{ github.event.inputs.tag_name || github.event.repository.default_branch }}
+#           tag_type: ${{ github.event.inputs.tag_type }}
+#           module_name: ${{ vars.MODULE_NAME }}
+#           dd_url: ${{ secrets.DEFECTDOJO_HOST }}
+#           dd_token: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+#           prod_registry: ${{ secrets.PROD_READ_REGISTRY }}
+#           prod_registry_user: ${{ secrets.PROD_READ_REGISTRY_LOGIN }}
+#           prod_registry_password: ${{ secrets.PROD_READ_REGISTRY_PASSWORD }}
+#           dev_registry: ${{ secrets.DEV_REGISTRY }}
+#           dev_registry_user: ${{ secrets.DEV_REGISTRY_LOGIN }}
+#           dev_registry_password: ${{ secrets.DEV_REGISTRY_PASSWORD }}
+#           deckhouse_private_repo: ${{ secrets.DECKHOUSE_PRIVATE_REPO }}
+#           scan_several_lastest_releases: ${{ github.event.inputs.scan_several_lastest_releases }}
+#           latest_releases_amount: ${{ github.event.inputs.latest_releases_amount || '3' }}
+#           severity: ${{ github.event.inputs.severity }}
+
+jobs:
+  cve_scan_on_pr:
+    if: github.event_name == 'pull_request'
+    name: CVE scan for PR
+    runs-on: ubuntu-latest
+    env:
+      TRIVY_BIN_VERSION: "v0.67.2"
+      TRIVY_REGISTRY: $TRIVY_REGISTRY
+      PROD_READ_REGISTRY_USER: $PROD_READ_REGISTRY_USER
+      PROD_READ_REGISTRY_PASSWORD: $PROD_READ_REGISTRY_PASSWORD
+      TRIVY_DB_URL: $TRIVY_DB_URL
+      TRIVY_JAVA_DB_URL: $TRIVY_JAVA_DB_URL
+      TRIVY_POLICY_URL: TRIVY_POLICY_URL
+      SEVERITY: SEVERITY
+
+    steps:
+    - name: scan
+      run: |
+        echo "Creating workdir"
+        workdir="trivy_scan"
+        # remove workdir in case it was not removed on previous run
+        rm -rf "${workdir}"
+        mkdir "${workdir}"
+
+        echo
+        echo "======================================================="
+        echo
+
+        echo "Get Trivy"
+        echo "Trivy version: ${TRIVY_BIN_VERSION}"
+        mkdir -p "${workdir}/bin/trivy-${TRIVY_BIN_VERSION}"
+        curl -L -s --fail-with-body https://${DECKHOUSE_PRIVATE_REPO}/api/v4/projects/${TRIVY_REPO_ID}/packages/generic/trivy-${TRIVY_BIN_VERSION}/${TRIVY_BIN_VERSION}/trivy -o ${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy
+        chmod u+x ${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy
+        ln -s ${PWD}/${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy ${workdir}/bin/trivy
+
+        echo
+        echo "======================================================="
+        echo
+
+        echo "Updating Trivy Data Bases"
+        mkdir -p "${workdir}/bin/trivy_cache"
+        ${workdir}/bin/trivy image --timeout 15m --username "${PROD_READ_REGISTRY_USER}" --password "${PROD_READ_REGISTRY_PASSWORD}" --download-db-only --db-repository "${TRIVY_DB_URL}" --cache-dir "${workdir}/bin/trivy_cache"
+        ${workdir}/bin/trivy image --timeout 15m --username "${PROD_READ_REGISTRY_USER}" --password "${PROD_READ_REGISTRY_PASSWORD}" --download-java-db-only --java-db-repository "${TRIVY_JAVA_DB_URL}" --cache-dir "${workdir}/bin/trivy_cache"
+
+        echo
+        echo "======================================================="
+        echo
+
+        ${workdir}/bin/trivy fs --scanners vuln,license ./ --output report.json --format table --ignorefile "${module_workdir}/.trivyignore"
+
+        rm -r ${workdir}
+
+
+
+
+
+
+
+
+        # echo "Preparing DOCKER_CONFIG and log in to registries"
+        # mkdir -p "${workdir}/docker"
+        # export DOCKER_CONFIG="${workdir}/docker"
+        # echo "${{inputs.prod_registry_password}}" | docker login --username="${{inputs.prod_registry_user}}" --password-stdin ${{inputs.prod_registry}}
+        # echo "${{inputs.dev_registry_password}}" | docker login --username="${{inputs.dev_registry_user}}" --password-stdin ${{inputs.dev_registry}}
+        # echo
+        # echo "======================================================="
+        # echo
+        # echo "Get Trivy"
+        # echo "Trivy version: ${TRIVY_BIN_VERSION}"
+        # mkdir -p "${workdir}/bin/trivy-${TRIVY_BIN_VERSION}"
+        # curl -L -s --fail-with-body https://${DECKHOUSE_PRIVATE_REPO}/api/v4/projects/${TRIVY_REPO_ID}/packages/generic/trivy-${TRIVY_BIN_VERSION}/${TRIVY_BIN_VERSION}/trivy -o ${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy
+        # chmod u+x ${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy
+        # ln -s ${PWD}/${workdir}/bin/trivy-${TRIVY_BIN_VERSION}/trivy ${workdir}/bin/trivy
+
+        # echo "Updating Trivy Data Bases"
+        # mkdir -p "${workdir}/bin/trivy_cache"
+        # ${workdir}/bin/trivy image --timeout 15m --username "${{inputs.prod_registry_user}}" --password "${{inputs.prod_registry_password}}" --download-db-only --db-repository "${TRIVY_DB_URL}" --cache-dir "${workdir}/bin/trivy_cache"
+        # ${workdir}/bin/trivy image --timeout 15m --username "${{inputs.prod_registry_user}}" --password "${{inputs.prod_registry_password}}" --download-java-db-only --java-db-repository "${TRIVY_JAVA_DB_URL}" --cache-dir "${workdir}/bin/trivy_cache"
+        # echo
+        # echo "======================================================="
+        # echo
+        # # Defining functions
+
+        # trivy_scan() {
+        #   ${workdir}/bin/trivy i --timeout 15m --vex oci --show-suppressed --config-check "${TRIVY_POLICY_URL}" --cache-dir "${workdir}/bin/trivy_cache" --skip-db-update --skip-java-db-update --exit-code 0 --severity "${SEVERITY}" --ignorefile "${module_workdir}/.trivyignore" --format ${1} ${2} ${3} --quiet ${4} --username "${trivy_registry_user}" --password "${trivy_registry_pass}" --image-src remote
+        # }
+
+        # send_report() {
+        #   dd_scan_type="${1}"
+        #   dd_report_file_path="${2}"
+        #   dd_module_name="${3}"
+        #   dd_image_name="${4}"
+        #   dd_engagement_name="[$(echo "${dd_scan_type}" | tr '[:lower:]' '[:upper:]')] [IMAGES] [${dd_branch}]"
+        #   tags_string="\"external_modules\",\"images\",\"${dd_scan_type}\",\"${dd_release_or_dev_tag}\",\"${dd_image_version}\""
+        #   if [[ -n "${dd_short_release_tag}" && -n "${dd_full_release_tag}" ]]; then
+        #     tags_string+=",\"${dd_short_release_tag}\",\"${dd_full_release_tag}\""
+        #   fi
+        #   echo ""
+        #   echo "Uploading trivy ${dd_branch} report for image \"${dd_image_name}\" of \"${dd_module_name}\" module"
+        #   echo ""
+        #   dd_upload_response=$(curl -sw "%{http_code}" -X POST \
+        #     --retry 10 \
+        #     --retry-delay 20 \
+        #     --retry-all-errors \
+        #     ${DD_URL}/api/v2/reimport-scan/ \
+        #     -H "accept: application/json" \
+        #     -H "Authorization: Token ${DD_TOKEN}" \
+        #     -F "auto_create_context=True" \
+        #     -F "minimum_severity=Info" \
+        #     -F "active=true" \
+        #     -F "verified=true" \
+        #     -F "scan_type=Trivy Scan" \
+        #     -F "close_old_findings=true" \
+        #     -F "do_not_reactivate=false" \
+        #     -F "push_to_jira=false" \
+        #     -F "file=@${dd_report_file_path}" \
+        #     -F "product_type_name=External Modules" \
+        #     -F "product_name=${dd_module_name}" \
+        #     -F "scan_date=${date_iso}" \
+        #     -F "engagement_name=${dd_engagement_name}" \
+        #     -F "service=${dd_module_name} / ${dd_image_name}" \
+        #     -F "group_by=component_name+component_version" \
+        #     -F "deduplication_on_engagement=false" \
+        #     -F "tags=external_module,${dd_scan_type},module:${dd_module_name},image:${dd_image_name},branch:${dd_branch},${dd_short_release_tag},${dd_full_release_tag},${dd_default_branch_tag},${dd_release_or_dev_tag}" \
+        #     -F "test_title=[${dd_module_name}]: ${dd_image_name}:${dd_image_version}" \
+        #     -F "version=${dd_image_version}" \
+        #     -F "build_id=${IMAGE_HASH}" \
+        #     -F "commit_hash=${CI_COMMIT_SHA}" \
+        #     -F "branch_tag=${module_tag}" \
+        #     -F "apply_tags_to_findings=true")
+
+        #   dd_return_code="${dd_upload_response: -3}"
+        #   dd_return_body="${dd_upload_response:0: -3}"
+        #   if [ ${dd_return_code} -eq 201 ]; then
+        #     dd_engagement_id=$(echo ${dd_return_body} | jq ".engagement_id" )
+        #     echo "dd_engagement_id: ${dd_engagement_id}"
+        #     echo "Update with tags: ${tags_string}"
+        #     # Updating engagement
+        #     dd_eng_patch_response=$(curl -sw "%{http_code}" -X "PATCH" \
+        #       --retry 10 \
+        #       --retry-delay 20 \
+        #       --retry-all-errors \
+        #       "${DD_URL}/api/v2/engagements/${dd_engagement_id}/" \
+        #       -H "accept: application/json" \
+        #       -H "Authorization: Token ${DD_TOKEN}" \
+        #       -H "Content-Type: application/json" \
+        #       -d "{
+        #       \"tags\": ["${tags_string}"],
+        #       \"version\": \"${dd_image_version}\",
+        #       \"branch_tag\": \"${dd_branch}\"
+        #     }")
+        #     if [ ${dd_eng_patch_response: -3} -eq 200 ]; then
+        #       echo "Engagemet \"${dd_engagement_name}\" updated successfully"
+        #     else
+        #       echo "!!!WARNING!!!"
+        #       echo "Engagemet \"${dd_engagement_name}\" WAS NOT UPDATED"
+        #       echo "HTTP_CODE: ${dd_eng_patch_response: -3}"
+        #       echo "DD_RESPONSE: ${dd_eng_patch_response:0: -3}"
+        #     fi
+        #   else
+        #     echo "!!!WARNING!!!"
+        #     echo "Report for image \"${dd_image_name}\" of \"${dd_module_name}\" module WAS NOT UPLOADED"
+        #     echo "HTTP_CODE: ${dd_return_code}"
+        #     echo "DD_RESPONSE: ${dd_return_body}"
+        #   fi
+        # }
+        # if [ "${{ github.event_name }}" == "schedule" ]; then
+        #   SCAN_SEVERAL_LASTEST_RELEASES="true"
+        # fi
+
+        # echo "Setting up registry path for module"
+        # PROD_REGISTRY_MODULE_BASEDIR="${{inputs.prod_registry}}/${MODULE_PROD_REGISTRY_PATH}"
+        # DEV_REGISTRY_MODULE_BASEDIR="${{inputs.dev_registry}}/${MODULE_DEV_REGISTRY_PATH}"
+
+        # echo "Getting tags to scan"
+        # module_tags=("${TAG}")
+        # # Check if provided tag for manual run is for release
+        # if [ "${{ github.event_name }}" != "pull_request" ]; then
+        #   if [ "${TAG}" != "${{ github.event.repository.default_branch }}" ]; then
+        #     if [ "${TAG_TYPE}" == "release" ]; then
+        #       # if some specific release is defined - scan only it
+        #       if echo "${TAG}"|grep -qE "^[0-9]+\.[0-9]+$"; then
+        #         module_tags=($(crane ls "${PROD_REGISTRY_MODULE_BASEDIR}/${MODULE_NAME}" | grep "^v${TAG}\.[0-9]*$" | sort -V -r | head -n 1))
+        #       else
+        #         echo "ERROR: Please specify required release in the following format: [0-9]+\.[0-9]+"
+        #         exit 1
+        #       fi
+        #     elif [ "${TAG_TYPE}" == "dev" ]; then
+        #       if [ $(crane ls "${DEV_REGISTRY_MODULE_BASEDIR}/${MODULE_NAME}" | grep "^${TAG}$" | wc -l) -eq 1 ]; then
+        #         module_tags=("${TAG}")
+        #       else
+        #         echo "ERROR: Provided tag \"${TAG}\" is not found in dev registry"
+        #         exit 1
+        #       fi
+        #     else
+        #       echo "ERROR: TAG TYPE is not defined!"
+        #       exit 1
+        #     fi
+        #   fi
+        # fi
+        # if [ "${SCAN_SEVERAL_LASTEST_RELEASES}" == "true" ]; then
+        #   # Get release tags by regexp, sort by sevmer desc, cut to get minor version, uniq and get 3 latest
+        #   releases=($(crane ls "${PROD_REGISTRY_MODULE_BASEDIR}/${MODULE_NAME}" | grep "^v[0-9]*\.[0-9]*\.[0-9]*" | sort -V -r))
+        #   latest_minor_releases=($(printf '%s\n' "${releases[@]}"| cut -d "." -f -2 | uniq | head -n ${LATEST_RELEASES_AMOUNT}))
+        #   for r in "${latest_minor_releases[@]}"; do
+        #     module_tags+=($(printf '%s\n' "${releases[@]}" | grep "${r}" | sort -V -r|head -n 1))
+        #   done
+        # fi
+
+        # echo "CVE Scan will be applied to the following tags of ${MODULE_NAME}"
+        # echo "${module_tags[*]}"
+        # # Scan in loop for provided list of tags
+        # for module_tag in ${module_tags[*]}; do
+        #   dd_default_branch_tag=""
+        #   dd_short_release_tag=""
+        #   dd_full_release_tag=""
+        #   dd_release_or_dev_tag="dev"
+        #   dd_image_version="${module_tag}"
+        #   dd_branch="${module_tag}"
+        #   date_iso=$(date -I)
+        #   module_image="${DEV_REGISTRY_MODULE_BASEDIR}/${MODULE_NAME}"
+        #   trivy_registry_user="${{inputs.dev_registry_user}}"
+        #   trivy_registry_pass="${{inputs.dev_registry_password}}"
+        #   if [ "${module_tag}" == "${{ github.event.repository.default_branch }}" ]; then
+        #     dd_default_branch_tag="default_branch"
+        #   fi
+        #   # If we are scanning release images - we need to redefine image path to prod registry
+        #   if echo "${module_tag}" | grep -q "^v[0-9]*\.[0-9]*\.[0-9]*" && [[ "${{ github.event_name }}" != "pull_request" ]]; then
+        #     module_image="${PROD_REGISTRY_MODULE_BASEDIR}/${MODULE_NAME}"
+        #     trivy_registry_user="${{inputs.prod_registry_user}}"
+        #     trivy_registry_pass="${{inputs.prod_registry_password}}"
+        #     dd_short_release_tag="release:$(echo ${module_tag} | cut -d '.' -f -2 | sed 's/^v//')"
+        #     dd_full_release_tag="image_release_tag:${module_tag}"
+        #     dd_release_or_dev_tag="release"
+        #     dd_image_version="$(echo ${dd_short_release_tag} | sed 's/^release\://')"
+        #   fi
+        #   module_workdir="${workdir}/${MODULE_NAME}_${module_tag}"
+        #   module_reports="${module_workdir}/reports"
+        #   mkdir -p "${module_reports}"
+        #   touch ${module_workdir}/.trivyignore
+        #   echo "Run Trivy scan"
+        #   echo "Image to check: ${module_image}:${module_tag}"
+        #   echo "Severity: ${SEVERITY}"
+        #   echo "----------------------------------------------"
+        #   echo ""
+        #   echo "Getting module image"
+        #   crane export "${module_image}:${module_tag}" "${MODULE_NAME}.tar"
+        #   tar xf "${MODULE_NAME}.tar" -C "${module_workdir}/"
+        #   echo "Preparing images list to scan"
+        #   digests=$(cat "${module_workdir}${IMAGES_DIGESTS_PATH}")
+        #   # Main module images to scan
+        #   digests=$(echo "${digests}"|jq --arg i "${MODULE_NAME}" --arg s "${module_tag}" '. += { ($i): ($s) }')
+        #   echo "Images to scan:"
+        #   echo "${digests}"
+        #   while read -r line; do
+        #     IMAGE_NAME=$(jq -rc '.key' <<< "${line}")
+        #     if [[ "${IMAGE_NAME}" == "trivy" ]]; then
+        #       continue
+        #     fi
+        #     # Set flag if additional image to use tag instead of hash
+        #     additional_image_detected=false
+        #     if [ "${IMAGE_NAME}" == "${MODULE_NAME}" ]; then
+        #       additional_image_detected=true
+        #     fi
+        #     echo "----------------------------------------------"
+        #     echo "👾 Scaning image \"${IMAGE_NAME}\" of module \"${MODULE_NAME}\" for tag \"${module_tag}\""
+        #     echo ""
+        #     IMAGE_HASH="$(jq -rc '.value' <<< "$line")"
+
+        #     if [ "$additional_image_detected" == true ]; then
+        #       if [ "${TRIVY_REPORTS_LOG_OUTPUT}" != "false" ]; then
+        #         # CVE Scan
+        #         trivy_scan "table" "--scanners vuln" "" "${module_image}:${module_tag}"
+        #         # License scan
+        #         trivy_scan "table" "--scanners license --license-full" "" "${module_image}:${module_tag}"
+        #       fi
+        #       # CVE Scan
+        #       trivy_scan "json" "--scanners vuln" "--output ${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report.json" "${module_image}:${module_tag}"
+        #       # License scan
+        #       trivy_scan "json" "--scanners license --license-full" "--output ${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report_license.json" "${module_image}:${module_tag}"
+        #     else
+        #       if [ "${TRIVY_REPORTS_LOG_OUTPUT}" != "false" ]; then
+        #         # CVE Scan
+        #         trivy_scan "table" "--scanners vuln" "" "${module_image}@${IMAGE_HASH}"
+        #         # License scan
+        #         trivy_scan "table" "--scanners license --license-full" "" "${module_image}@${IMAGE_HASH}"
+        #       fi
+        #       # CVE Scan
+        #       trivy_scan "json" "--scanners vuln" "--output ${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report.json" "${module_image}@${IMAGE_HASH}"
+        #       # License scan
+        #       trivy_scan "json" "--scanners license --license-full" "--output ${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report_license.json" "${module_image}@${IMAGE_HASH}"
+        #     fi
+        #     echo "    Done"
+
+        #     send_report "CVE" "${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report.json" "${MODULE_NAME}" "${IMAGE_NAME}"
+        #     send_report "License" "${module_reports}/ext_${MODULE_NAME}_${IMAGE_NAME}_report_license.json" "${MODULE_NAME}" "${IMAGE_NAME}"
+        #   done < <(jq -rc 'to_entries[]' <<< "${digests}")
+        # done
+        # rm -r ${workdir}
