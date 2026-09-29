@@ -50,11 +50,16 @@ type publicationIdentity struct {
 	UID        string `json:"uid,omitempty"`
 }
 
+// publicationEntry records what one node's snapshot.yaml must hold once published. Its
+// MetadataChecksum is the one the sealed snapshot.yaml gets: a parent at
+// archive.SnapshotFormatVersionChildMetadata commits to it, so it is fixed before any node is
+// finalized. A transaction written before it was recorded fails its checksum on load.
 type publicationEntry struct {
 	Path                  string                `json:"path"`
 	Identity              publicationIdentity   `json:"identity"`
 	NodeChecksum          archive.NodeChecksum  `json:"nodeChecksum"`
 	ChildrenChecksum      archive.NodeChecksum  `json:"childrenChecksum"`
+	MetadataChecksum      archive.NodeChecksum  `json:"metadataChecksum"`
 	HadSnapshot           bool                  `json:"hadSnapshot"`
 	PriorSnapshotDigest   string                `json:"priorSnapshotDigest,omitempty"`
 	PriorChildrenChecksum *archive.NodeChecksum `json:"priorChildrenChecksum,omitempty"`
@@ -66,6 +71,12 @@ type publicationTransaction struct {
 	SourceTreeDigest string             `json:"sourceTreeDigest"`
 	Entries          []publicationEntry `json:"entries"`
 	Checksum         string             `json:"checksum"`
+
+	// descriptors holds, by entry path, the snapshot.yaml each entry's MetadataChecksum was
+	// taken from, so that the run which built the transaction publishes exactly those without
+	// measuring every payload again. A transaction loaded from disk has none, and its entries
+	// are finalized from the node directories instead.
+	descriptors map[string]archive.SnapshotYAML
 }
 
 type publicationReceipt struct {
@@ -184,7 +195,7 @@ func validatePublicationTransaction(
 	for _, entry := range transaction.Entries {
 		if !filepath.IsLocal(entry.Path) ||
 			entry.Identity.APIVersion == "" || entry.Identity.Kind == "" || entry.Identity.Name == "" ||
-			entry.NodeChecksum.Hex == "" || entry.ChildrenChecksum.Hex == "" {
+			entry.NodeChecksum.Hex == "" || entry.ChildrenChecksum.Hex == "" || entry.MetadataChecksum.Hex == "" {
 			return fmt.Errorf("publication transaction contains incomplete entry: %w", errPublicationTransactionInvalid)
 		}
 
@@ -338,69 +349,58 @@ func snapshotDigest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// publicationPlanEntry is what buildPublicationTransaction knows about one node while it walks
+// the tree bottom up: the entry the node gets when it is published, and the commitment its
+// parent records for it. err defers a failure to compute either to the parent that needs it.
+type publicationPlanEntry struct {
+	entry      publicationEntry
+	descriptor archive.SnapshotYAML
+	commitment archive.ChildCommitment
+	err        error
+}
+
+// buildPublicationTransaction fixes, before any node is finalized, the snapshot.yaml digests
+// every published node ends up with. It walks the tree bottom up, because a parent commits to its
+// direct children's content checksum, children checksum and, at
+// archive.SnapshotFormatVersionChildMetadata, metadata checksum: a published child contributes
+// the snapshot.yaml describeNode predicts for it, sealed as it will be written; a child kept
+// as it is contributes the snapshot.yaml already on disk.
 func buildPublicationTransaction(
 	destination *archive.RootedDestination,
 	sourceTreeDigest string,
 	tasks []nodeTask,
 	publish map[*source.Node]bool,
 	computeNodeChecksum func(string) (archive.NodeChecksum, error),
+	describeNode func(task nodeTask, checksum, childrenChecksum archive.NodeChecksum) (archive.SnapshotYAML, error),
 ) (*publicationTransaction, error) {
-	expected := make(map[*source.Node]publicationEntry, len(tasks))
+	planned := make(map[*source.Node]publicationPlanEntry, len(tasks))
 
 	for i := len(tasks) - 1; i >= 0; i-- {
 		task := tasks[i]
 
-		checksum, err := computeNodeChecksum(task.nodeDir)
+		plan, err := planPublicationNode(destination, task, publish[task.node], planned,
+			computeNodeChecksum, describeNode)
 		if err != nil {
-			return nil, fmt.Errorf("compute publication checksum for %s: %w", task.node.DisplayLabel(), err)
+			return nil, err
 		}
 
-		children := make([]archive.ChildCommitment, 0, len(task.node.Children))
-		for _, child := range task.node.Children {
-			childEntry, ok := expected[child]
-			if !ok {
-				return nil, fmt.Errorf("publication child %s was not planned before parent: %w",
-					child.DisplayLabel(), errPublicationTransactionInvalid)
-			}
-
-			children = append(children, archive.ChildCommitment{
-				APIVersion:       childEntry.Identity.APIVersion,
-				Kind:             childEntry.Identity.Kind,
-				Name:             childEntry.Identity.Name,
-				Namespace:        childEntry.Identity.Namespace,
-				UID:              childEntry.Identity.UID,
-				NodeChecksum:     childEntry.NodeChecksum,
-				ChildrenChecksum: childEntry.ChildrenChecksum,
-			})
+		if plan.err != nil && publish[task.node] {
+			return nil, plan.err
 		}
 
-		childrenChecksum, err := archive.ComputeChildrenChecksum(children)
-		if err != nil {
-			return nil, fmt.Errorf("compute intended children commitment for %s: %w",
-				task.node.DisplayLabel(), err)
-		}
-
-		relative, err := filepath.Rel(destination.Path(), task.nodeDir)
-		if err != nil || !filepath.IsLocal(relative) {
-			return nil, fmt.Errorf("derive publication path for %s: %w",
-				task.node.DisplayLabel(), errPublicationTransactionInvalid)
-		}
-
-		expected[task.node] = publicationEntry{
-			Path:             relative,
-			Identity:         publicationIdentityForNode(task.node),
-			NodeChecksum:     checksum,
-			ChildrenChecksum: childrenChecksum,
-		}
+		planned[task.node] = plan
 	}
 
 	entries := make([]publicationEntry, 0, len(publish))
+	descriptors := make(map[string]archive.SnapshotYAML, len(publish))
+
 	for _, task := range tasks {
 		if !publish[task.node] {
 			continue
 		}
 
-		entry := expected[task.node]
+		entry := planned[task.node].entry
+		descriptors[entry.Path] = planned[task.node].descriptor
 		snapshotPath := filepath.Join(task.nodeDir, archive.SnapshotYAMLName)
 
 		data, found, err := readPublicationState(destination, snapshotPath)
@@ -433,12 +433,119 @@ func buildPublicationTransaction(
 		ArchiveRoot:      destination.Path(),
 		SourceTreeDigest: sourceTreeDigest,
 		Entries:          entries,
+		descriptors:      descriptors,
 	}
 	if err := sealPublicationTransaction(transaction); err != nil {
 		return nil, err
 	}
 
 	return transaction, nil
+}
+
+// planPublicationNode computes one node's publication entry and the commitment its parent
+// records for it, from its already planned children. A failure to compute the commitment is
+// recorded in the plan's err rather than returned: the caller fails at once for a published
+// node, and otherwise leaves it to the node's parent, since a node that is neither published nor
+// the child of a published node (one below a failed node, say) never needs its commitment.
+func planPublicationNode(
+	destination *archive.RootedDestination,
+	task nodeTask,
+	published bool,
+	planned map[*source.Node]publicationPlanEntry,
+	computeNodeChecksum func(string) (archive.NodeChecksum, error),
+	describeNode func(task nodeTask, checksum, childrenChecksum archive.NodeChecksum) (archive.SnapshotYAML, error),
+) (publicationPlanEntry, error) {
+	checksum, err := computeNodeChecksum(task.nodeDir)
+	if err != nil {
+		return publicationPlanEntry{}, fmt.Errorf("compute publication checksum for %s: %w",
+			task.node.DisplayLabel(), err)
+	}
+
+	relative, err := filepath.Rel(destination.Path(), task.nodeDir)
+	if err != nil || !filepath.IsLocal(relative) {
+		return publicationPlanEntry{}, fmt.Errorf("derive publication path for %s: %w",
+			task.node.DisplayLabel(), errPublicationTransactionInvalid)
+	}
+
+	identity := publicationIdentityForNode(task.node)
+	plan := publicationPlanEntry{
+		entry: publicationEntry{
+			Path:         relative,
+			Identity:     identity,
+			NodeChecksum: checksum,
+		},
+		commitment: archive.ChildCommitment{
+			APIVersion:   identity.APIVersion,
+			Kind:         identity.Kind,
+			Name:         identity.Name,
+			Namespace:    identity.Namespace,
+			UID:          identity.UID,
+			NodeChecksum: checksum,
+		},
+	}
+
+	children := make([]archive.ChildCommitment, 0, len(task.node.Children))
+	for _, child := range task.node.Children {
+		childPlan, ok := planned[child]
+		if !ok {
+			return publicationPlanEntry{}, fmt.Errorf("publication child %s was not planned before parent: %w",
+				child.DisplayLabel(), errPublicationTransactionInvalid)
+		}
+
+		if childPlan.err != nil {
+			plan.err = childPlan.err
+
+			return plan, nil
+		}
+
+		children = append(children, childPlan.commitment)
+	}
+
+	childrenChecksum, err := archive.ComputeChildrenChecksum(children)
+	if err != nil {
+		plan.err = fmt.Errorf("compute intended children commitment for %s: %w", task.node.DisplayLabel(), err)
+
+		return plan, nil
+	}
+
+	plan.entry.ChildrenChecksum = childrenChecksum
+	plan.commitment.ChildrenChecksum = childrenChecksum
+
+	var metadata archive.SnapshotYAML
+
+	if published {
+		described, describeErr := describeNode(task, checksum, childrenChecksum)
+		if describeErr != nil {
+			plan.err = fmt.Errorf("describe publication of %s: %w", task.node.DisplayLabel(), describeErr)
+
+			return plan, nil
+		}
+
+		metadata, err = archive.SealSnapshotYAML(described)
+		if err != nil {
+			plan.err = fmt.Errorf("seal intended snapshot metadata for %s: %w", task.node.DisplayLabel(), err)
+
+			return plan, nil
+		}
+
+		plan.descriptor = described
+	} else {
+		metadata, err = destination.ReadSnapshotYAML(task.nodeDir)
+		if err != nil {
+			plan.err = fmt.Errorf("read kept snapshot metadata for %s: %w", task.node.DisplayLabel(), err)
+
+			return plan, nil
+		}
+	}
+
+	if metadata.MetadataChecksum != nil {
+		plan.entry.MetadataChecksum = *metadata.MetadataChecksum
+		plan.commitment.MetadataChecksum = *metadata.MetadataChecksum
+	}
+
+	plan.commitment.FormatVersion = metadata.FormatVersion
+
+	return plan, nil
 }
 
 func publicationIdentityMatches(identity publicationIdentity, metadata archive.SnapshotYAML) bool {
@@ -547,7 +654,10 @@ func verifyPublicationEntryEnvelope(
 	if !publicationIdentityMatches(entry.Identity, metadata) ||
 		metadata.Checksum.Hex != entry.NodeChecksum.Hex ||
 		metadata.ChildrenChecksum == nil ||
-		metadata.ChildrenChecksum.Hex != entry.ChildrenChecksum.Hex {
+		metadata.ChildrenChecksum.Hex != entry.ChildrenChecksum.Hex ||
+		metadata.FormatVersion != archive.SnapshotFormatVersionCurrent ||
+		metadata.MetadataChecksum == nil ||
+		metadata.MetadataChecksum.Hex != entry.MetadataChecksum.Hex {
 		return fmt.Errorf("publication marker at %s does not match transaction: %w",
 			nodeDir, errPublicationTransactionInvalid)
 	}

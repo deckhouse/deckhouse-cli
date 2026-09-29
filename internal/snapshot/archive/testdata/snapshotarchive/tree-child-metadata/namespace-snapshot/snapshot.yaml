@@ -1,0 +1,18 @@
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+checksum:
+  algorithm: sha256
+  hex: a793dfbfbe686deb3c51708aefd23de3df4ae4b11af4c071809512d137435fd5
+  short: a793dfbf
+childrenChecksum:
+  algorithm: sha256
+  hex: f00223f4b9f077ff4dc1e2a3337a58c9c5bc93d63e26738e3abc9fdc45c6f8fa
+  short: f00223f4
+formatVersion: 4
+kind: Snapshot
+metadataChecksum:
+  algorithm: sha256
+  hex: 6a90e994600e88fbb5a317f5415aba1a5f62f54fac42de727856e53b9e7cf8b1
+  short: 6a90e994
+name: my-app-snapshot
+namespace: my-app
+uid: 5f6bd1ca-2c1a-4a2f-9f3f-000000000001
