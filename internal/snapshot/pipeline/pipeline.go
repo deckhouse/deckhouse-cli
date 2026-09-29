@@ -320,7 +320,10 @@ func run(
 	// commitment (AC-2: fail before mutation on a hybrid tree extends to fail before
 	// publication on an incomplete one). An already-resumed-complete node (task.done) is
 	// re-finalized only if one of its direct children was freshly (re)published this run,
-	// since that is the only way its previously-committed ChildrenChecksum could now be stale.
+	// since that is the only way its previously-committed ChildrenChecksum could now be stale,
+	// or if its snapshot.yaml is at an older format version: a parent written now is at
+	// archive.SnapshotFormatVersionCurrent, which admits only children at that version, so a
+	// resumed archive of an older version is rewritten at the current one bottom up.
 	failed := make(map[*source.Node]bool, len(tasks))
 	publish := make(map[*source.Node]bool, len(tasks))
 	// Publication writes only local, already-downloaded content and must not be aborted by a
@@ -346,6 +349,18 @@ func run(
 			continue
 		}
 
+		if !needsPublication {
+			current, err := hasCurrentFormatVersion(destination, task.nodeDir)
+			if err != nil {
+				nodeErrs = append(nodeErrs, fmt.Errorf("inspect %s: %w", task.node.DisplayLabel(), err))
+				failed[task.node] = true
+
+				continue
+			}
+
+			needsPublication = !current
+		}
+
 		if needsPublication {
 			publish[task.node] = true
 		}
@@ -359,6 +374,10 @@ func run(
 			publish,
 			func(nodeDir string) (archive.NodeChecksum, error) {
 				return computePublicationNodeChecksum(ctx, destination, nodeDir)
+			},
+			func(task nodeTask, checksum, childrenChecksum archive.NodeChecksum) (archive.SnapshotYAML, error) {
+				return volume.DescribeNodeRootedContext(publicationCtx, destination, task.nodeDir, task.node,
+					checksum, childrenChecksum)
 			},
 		)
 		if err != nil {
@@ -445,13 +464,7 @@ func run(
 				break
 			}
 
-			if err := volume.FinalizeNodeRootedContextWithChecksum(
-				publicationCtx,
-				destination,
-				task.nodeDir,
-				task.node,
-				entry.NodeChecksum,
-			); err != nil {
+			if err := finalizePublicationEntry(publicationCtx, destination, transaction, task, entry); err != nil {
 				publicationFailed = true
 
 				nodeErrs = append(nodeErrs, fmt.Errorf("finalize %s: %w", task.node.DisplayLabel(), err))
@@ -735,6 +748,35 @@ func lookupStream(streams map[streamKey]streamHandle, node *source.Node) streamH
 	}
 
 	return streams[streamKey{node: node}]
+}
+
+// hasCurrentFormatVersion reports whether the snapshot.yaml of the completed node at nodeDir is
+// at archive.SnapshotFormatVersionCurrent.
+func hasCurrentFormatVersion(destination *archive.RootedDestination, nodeDir string) (bool, error) {
+	metadata, err := destination.ReadSnapshotYAML(nodeDir)
+	if err != nil {
+		return false, err
+	}
+
+	return metadata.FormatVersion == archive.SnapshotFormatVersionCurrent, nil
+}
+
+// finalizePublicationEntry writes the snapshot.yaml of one transaction entry. The run that built
+// the transaction writes the snapshot.yaml the entry's MetadataChecksum was taken from; a run
+// that resumes a transaction from disk finalizes the node from its directory instead, and
+// verifyPublicationEntryEnvelope then proves the result is the one the entry records.
+func finalizePublicationEntry(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	transaction *publicationTransaction,
+	task nodeTask,
+	entry publicationEntry,
+) error {
+	if descriptor, ok := transaction.descriptors[entry.Path]; ok {
+		return volume.PublishNodeSnapshotYAMLRootedContext(ctx, destination, task.nodeDir, task.node, descriptor)
+	}
+
+	return volume.FinalizeNodeRootedContextWithChecksum(ctx, destination, task.nodeDir, task.node, entry.NodeChecksum)
 }
 
 // collectNodeTasks performs a depth-first traversal of the snapshot tree, computing

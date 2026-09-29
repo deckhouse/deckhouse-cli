@@ -22,10 +22,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -179,16 +181,65 @@ func verifyVectorTree(t *testing.T, root string) error {
 }
 
 // recomputeVectorChildrenChecksum recomputes the children checksum of the node at nodeDir from
-// its children on disk.
-func recomputeVectorChildrenChecksum(t *testing.T, nodeDir string, _ int) NodeChecksum {
+// its children on disk, with the encoding of format version.
+func recomputeVectorChildrenChecksum(t *testing.T, nodeDir string, version int) NodeChecksum {
 	t.Helper()
 
-	checksum, err := ComputeNodeChildrenChecksum(nodeDir)
+	source, err := OpenRootedSource(nodeDir)
 	if err != nil {
-		t.Fatalf("ComputeNodeChildrenChecksum %s: %v", nodeDir, err)
+		t.Fatalf("OpenRootedSource %s: %v", nodeDir, err)
+	}
+
+	defer func() { _ = source.Close() }()
+
+	checksum, err := computeNodeChildrenChecksum(source, version, SnapshotYAMLReadOptions{})
+	if err != nil {
+		t.Fatalf("children checksum of %s at version %d: %v", nodeDir, version, err)
 	}
 
 	return checksum
+}
+
+// rewriteVectorSnapshotYAML reseals sy at format version and writes it as the snapshot.yaml of
+// the node at nodeDir.
+func rewriteVectorSnapshotYAML(t *testing.T, nodeDir string, sy SnapshotYAML, version int) {
+	t.Helper()
+
+	sealed, err := sealSnapshotYAMLAt(sy, version)
+	if err != nil {
+		t.Fatalf("seal %s at version %d: %v", nodeDir, version, err)
+	}
+
+	if err := WriteSnapshotYAML(nodeDir, sealed); err != nil {
+		t.Fatalf("WriteSnapshotYAML %s: %v", nodeDir, err)
+	}
+}
+
+// readVectorSnapshotYAML reads the snapshot.yaml of the node at rel beneath root.
+func readVectorSnapshotYAML(t *testing.T, root, rel string) SnapshotYAML {
+	t.Helper()
+
+	sy, err := ReadSnapshotYAML(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("%s: ReadSnapshotYAML: %v", rel, err)
+	}
+
+	return sy
+}
+
+// replaceVectorSnapshotYAML puts the tampered descriptor file in place of the snapshot.yaml of
+// the node at rel beneath root.
+func replaceVectorSnapshotYAML(t *testing.T, root, rel, file string) {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(vectorsDir, "tampered", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(rel), SnapshotYAMLName), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // checkVectorTree verifies the vector tree testdata/snapshotarchive/<tree> and compares every
@@ -275,6 +326,198 @@ func TestReferenceVectorTree(t *testing.T) {
 	t.Run("version 3", func(t *testing.T) {
 		checkVectorTree(t, "tree", expected.TreeRoot, SnapshotFormatVersionPayloadSizes, expected.Nodes)
 	})
+	t.Run("version 4", func(t *testing.T) {
+		if len(expected.ChildMetadataNodes) == 0 {
+			t.Fatal("expected.json lists no version 4 nodes")
+		}
+
+		checkVectorTree(t, "tree-child-metadata", expected.TreeRoot, SnapshotFormatVersionChildMetadata,
+			expected.ChildMetadataNodes)
+	})
+}
+
+// TestReferenceVectorTreeResealReproducesBytes strips every digest from each vector tree and
+// writes every snapshot.yaml again bottom up, children before their parent, the way d8's writers
+// do. Each must come out byte for byte as stored. The version 4 tree is written by the default
+// path (no version declared), so it pins what a new archive gets.
+func TestReferenceVectorTreeResealReproducesBytes(t *testing.T) {
+	expected := loadVectorExpected(t)
+
+	tests := []struct {
+		name    string
+		tree    string
+		version int
+		stamp   int
+	}{
+		{name: "version 3", tree: "tree", version: SnapshotFormatVersionPayloadSizes, stamp: SnapshotFormatVersionPayloadSizes},
+		{name: "version 4", tree: "tree-child-metadata", version: SnapshotFormatVersionCurrent, stamp: SnapshotFormatVersionLegacy},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := copyVectorTree(t, tt.tree, expected.TreeRoot)
+			nodes := vectorTreeNodes(t, root)
+
+			for i := len(nodes) - 1; i >= 0; i-- {
+				nodeDir := filepath.Join(root, filepath.FromSlash(nodes[i]))
+
+				original, err := os.ReadFile(filepath.Join(nodeDir, SnapshotYAMLName))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				sy := readVectorSnapshotYAML(t, root, nodes[i])
+
+				checksum, err := ComputeNodeChecksum(nodeDir)
+				if err != nil {
+					t.Fatalf("%s: ComputeNodeChecksum: %v", nodes[i], err)
+				}
+
+				children := recomputeVectorChildrenChecksum(t, nodeDir, tt.version)
+
+				sy.FormatVersion = tt.stamp
+				sy.Checksum = checksum
+				sy.ChildrenChecksum = &children
+				sy.MetadataChecksum = nil
+
+				if err := WriteSnapshotYAML(nodeDir, sy); err != nil {
+					t.Fatalf("%s: WriteSnapshotYAML: %v", nodes[i], err)
+				}
+
+				written, err := os.ReadFile(filepath.Join(nodeDir, SnapshotYAMLName))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if !bytes.Equal(written, original) {
+					t.Errorf("%s: written snapshot.yaml differs from the vector\n got:\n%s\nwant:\n%s",
+						nodes[i], written, original)
+				}
+			}
+		})
+	}
+}
+
+// TestReferenceVectorTamperedChildMetadata puts each tampered descriptor in place of its node in
+// the version 4 tree. The node still verifies on its own, but verifying the tree from the root
+// must fail at the node's parent: a version 4 parent commits to its children's metadataChecksum.
+func TestReferenceVectorTamperedChildMetadata(t *testing.T) {
+	expected := loadVectorExpected(t)
+
+	if len(expected.TamperedChildMetadata) == 0 {
+		t.Fatal("expected.json lists no tampered descriptor vectors")
+	}
+
+	sentinels := map[string]error{"ErrChildrenChecksumMismatch": ErrChildrenChecksumMismatch}
+
+	for _, want := range expected.TamperedChildMetadata {
+		t.Run(want.File, func(t *testing.T) {
+			wantErr, ok := sentinels[want.Error]
+			if !ok {
+				t.Fatalf("unknown error %q", want.Error)
+			}
+
+			raw, err := os.ReadFile(filepath.Join(vectorsDir, "tampered", want.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := UnmarshalSnapshotYAML(raw, SnapshotYAMLReadOptions{}); err != nil {
+				t.Fatalf("the tampered descriptor must decode on its own: %v", err)
+			}
+
+			root := copyVectorTree(t, "tree-child-metadata", expected.TreeRoot)
+			replaceVectorSnapshotYAML(t, root, want.Node, want.File)
+
+			nodeDir := filepath.Join(root, filepath.FromSlash(want.Node))
+			if err := VerifyNode(nodeDir); err != nil {
+				t.Fatalf("the tampered node must verify on its own: %v", err)
+			}
+
+			if err := ValidateNodeMetadata(nodeDir); err != nil {
+				t.Fatalf("the tampered node must validate on its own: %v", err)
+			}
+
+			err = verifyVectorTree(t, root)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("verify the tree: %v, want %v", err, wantErr)
+			}
+
+			if !strings.HasPrefix(err.Error(), want.FailingNode+": ") {
+				t.Errorf("error %q does not name the node %q", err, want.FailingNode)
+			}
+		})
+	}
+}
+
+// TestReferenceVectorMixedVersions pins how a parent's own format version decides the commitment
+// over children at another version.
+func TestReferenceVectorMixedVersions(t *testing.T) {
+	expected := loadVectorExpected(t)
+
+	t.Run("a version 4 root over version 3 children is refused", func(t *testing.T) {
+		root := copyVectorTree(t, "tree", expected.TreeRoot)
+
+		// A writer cannot commit a current parent to them.
+		if _, err := ComputeNodeChildrenChecksum(root); !errors.Is(err, ErrInvalidSnapshotYAML) {
+			t.Fatalf("children checksum at the current version over version 3 children: %v, want ErrInvalidSnapshotYAML", err)
+		}
+
+		// A root restamped at version 4 over them fails, whatever it commits to.
+		rewriteVectorSnapshotYAML(t, root, readVectorSnapshotYAML(t, root, "."), SnapshotFormatVersionChildMetadata)
+
+		err := verifyVectorTree(t, root)
+		if !errors.Is(err, ErrInvalidSnapshotYAML) {
+			t.Fatalf("verify the tree: %v, want ErrInvalidSnapshotYAML", err)
+		}
+
+		if !strings.HasPrefix(err.Error(), ".: ") {
+			t.Errorf("error %q does not name the root", err)
+		}
+	})
+
+	t.Run("a version 3 root over version 4 children verifies", func(t *testing.T) {
+		root := copyVectorTree(t, "tree-child-metadata", expected.TreeRoot)
+
+		sy := readVectorSnapshotYAML(t, root, ".")
+		children := recomputeVectorChildrenChecksum(t, root, SnapshotFormatVersionPayloadSizes)
+		sy.ChildrenChecksum = &children
+		rewriteVectorSnapshotYAML(t, root, sy, SnapshotFormatVersionPayloadSizes)
+
+		if err := verifyVectorTree(t, root); err != nil {
+			t.Fatalf("verify the tree: %v", err)
+		}
+
+		// The version 3 encoding does not commit to the children's metadata, so a resealed edit
+		// of a direct child's descriptor still verifies under it.
+		for _, tampered := range expected.TamperedChildMetadata {
+			if tampered.FailingNode == "." {
+				replaceVectorSnapshotYAML(t, root, tampered.Node, tampered.File)
+			}
+		}
+
+		if err := verifyVectorTree(t, root); err != nil {
+			t.Errorf("verify the tree after a resealed child edit: %v", err)
+		}
+	})
+
+	t.Run("an old commitment relabelled as version 4 fails", func(t *testing.T) {
+		root := copyVectorTree(t, "tree-child-metadata", expected.TreeRoot)
+
+		sy := readVectorSnapshotYAML(t, root, ".")
+		children := recomputeVectorChildrenChecksum(t, root, SnapshotFormatVersionPayloadSizes)
+		sy.ChildrenChecksum = &children
+		rewriteVectorSnapshotYAML(t, root, sy, SnapshotFormatVersionChildMetadata)
+
+		err := verifyVectorTree(t, root)
+		if !errors.Is(err, ErrChildrenChecksumMismatch) {
+			t.Fatalf("verify the tree: %v, want ErrChildrenChecksumMismatch", err)
+		}
+
+		if !strings.HasPrefix(err.Error(), ".: ") {
+			t.Errorf("error %q does not name the root", err)
+		}
+	})
 }
 
 // TestReferenceVectorDescriptors decodes the stand-alone descriptor vectors and requires their
@@ -327,6 +570,24 @@ func TestReferenceVectorDescriptors(t *testing.T) {
 			sum := sha256.Sum256(canonical)
 			if hex.EncodeToString(sum[:]) != want.MetadataChecksum {
 				t.Errorf("sha256 of the canonical JSON vector is %x, want %s", sum, want.MetadataChecksum)
+			}
+
+			// Encoding the decoded descriptor again keeps its version, and so its metadata
+			// checksum. The vector files are written by hand, so their bytes are not compared.
+			rewriteDir := t.TempDir()
+			if err := WriteSnapshotYAML(rewriteDir, sy); err != nil {
+				t.Fatalf("WriteSnapshotYAML: %v", err)
+			}
+
+			rewritten, err := ReadSnapshotYAML(rewriteDir)
+			if err != nil {
+				t.Fatalf("ReadSnapshotYAML of the rewritten descriptor: %v", err)
+			}
+
+			if rewritten.FormatVersion != want.FormatVersion || rewritten.MetadataChecksum == nil ||
+				rewritten.MetadataChecksum.Hex != want.MetadataChecksum {
+				t.Errorf("rewritten as version %d with metadataChecksum %+v, want version %d with %s",
+					rewritten.FormatVersion, rewritten.MetadataChecksum, want.FormatVersion, want.MetadataChecksum)
 			}
 		})
 	}
