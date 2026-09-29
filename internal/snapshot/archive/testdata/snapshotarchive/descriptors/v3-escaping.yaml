@@ -1,0 +1,37 @@
+apiVersion: demo.deckhouse.io/v1alpha1
+checksum:
+  algorithm: sha256
+  hex: a793dfbfbe686deb3c51708aefd23de3df4ae4b11af4c071809512d137435fd5
+  short: a793dfbf
+childrenChecksum:
+  algorithm: sha256
+  hex: 926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701
+  short: 926e8250
+formatVersion: 3
+kind: DemoVirtualDiskSnapshot
+metadataChecksum:
+  algorithm: sha256
+  hex: faa2c103bd865e6ff4a951337f0c7e6a48907feffa9a2a31fca156ffb613214f
+  short: faa2c103
+name: escaping
+namespace: ns-<&>
+sourceName: πηγή-☃-ü
+sourceObjectRef:
+  apiVersion: demo.deckhouse.io/v1alpha1
+  kind: DemoVirtualDisk
+  name: a&b
+uid: uid-"quoted"\slash
+volumes:
+- artifact:
+    apiVersion: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshotContent
+    name: vsc-1
+  rawSizeBytes: 1
+  size: 1Gi
+  storageClassName: sc
+  storedSizeBytes: 2048
+  target:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: pvc<1>
+  volumeMode: Filesystem
