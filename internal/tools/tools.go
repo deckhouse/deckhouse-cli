@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/kubectl/pkg/util/templates"
 
+	cosign "github.com/deckhouse/deckhouse-cli/internal/tools/cosign/cmd"
 	farconverter "github.com/deckhouse/deckhouse-cli/internal/tools/farconverter/cmd"
 	gostsum "github.com/deckhouse/deckhouse-cli/internal/tools/gostsum/cmd"
 	htpasswd "github.com/deckhouse/deckhouse-cli/internal/tools/htpasswd/cmd"
@@ -42,6 +43,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	toolsCmd.AddCommand(
+		cosign.NewCommand(),
 		farconverter.NewCommand(),
 		gostsum.NewCommand(),
 		htpasswd.NewCommand(),
