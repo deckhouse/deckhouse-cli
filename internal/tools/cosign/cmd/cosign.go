@@ -52,6 +52,7 @@ func NewCommand() *cobra.Command {
 			if v, _, err := cosignCmd.Find([]string{"version"}); err == nil && v != cosignCmd {
 				cosignCmd.RemoveCommand(v)
 			}
+
 			cosignCmd.AddCommand(&cobra.Command{
 				Use:   "version",
 				Short: "Prints the cosign version",
@@ -59,6 +60,7 @@ func NewCommand() *cobra.Command {
 					cmd.Println("cosign", cosignVersion())
 				},
 			})
+
 			return cosignCmd.ExecuteContext(cmd.Context())
 		},
 	}
@@ -72,5 +74,6 @@ func cosignVersion() string {
 			}
 		}
 	}
+
 	return "unknown"
 }
