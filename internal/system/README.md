@@ -76,13 +76,15 @@ Before any subcommand runs, `d8 system` validates that `--kubeconfig` points at 
 
 ## How `d8 system` reaches the cluster
 
-Commands in this subtree use one of three access paths. Knowing which a command uses explains its prerequisites and its failure modes.
+Commands in this subtree use one of four access paths. Knowing which a command uses explains its prerequisites and its failure modes.
 
 1. **Direct Kubernetes API.** The command reads or writes a specific resource through the API server using your kubeconfig credentials. Used by `get`/`edit` (Secrets in `kube-system`), `module enable`/`disable`/`maintenance` (`ModuleConfig`), `module approve`/`apply-now` (`ModuleRelease`), and `package scan` (`PackageRepositoryOperation`). Requires the corresponding RBAC (get/patch/create on those resources).
 
 2. **Exec into the Deckhouse leader pod.** The command shells into the running controller and either curls the controller's internal self-API at `http://127.0.0.1:9652/...` (`module list`/`values`/`snapshots`, `queue list`/`main`) or runs a battery of diagnostic commands (`collect-debug-info`). The leader pod is located in namespace `d8-system` by the label selector `leader=true`, container `deckhouse`. This path needs RBAC to `create pods/exec` in `d8-system`, and the relevant tools (`curl`, `kubectl`, `deckhouse-controller`, ...) must exist inside that container. If no leader pod is present the command fails with `no pods deckhouse available in namespace d8-system`.
 
-3. **Pod log stream.** `logs` reads the leader pod's `deckhouse` container log through the Kubernetes log API (not an exec).
+3. **Port-forward to the Deckhouse leader pod.** `queue list`/`main` with `--http` send the HTTP request to the same self-API at `127.0.0.1:9652` themselves, over the API server's `pods/portforward` subresource (WebSockets, falling back to SPDY, like kubectl), so nothing has to run inside the container. This path needs RBAC to `create pods/portforward` in `d8-system` instead of `pods/exec`; with user-authz that is the separate `portForwarding` switch, while exec comes with the `PrivilegedUser` level. The leader pod is found the same way as for exec. `pods/proxy` cannot replace it: the self-API listens on loopback only, and the kube-rbac-proxy that publishes it on port 4204 never receives your token, because the API server drops the `Authorization` header before proxying.
+
+4. **Pod log stream.** `logs` reads the leader pod's `deckhouse` container log through the Kubernetes log API (not an exec).
 
 ---
 
@@ -187,7 +189,7 @@ Note that `--dry-run` still contacts the cluster: the target `PackageRepository`
 
 ## Queues: `queue`
 
-Dump the controller's reconciliation queues. Both leaves exec into the leader pod and curl the controller self-API, then print its response.
+Dump the controller's reconciliation queues. Both leaves exec into the leader pod and curl the controller self-API, then print its response. With `--http` they reach the same self-API through a port-forward instead of the exec (see [How `d8 system` reaches the cluster](#how-d8-system-reaches-the-cluster)); the output is the same.
 
 ### `d8 system queue list`
 
@@ -196,12 +198,13 @@ Dump the controller's reconciliation queues. Both leaves exec into the leader po
 | `--output` | `-o` | string | `text` | Output format: `text`, `yaml`, or `json`. |
 | `--show-empty` | `-e` | bool | `false` | Include empty queues. |
 | `--watch` | `-w` | bool | `false` | Continuously re-render the queue in place. |
+| `--http` | | bool | `false` | Fetch through a `pods/portforward` tunnel instead of exec into the pod. |
 
-`--watch` is a full-screen view that refreshes about once a second until you press `Ctrl+C`; it is only valid with `--output text` (combining it with `json`/`yaml` is rejected up front).
+`--watch` is a full-screen view that refreshes about once a second until you press `Ctrl+C`; it is only valid with `--output text` (combining it with `json`/`yaml` is rejected up front). With `--http` the watch keeps one port-forward connection open and reconnects, finding the leader pod again, after a failed refresh.
 
 ### `d8 system queue main`
 
-Dumps only the main queue. Supports `--output` (`text`/`yaml`/`json`, default `text`) - it has no `--show-empty` or `--watch`.
+Dumps only the main queue. Supports `--output` (`text`/`yaml`/`json`, default `text`) and `--http` - it has no `--show-empty` or `--watch`.
 
 ---
 
@@ -316,6 +319,9 @@ d8 system queue list -o yaml --show-empty
 
 # Live-watch the queues (text only, Ctrl+C to stop)
 d8 system queue list --watch
+
+# Same, without exec: port-forward through the API server (needs pods/portforward)
+d8 system queue list --watch --http
 
 # Just the main queue
 d8 system queue main
