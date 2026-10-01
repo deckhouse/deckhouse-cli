@@ -525,7 +525,7 @@ So bundles of several editions pushed next to each other, e.g. a CE bundle to `r
 
 A path that consists of the edition alone, like `registry.company.com/ee`, is not split: that would leave the bare registry host, so the whole bundle lands under it.
 
-See §2.9 of [docs/mirror-bundle-layout.md](../../docs/mirror-bundle-layout.md) for the full routing rules.
+See §8 of [docs/mirror-bundle-layout.md](../../docs/mirror-bundle-layout.md) for the full routing rules (the edition split is §8.2).
 
 ### Synopsis
 
