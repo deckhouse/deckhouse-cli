@@ -471,8 +471,12 @@ func attachToPod(ctx context.Context, kube kubernetes.Interface, restConfig *res
 	}
 
 	var sizeQueue remotecommand.TerminalSizeQueue
+
 	if tty.IsTerminalIn() {
-		sizeQueue = tty.MonitorSize(tty.GetSize())
+		// MonitorSize returns nil when stdout is not a terminal; wrapping that nil would panic on Next.
+		if monitor := tty.MonitorSize(tty.GetSize()); monitor != nil {
+			sizeQueue = &terminalSizeQueueAdapter{delegate: monitor}
+		}
 	}
 
 	return tty.Safe(func() error {
@@ -489,4 +493,22 @@ func attachToPod(ctx context.Context, kube kubernetes.Interface, restConfig *res
 
 		return nil
 	})
+}
+
+// terminalSizeQueueAdapter converts kubectl terminal sizes to client-go ones, as kubectl's own attach
+// and exec do: since Kubernetes 1.35 kubectl/pkg/util/term has its own TerminalSize type.
+type terminalSizeQueueAdapter struct {
+	delegate term.TerminalSizeQueue
+}
+
+func (a *terminalSizeQueueAdapter) Next() *remotecommand.TerminalSize {
+	next := a.delegate.Next()
+	if next == nil {
+		return nil
+	}
+
+	return &remotecommand.TerminalSize{
+		Width:  next.Width,
+		Height: next.Height,
+	}
 }
