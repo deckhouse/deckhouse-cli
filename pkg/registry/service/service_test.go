@@ -105,6 +105,13 @@ func TestService_GetRoot_GetEditionRoot(t *testing.T) {
 			expectedEditionRoot: host + "/ce",
 		},
 		{
+			name:                "CSE edition appends cse segment only to edition root",
+			host:                host,
+			edition:             pkg.CSEEdition,
+			expectedRoot:        host,
+			expectedEditionRoot: host + "/cse",
+		},
+		{
 			name:                "host with trailing slash is normalised by underlying client",
 			host:                "registry.example.com/deckhouse/",
 			edition:             pkg.FEEdition,
@@ -191,4 +198,28 @@ func TestService_SubServiceScoping(t *testing.T) {
 		assert.Equal(t, host, noEditionSvc.DeckhouseService().GetRoot(),
 			"DeckhouseService root must equal the bare root when no edition is set")
 	})
+}
+
+// TestGetEditionFromRegistryPath pins where pull reads the edition-independent
+// installer and deckhouse-cli from: the root above a trailing edition segment.
+func TestGetEditionFromRegistryPath(t *testing.T) {
+	tests := []struct {
+		repo         string
+		expectedRoot string
+		expected     pkg.Edition
+	}{
+		{repo: "registry.deckhouse.ru/deckhouse/ee", expectedRoot: "registry.deckhouse.ru/deckhouse", expected: pkg.EEEdition},
+		{repo: "registry.deckhouse.ru/deckhouse/se-plus/", expectedRoot: "registry.deckhouse.ru/deckhouse", expected: pkg.SEPlusEdition},
+		{repo: "registry-cse.deckhouse.ru/deckhouse/cse", expectedRoot: "registry-cse.deckhouse.ru/deckhouse", expected: pkg.CSEEdition},
+		{repo: "myregistry.ru/deckhouse", expectedRoot: "myregistry.ru/deckhouse", expected: pkg.NoEdition},
+		{repo: "myregistry.ru/deckhouse/ee-mirror", expectedRoot: "myregistry.ru/deckhouse/ee-mirror", expected: pkg.NoEdition},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.repo, func(t *testing.T) {
+			root, edition := registryservice.GetEditionFromRegistryPath(tt.repo)
+			assert.Equal(t, tt.expectedRoot, root)
+			assert.Equal(t, tt.expected, edition)
+		})
+	}
 }

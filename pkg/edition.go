@@ -16,6 +16,13 @@ limitations under the License.
 
 package pkg
 
+// Edition is the last segment of a Deckhouse edition repo, e.g. the "ee" of
+// registry.deckhouse.io/deckhouse/ee. The installer and deckhouse-cli are
+// published once for all editions, in the root above it: pull reads them from
+// there and push writes them there.
+//
+// The in-cluster registry-packages-proxy keeps its own list of editions to
+// find deckhouse-cli above a cluster's edition repo; keep the two in sync.
 type Edition string
 
 const (
@@ -25,6 +32,7 @@ const (
 	BEEdition     Edition = "be"
 	SEPlusEdition Edition = "se-plus"
 	CEEdition     Edition = "ce"
+	CSEEdition    Edition = "cse"
 	NoEdition     Edition = ""
 )
 
@@ -34,7 +42,7 @@ func (e Edition) String() string {
 
 func (e Edition) IsValid() bool {
 	switch e {
-	case EEEdition, FEEdition, SEEdition, BEEdition, SEPlusEdition, CEEdition:
+	case EEEdition, FEEdition, SEEdition, BEEdition, SEPlusEdition, CEEdition, CSEEdition:
 		return true
 	default:
 		return false

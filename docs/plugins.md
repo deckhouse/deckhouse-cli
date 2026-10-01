@@ -135,17 +135,9 @@ Mirroring the platform additionally pulls the plugins that ship with it -
 version still has to be one the mirrored platform can run, and a registry that
 does not publish them yields a warning rather than a failed pull.
 
-Their dependencies come along as usual, including ones named after a built-in d8
-command (`package` depends on **`delivery-kit`**): the plugin is mirrored when the
-registry has it, and the built-in command covers the dependency when it does not. After `d8 mirror push`, the
-plugins live at `<target>/deckhouse-cli/plugins/<name>` - exactly where the
-in-cluster registry-packages-proxy looks - so `d8 plugins install <name>`
-works in the air-gapped cluster with no extra setup. See
-`internal/mirror/README.MD` (Deckhouse CLI Mirroring, Plugin Mirroring) for selection details.
+Their dependencies come along as usual, including ones named after a built-in d8 command (`package` depends on **`delivery-kit`**): the plugin is mirrored when the registry has it, and the built-in command covers the dependency when it does not. After `d8 mirror push`, the plugins live at `<target>/deckhouse-cli/plugins/<name>`, or one level up, outside the edition, when the target ends with one (a push to `…/deckhouse/ee` puts them at `…/deckhouse/deckhouse-cli/plugins/<name>`). The in-cluster registry-packages-proxy looks in both places, so `d8 plugins install <name>` works in the air-gapped cluster with no extra setup. The exception is a `cse` target: the proxy does not look above `…/cse`, so a CSE cluster does not find plugins pushed one level up. See `internal/mirror/README.MD` (Deckhouse CLI Mirroring, Plugin Mirroring, Edition targets) for details.
 
-Note: the proxy serves plugins by exact name; listing the catalog through it
-is not supported. To see what a registry offers, use
-`crane ls <target>/deckhouse-cli/plugins` (or `d8 cr ls`).
+Note: the proxy serves plugins by exact name; listing the catalog through it is not supported. To see what a registry offers, use `crane ls <root>/deckhouse-cli/plugins` (or `d8 cr ls`), `<root>` being the push target without its edition segment.
 
 ## Flags and environment variables
 

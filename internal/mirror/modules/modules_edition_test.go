@@ -106,6 +106,7 @@ func TestModulesService_RootURL_CoversAllEditions(t *testing.T) {
 		pkg.SEPlusEdition,
 		pkg.BEEdition,
 		pkg.CEEdition,
+		pkg.CSEEdition,
 	}
 
 	for _, edition := range editions {

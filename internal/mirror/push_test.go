@@ -31,6 +31,7 @@ import (
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
@@ -224,5 +225,151 @@ func TestPushService_ModulesPathSuffix(t *testing.T) {
 			assert.NoErrorf(t, installRepo.CheckImageExists(ctx, installTag),
 				"install layout must stay at <repo>/install regardless of suffix")
 		})
+	}
+}
+
+func TestSplitTargetEdition(t *testing.T) {
+	tests := []struct {
+		repoPath    string
+		wantRoot    string
+		wantEdition pkg.Edition
+	}{
+		// An edition repo splits into the root above it and the edition.
+		{repoPath: "/deckhouse/ee", wantRoot: "/deckhouse", wantEdition: pkg.EEEdition},
+		{repoPath: "/deckhouse/fe", wantRoot: "/deckhouse", wantEdition: pkg.FEEdition},
+		{repoPath: "/deckhouse/se", wantRoot: "/deckhouse", wantEdition: pkg.SEEdition},
+		{repoPath: "/deckhouse/se-plus", wantRoot: "/deckhouse", wantEdition: pkg.SEPlusEdition},
+		{repoPath: "/deckhouse/be", wantRoot: "/deckhouse", wantEdition: pkg.BEEdition},
+		{repoPath: "/deckhouse/ce", wantRoot: "/deckhouse", wantEdition: pkg.CEEdition},
+		{repoPath: "/deckhouse/cse", wantRoot: "/deckhouse", wantEdition: pkg.CSEEdition},
+		{repoPath: "/deckhouse/ce/", wantRoot: "/deckhouse", wantEdition: pkg.CEEdition},
+		{repoPath: "/mirror/deckhouse/ee", wantRoot: "/mirror/deckhouse", wantEdition: pkg.EEEdition},
+		// No edition at the end of the path.
+		{repoPath: "/deckhouse", wantRoot: "/deckhouse", wantEdition: pkg.NoEdition},
+		{repoPath: "/deckhouse/ee-mirror", wantRoot: "/deckhouse/ee-mirror", wantEdition: pkg.NoEdition},
+		{repoPath: "/ee/deckhouse", wantRoot: "/ee/deckhouse", wantEdition: pkg.NoEdition},
+		// An edition as the only segment would leave the bare host as root.
+		{repoPath: "/ee", wantRoot: "/ee", wantEdition: pkg.NoEdition},
+		{repoPath: "/cse", wantRoot: "/cse", wantEdition: pkg.NoEdition},
+		{repoPath: "//ee", wantRoot: "//ee", wantEdition: pkg.NoEdition},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.repoPath, func(t *testing.T) {
+			root, edition := SplitTargetEdition(tt.repoPath)
+			assert.Equal(t, tt.wantRoot, root)
+			assert.Equal(t, tt.wantEdition, edition)
+		})
+	}
+}
+
+// buildEditionBundle writes a bundle with one layout per push route: the
+// edition-scoped platform root, install and a module, and the
+// edition-independent installer, d8 binary and plugin.
+func buildEditionBundle(t *testing.T) []string {
+	t.Helper()
+
+	bundleDir := t.TempDir()
+
+	return []string{
+		buildLayoutBundle(t, bundleDir, "platform.tar", "", "v1.76.2"),
+		buildLayoutBundle(t, bundleDir, "install.tar", "install", "v1.76.2"),
+		buildLayoutBundle(t, bundleDir, "module-foo.tar", path.Join("modules", "foo"), "v0.0.1"),
+		buildLayoutBundle(t, bundleDir, "installer.tar", "installer", "latest"),
+		buildLayoutBundle(t, bundleDir, "deckhouse-cli.tar", "deckhouse-cli", "v0.13.1"),
+		buildLayoutBundle(t, bundleDir, "plugin-system.tar", path.Join("deckhouse-cli", "plugins", "system"), "v1.0.0"),
+	}
+}
+
+// TestPushService_EditionTargets pushes CE, CSE and EE bundles to the edition
+// repos of one registry, side by side. Edition-scoped layouts land under their
+// own edition; the installer and deckhouse-cli land once, in the root above
+// them all, as pull reads them from the Deckhouse registry.
+func TestPushService_EditionTargets(t *testing.T) {
+	reg := upfake.NewRegistry("registry.io")
+	rootClient := pkgclient.Adapt(upfake.NewClient(reg)).WithSegment("deckhouse")
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	ctx := context.Background()
+	exists := func(repo, tag string) error {
+		return rootClient.WithSegment(pkgclient.PathToSegments(repo)...).CheckImageExists(ctx, tag)
+	}
+
+	editions := []pkg.Edition{pkg.CEEdition, pkg.CSEEdition, pkg.EEEdition}
+
+	for _, edition := range editions {
+		svc := NewPushService(rootClient, &PushServiceOptions{
+			Packages:   buildEditionBundle(t),
+			WorkingDir: t.TempDir(),
+			Edition:    edition,
+		}, logger, userLogger)
+
+		summary, err := svc.Push(ctx)
+		require.NoErrorf(t, err, "push to the %s edition repo", edition)
+
+		assert.True(t, summary.PlatformPushed)
+		assert.True(t, summary.InstallerPushed)
+		assert.True(t, summary.DeckhouseCLIPushed)
+		assert.Equal(t, 1, summary.Modules)
+		assert.Equal(t, 1, summary.Plugins)
+	}
+
+	for _, edition := range editions {
+		t.Run(edition.String(), func(t *testing.T) {
+			edition := edition.String()
+
+			assert.NoError(t, exists(edition, "v1.76.2"), "platform root stays in the edition")
+			assert.NoError(t, exists(edition+"/install", "v1.76.2"), "install stays in the edition")
+			assert.NoError(t, exists(edition+"/modules/foo", "v0.0.1"), "modules stay in the edition")
+
+			tags, err := rootClient.WithSegment(edition, "modules").ListTags(ctx)
+			require.NoError(t, err)
+			assert.Contains(t, tags, "foo", "the modules index stays in the edition")
+
+			assert.Error(t, exists(edition+"/installer", "latest"), "installer must not land in the edition")
+			assert.Error(t, exists(edition+"/deckhouse-cli", "v0.13.1"), "d8 binary must not land in the edition")
+			assert.Error(t, exists(edition+"/deckhouse-cli/plugins/system", "v1.0.0"), "plugin must not land in the edition")
+		})
+	}
+
+	assert.NoError(t, exists("installer", "latest"), "installer lands in the root above the editions")
+	assert.NoError(t, exists("deckhouse-cli", "v0.13.1"), "d8 binary lands in the root above the editions")
+	assert.NoError(t, exists("deckhouse-cli/plugins/system", "v1.0.0"), "plugin lands in the root above the editions")
+
+	tags, err := rootClient.WithSegment("deckhouse-cli", "plugins").ListTags(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tags, "system", "the plugins index lands in the root above the editions")
+}
+
+// TestPushService_NoEditionKeepsLayoutVerbatim: a target without an edition
+// holds the whole bundle, the installer and deckhouse-cli included.
+func TestPushService_NoEditionKeepsLayoutVerbatim(t *testing.T) {
+	reg := upfake.NewRegistry("registry.io")
+	target := pkgclient.Adapt(upfake.NewClient(reg)).WithSegment("mirror", "deckhouse")
+
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+	userLogger := log.NewSLogger(slog.LevelWarn)
+
+	svc := NewPushService(target, &PushServiceOptions{
+		Packages:   buildEditionBundle(t),
+		WorkingDir: t.TempDir(),
+	}, logger, userLogger)
+
+	_, err := svc.Push(context.Background())
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	for repo, tag := range map[string]string{
+		"":                             "v1.76.2",
+		"install":                      "v1.76.2",
+		"modules/foo":                  "v0.0.1",
+		"installer":                    "latest",
+		"deckhouse-cli":                "v0.13.1",
+		"deckhouse-cli/plugins/system": "v1.0.0",
+	} {
+		assert.NoErrorf(t, target.WithSegment(pkgclient.PathToSegments(repo)...).CheckImageExists(ctx, tag),
+			"%q:%s must land under the target", repo, tag)
 	}
 }

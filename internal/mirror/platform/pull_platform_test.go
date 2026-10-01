@@ -1055,6 +1055,7 @@ func TestPullPlatform_AllEditions_DownloadListUsesEditionRoot(t *testing.T) {
 		pkg.SEPlusEdition,
 		pkg.BEEdition,
 		pkg.CEEdition,
+		pkg.CSEEdition,
 	}
 
 	const probe = "v1.69.0"

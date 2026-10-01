@@ -408,7 +408,7 @@ The d8 binary is published as a multi-platform OCI index at the bare registry ro
 
 **Bundle output:** `deckhouse-cli.tar`, carrying the layout at `deckhouse-cli/`.
 
-One version is mirrored: the newest published **stable** one (non-semver build tags and genuine pre-releases are dropped, the same notion of stable that `d8 dist update` uses), or the exact version named by `--deckhouse-cli-tag`. After `d8 mirror push` it lands at `<target>/deckhouse-cli` - where the in-cluster registry-packages-proxy looks - so `d8 dist update` works in the air-gapped cluster with no extra setup.
+One version is mirrored: the newest published **stable** one (non-semver build tags and genuine pre-releases are dropped, the same notion of stable that `d8 dist update` uses), or the exact version named by `--deckhouse-cli-tag`. After `d8 mirror push` it lands at `<target>/deckhouse-cli`, or one level up, outside the edition, when the target is an edition repo (see [Edition targets](#edition-targets)). The in-cluster registry-packages-proxy looks in both places, so `d8 dist update` works in the air-gapped cluster with no extra setup. The exception is a `cse` target: the proxy does not look above `…/cse`, so a CSE cluster does not find the d8 CLI pushed one level up.
 
 **A missing binary never fails the pull.** Registries that publish no `deckhouse-cli` repository, or deny access to it, are reported in the summary (`d8 dist: not mirrored - not available in this registry`) and the rest of the bundle is built as usual. The exception is `--deckhouse-cli-tag`: a version asked for by name and not found fails the pull, like an unmet `--include-plugin`.
 
@@ -442,7 +442,7 @@ What is checked at mirror time vs install time:
 - `kubernetes` and `noneOf` requirements are cluster-side: `d8 plugins install` enforces them on the target cluster as usual.
 - Conditional requirements never gate mirroring; conflicts show up as warnings.
 
-After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <target>/deckhouse-cli/plugins` shows the names).
+After `d8 mirror push`, `d8 plugins install <name>` works in the air-gapped cluster through the registry-packages-proxy. Note the proxy serves plugins **by exact name** - listing the plugin catalog through it is not supported (a registry-packages-proxy limitation, not a bundle one; `crane ls <root>/deckhouse-cli/plugins` shows the names, `<root>` being the push target without its edition segment).
 
 If the source registry has no `deckhouse-cli/plugins` catalog, or denies access to it (HTTP 401/403 - token-auth registries answer this way for any path outside the license's scope, published or not), the automatic selection is skipped quietly. Explicit `--include-plugin` entries still resolve against their own repositories, and a denied explicit include fails the pull.
 
@@ -517,6 +517,16 @@ Uploads a previously downloaded Deckhouse Kubernetes Platform distribution bundl
 
 Before uploading, push runs a write-access check against the target repository (15-second timeout, or `D8_MIRROR_TIMEOUT`); set `MIRROR_BYPASS_ACCESS_CHECKS=1` to proceed even if that check fails. Chunked packages (`<name>.tar.NNNN.chunk`) are reassembled transparently, and each image upload is retried up to 4 times. After the layouts are pushed, small discovery-index tags are created at `<repo>/modules:<module>` and `<repo>/packages:<package>` so the mirrored modules and packages can be enumerated by tag listing.
 
+#### Edition targets
+
+When the last segment of the target path is an edition (`ce`, `be`, `se`, `se-plus`, `ee`, `fe`, `cse`), e.g. `registry.company.com/deckhouse/ee`, push lays the bundle out the way the Deckhouse registry does. The platform, security databases, modules and packages are edition-scoped and go under the target. The installer and the d8 CLI with its plugins are published once for all editions, so they go one level up, outside the edition: `registry.company.com/deckhouse/installer` and `registry.company.com/deckhouse/deckhouse-cli`. This is the default, there is no flag for it.
+
+So bundles of several editions pushed next to each other, e.g. a CE bundle to `registry.company.com/deckhouse/ce` and an EE bundle to `registry.company.com/deckhouse/ee`, share one installer and one d8 CLI, and a later `d8 mirror pull` from either edition repo finds them where it looks. The same holds for a CSE bundle pushed to `registry.company.com/deckhouse/cse`.
+
+A path that consists of the edition alone, like `registry.company.com/ee`, is not split: that would leave the bare registry host, so the whole bundle lands under it.
+
+See §2.9 of [docs/mirror-bundle-layout.md](../../docs/mirror-bundle-layout.md) for the full routing rules.
+
 ### Synopsis
 
 ```bash
@@ -565,6 +575,12 @@ d8 mirror push <registry> --file platform.tar --file module-foo.tar [flags]
 ```bash
 # Push bundle to private registry with authentication
 d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse \
+  --registry-login admin \
+  --registry-password secretpassword
+
+# Push an EE bundle into the EE edition repo: the installer and the d8 CLI
+# go to registry.company.com/deckhouse, everything else under .../deckhouse/ee
+d8 mirror push /tmp/d8-bundle registry.company.com/deckhouse/ee \
   --registry-login admin \
   --registry-password secretpassword
 
@@ -765,7 +781,7 @@ By default, the platform service discovers releases between the current `rock-so
 
 ### Editions
 
-The last path segment of `--source` selects the Deckhouse edition and is stripped to form the *edition root* that scopes the deckhouse, modules, packages and security repositories. Recognized editions: `ee`, `fe`, `se`, `se-plus`, `be`, `ce`. A source whose last segment is not one of these is treated as a plain path with no edition (the end-of-pull summary then omits the Edition line). The standalone `installer` image is always pulled from the non-edition root. Editions differ in which components exist — for example, only EE/FE ship [security databases](#security-databases).
+The last path segment of `--source` selects the Deckhouse edition and is stripped to form the *edition root* that scopes the deckhouse, modules, packages and security repositories. Recognized editions: `ee`, `fe`, `se`, `se-plus`, `be`, `ce`, `cse`. A source whose last segment is not one of these is treated as a plain path with no edition (the end-of-pull summary then omits the Edition line). The standalone `installer` image and the d8 CLI are always pulled from the non-edition root, and `d8 mirror push` writes them back there when its target ends with an edition (see [Edition targets](#edition-targets)). Editions differ in which components exist — for example, only EE/FE ship [security databases](#security-databases).
 
 ### Storage Layout
 

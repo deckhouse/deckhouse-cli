@@ -4,7 +4,7 @@ How `d8 mirror pull` lays out the archives it writes, why it lays them out that 
 
 ## The one rule that ties `pull` and `push` together
 
-The bundle is a **path-preserving snapshot of the source registry tree**. Every archive contains one or more [OCI image layouts](https://github.com/opencontainers/image-spec/blob/main/image-layout.md), and the path of a layout *inside the tar* is exactly the registry segment that layout must be pushed to. `push` performs **no path translation**: whatever relative path a layout ends up at after unpacking becomes its path in the destination registry (see the package doc comment on `PushService` in [push.go](../internal/mirror/push.go)).
+The bundle is a **path-preserving snapshot of the source registry tree**. Every archive contains one or more [OCI image layouts](https://github.com/opencontainers/image-spec/blob/main/image-layout.md), and the path of a layout *inside the tar* is exactly the registry segment that layout must be pushed to. `push` performs **no path translation**: whatever relative path a layout ends up at after unpacking becomes its path in the destination registry (see the package doc comment on `PushService` in [push.go](../internal/mirror/push.go)). The path is relative to the target repo, with one twist: when the target is an edition repo (`…/deckhouse/ee`), the edition-independent `installer/` and `deckhouse-cli/` are relative to the root above it, where the source registry keeps them (§2.9).
 
 Everything below is a consequence of this single rule. `pull` encodes the destination into the archive contents; `push` reads it back out positionally.
 
@@ -14,7 +14,7 @@ Everything below is a consequence of this single rule. `pull` encodes the destin
 
 `pull` downloads the platform, installer, security databases, modules, packages and the d8 CLI distribution (the binary and its plugins), and writes them into the bundle directory (the first positional argument) as a set of tar archives. The orchestration lives in [`PullService.Pull`](../internal/mirror/pull.go); each component is pulled by its own service under [`internal/mirror/`](../internal/mirror/) (`platform`, `installer`, `security`, `modules`, `packages`, `dist`).
 
-The d8 CLI tree is the one part of the bundle that is **not** edition-scoped: `deckhouse-cli/` sits at the bare registry root, like `installer/`, so the same binary and plugins serve every edition.
+The d8 CLI tree is the one part of the bundle that is **not** edition-scoped: `deckhouse-cli/` sits at the bare registry root, like `installer/`, so the same binary and plugins serve every edition. `push` returns both to that root when the target is an edition repo (§2.9).
 
 ### 1.1. Archives written to the bundle directory
 
@@ -157,7 +157,7 @@ All discovered archives are unpacked into a single `unified/` working directory,
 
 ### 2.3. The routing principle: the path *is* the destination
 
-`push` then walks the unified tree, treats **every directory that contains an `index.json` as an OCI layout**, and pushes it to `registry/<relative-path>` — where `<relative-path>` is that directory's path relative to the unified root (`findLayouts` + `pushSingleLayout` in [push.go](../internal/mirror/push.go)). No mapping table, no per-component logic: **the relative path of the layout is the registry segment, verbatim.** A layout at the root pushes to the repo root; a layout at `security/trivy-db` pushes to `<repo>/security/trivy-db`.
+`push` then walks the unified tree, treats **every directory that contains an `index.json` as an OCI layout**, and pushes it to `registry/<relative-path>` — where `<relative-path>` is that directory's path relative to the unified root (`findLayouts` + `pushSingleLayout` in [push.go](../internal/mirror/push.go)). No mapping table, no per-component logic: **the relative path of the layout is the registry segment, verbatim.** A layout at the root pushes to the repo root; a layout at `security/trivy-db` pushes to `<repo>/security/trivy-db`. The only choice `push` makes is which repo that path is relative to: for an edition target, `installer/` and `deckhouse-cli/` go to the root above the edition (§2.9).
 
 ### 2.4. Routing table
 
@@ -167,10 +167,12 @@ All discovered archives are unpacked into a single `unified/` working directory,
 | `install/` | `<repo>/install` | `platform.tar` (version tags + channel aliases) |
 | `install-standalone/` | `<repo>/install-standalone` | `platform.tar` |
 | `release-channel/` | `<repo>/release-channel` | `platform.tar` |
-| `installer/` | `<repo>/installer` | `installer.tar` |
+| `installer/` | `<repo>/installer`, or `<root>/installer` for an edition target (§2.9) | `installer.tar` |
 | `security/<db>/` | `<repo>/security/<db>` | `security.tar` |
 | `modules/<name>/` (+ `release/`, `extra/<extra>/`) | `<repo>/modules/<name>[/…]` | `module-<name>.tar` |
 | `packages/<name>/` (+ `version/`, `extra/<extra>/`) | `<repo>/packages/<name>[/…]` | `package-<name>.tar`, `package-versions.tar` |
+| `deckhouse-cli/` | `<repo>/deckhouse-cli`, or `<root>/deckhouse-cli` for an edition target (§2.9) | `deckhouse-cli.tar` |
+| `deckhouse-cli/plugins/<name>/` | `<repo>/deckhouse-cli/plugins/<name>`, or `<root>/…` for an edition target (§2.9) | `plugin-<name>.tar` |
 
 ### 2.5. The `short_tag` annotation decides the image tag
 
@@ -181,7 +183,8 @@ Within a layout, `push` does not invent tags. It reads the destination tag from 
 After pushing the layouts, `push` creates lightweight discovery tags so the platform can enumerate what is available:
 
 - for every directory directly under `modules/`, it pushes a tiny placeholder image to `<repo>/modules:<name>`;
-- for every directory directly under `packages/`, it pushes one to `<repo>/packages:<name>`.
+- for every directory directly under `packages/`, it pushes one to `<repo>/packages:<name>`;
+- for every directory directly under `deckhouse-cli/plugins/`, it pushes one to `<repo>/deckhouse-cli/plugins:<name>` (`<root>/…` for an edition target, §2.9).
 
 These tags are what `ListTags` on `<repo>/modules` and `<repo>/packages` returns, so a module/package is only discoverable if its layout sits at `modules/<name>/` / `packages/<name>/`. This is the practical reason the `modules/` and `packages/` prefixes are mandatory (`createModulesIndex` / `createPackagesIndex` in [push.go](../internal/mirror/push.go)).
 
@@ -193,6 +196,22 @@ Older bundles packed a module's contents at the **root** of `module-<name>.tar`,
 
 Modules are **always** stored under `modules/` inside the bundle. If you push them to a non-default location, `--modules-path-suffix` rewrites the leading `modules` segment at push time (`remapModulesSegment` in [push.go](../internal/mirror/push.go); `NormalizeModulesPath` in [service.go](../pkg/registry/service/service.go)). The remap happens only on push — the bundle contents are unchanged — and the discovery index tags (§2.6) follow the same remapped path.
 
+### 2.9. Special case: a target that ends with an edition
+
+The Deckhouse registry keeps each edition in a repo of its own (`registry.deckhouse.io/deckhouse/ee`, `…/ce`, …), but publishes the installer and the d8 CLI once for all editions, in the root above them (`registry.deckhouse.io/deckhouse/installer`, `…/deckhouse-cli`). `pull` reads them from that root (`GetEditionFromRegistryPath` and `NewService` in [service.go](../pkg/registry/service/service.go)), and `push` writes them back the same way. This is the default, there is no flag for it:
+
+- when the last segment of the target path is an edition — `ce`, `be`, `se`, `se-plus`, `ee`, `fe` or `cse` — the target is an edition repo, and its root is the path above it;
+- `installer/` and `deckhouse-cli/` (the d8 binary, its plugins and the plugins discovery tags) are pushed relative to that root;
+- every other layout — the repo root, `install/`, `install-standalone/`, `release-channel/`, `security/`, `modules/`, `packages/` — is pushed relative to the target, as usual.
+
+So a CE bundle pushed to `registry.example.com/deckhouse/ce` and an EE bundle pushed to `registry.example.com/deckhouse/ee` share one `registry.example.com/deckhouse/installer` and one `registry.example.com/deckhouse/deckhouse-cli`, the same as the source registry, and a later `d8 mirror pull` from either edition repo finds them where it looks.
+
+The editions are `pkg.Edition`, the list pull uses, so a CSE bundle pushed to `…/deckhouse/cse` next to `…/deckhouse/ce` shares the installer and d8 CLI as well. The in-cluster registry-packages-proxy keeps its own list (`editionSegments` in deckhouse's `go_lib/registry-packages-proxy/proxy/cli_repo.go`), which does not include `cse`: until it does, the proxy does not look above `…/cse`, and `d8 dist update` and `d8 plugins install` in a CSE cluster do not find the d8 CLI and plugins pushed this way.
+
+A target whose only path segment is an edition (`registry.example.com/ee`) is not split: the root would be the bare registry host, so the path is taken as a project that happens to be called `ee`, and the whole bundle lands under it. The in-cluster registry-packages-proxy applies the same rule when it looks for `deckhouse-cli` above a cluster's edition repo.
+
+The split is decided by `SplitTargetEdition`, and the per-layout choice is made by `clientFor`, both in [push.go](../internal/mirror/push.go).
+
 ---
 
 ## 3. Checklist: a push-compatible archive
@@ -201,7 +220,7 @@ An archive (whatever its name) is processed correctly by `push` if:
 
 1. It is a valid tar, or a complete set of `<name>.tar.NNNN.chunk` parts with none missing.
 2. Every image lives in a valid OCI layout — a directory containing `index.json` plus a `blobs/` tree.
-3. The layout's path inside the tar equals the target registry segment (`install/`, `installer/`, `security/trivy-db/`, `modules/<name>/`, `packages/<name>/version/`, …). Root-level `index.json` targets the repo root.
+3. The layout's path inside the tar equals the target registry segment (`install/`, `installer/`, `security/trivy-db/`, `modules/<name>/`, `packages/<name>/version/`, …). Root-level `index.json` targets the repo root. For an edition target, `installer/` and `deckhouse-cli/` are relative to the root above the edition (§2.9).
 4. Every manifest to be pushed carries the `io.deckhouse.image.short_tag` annotation; that value becomes its tag.
 5. Modules are under `modules/<name>/` and packages under `packages/<name>/`, otherwise the discovery index tags and `--modules-path-suffix` remap will not apply to them.
 
@@ -245,16 +264,16 @@ and pushes each layout to the segment its path names:
 ```
 registry.example.com/deckhouse/fe                        <- unified/index.json
 registry.example.com/deckhouse/fe/install                <- unified/install
-registry.example.com/deckhouse/fe/installer              <- unified/installer
 registry.example.com/deckhouse/fe/security/trivy-db      <- unified/security/trivy-db
 registry.example.com/deckhouse/fe/modules/<name>         <- unified/modules/<name>
 registry.example.com/deckhouse/fe/packages/<name>        <- unified/packages/<name>
-registry.example.com/deckhouse/fe/deckhouse-cli          <- unified/deckhouse-cli (the d8 binary)
-registry.example.com/deckhouse/fe/deckhouse-cli/plugins/system <- unified/deckhouse-cli/plugins/system
+registry.example.com/deckhouse/installer                 <- unified/installer (outside the edition, §2.9)
+registry.example.com/deckhouse/deckhouse-cli             <- unified/deckhouse-cli (the d8 binary, outside the edition)
+registry.example.com/deckhouse/deckhouse-cli/plugins/system <- unified/deckhouse-cli/plugins/system
 …
 registry.example.com/deckhouse/fe/modules:<name>         <- discovery index tag
 registry.example.com/deckhouse/fe/packages:<name>        <- discovery index tag
-registry.example.com/deckhouse/fe/deckhouse-cli/plugins:system <- discovery index tag
+registry.example.com/deckhouse/deckhouse-cli/plugins:system <- discovery index tag
 ```
 
-The bundle carried no routing table and `push` consulted none: every destination above was read straight out of the paths the archives were built with.
+The bundle carried no routing table and `push` consulted none: every destination above was read straight out of the paths the archives were built with. The `fe` at the end of the target only decided which repo `installer/` and `deckhouse-cli/` are relative to.
