@@ -29,6 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/kubectl/pkg/util/term"
 )
 
 func TestEnsureRBACCreatesObjects(t *testing.T) {
@@ -242,6 +244,27 @@ func TestNewCommandFlags(t *testing.T) {
 	for _, name := range []string{"namespace", "target-namespace", "istio-namespace", "image", "kubeconfig", "context"} {
 		assert.NotNil(t, cmd.Flags().Lookup(name), "missing flag %s", name)
 	}
+}
+
+func TestTerminalSizeQueueAdapter(t *testing.T) {
+	sizes := fakeTerminalSizeQueue{{Width: 120, Height: 40}}
+	adapter := &terminalSizeQueueAdapter{delegate: &sizes}
+
+	assert.Equal(t, &remotecommand.TerminalSize{Width: 120, Height: 40}, adapter.Next())
+	assert.Nil(t, adapter.Next(), "a stopped monitor must stay nil for client-go")
+}
+
+type fakeTerminalSizeQueue []*term.TerminalSize
+
+func (q *fakeTerminalSizeQueue) Next() *term.TerminalSize {
+	if len(*q) == 0 {
+		return nil
+	}
+
+	next := (*q)[0]
+	*q = (*q)[1:]
+
+	return next
 }
 
 func prependGenerateName(kube *fake.Clientset) {
