@@ -97,7 +97,7 @@ type Stream interface {
 }
 
 // Direction supplies the direction-specific wording rendered by stateWord and
-// the non-TTY aggregate line. It deliberately covers ONLY the words that
+// both sinks' volume counters. It deliberately covers ONLY the words that
 // differ between a download and an upload; "Already exists" (resume skip)
 // and "Interrupted" (Fail) are direction-independent and stay hard-coded in
 // stateWord regardless of Direction.
@@ -112,8 +112,8 @@ type Direction struct {
 	// ("DataExport" or "DataImport"), interpolated into the
 	// direction-independent "Waiting for %s to be Ready" template.
 	WaitResource string
-	// PastVerb is the lower-case past-tense verb used in the non-TTY
-	// aggregate line, e.g. "downloaded" or "uploaded".
+	// PastVerb is the lower-case past-tense verb used in the TTY summary line
+	// and the non-TTY aggregate line, e.g. "downloaded" or "uploaded".
 	PastVerb string
 }
 
@@ -205,9 +205,11 @@ type ttySink struct {
 	// dir is the direction-specific wording (see Direction) rendered by every
 	// stream this sink creates.
 	dir Direction
-	// summaryOnce guards one-time creation of the bottom-pinned volume-counter bar.
+	// summaryOnce guards one-time creation of the top-pinned volume-counter bar.
 	summaryOnce sync.Once
 	summaryBar  *mpb.Bar
+	// summaryTick is the summary spinner's frame counter, like ttyStream.spinTick.
+	summaryTick atomic.Uint64
 	// volTotal/volDone back the "N/M volumes downloaded" counter: volTotal is set
 	// once via SetVolumeTotal, volDone is incremented exactly once per stream by
 	// ttyStream.Done (see the SwapInt32 gate there).
@@ -221,7 +223,7 @@ func newTTYSink(w io.Writer, dir Direction) *ttySink {
 	return &ttySink{p: p, dir: dir}
 }
 
-// SetVolumeTotal sets M for the bottom "N/M volumes downloaded" summary bar.
+// SetVolumeTotal sets M for the "N/M volumes <verb>" summary bar.
 func (s *ttySink) SetVolumeTotal(n int) {
 	s.volTotal.Store(int64(n))
 }
@@ -229,35 +231,20 @@ func (s *ttySink) SetVolumeTotal(n int) {
 // NewStream adds a named per-stream bar. The bar starts in the waiting state and
 // switches to the live byte-counter display after Activate() is called. There is
 // no aggregate summary header among the per-leaf rows: `docker pull` shows only
-// per-layer rows. A separate bottom-pinned volume-counter bar (see summaryOnce)
-// reports overall N/M completion below every per-leaf row.
+// per-layer rows. A separate volume-counter bar (see summaryOnce) above every
+// per-leaf row reports overall N/M completion.
 func (s *ttySink) NewStream(name string, total int64) Stream {
-	// Create the bottom-pinned volume-counter bar the first time any stream is
-	// registered. mpb.BarPriority(math.MinInt) pins it below every per-leaf row
-	// regardless of registration order (verified empirically against mpb/v8
-	// v8.7.5: greater priority renders at the top; math.MinInt is the smallest
-	// possible priority, so this bar always sinks to the bottom).
-	//
-	// The spinner filler is built directly (not via AddSpinner, which hardcodes
-	// the default center-positioned style) and given an explicit narrow
-	// mpb.BarWidth, mirroring the per-leaf bar's own BarWidth(ttyBarWidth) below.
-	// Without a requested width, mpb/v8 v8.7.5's sFiller.Fill computes
-	// width = internal.CheckRequestedWidth(stat.RequestedWidth, stat.AvailableWidth),
-	// and CheckRequestedWidth returns AvailableWidth whenever requested < 1 — so an
-	// unconfigured spinner claims ALL remaining terminal width. The default
-	// (center) position then pads AvailableWidth/2 blanks BEFORE the glyph,
-	// stranding it far to the right of the " N/M volumes downloaded" label on any
-	// reasonably wide terminal (the reported bug). PositionLeft() plus a
-	// spinnerCellWidth-sized bar glues the glyph immediately after the label,
-	// matching the per-row waiting-spinner cell it echoes.
+	// Create the volume-counter bar with the first stream. mpb draws rows in
+	// ascending priority order, so math.MinInt keeps it on top regardless of
+	// registration order. The bar itself draws nothing; summaryCell renders it.
 	s.summaryOnce.Do(func() {
 		bar, err := s.p.Add(0,
-			mpb.SpinnerStyle().PositionLeft().Build(),
-			mpb.BarWidth(spinnerCellWidth),
+			mpb.NopStyle().Build(),
 			mpb.BarPriority(math.MinInt),
 			mpb.PrependDecorators(
-				decor.Any(func(_ decor.Statistics) string {
-					return volumeCounterLabel(int(s.volDone.Load()), int(s.volTotal.Load()))
+				decor.Any(func(stats decor.Statistics) string {
+					return summaryCell(int(s.volDone.Load()), int(s.volTotal.Load()),
+						stats.Completed, s.summaryTick.Add(1), s.dir.PastVerb)
 				}),
 			),
 		)
@@ -289,8 +276,8 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 	//     auto-sizes the column to the longest name across all rows. nameCell appends
 	//     one trailing space so even the widest (unpadded) row keeps a clean gap
 	//     before the spinner.
-	//   - spinner: fixed-width (spinnerCellWidth) animated cell, non-blank only while
-	//     waiting; a same-width blank in active/done so the column never shifts.
+	//   - status: fixed-width (spinnerCellWidth) cell, a spinner frame until the
+	//     volume finishes, then a ✓/✗ mark, so the column never shifts.
 	//   - stateWord: left-aligned width-synced cell (WCSyncWidthR); the widest word
 	//     sets one shared width across all rows, so the bar / end-of-row begins at
 	//     the same x in every state.
@@ -309,11 +296,9 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 		mpb.BarWidth(ttyBarWidth),
 		mpb.PrependDecorators(
 			decor.Name(nameCell(name), decor.WCSyncWidthR),
-			// Waiting spinner: a fixed-width animated cell shown only while the row
-			// is waiting. mpb calls this once per refresh; the atomic add advances
+			// Status cell: mpb calls this once per refresh; the atomic add advances
 			// the frame each refresh so the glyph spins. WC{W: spinnerCellWidth}
-			// reserves the same width in every state (blank in active/done), so no
-			// other column shifts when the spinner appears or disappears.
+			// reserves the same width in every state, so no other column shifts.
 			decor.Any(func(_ decor.Statistics) string {
 				return spinnerCell(atomic.LoadInt32(&ts.state), atomic.AddUint64(&ts.spinTick, 1))
 			}, decor.WC{W: spinnerCellWidth}),
@@ -344,8 +329,8 @@ func (s *ttySink) NewStream(name string, total int64) Stream {
 
 // Wait completes the volume-counter summary bar and then drains the mpb renderer
 // once all per-stream bars have finished. By the time Wait is called every
-// per-leaf stream has called Done, so the settled "M/M volumes downloaded" line
-// renders before the container drains.
+// per-leaf stream has settled, so the final frame shows the settled counter
+// with its ✓/✗ mark instead of a spinner frame.
 func (s *ttySink) Wait() {
 	if s.summaryBar != nil {
 		s.summaryBar.SetTotal(1, true)
@@ -366,7 +351,7 @@ func (s *ttySink) LogWriter() io.Writer {
 type ttyStream struct {
 	bar *mpb.Bar
 	// sink is a back-reference to the owning ttySink, used only to bump volDone
-	// on completion for the bottom volume-counter bar. Never nil in production
+	// on completion for the volume-counter bar. Never nil in production
 	// (set by ttySink.NewStream); tests that construct a bare *ttyStream leave it
 	// nil, which Done() guards against.
 	sink *ttySink
@@ -382,9 +367,9 @@ type ttyStream struct {
 	// from a resume skip (waiting → done without Activate, "Already exists") in
 	// stateWord without adding a new Stream interface method.
 	activated int32
-	// spinTick is the waiting-spinner frame counter. mpb invokes the spinner
+	// spinTick is the status-spinner frame counter. mpb invokes the spinner
 	// decorator once per refresh; each invocation does an atomic add so the
-	// frame advances per refresh and the waiting glyph animates.
+	// frame advances per refresh and the glyph animates.
 	spinTick uint64
 }
 
@@ -484,39 +469,47 @@ func (f stateBarFiller) Fill(w io.Writer, stat decor.Statistics) error {
 	return f.inner.Fill(w, stat)
 }
 
-// ── Waiting spinner ───────────────────────────────────────────────────────────
+// ── Status spinner and outcome marks ──────────────────────────────────────────
 
-// spinnerCellWidth is the fixed display-rune width of the waiting-spinner cell:
-// one braille glyph plus a trailing space while waiting, or two blanks otherwise.
-// Keeping it constant means the spinner column never shifts the columns to its
-// right when the glyph appears (waiting) or disappears (active/done).
+// spinnerCellWidth is the fixed display width of the status cell: one glyph (a
+// spinner frame or an outcome mark) plus a trailing space. Keeping it constant
+// means the status column never shifts the columns to its right.
 const spinnerCellWidth = 2
 
-// waitingSpinnerFrames is the 10-frame braille spinner cycled while a row waits
-// for its DataExport, matching the familiar docker-pull-style motion.
-var waitingSpinnerFrames = []string{
+// Outcome marks shown once a volume row or the summary line settles. Unlike
+// the heavy U+2714/U+2718 variants these have no emoji presentation, so they
+// stay one cell wide like the braille frames.
+const (
+	markDone   = "\u2713" // CHECK MARK
+	markFailed = "\u2717" // BALLOT X
+)
+
+// spinnerFrames is the 10-frame braille spinner cycled while a row is
+// unfinished, matching the familiar docker-pull-style motion.
+var spinnerFrames = []string{
 	"\u280b", "\u2819", "\u2839", "\u2838", "\u283c",
 	"\u2834", "\u2826", "\u2827", "\u2807", "\u280f",
 }
 
 // spinnerFrame returns the braille glyph for the given tick, cycling through
-// waitingSpinnerFrames by tick modulo the frame count. It is pure and
+// spinnerFrames by tick modulo the frame count. It is pure and
 // deterministic so the animation can be unit-asserted without mpb rendering.
 func spinnerFrame(tick uint64) string {
-	return waitingSpinnerFrames[tick%uint64(len(waitingSpinnerFrames))]
+	return spinnerFrames[tick%uint64(len(spinnerFrames))]
 }
 
-// spinnerCell returns the fixed-width waiting-spinner cell for a stream's state.
-// While waiting it returns the current braille glyph plus a trailing space (an
-// animated indicator); in the active and done states it returns a same-width
-// blank ("  "), so the spinner is visible only while waiting and the column
-// width stays constant across every state. It is pure and unit-assertable.
+// spinnerCell returns the fixed-width status cell for a stream's state: a
+// spinner frame while the volume waits or transfers, then a still outcome mark
+// that stays on screen after the command exits.
 func spinnerCell(state int32, tick uint64) string {
-	if state == streamStateWaiting {
+	switch state {
+	case streamStateDone:
+		return markDone + " "
+	case streamStateFailed:
+		return markFailed + " "
+	default:
 		return spinnerFrame(tick) + " "
 	}
-
-	return "  "
 }
 
 // ── Decorator pure functions ──────────────────────────────────────────────────
@@ -607,16 +600,34 @@ func decorateAppend(state int32, stats decor.Statistics) string {
 	}
 }
 
-// volumeCounterLabel returns the text for the bottom volume-counter summary bar.
-// It is a pure function so the label can be unit-tested without any mpb
-// rendering. total==0 means no volumes are in scope (e.g. a manifest-only
-// selection), so nothing is rendered.
-func volumeCounterLabel(done, total int) string {
+// volumeCounterLabel returns the counter text of the volume-counter summary bar;
+// verb is the direction's PastVerb. It is a pure function so the label can be
+// unit-tested without any mpb rendering. total==0 means no volumes are in scope
+// (e.g. a manifest-only selection), so nothing is rendered.
+func volumeCounterLabel(done, total int, verb string) string {
 	if total == 0 {
 		return ""
 	}
 
-	return fmt.Sprintf(" %d/%d volumes downloaded", done, total)
+	return fmt.Sprintf(" %d/%d volumes %s", done, total, verb)
+}
+
+// summaryCell returns the whole summary line: the counter with a spinner frame
+// while the bar is live, then a still mark once Wait completes it. The mark
+// follows the counter rather than the exit status: ✓ only when every volume is done.
+func summaryCell(done, total int, completed bool, tick uint64, verb string) string {
+	label := volumeCounterLabel(done, total, verb)
+
+	switch {
+	case label == "":
+		return ""
+	case !completed:
+		return label + " " + spinnerFrame(tick)
+	case done < total:
+		return label + " " + markFailed
+	default:
+		return label + " " + markDone
+	}
 }
 
 // nameCell renders the FULL leaf name with NO truncation, followed by a single

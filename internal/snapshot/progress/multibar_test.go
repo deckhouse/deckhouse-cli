@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
@@ -380,6 +383,60 @@ func TestNonTTY_Wait_AlwaysEmitsFinalLine(t *testing.T) {
 	}
 }
 
+func TestNonTTY_NoMarks(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		dir      Direction
+		fail     bool
+		wantDone int
+	}{
+		{"Non-terminal output has no marks (download, success)", DirectionDownload, false, 2},
+		{"Non-terminal output has no marks (download, interrupted)", DirectionDownload, true, 1},
+		{"Non-terminal output has no marks (upload, success)", DirectionUpload, false, 2},
+		{"Non-terminal output has no marks (upload, interrupted)", DirectionUpload, true, 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sink := New(buf, false, WithInterval(time.Hour), WithDirection(tc.dir))
+			sink.SetVolumeTotal(2)
+
+			completeTransfer(sink.NewStream("vol-a", 0))
+
+			b := sink.NewStream("vol-b", 0)
+			if tc.fail {
+				interruptTransfer(b)
+			} else {
+				completeTransfer(b)
+			}
+
+			sink.Wait()
+
+			out := buf.String()
+			lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+
+			wantBytes := int64(2048)
+			if tc.fail {
+				wantBytes = 1024 + 512
+			}
+
+			want := aggregateLineWithVerb(t, tc.dir.PastVerb, wantBytes, 2048, tc.wantDone, 2)
+			if got := lines[len(lines)-1] + "\n"; got != want {
+				t.Errorf("last line = %q, want %q", got, want)
+			}
+
+			if strings.ContainsAny(out, "✓✗") || containsBraille(out) {
+				t.Errorf("non-terminal output must carry no marks or spinner frames\ngot: %q", out)
+			}
+		})
+	}
+}
+
 func TestDecorateStatus(t *testing.T) {
 	t.Parallel()
 
@@ -629,23 +686,23 @@ func TestWCSyncWidthAlignmentDirection(t *testing.T) {
 }
 
 // TestSpinnerFrame asserts the pure frame selector cycles through
-// waitingSpinnerFrames by tick % len, including wrap-around at and past the
+// spinnerFrames by tick % len, including wrap-around at and past the
 // frame count. mpb refresh timing/terminal animation is intentionally not tested.
 func TestSpinnerFrame(t *testing.T) {
 	t.Parallel()
 
-	n := uint64(len(waitingSpinnerFrames))
+	n := uint64(len(spinnerFrames))
 
 	cases := []struct {
 		name string
 		tick uint64
 		want string
 	}{
-		{"first", 0, waitingSpinnerFrames[0]},
-		{"last_before_wrap", n - 1, waitingSpinnerFrames[n-1]},
-		{"wrap_to_first", n, waitingSpinnerFrames[0]},
-		{"wrap_to_second", n + 1, waitingSpinnerFrames[1]},
-		{"multi_wrap", 2*n + 3, waitingSpinnerFrames[3]},
+		{"first", 0, spinnerFrames[0]},
+		{"last_before_wrap", n - 1, spinnerFrames[n-1]},
+		{"wrap_to_first", n, spinnerFrames[0]},
+		{"wrap_to_second", n + 1, spinnerFrames[1]},
+		{"multi_wrap", 2*n + 3, spinnerFrames[3]},
 	}
 
 	for _, tc := range cases {
@@ -664,11 +721,11 @@ func TestSpinnerFrame(t *testing.T) {
 func TestSpinnerFrameAdvances(t *testing.T) {
 	t.Parallel()
 
-	n := len(waitingSpinnerFrames)
+	n := len(spinnerFrames)
 
 	for i := 0; i < 2*n; i++ {
 		got := spinnerFrame(uint64(i))
-		want := waitingSpinnerFrames[i%n]
+		want := spinnerFrames[i%n]
 
 		if got != want {
 			t.Errorf("tick %d: spinnerFrame = %q, want %q", i, got, want)
@@ -676,85 +733,228 @@ func TestSpinnerFrameAdvances(t *testing.T) {
 	}
 }
 
-// TestSpinnerCell asserts state gating and constant width: a real glyph cell
-// (frame + trailing space) only in the waiting state, a same-width blank in the
-// active and done states, and an identical display (rune) width across all three.
+// TestSpinnerCell pins the status cell per state: an animated spinner frame
+// while the volume is unfinished, a still mark once it settles, and the same
+// display width in every state and runewidth mode.
 func TestSpinnerCell(t *testing.T) {
 	t.Parallel()
 
 	const tick = uint64(3)
 
-	waitingCell := spinnerCell(streamStateWaiting, tick)
-	activeCell := spinnerCell(streamStateActive, tick)
-	doneCell := spinnerCell(streamStateDone, tick)
-
-	if want := spinnerFrame(tick) + " "; waitingCell != want {
-		t.Errorf("waiting cell = %q, want %q", waitingCell, want)
+	cases := []struct {
+		name      string
+		dir       Direction
+		state     int32
+		activated bool
+		wantWord  string
+		// wantMark is the still mark of a settled row; empty means a spinner.
+		wantMark string
+	}{
+		{"Spinner animates while volume waits for readiness", DirectionDownload, streamStateWaiting, false, "Waiting for DataExport to be Ready", ""},
+		{"Spinner animates while volume data transfers", DirectionUpload, streamStateActive, true, "Uploading", ""},
+		{"success: transferred volume shows check mark", DirectionDownload, streamStateDone, true, "Download complete", "✓"},
+		{"success: already present volume shows check mark", DirectionDownload, streamStateDone, false, "Already exists", "✓"},
+		{"error: interrupted transfer shows cross mark", DirectionDownload, streamStateFailed, true, "Interrupted", "✗"},
+		{"error: volume interrupted while waiting shows cross mark", DirectionUpload, streamStateFailed, false, "Interrupted", "✗"},
 	}
 
-	if strings.TrimSpace(waitingCell) == "" {
-		t.Errorf("waiting cell %q must contain a non-blank glyph", waitingCell)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if activeCell != "  " {
-		t.Errorf("active cell = %q, want two-space blank", activeCell)
-	}
+			if got := stateWord(tc.state, tc.activated, tc.dir); got != tc.wantWord {
+				t.Fatalf("stateWord = %q, want %q", got, tc.wantWord)
+			}
 
-	if doneCell != "  " {
-		t.Errorf("done cell = %q, want two-space blank", doneCell)
-	}
+			cell, next := spinnerCell(tc.state, tick), spinnerCell(tc.state, tick+1)
 
-	// Constant display width is what keeps the columns to the right from shifting
-	// when the spinner appears (waiting) or disappears (active/done).
-	wWidth := utf8.RuneCountInString(waitingCell)
-	if wWidth != spinnerCellWidth {
-		t.Errorf("waiting cell width = %d, want %d", wWidth, spinnerCellWidth)
-	}
+			if tc.wantMark == "" {
+				if want := spinnerFrame(tick) + " "; cell != want {
+					t.Errorf("cell = %q, want spinner frame %q", cell, want)
+				}
 
-	if aWidth := utf8.RuneCountInString(activeCell); aWidth != wWidth {
-		t.Errorf("active cell width = %d, want %d (== waiting)", aWidth, wWidth)
-	}
+				if cell == next {
+					t.Errorf("cell did not change between ticks: %q", cell)
+				}
+			} else {
+				if want := tc.wantMark + " "; cell != want || next != want {
+					t.Errorf("cells = %q, %q, want still mark %q", cell, next, want)
+				}
+			}
 
-	if dWidth := utf8.RuneCountInString(doneCell); dWidth != wWidth {
-		t.Errorf("done cell width = %d, want %d (== waiting)", dWidth, wWidth)
+			// A local Condition: mutating runewidth.DefaultCondition would race
+			// with the other parallel tests.
+			eastAsian := &runewidth.Condition{EastAsianWidth: true}
+
+			for _, c := range []string{cell, next} {
+				if w := runewidth.StringWidth(c); w != spinnerCellWidth {
+					t.Errorf("width(%q) = %d, want %d", c, w, spinnerCellWidth)
+				}
+
+				if w := eastAsian.StringWidth(c); w != spinnerCellWidth {
+					t.Errorf("East Asian width(%q) = %d, want %d", c, w, spinnerCellWidth)
+				}
+			}
+		})
 	}
 }
 
-// TestTTYStream_SpinnerStateGating drives a real ttyStream through
-// waiting → active → done and asserts the spinner cell is non-blank only while
-// waiting and blank (constant width) once the row becomes active or done.
+// notifyWriter is a goroutine-safe buffer that signals every write, so a test
+// can wait for the next mpb frame instead of sleeping.
+type notifyWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	notify chan struct{}
+}
+
+func newNotifyWriter() *notifyWriter {
+	return &notifyWriter{notify: make(chan struct{}, 1)}
+}
+
+func (w *notifyWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	w.mu.Unlock()
+
+	select {
+	case w.notify <- struct{}{}:
+	default:
+	}
+
+	return n, err
+}
+
+func (w *notifyWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.buf.String()
+}
+
+// TestTTYStream_SpinnerStateGating drives real ttyStreams through every state
+// and checks the status cell and its rendered column.
 func TestTTYStream_SpinnerStateGating(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	sink := newTTYSink(buf, DirectionDownload)
+	t.Run("success: cell follows stream state", func(t *testing.T) {
+		t.Parallel()
 
-	st, ok := sink.NewStream("spin", 0).(*ttyStream)
-	if !ok {
-		t.Fatal("NewStream did not return *ttyStream")
-	}
+		sink := newTTYSink(&bytes.Buffer{}, DirectionDownload)
 
-	cellNow := func() string {
-		return spinnerCell(atomic.LoadInt32(&st.state), atomic.AddUint64(&st.spinTick, 1))
-	}
+		st, ok := sink.NewStream("spin", 0).(*ttyStream)
+		if !ok {
+			t.Fatal("NewStream did not return *ttyStream")
+		}
 
-	if cell := cellNow(); strings.TrimSpace(cell) == "" {
-		t.Errorf("fresh (waiting) stream spinner cell = %q, want a non-blank glyph", cell)
-	}
+		failed, ok := sink.NewStream("failed", 0).(*ttyStream)
+		if !ok {
+			t.Fatal("NewStream did not return *ttyStream")
+		}
 
-	st.Activate()
+		cellOf := func(s *ttyStream) string {
+			return spinnerCell(atomic.LoadInt32(&s.state), atomic.AddUint64(&s.spinTick, 1))
+		}
 
-	if cell := cellNow(); cell != "  " {
-		t.Errorf("active stream spinner cell = %q, want two-space blank", cell)
-	}
+		if cell := cellOf(st); !containsBraille(cell) {
+			t.Errorf("waiting stream cell = %q, want a spinner frame", cell)
+		}
 
-	st.Done()
+		st.Activate()
 
-	if cell := cellNow(); cell != "  " {
-		t.Errorf("done stream spinner cell = %q, want two-space blank", cell)
-	}
+		if cell := cellOf(st); !containsBraille(cell) {
+			t.Errorf("active stream cell = %q, want a spinner frame", cell)
+		}
 
-	sink.Wait()
+		st.Done()
+
+		if cell := cellOf(st); cell != "✓ " {
+			t.Errorf("done stream cell = %q, want %q", cell, "✓ ")
+		}
+
+		failed.Fail()
+
+		if cell := cellOf(failed); cell != "✗ " {
+			t.Errorf("failed stream cell = %q, want %q", cell, "✗ ")
+		}
+
+		sink.Wait()
+	})
+
+	t.Run("Status column keeps constant width", func(t *testing.T) {
+		t.Parallel()
+
+		rows := []struct{ name, word string }{
+			{"waiting-volume", "Waiting for DataExport to be Ready"},
+			{"act", "Downloading"},
+			{"done-vol", "Download complete"},
+			{"failed-volume-with-a-long-name", "Interrupted"},
+		}
+
+		w := newNotifyWriter()
+		sink := newRenderSink(w, DirectionDownload)
+		sink.SetVolumeTotal(len(rows))
+
+		waiting := sink.NewStream(rows[0].name, 0)
+		active := sink.NewStream(rows[1].name, 0)
+		completeTransfer(sink.NewStream(rows[2].name, 0))
+		sink.NewStream(rows[3].name, 0).Fail()
+
+		active.Activate()
+		active.SetTotal(1024)
+		active.IncrBy(512)
+
+		t.Cleanup(func() {
+			waiting.Fail()
+			active.Fail()
+			sink.Wait()
+		})
+
+		// wordColumns returns the display column of each row's state word in the
+		// newest frame showing all four states at once.
+		wordColumns := func() ([]int, bool) {
+			frames := renderedFrames(w.String())
+
+		frameLoop:
+			for i := len(frames) - 1; i >= 0; i-- {
+				cols := make([]int, 0, len(rows))
+
+				for _, r := range rows {
+					row, ok := findRow(frames[i], r.name)
+					idx := strings.Index(row, r.word)
+
+					if !ok || idx < 0 {
+						continue frameLoop
+					}
+
+					cols = append(cols, runewidth.StringWidth(row[:idx]))
+				}
+
+				return cols, true
+			}
+
+			return nil, false
+		}
+
+		deadline := time.After(5 * time.Second)
+
+		for {
+			if cols, ok := wordColumns(); ok {
+				for i, c := range cols {
+					if c != cols[0] {
+						t.Errorf("state word of %q starts at column %d, want %d (as %q)", rows[i].name, c, cols[0], rows[0].name)
+					}
+				}
+
+				return
+			}
+
+			select {
+			case <-w.notify:
+			case <-deadline:
+				t.Fatalf("no frame showed all four states within 5s\nraw: %q", w.String())
+			}
+		}
+	})
 }
 
 func TestStateBarFiller(t *testing.T) {
@@ -974,8 +1174,8 @@ func TestTTYStream_SetCurrent_SeedsAndCancels(t *testing.T) {
 // TestTTYSink_NoSummaryHeader guards the summary-cleanup decision: a TTY run must
 // never reintroduce the OLD removed header wording ("preparing exports"/"exports
 // ready") or the old "waiting…" counter. It deliberately does NOT ban the NEW
-// "volumes downloaded" bottom summary bar text added by the progress-volume-
-// counter feature — that bar is a distinct, later product decision (see
+// "volumes downloaded" summary bar text — that bar is a distinct, later
+// product decision (see
 // TestVolumeCounterLabel and the TTY/non-TTY count-once tests below for its
 // dedicated coverage). mpb terminal frames are not asserted here; we only assert
 // the rendered output never contains the removed header strings.
@@ -1011,8 +1211,8 @@ func TestTTYSink_NoSummaryHeader(t *testing.T) {
 	}
 }
 
-// TestVolumeCounterLabel pins the exact text of the bottom "N/M volumes
-// downloaded" summary bar as a pure function, independent of any mpb rendering.
+// TestVolumeCounterLabel pins the exact text of the "N/M volumes <verb>"
+// summary bar as a pure function, independent of any mpb rendering.
 func TestVolumeCounterLabel(t *testing.T) {
 	t.Parallel()
 
@@ -1020,20 +1220,61 @@ func TestVolumeCounterLabel(t *testing.T) {
 		name  string
 		done  int
 		total int
+		verb  string
 		want  string
 	}{
-		{name: "no volumes in scope renders nothing", done: 0, total: 0, want: ""},
-		{name: "none done yet", done: 0, total: 4, want: " 0/4 volumes downloaded"},
-		{name: "partially done", done: 2, total: 4, want: " 2/4 volumes downloaded"},
-		{name: "fully done", done: 4, total: 4, want: " 4/4 volumes downloaded"},
+		{name: "no volumes in scope renders nothing", done: 0, total: 0, verb: "downloaded", want: ""},
+		{name: "none done yet", done: 0, total: 4, verb: "downloaded", want: " 0/4 volumes downloaded"},
+		{name: "partially done", done: 2, total: 4, verb: "downloaded", want: " 2/4 volumes downloaded"},
+		{name: "fully done", done: 4, total: 4, verb: "downloaded", want: " 4/4 volumes downloaded"},
+		{name: "Download summary says downloaded", done: 1, total: 2, verb: DirectionDownload.PastVerb, want: " 1/2 volumes downloaded"},
+		{name: "Upload summary says uploaded", done: 1, total: 2, verb: DirectionUpload.PastVerb, want: " 1/2 volumes uploaded"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := volumeCounterLabel(tc.done, tc.total); got != tc.want {
-				t.Errorf("volumeCounterLabel(%d, %d) = %q, want %q", tc.done, tc.total, got, tc.want)
+			if got := volumeCounterLabel(tc.done, tc.total, tc.verb); got != tc.want {
+				t.Errorf("volumeCounterLabel(%d, %d, %q) = %q, want %q", tc.done, tc.total, tc.verb, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummaryCell(t *testing.T) {
+	t.Parallel()
+
+	const tick = uint64(4)
+
+	frame := spinnerFrame(tick)
+
+	cases := []struct {
+		name      string
+		done      int
+		total     int
+		completed bool
+		verb      string
+		want      string
+	}{
+		{"success: no volumes in scope renders nothing", 0, 0, false, "downloaded", ""},
+		{"success: no volumes in scope renders nothing after completion", 0, 0, true, "downloaded", ""},
+		{"success: live counter shows spinner", 1, 3, false, "downloaded", " 1/3 volumes downloaded " + frame},
+		{"success: live counter with all done still spins", 3, 3, false, "downloaded", " 3/3 volumes downloaded " + frame},
+		{"success: all volumes done shows check mark", 3, 3, true, "downloaded", " 3/3 volumes downloaded ✓"},
+		{"success: single volume done shows check mark", 1, 1, true, "uploaded", " 1/1 volumes uploaded ✓"},
+		{"error: some volumes not done shows cross mark", 2, 3, true, "downloaded", " 2/3 volumes downloaded ✗"},
+		{"error: no volumes done shows cross mark", 0, 2, true, "uploaded", " 0/2 volumes uploaded ✗"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := summaryCell(tc.done, tc.total, tc.completed, tick, tc.verb)
+			if got != tc.want {
+				t.Errorf("summaryCell(%d, %d, %t, %d, %q) = %q, want %q",
+					tc.done, tc.total, tc.completed, tick, tc.verb, got, tc.want)
 			}
 		})
 	}
@@ -1089,8 +1330,8 @@ func TestTTYSink_VolumeCounter_CountsOnce(t *testing.T) {
 	}
 
 	wantLabel := " 2/2 volumes downloaded"
-	if label := volumeCounterLabel(int(got), int(ts.volTotal.Load())); label != wantLabel {
-		t.Errorf("volumeCounterLabel(%d, %d) = %q, want %q", got, ts.volTotal.Load(), label, wantLabel)
+	if label := volumeCounterLabel(int(got), int(ts.volTotal.Load()), ts.dir.PastVerb); label != wantLabel {
+		t.Errorf("volumeCounterLabel(%d, %d, %q) = %q, want %q", got, ts.volTotal.Load(), ts.dir.PastVerb, label, wantLabel)
 	}
 }
 
@@ -1380,15 +1621,13 @@ func TestVolumeCounter_ZeroVolumes(t *testing.T) {
 	})
 }
 
-// summaryLines extracts every rendered line of the bottom volume-counter
-// summary bar from a raw mpb output buffer, in render order. Each render
-// cycle rewrites the previous frame in place (mpb interleaves cursor-reset
-// escape sequences between frames), so splitting on newlines and filtering
-// for the marker text recovers exactly one summary line per frame regardless
-// of the surrounding control bytes.
-func summaryLines(raw string) []string {
-	const marker = "volumes downloaded"
-
+// summaryLines extracts every rendered line of the volume-counter summary bar
+// from a raw mpb output buffer, in render order. Each render cycle rewrites
+// the previous frame in place (mpb interleaves cursor-reset escape sequences
+// between frames), so splitting on newlines and filtering for the marker text
+// (e.g. "volumes downloaded") recovers exactly one summary line per frame
+// regardless of the surrounding control bytes.
+func summaryLines(raw, marker string) []string {
 	lines := strings.Split(raw, "\n")
 	out := make([]string, 0, len(lines))
 
@@ -1402,13 +1641,10 @@ func summaryLines(raw string) []string {
 }
 
 // summaryLineGap returns the number of space runes between the end of the
-// "volumes downloaded" counter text and the next non-space rune on the same
-// rendered line (the waiting-spinner glyph). It pins the summary bar's
-// spinner-adjacency geometry fixed by progress-overall-bar-spinner-fix.
-func summaryLineGap(t *testing.T, line string) int {
+// marker counter text and the next non-space rune on the same rendered line
+// (the spinner frame or the outcome mark).
+func summaryLineGap(t *testing.T, line, marker string) int {
 	t.Helper()
-
-	const marker = "volumes downloaded"
 
 	idx := strings.Index(line, marker)
 	if idx < 0 {
@@ -1429,74 +1665,412 @@ func summaryLineGap(t *testing.T, line string) int {
 	return gap
 }
 
-// TestTTYSink_SummaryBarSpinnerAdjacency pins the rendered geometry of the
-// bottom volume-counter summary bar fixed by progress-overall-bar-spinner-fix:
-// the waiting spinner must sit within a small, fixed gap of the "N/M volumes
-// downloaded" text on every rendered frame, including the last frame produced
-// at Wait(), and must never drift across the terminal.
-//
-// Unlike this package's other TTY-sink tests (TestTTYSink_NoSummaryHeader,
-// TestTTYSink_VolumeCounter_CountsOnce), this test DOES assert live mpb
-// rendered frame content, because the defect under test — a spinner stranded
-// far from its label — is a rendering-geometry bug that a state-only
-// assertion cannot observe; per cross-cutting invariant #8, the actual layout
-// a width/position option produces must be checked empirically, and here the
-// horizontal gap IS the thing under test. mpb only auto-refreshes to a
-// non-terminal io.Writer when WithAutoRefresh is explicitly set (confirmed by
-// reading the pinned github.com/vbauerster/mpb/v8 v8.7.5 progress.go
-// NewWithContext: `cw.IsTerminal() || s.autoRefresh` gates the
-// autoRefreshListener goroutine) — which is why this package's New()
-// constructor never renders anything to a bytes.Buffer target and the other
-// TTY tests only assert absence-of-text or internal counter state. This test
-// builds a *ttySink directly (white-box, same package) around an mpb.Progress
-// created with WithAutoRefresh and a short WithRefreshRate, so the SAME
-// serve()/render() code path a real terminal drives actually writes frames
-// into the buffer; no time.Sleep is needed because mpb's shutdown path
-// (progress.go's `<-p.done` case) renders at least once more synchronously
-// while autoRefresh is on, before Wait returns.
-//
-// Empirically verified with a throwaway repro of the exact pre-fix
-// `s.p.AddSpinner(0, mpb.BarPriority(math.MinInt), ...)` construction (no
-// BarWidth, default center position) that it renders a gap of 28 spaces
-// before the glyph at the harness's default width, against a gap of 1 space
-// with the shipped fix's `mpb.BarWidth(spinnerCellWidth)` + `PositionLeft()`
-// — so the <= 1 bound below fails against the pre-fix construction and
-// passes against the fix.
+// TestTTYSink_SummaryBarSpinnerAdjacency pins that the summary spinner, and the
+// mark replacing it, sit right after the "N/M volumes <verb>" text on every
+// rendered frame instead of drifting across the terminal.
 func TestTTYSink_SummaryBarSpinnerAdjacency(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	p := mpb.New(mpb.WithOutput(buf), mpb.WithAutoRefresh(), mpb.WithRefreshRate(5*time.Millisecond))
-	sink := &ttySink{p: p}
-	sink.SetVolumeTotal(2)
-
-	a := sink.NewStream("stream-a", 0)
-	b := sink.NewStream("stream-b", 0)
-
-	a.Activate()
-	a.SetTotal(1024)
-	a.IncrBy(1024)
-	a.Done()
-
-	// b is a resume skip: Done without Activate.
-	b.Done()
-
-	sink.Wait()
-
-	lines := summaryLines(buf.String())
-	if len(lines) == 0 {
-		t.Fatal("no rendered volume-counter summary lines captured")
+	cases := []struct {
+		name string
+		dir  Direction
+	}{
+		{"success: download summary", DirectionDownload},
+		{"success: upload summary", DirectionUpload},
 	}
 
-	for i, line := range lines {
-		if gap := summaryLineGap(t, line); gap > 1 {
-			t.Errorf("frame %d: gap between %q and spinner = %d, want <= 1\nline: %q", i, "volumes downloaded", gap, line)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			marker := "volumes " + tc.dir.PastVerb
+
+			buf := &bytes.Buffer{}
+			sink := newRenderSink(buf, tc.dir)
+			sink.SetVolumeTotal(2)
+
+			completeTransfer(sink.NewStream("stream-a", 0))
+
+			// stream-b is a resume skip: Done without Activate.
+			sink.NewStream("stream-b", 0).Done()
+
+			sink.Wait()
+
+			lines := summaryLines(buf.String(), marker)
+			if len(lines) == 0 {
+				t.Fatal("no rendered volume-counter summary lines captured")
+			}
+
+			for i, line := range lines {
+				if gap := summaryLineGap(t, line, marker); gap > 1 {
+					t.Errorf("frame %d: gap between %q and spinner = %d, want <= 1\nline: %q", i, marker, gap, line)
+				}
+			}
+
+			last := lines[len(lines)-1]
+			if want := "2/2 " + marker; !strings.Contains(last, want) {
+				t.Errorf("final rendered summary line = %q, want to contain %q", last, want)
+			}
+		})
+	}
+}
+
+// frameSeparator is the cursor-up + erase-down sequence mpb writes before
+// redrawing a frame in place.
+var frameSeparator = regexp.MustCompile("\x1b\\[\\d+A\x1b\\[J")
+
+// newRenderSink builds a ttySink whose frames really reach w: mpb renders to a
+// non-terminal writer only with WithAutoRefresh.
+func newRenderSink(w io.Writer, dir Direction) *ttySink {
+	p := mpb.New(mpb.WithOutput(w), mpb.WithAutoRefresh(), mpb.WithRefreshRate(5*time.Millisecond))
+
+	return &ttySink{p: p, dir: dir}
+}
+
+// renderedFrames splits raw mpb output into frames, each a slice of rows.
+func renderedFrames(raw string) [][]string {
+	chunks := frameSeparator.Split(raw, -1)
+	frames := make([][]string, 0, len(chunks))
+
+	for _, chunk := range chunks {
+		if chunk = strings.TrimRight(chunk, "\n"); chunk != "" {
+			frames = append(frames, strings.Split(chunk, "\n"))
 		}
 	}
 
-	last := lines[len(lines)-1]
-	if !strings.Contains(last, "2/2 volumes downloaded") {
-		t.Errorf("final rendered summary line = %q, want to contain %q", last, "2/2 volumes downloaded")
+	return frames
+}
+
+// lastFrame returns the rows of the final frame left on screen.
+func lastFrame(t *testing.T, raw string) []string {
+	t.Helper()
+
+	frames := renderedFrames(raw)
+	if len(frames) == 0 {
+		t.Fatalf("no rendered frames captured\nraw: %q", raw)
+	}
+
+	return frames[len(frames)-1]
+}
+
+// findRow returns the row of frame whose first field is name.
+func findRow(frame []string, name string) (string, bool) {
+	for _, row := range frame {
+		if fields := strings.Fields(row); len(fields) > 0 && fields[0] == name {
+			return row, true
+		}
+	}
+
+	return "", false
+}
+
+// findSummaryRow returns the row of frame carrying the "volumes <verb>" counter.
+func findSummaryRow(frame []string) (string, bool) {
+	for _, row := range frame {
+		if strings.Contains(row, "volumes "+DirectionDownload.PastVerb) || strings.Contains(row, "volumes "+DirectionUpload.PastVerb) {
+			return row, true
+		}
+	}
+
+	return "", false
+}
+
+// statusGlyph returns the status-column content of a volume row: the field
+// right after the name, or the first state word when the column is blank.
+func statusGlyph(row string) string {
+	fields := strings.Fields(row)
+	if len(fields) < 2 {
+		return ""
+	}
+
+	return fields[1]
+}
+
+func containsBraille(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r >= 0x2800 && r <= 0x28FF })
+}
+
+// completeTransfer drives s through a full real transfer: waiting → active → done.
+func completeTransfer(s Stream) {
+	s.Activate()
+	s.SetTotal(1024)
+	s.IncrBy(1024)
+	s.Done()
+}
+
+// interruptTransfer drives s into the active state and fails it mid-copy.
+func interruptTransfer(s Stream) {
+	s.Activate()
+	s.SetTotal(1024)
+	s.IncrBy(512)
+	s.Fail()
+}
+
+func TestTTYSink_SummaryMark(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		volumes int
+		drive   func(streams []Stream)
+		want    string
+	}{
+		{
+			name:    "Summary shows check mark when all volumes completed",
+			volumes: 3,
+			drive: func(streams []Stream) {
+				for _, s := range streams {
+					completeTransfer(s)
+				}
+			},
+			want: " 3/3 volumes downloaded ✓",
+		},
+		{
+			name:    "Summary shows check mark when all volumes already present",
+			volumes: 2,
+			drive: func(streams []Stream) {
+				for _, s := range streams {
+					s.Done()
+				}
+			},
+			want: " 2/2 volumes downloaded ✓",
+		},
+		{
+			name:    "Summary shows cross mark when a volume failed",
+			volumes: 3,
+			drive: func(streams []Stream) {
+				completeTransfer(streams[0])
+				completeTransfer(streams[1])
+				interruptTransfer(streams[2])
+			},
+			want: " 2/3 volumes downloaded ✗",
+		},
+		{
+			name:    "Summary shows cross mark after interrupt",
+			volumes: 3,
+			drive: func(streams []Stream) {
+				completeTransfer(streams[0])
+
+				streams[1].Activate()
+				streams[1].SetTotal(1024)
+				streams[1].IncrBy(256)
+
+				// Mirrors the pipeline's post-cancel sweep over every stream.
+				for _, s := range streams {
+					s.Fail()
+				}
+			},
+			want: " 1/3 volumes downloaded ✗",
+		},
+		{
+			name:    "Summary mark follows volume count, not exit status",
+			volumes: 2,
+			drive: func(streams []Stream) {
+				completeTransfer(streams[0])
+				streams[1].Done()
+			},
+			want: " 2/2 volumes downloaded ✓",
+		},
+		{
+			name:    "error: volume failed while waiting gives cross mark",
+			volumes: 2,
+			drive: func(streams []Stream) {
+				completeTransfer(streams[0])
+				streams[1].Fail()
+			},
+			want: " 1/2 volumes downloaded ✗",
+		},
+		{
+			name:    "error: Done after Fail keeps cross mark",
+			volumes: 1,
+			drive: func(streams []Stream) {
+				streams[0].Fail()
+				streams[0].Done()
+			},
+			want: " 0/1 volumes downloaded ✗",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sink := newRenderSink(buf, DirectionDownload)
+			sink.SetVolumeTotal(tc.volumes)
+
+			streams := make([]Stream, 0, tc.volumes)
+			for i := range tc.volumes {
+				streams = append(streams, sink.NewStream(fmt.Sprintf("vol-%d", i), 0))
+			}
+
+			tc.drive(streams)
+			sink.Wait()
+
+			frame := lastFrame(t, buf.String())
+
+			row, ok := findSummaryRow(frame)
+			if !ok {
+				t.Fatalf("final frame has no summary row\nframe: %q", frame)
+			}
+
+			if strings.TrimRight(row, " ") != tc.want {
+				t.Errorf("final summary row = %q, want %q", row, tc.want)
+			}
+
+			if containsBraille(strings.Join(frame, "\n")) {
+				t.Errorf("final frame still shows a spinner glyph\nframe: %q", frame)
+			}
+		})
+	}
+}
+
+func TestTTYSink_VolumeRowMark(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		dir      Direction
+		drive    func(s Stream)
+		wantMark string
+		wantWord string
+	}{
+		{"Downloaded volume shows check mark", DirectionDownload, completeTransfer, "✓", "Download complete"},
+		{"Uploaded volume shows check mark", DirectionUpload, completeTransfer, "✓", "Upload complete"},
+		{"Already present volume shows check mark", DirectionDownload, func(s Stream) { s.Done() }, "✓", "Already exists"},
+		{"Volume interrupted during transfer shows cross mark", DirectionDownload, interruptTransfer, "✗", "Interrupted"},
+		{"Volume interrupted while waiting shows cross mark", DirectionUpload, func(s Stream) { s.Fail() }, "✗", "Interrupted"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sink := newRenderSink(buf, tc.dir)
+			sink.SetVolumeTotal(1)
+
+			tc.drive(sink.NewStream("vol-a", 0))
+			sink.Wait()
+
+			frame := lastFrame(t, buf.String())
+
+			row, ok := findRow(frame, "vol-a")
+			if !ok {
+				t.Fatalf("final frame has no row for vol-a\nframe: %q", frame)
+			}
+
+			if got := statusGlyph(row); got != tc.wantMark {
+				t.Errorf("status column = %q, want %q\nrow: %q", got, tc.wantMark, row)
+			}
+
+			if !strings.Contains(row, tc.wantWord) {
+				t.Errorf("row %q does not contain state %q", row, tc.wantWord)
+			}
+		})
+	}
+}
+
+func TestTTYSink_SummaryVerb(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		dir       Direction
+		want      string
+		forbidden string
+	}{
+		{"Download summary says downloaded", DirectionDownload, "1/2 volumes downloaded", "uploaded"},
+		{"Upload summary says uploaded", DirectionUpload, "1/2 volumes uploaded", "downloaded"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sink := newRenderSink(buf, tc.dir)
+			sink.SetVolumeTotal(2)
+
+			completeTransfer(sink.NewStream("vol-a", 0))
+			sink.NewStream("vol-b", 0).Fail()
+			sink.Wait()
+
+			row, ok := findSummaryRow(lastFrame(t, buf.String()))
+			if !ok {
+				t.Fatalf("final frame has no summary row\nraw: %q", buf.String())
+			}
+
+			if !strings.Contains(row, tc.want) {
+				t.Errorf("summary row = %q, want to contain %q", row, tc.want)
+			}
+
+			if strings.Contains(buf.String(), tc.forbidden) {
+				t.Errorf("output must not contain %q\nraw: %q", tc.forbidden, buf.String())
+			}
+		})
+	}
+}
+
+func TestTTYSink_SummaryAboveVolumeRows(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		volumes int
+	}{
+		{"Summary line is rendered above volume rows (one volume)", 1},
+		{"Summary line is rendered above volume rows (volumes finish in reverse order)", 4},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &bytes.Buffer{}
+			sink := newRenderSink(buf, DirectionDownload)
+			sink.SetVolumeTotal(tc.volumes)
+
+			streams := make([]Stream, 0, tc.volumes)
+			for i := range tc.volumes {
+				streams = append(streams, sink.NewStream(fmt.Sprintf("vol-%d", i), 0))
+			}
+
+			for i := len(streams) - 1; i >= 0; i-- {
+				if i%2 == 0 {
+					completeTransfer(streams[i])
+				} else {
+					streams[i].Done()
+				}
+			}
+
+			sink.Wait()
+
+			frames := renderedFrames(buf.String())
+			if len(frames) == 0 {
+				t.Fatalf("no rendered frames captured\nraw: %q", buf.String())
+			}
+
+			for i, frame := range frames {
+				summaryIdx := slices.IndexFunc(frame, func(row string) bool {
+					return strings.Contains(row, "volumes downloaded")
+				})
+
+				for j, row := range frame {
+					if fields := strings.Fields(row); len(fields) == 0 || !strings.HasPrefix(fields[0], "vol-") {
+						continue
+					}
+
+					if summaryIdx < 0 || j < summaryIdx {
+						t.Errorf("frame %d: volume row %d %q precedes the summary row (index %d)\nframe: %q", i, j, row, summaryIdx, frame)
+					}
+				}
+			}
+
+			if last := frames[len(frames)-1]; !strings.Contains(last[0], "volumes downloaded") {
+				t.Errorf("final frame starts with %q, want the summary row\nframe: %q", last[0], last)
+			}
+		})
 	}
 }
 
