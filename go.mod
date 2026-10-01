@@ -37,7 +37,6 @@ require (
 	github.com/werf/logboek v0.7.1
 	github.com/werf/nelm v1.30.5-0.20260918172005-312d2f269472
 	github.com/werf/werf/v2 v2.79.1
-	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.15.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.55.0

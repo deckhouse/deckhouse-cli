@@ -1,5 +1,7 @@
+//go:build !windows
+
 /*
-Copyright 2024 Flant JSC
+Copyright 2026 Flant JSC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,7 +18,5 @@ limitations under the License.
 
 package main
 
-func main() {
-	enableVirtualTerminal()
-	execute()
-}
+// enableVirtualTerminal is a no-op: terminals outside Windows render ANSI escape sequences as is.
+func enableVirtualTerminal() {}
