@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/go-multierror"
-	"github.com/samber/lo"
 )
 
 type FileReader struct {
@@ -44,9 +43,14 @@ func Open(baseDir, baseFileName string) (*FileReader, error) {
 		case errors.Is(err, os.ErrNotExist) && chunkIndex == 0:
 			return nil, err
 		case errors.Is(err, os.ErrNotExist) && chunkIndex > 0:
+			readers := make([]io.Reader, len(chunks))
+			for i := range chunks {
+				readers[i] = chunks[i]
+			}
+
 			return &FileReader{
 				chunks:  chunks,
-				multiRd: io.MultiReader(lo.Map(chunks, func(item *os.File, _ int) io.Reader { return item })...),
+				multiRd: io.MultiReader(readers...),
 			}, nil
 		case err != nil:
 			return nil, fmt.Errorf("opening chunk %s: %w", chunkName, err)

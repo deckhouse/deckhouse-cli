@@ -27,13 +27,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/hashicorp/go-multierror"
-	"github.com/samber/lo"
-	"github.com/samber/lo/parallel"
 	"github.com/spf13/cobra"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
@@ -668,32 +667,46 @@ func (p *Puller) computeGOSTDigests() error {
 			return fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err)
 		}
 
-		bundlePackages := lo.Filter(bundleDirContents, func(item os.DirEntry, _ int) bool {
-			ext := filepath.Ext(item.Name())
-			return ext == ".tar" || ext == ".chunk"
-		})
+		var (
+			wg   sync.WaitGroup
+			mu   sync.Mutex
+			merr = &multierror.Error{}
+		)
 
-		merr := &multierror.Error{}
+		appendErr := func(err error) {
+			mu.Lock()
+			defer mu.Unlock()
 
-		parallel.ForEach(bundlePackages, func(bundlePackage os.DirEntry, _ int) {
-			file, err := os.Open(filepath.Join(p.params.BundleDir, bundlePackage.Name()))
-			if err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err))
+			merr = multierror.Append(merr, err)
+		}
+
+		for _, bundlePackage := range bundleDirContents {
+			if ext := filepath.Ext(bundlePackage.Name()); ext != ".tar" && ext != ".chunk" {
+				continue
 			}
 
-			digest, err := gostsums.CalculateBlobGostDigest(file)
-			if err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Calculate digest: %w", err))
-			}
+			wg.Go(func() {
+				file, err := os.Open(filepath.Join(p.params.BundleDir, bundlePackage.Name()))
+				if err != nil {
+					appendErr(fmt.Errorf("Read Deckhouse Kubernetes Platform distribution bundle: %w", err))
+				}
 
-			if err = os.WriteFile(
-				filepath.Join(p.params.BundleDir, bundlePackage.Name())+".gostsum",
-				[]byte(digest),
-				0o644,
-			); err != nil {
-				merr = multierror.Append(merr, fmt.Errorf("Could not write digest to .gostsum file: %w", err))
-			}
-		})
+				digest, err := gostsums.CalculateBlobGostDigest(file)
+				if err != nil {
+					appendErr(fmt.Errorf("Calculate digest: %w", err))
+				}
+
+				if err = os.WriteFile(
+					filepath.Join(p.params.BundleDir, bundlePackage.Name())+".gostsum",
+					[]byte(digest),
+					0o644,
+				); err != nil {
+					appendErr(fmt.Errorf("Could not write digest to .gostsum file: %w", err))
+				}
+			})
+		}
+
+		wg.Wait()
 
 		return merr.ErrorOrNil()
 	})

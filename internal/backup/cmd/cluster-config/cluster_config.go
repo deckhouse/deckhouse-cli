@@ -9,9 +9,7 @@ import (
 	"reflect"
 	"runtime"
 
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -101,7 +99,7 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 		{payload: storageclasses.BackupStorageClasses},
 	}
 
-	errs := lo.Map(backupStages, func(stage *BackupStage, _ int) error {
+	runStage := func(stage *BackupStage) error {
 		stagePayloadFuncName := runtime.FuncForPC(reflect.ValueOf(stage.payload).Pointer()).Name()
 
 		objects, err := stage.payload(restConfig, kubeCl, dynamicCl, namespaces)
@@ -120,7 +118,13 @@ func backupConfigs(cmd *cobra.Command, args []string) error {
 		}
 
 		return nil
-	})
+	}
+
+	errs := make([]error, 0, len(backupStages))
+	for _, stage := range backupStages {
+		errs = append(errs, runStage(stage))
+	}
+
 	if err = errors.Join(errs...); err != nil {
 		log.Printf("WARN: Some backup procedures failed, only successfully backed-up resources will be available:\n%v", err)
 	}
@@ -150,9 +154,10 @@ func getNamespacesFromCluster(kubeCl *kubernetes.Clientset) ([]string, error) {
 		return nil, fmt.Errorf("Failed to list namespaces: %w", err)
 	}
 
-	namespaces := lo.Map(namespaceList.Items, func(ns corev1.Namespace, _ int) string {
-		return ns.Name
-	})
+	namespaces := make([]string, 0, len(namespaceList.Items))
+	for i := range namespaceList.Items {
+		namespaces = append(namespaces, namespaceList.Items[i].Name)
+	}
 
 	return namespaces, nil
 }

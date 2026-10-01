@@ -3,9 +3,9 @@ module github.com/deckhouse/deckhouse-cli
 go 1.25.12
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e
-	github.com/deckhouse/deckhouse/pkg/log v0.2.0
+	github.com/deckhouse/deckhouse/pkg/log v0.2.1
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.1
 	github.com/deckhouse/virtualization/src/cli v1.11.1
 	github.com/fatih/color v1.19.0
@@ -26,8 +26,6 @@ require (
 	github.com/mitchellh/mapstructure v1.5.1-0.20231216201459-8508981c8b6c
 	github.com/muesli/termenv v0.16.0
 	github.com/pkg/errors v0.9.1
-	github.com/rs/zerolog v1.34.0
-	github.com/samber/lo v1.51.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
@@ -39,22 +37,22 @@ require (
 	github.com/werf/logboek v0.7.1
 	github.com/werf/nelm v1.30.5-0.20260918172005-312d2f269472
 	github.com/werf/werf/v2 v2.79.1
-	gitlab.com/greyxor/slogor v1.2.11
 	go.cypherpunks.ru/gogost/v5 v5.15.0
+	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.55.0
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b
 	golang.org/x/image v0.45.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.34.8
-	k8s.io/apiextensions-apiserver v0.34.8
-	k8s.io/apimachinery v0.35.0
-	k8s.io/cli-runtime v0.34.8
-	k8s.io/client-go v0.34.8
-	k8s.io/component-base v0.34.8
-	k8s.io/kubectl v0.34.8
+	k8s.io/api v0.35.9
+	k8s.io/apiextensions-apiserver v0.35.9
+	k8s.io/apimachinery v0.35.9
+	k8s.io/cli-runtime v0.35.9
+	k8s.io/client-go v0.35.9
+	k8s.io/component-base v0.35.9
+	k8s.io/kubectl v0.35.9
 	k8s.io/utils v0.0.0-20260507154919-ff6756f316d2
-	sigs.k8s.io/controller-runtime v0.22.0
+	sigs.k8s.io/controller-runtime v0.23.3
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -617,6 +615,7 @@ require (
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
+	github.com/samber/lo v1.51.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
 	github.com/sasha-s/go-deadlock v0.3.6 // indirect
 	github.com/seccomp/libseccomp-golang v0.10.0 // indirect
@@ -717,7 +716,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/mod v0.40.0 // indirect
@@ -732,7 +730,7 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/grpc v1.83.2 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
@@ -740,11 +738,11 @@ require (
 	gopkg.in/resty.v1 v1.12.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	k8s.io/apiserver v0.34.8 // indirect
-	k8s.io/component-helpers v0.34.8 // indirect
+	k8s.io/apiserver v0.35.9 // indirect
+	k8s.io/component-helpers v0.35.9 // indirect
 	k8s.io/klog v1.0.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20260603220949-865597e52e25 // indirect
-	k8s.io/metrics v0.34.8 // indirect
+	k8s.io/metrics v0.35.9 // indirect
 	kubevirt.io/api v1.6.2 // indirect
 	kubevirt.io/containerized-data-importer-api v1.60.3-0.20241105012228-50fbed985de9 // indirect
 	kubevirt.io/controller-lifecycle-operator-sdk/api v0.0.0-20220329064328-f3cc58c6ed90 // indirect
@@ -774,6 +772,8 @@ replace (
 	github.com/hashicorp/vault/sdk => flant.internal/deckhouse/stronghold.git/images/stronghold/sdk v1.18.6
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
+	// v1.10+ imports vault/api/cliconfig, missing from the Stronghold vault/api fork, and breaks go mod tidy; d8 never registers this KMS.
+	github.com/sigstore/sigstore/pkg/signature/kms/hashivault => github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.9.5
 	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.79.1-dk.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0 => github.com/deckhouse/gogost/v5 v5.15.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc => go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0

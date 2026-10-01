@@ -20,8 +20,8 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
@@ -59,11 +59,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	digest, err := imagedigest.PullAnnotatePush(imageName, opts...)
 	if err != nil {
-		log.Fatal().Err(err).Msg("AddGostImageDigest")
+		zap.S().Fatalw("AddGostImageDigest", "error", err)
 	}
 
-	log.Info().Msgf("GOST Image Digest: %s", digest)
-	log.Info().Msg("Added successfully")
+	zap.S().Infof("GOST Image Digest: %s", digest)
+	zap.S().Info("Added successfully")
 
 	return nil
 }

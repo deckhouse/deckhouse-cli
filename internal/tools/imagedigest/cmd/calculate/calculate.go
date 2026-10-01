@@ -21,8 +21,8 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
@@ -60,10 +60,10 @@ func runCalculate(cmd *cobra.Command, args []string) error {
 
 	gostImageDigest, err := imagedigest.PullAndCalculate(imageName, opts...)
 	if err != nil {
-		log.Fatal().Err(err).Msg("CalculateGostImageDigest")
+		zap.S().Fatalw("CalculateGostImageDigest", "error", err)
 	}
 
-	log.Info().Msgf("GOST Image Digest: %s", hex.EncodeToString(gostImageDigest))
+	zap.S().Infof("GOST Image Digest: %s", hex.EncodeToString(gostImageDigest))
 
 	return nil
 }

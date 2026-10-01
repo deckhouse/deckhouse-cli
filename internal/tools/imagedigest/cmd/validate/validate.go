@@ -20,8 +20,8 @@ import (
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/crane"
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest"
 )
@@ -66,18 +66,18 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	result, err := imagedigest.PullAndValidate(imageName, opts...)
 	if err != nil {
-		log.Error().Err(err).Msg("ValidateGostImageDigest")
+		zap.S().Errorw("ValidateGostImageDigest", "error", err)
 
 		if fix {
-			log.Info().Msg("Fix GOST Image Digest")
+			zap.S().Info("Fix GOST Image Digest")
 
 			newDigest, fixErr := imagedigest.PullAnnotatePush(imageName, opts...)
 			if fixErr != nil {
-				log.Fatal().Err(fixErr).Msg("AddGostImageDigest")
+				zap.S().Fatalw("AddGostImageDigest", "error", fixErr)
 			}
 
-			log.Info().Msgf("GOST Image Digest: %s", newDigest)
-			log.Info().Msg("Added successfully")
+			zap.S().Infof("GOST Image Digest: %s", newDigest)
+			zap.S().Info("Added successfully")
 
 			return nil
 		}
@@ -85,9 +85,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	log.Info().Msgf("GOST Image Digest from image: %s", result.StoredDigest)
-	log.Info().Msgf("Calculated GOST Image Digest: %s", result.CalculatedDigest)
-	log.Info().Msg("Validate successfully")
+	zap.S().Infof("GOST Image Digest from image: %s", result.StoredDigest)
+	zap.S().Infof("Calculated GOST Image Digest: %s", result.CalculatedDigest)
+	zap.S().Info("Validate successfully")
 
 	return nil
 }

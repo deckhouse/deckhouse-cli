@@ -18,10 +18,11 @@ package cmd
 
 import (
 	"os"
+	"time"
 
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/add"
 	"github.com/deckhouse/deckhouse-cli/internal/tools/imagedigest/cmd/calculate"
@@ -38,15 +39,7 @@ func NewCommand() *cobra.Command {
 			ojson, _ := cmd.Flags().GetBool("json")
 			debug, _ := cmd.Flags().GetBool("debug")
 
-			zerolog.SetGlobalLevel(zerolog.InfoLevel)
-
-			if !ojson {
-				log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout})
-			}
-
-			if debug {
-				zerolog.SetGlobalLevel(zerolog.DebugLevel)
-			}
+			zap.ReplaceGlobals(newLogger(ojson, debug))
 		},
 	}
 
@@ -62,4 +55,29 @@ func NewCommand() *cobra.Command {
 	)
 
 	return imagedigestCmd
+}
+
+// newLogger writes colored console lines to stdout, or JSON lines to stderr when ojson is set.
+func newLogger(ojson, debug bool) *zap.Logger {
+	level := zapcore.InfoLevel
+	if debug {
+		level = zapcore.DebugLevel
+	}
+
+	encoderConfig := zapcore.EncoderConfig{
+		TimeKey:     "time",
+		LevelKey:    "level",
+		MessageKey:  "message",
+		EncodeLevel: zapcore.LowercaseLevelEncoder,
+		EncodeTime:  zapcore.RFC3339TimeEncoder,
+	}
+
+	if ojson {
+		return zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(encoderConfig), zapcore.Lock(os.Stderr), level))
+	}
+
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout(time.Kitchen)
+
+	return zap.New(zapcore.NewCore(zapcore.NewConsoleEncoder(encoderConfig), zapcore.Lock(os.Stdout), level))
 }

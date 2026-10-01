@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 
-	"github.com/samber/lo"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,7 +27,9 @@ func BackupClusterRoles(
 		log.Fatalf("Failed to list ClusterRoles from: %v", err)
 	}
 
-	return lo.Map(list.Items, func(item rbacv1.ClusterRole, _ int) runtime.Object {
+	objects := make([]runtime.Object, 0, len(list.Items))
+	for i := range list.Items {
+		item := &list.Items[i]
 		// Some shit-for-brains kubernetes/client-go developer decided that it is fun to remove GVK from responses for no reason.
 		// Have to add it back so that meta.Accessor can do its job
 		// https://github.com/kubernetes/client-go/issues/1328
@@ -37,8 +38,10 @@ func BackupClusterRoles(
 			APIVersion: rbacv1.SchemeGroupVersion.String(),
 		}
 
-		return &item
-	}), nil
+		objects = append(objects, item)
+	}
+
+	return objects, nil
 }
 
 func BackupClusterRoleBindings(
@@ -54,7 +57,9 @@ func BackupClusterRoleBindings(
 		log.Fatalf("Failed to list ClusterRoleBindings from: %v", err)
 	}
 
-	return lo.Map(list.Items, func(item rbacv1.ClusterRoleBinding, _ int) runtime.Object {
+	objects := make([]runtime.Object, 0, len(list.Items))
+	for i := range list.Items {
+		item := &list.Items[i]
 		// Some shit-for-brains kubernetes/client-go developer decided that it is fun to remove GVK from responses for no reason.
 		// Have to add it back so that meta.Accessor can do its job
 		// https://github.com/kubernetes/client-go/issues/1328
@@ -63,6 +68,8 @@ func BackupClusterRoleBindings(
 			APIVersion: rbacv1.SchemeGroupVersion.String(),
 		}
 
-		return &item
-	}), nil
+		objects = append(objects, item)
+	}
+
+	return objects, nil
 }

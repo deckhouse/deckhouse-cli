@@ -5,7 +5,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,17 +19,20 @@ func BackupConfigMaps(
 	_ dynamic.Interface,
 	namespaces []string,
 ) ([]runtime.Object, error) {
-	namespaces = lo.Filter(namespaces, func(item string, _ int) bool {
-		return strings.HasPrefix(item, "d8-") || strings.HasPrefix(item, "kube-")
-	})
+	var configmaps []runtime.Object
 
-	configmaps := lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
+	for _, namespace := range namespaces {
+		if !strings.HasPrefix(namespace, "d8-") && !strings.HasPrefix(namespace, "kube-") {
+			continue
+		}
+
 		list, err := kubeCl.CoreV1().ConfigMaps(namespace).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			log.Fatalf("Failed to list configmaps from : %v", err)
 		}
 
-		return lo.Map(list.Items, func(item corev1.ConfigMap, _ int) runtime.Object {
+		for i := range list.Items {
+			item := &list.Items[i]
 			// Some shit-for-brains kubernetes/client-go developer decided that it is fun to remove GVK from responses for no reason.
 			// Have to add it back so that meta.Accessor can do its job
 			// https://github.com/kubernetes/client-go/issues/1328
@@ -39,9 +41,9 @@ func BackupConfigMaps(
 				APIVersion: corev1.SchemeGroupVersion.String(),
 			}
 
-			return &item
-		})
-	})
+			configmaps = append(configmaps, item)
+		}
+	}
 
-	return lo.Flatten(configmaps), nil
+	return configmaps, nil
 }

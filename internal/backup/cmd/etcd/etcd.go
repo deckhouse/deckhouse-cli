@@ -24,9 +24,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"time"
 
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -271,27 +271,28 @@ func findETCDPods(kubeCl kubernetes.Interface) ([]string, error) {
 		return nil, fmt.Errorf("listing etcd Pods: %w", err)
 	}
 
-	pods.Items = lo.Filter(pods.Items, func(pod v1.Pod, _ int) bool {
-		podIsReady := lo.FindOrElse(
-			pod.Status.Conditions, v1.PodCondition{},
-			func(condition v1.PodCondition) bool {
-				return condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue
-			}).Status == v1.ConditionTrue
+	podNames := make([]string, 0, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
 
-		_, foundEtcdContainer := lo.Find(pod.Spec.Containers, func(container v1.Container) bool {
+		podIsReady := slices.ContainsFunc(pod.Status.Conditions, func(condition v1.PodCondition) bool {
+			return condition.Type == v1.PodReady && condition.Status == v1.ConditionTrue
+		})
+
+		foundEtcdContainer := slices.ContainsFunc(pod.Spec.Containers, func(container v1.Container) bool {
 			return container.Name == "etcd"
 		})
 
-		return podIsReady && foundEtcdContainer
-	})
+		if podIsReady && foundEtcdContainer {
+			podNames = append(podNames, pod.Name)
+		}
+	}
 
-	if len(pods.Items) == 0 {
+	if len(podNames) == 0 {
 		return nil, fmt.Errorf("no valid etcd Pods found")
 	}
 
-	return lo.Map(pods.Items, func(pod v1.Pod, _ int) string {
-		return pod.Name
-	}), nil
+	return podNames, nil
 }
 
 func checkEtcdPodExistsAndReady(kubeCl kubernetes.Interface, podName string) error {
@@ -303,9 +304,10 @@ func checkEtcdPodExistsAndReady(kubeCl kubernetes.Interface, podName string) err
 		return fmt.Errorf("Query Pod %s: %w", podName, err)
 	}
 
-	podReady := lo.FindOrElse(pod.Status.Conditions, v1.PodCondition{}, func(condition v1.PodCondition) bool {
+	readyIdx := slices.IndexFunc(pod.Status.Conditions, func(condition v1.PodCondition) bool {
 		return condition.Type == v1.PodReady
-	}).Status == v1.ConditionTrue
+	})
+	podReady := readyIdx >= 0 && pod.Status.Conditions[readyIdx].Status == v1.ConditionTrue
 
 	if !podReady {
 		return fmt.Errorf("Pod %s is not yet ready, cannot snapshot it now", podName)
