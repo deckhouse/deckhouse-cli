@@ -4,10 +4,10 @@ import (
 	_ "embed"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
-	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
@@ -44,13 +44,8 @@ func (f *BakedInFilter) Matches(obj runtime.Object) bool {
 		}
 	})
 
-	if !lo.HasKey(f.whitelist, namespace) ||
-		!lo.HasKey(f.whitelist[namespace], apiVersion) ||
-		!lo.HasKey(f.whitelist[namespace][apiVersion], kind) {
-		return false
-	}
-
-	_, foundInWhitelist := lo.Find(f.whitelist[namespace][apiVersion][kind], func(item string) bool {
+	// Missing namespace, apiVersion or kind keys yield a nil list, which matches nothing.
+	return slices.ContainsFunc(f.whitelist[namespace][apiVersion][kind], func(item string) bool {
 		if strings.HasPrefix(item, "$regexp:") {
 			_, pattern, _ := strings.Cut(item, ":")
 			return matchNameWithRegex(name, pattern)
@@ -58,8 +53,6 @@ func (f *BakedInFilter) Matches(obj runtime.Object) bool {
 
 		return item == name
 	})
-
-	return foundInWhitelist
 }
 
 func matchNameWithRegex(objectName, pattern string) bool {

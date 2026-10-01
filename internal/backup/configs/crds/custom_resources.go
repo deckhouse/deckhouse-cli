@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 
-	"github.com/samber/lo"
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiext "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -42,32 +41,36 @@ func BackupCustomResources(
 		return nil, fmt.Errorf("Failed to list CustomResourceDefinitions: %w", err)
 	}
 
-	resourcesToBackup := lo.Compact(
-		lo.Map(crdList.Items, func(crd v1.CustomResourceDefinition, _ int) *customResourceDescription {
-			version, validVersionFound := lo.Find(crd.Spec.Versions, func(item v1.CustomResourceDefinitionVersion) bool {
-				return item.Storage && item.Served
-			})
-			if !validVersionFound {
-				return nil // Empty GVR's will be filtered out
-			}
+	var namespacedResourcesToBackup, clusterwideResourcesToBackup []*customResourceDescription
 
-			return &customResourceDescription{
-				gvr: schema.GroupVersionResource{
-					Group:    crd.Spec.Group,
-					Version:  version.Name,
-					Resource: crd.Spec.Names.Plural,
-				},
-				crd: crd,
-			}
-		}))
+	for _, crd := range crdList.Items {
+		versionIdx := slices.IndexFunc(crd.Spec.Versions, func(item v1.CustomResourceDefinitionVersion) bool {
+			return item.Storage && item.Served
+		})
+		if versionIdx < 0 {
+			continue // No served storage version, nothing to back up
+		}
 
-	namespacedResourcesToBackup, clusterwideResourcesToBackup := lo.FilterReject(
-		resourcesToBackup,
-		func(r *customResourceDescription, _ int) bool { return r.crd.Spec.Scope == v1.NamespaceScoped },
-	)
+		resource := &customResourceDescription{
+			gvr: schema.GroupVersionResource{
+				Group:    crd.Spec.Group,
+				Version:  crd.Spec.Versions[versionIdx].Name,
+				Resource: crd.Spec.Names.Plural,
+			},
+			crd: crd,
+		}
 
-	nsResources := lo.Map(namespacedResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
-		return lo.Flatten(lo.Map(namespaces, func(namespace string, _ int) []runtime.Object {
+		if crd.Spec.Scope == v1.NamespaceScoped {
+			namespacedResourcesToBackup = append(namespacedResourcesToBackup, resource)
+		} else {
+			clusterwideResourcesToBackup = append(clusterwideResourcesToBackup, resource)
+		}
+	}
+
+	var objects []runtime.Object
+
+	for _, resource := range namespacedResourcesToBackup {
+		for _, namespace := range namespaces {
 			query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
 			query = query.(dynamic.NamespaceableResourceInterface).Namespace(namespace)
 
@@ -76,13 +79,13 @@ func BackupCustomResources(
 				log.Fatalf("Failed to list %s: %v", resource.gvr, err)
 			}
 
-			return lo.Map(list.Items, func(object unstructured.Unstructured, _ int) runtime.Object {
-				return &object
-			})
-		}))
-	})
+			for i := range list.Items {
+				objects = append(objects, &list.Items[i])
+			}
+		}
+	}
 
-	cwResources := lo.Map(clusterwideResourcesToBackup, func(resource *customResourceDescription, _ int) []runtime.Object {
+	for _, resource := range clusterwideResourcesToBackup {
 		query := dynamic.ResourceInterface(dynamicCl.Resource(resource.gvr))
 
 		list, err := query.List(context.TODO(), metav1.ListOptions{})
@@ -90,10 +93,10 @@ func BackupCustomResources(
 			log.Fatalf("Failed to list %s: %v", resource.gvr, err)
 		}
 
-		return lo.Map(list.Items, func(object unstructured.Unstructured, _ int) runtime.Object {
-			return &object
-		})
-	})
+		for i := range list.Items {
+			objects = append(objects, &list.Items[i])
+		}
+	}
 
-	return lo.Flatten(append(nsResources, cwResources...)), nil
+	return objects, nil
 }

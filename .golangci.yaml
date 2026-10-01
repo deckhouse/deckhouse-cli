@@ -8,7 +8,7 @@ linters:
     - asciicheck
     - bodyclose
     - copyloopvar
-    # - depguard
+    - depguard
     - dogsled
     - durationcheck
     - errcheck
@@ -17,6 +17,7 @@ linters:
     - goprintffuncname
     - govet
     - ineffassign
+    - makezero
     - misspell
     - musttag
     - nolintlint
@@ -32,10 +33,22 @@ linters:
     - whitespace
     - wsl_v5
   settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          deny:
+            - pkg: github.com/golang/mock
+              desc: "In public archive. Use 'github.com/gojuno/minimock' instead."
+            - pkg: "github.com/samber/lo"
+              desc: "This package must not be used, because of increasing cognitive complexity."
     errcheck:
       exclude-functions:
         - fmt:.*[rR]ead|[wW]rite|[cC]lose
         - io:Copy
+        - (io.Writer).Write
+        - (net/http.ResponseWriter).Write
     nonamedreturns:
       report-error-in-defer: false
     sloglint:
@@ -64,6 +77,10 @@ linters:
         - time
       # Enforce putting arguments on separate lines.
       args-on-sep-lines: false
+    staticcheck:
+      checks:
+        - all
+        - '-QF1008' # not need to fix; we understand how to call nested structs
     revive:
       rules:
         - name: var-naming
@@ -78,10 +95,6 @@ linters:
                 skip-package-name-checks: true
                 skip-package-name-collision-with-go-std: false
                 extra-bad-package-names: []
-    staticcheck:
-      checks:
-        - all
-        - '-QF1008' # not need to fix; we understand how to call nested structs
   exclusions:
     generated: lax
     presets:

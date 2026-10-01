@@ -23,10 +23,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror"
@@ -90,13 +90,30 @@ func resolvePackages(bundleArg []string) error {
 		return errors.New("no packages to push: specify a bundle directory before registry URL, or use --file to specify tar/chunked package")
 	}
 
-	Packages = lo.Uniq(Packages)
+	Packages = uniquePaths(Packages)
 
 	if TempDir == "" {
 		TempDir = filepath.Join(filepath.Dir(Packages[0]), ".tmp", mirror.TmpMirrorFolderName)
 	}
 
 	return nil
+}
+
+// uniquePaths drops repeated paths and keeps the first occurrence of each, so Packages[0] stays put.
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+
+	return unique
 }
 
 // collectBundlePathPackages resolves the bundle path argument, which may be a
@@ -115,12 +132,12 @@ func collectBundlePathPackages(arg string) error {
 			return fmt.Errorf("could not list files in bundle directory: %w", err)
 		}
 
-		dirEntries = lo.Filter(dirEntries, func(item os.DirEntry, _ int) bool {
+		dirEntries = slices.DeleteFunc(dirEntries, func(item os.DirEntry) bool {
 			// Only regular files can be packages. A directory whose name happens
 			// to match (e.g. a folder literally named "platform.tar") would later
 			// be handed to the pusher as an archive path and fail with a confusing
 			// unpack error, so skip anything that is not a regular file.
-			return item.Type().IsRegular() && isPackageFile(item.Name())
+			return !item.Type().IsRegular() || !isPackageFile(item.Name())
 		})
 		if len(dirEntries) == 0 {
 			return errors.New("no packages found in bundle directory")
