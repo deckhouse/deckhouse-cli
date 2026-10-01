@@ -175,7 +175,9 @@ Given platform releases v1.63.x .. v1.71.x:
 
 Quote the whole value when the constraint uses >= or <=: --include-module "module-name@>=1.3.0". Unquoted, the shell takes > as a redirection and d8 receives a module with no version.
 
-A constraint keeps the latest patch in each minor it covers, plus whatever the release channels point at. Versions named with >= or <= are kept as well. An exact tag (=) pins one tag and publishes it to the release channels.
+A constraint keeps the latest patch in each minor it covers. Versions named with >= or <= are kept as well. An exact tag (=) pins one tag and publishes it to the release channels.
+
+All other constraints also pull the versions the release channels point at. These are added on top of the range without being checked against it, so the upper bound does not apply to them: "module-name@>=1.3.0 <=1.4.0" still pulls v1.4.1 if a release channel points at it. The examples below leave them out.
 
 Given v1.0.0, v1.1.0, v1.2.0, v1.3.0, v1.3.3, v1.4.0, v1.4.1:
   module-name                     only what the release channels point at, like a pull with no filters

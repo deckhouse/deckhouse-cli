@@ -130,6 +130,17 @@ func TestPullModules_SemverConstraintPullsAllMatchingTags(t *testing.T) {
 			rejectTags: []string{"v1.43.0"},
 		},
 		{
+			// Inclusive upper bound: the <= anchor v1.42.0 stays and v1.43.0
+			// is cut off, yet channelVersion (v1.45.2), which sits above the
+			// bound too, is still pulled. Release channel versions are added
+			// on top of the range and the upper bound does not apply to them,
+			// as the --include-module help promises.
+			name:       "inclusive range (>=1.40.0 <=1.42.0) still pulls channel versions above the upper bound",
+			constraint: ">=1.40.0 <=1.42.0",
+			wantTags:   []string{"v1.40.0", "v1.40.1", "v1.41.0", "v1.42.0", channelVersion},
+			rejectTags: []string{"v1.39.0", "v1.43.0"},
+		},
+		{
 			// Bare `>=1.40.0` with no upper bound. Anchor v1.40.0 is kept,
 			// 1.40.x latest patch v1.40.1 is also kept (per-minor rule),
 			// 1.41/1.42/1.43 collapse to their (only) tag.
