@@ -1,0 +1,1 @@
+{"queues":{"global":{"length":0},"prometheus":{"length":2,"tasks":[{"index":1,"name":"Run","enqueued":"1.5s","next_retry":"-500ms"},{"index":2,"name":"HookRun:hooks/a.go","enqueued":"300ms","next_retry":"2s","error":"hook failed: exit status 1"}]},"prometheus/main/sync":{"length":0}}}

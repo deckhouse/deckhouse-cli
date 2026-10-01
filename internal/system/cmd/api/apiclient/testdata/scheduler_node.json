@@ -1,0 +1,1 @@
+{"version":"1.70.0","order":300,"effectiveOrder":900,"state":"scheduled","scheduleReason":"dependencies satisfied","decision":{"kind":"Enable","reason":"Bundle","message":"enabled by the Default bundle"},"dependencies":{"cert-manager":{"constraint":"\u003e=1.0","optional":false},"istio":{"constraint":null,"optional":true}},"subscriptions":["global"]}
