@@ -281,9 +281,9 @@ The pod list is the entire payload of this archive, so the command fails (and wr
 
 `d8 system api` covers the runtime API of the Deckhouse controller, one leaf per route. The command is hidden from help because the API exists only when the controller runs Module v2 (`DECKHOUSE_ENABLE_MODULE_V2=true`, the `enableModuleV2` setting). Without it the same port is served by addon-operator: `healthz`, `readyz` and `metrics` still answer, `/api/v1/...` and `/endpoints` answer 404.
 
-Every command is a plain HTTP request through the API server: the `pods/proxy` subresource of the leader pod, to the controller's TCP listener on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222). It needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
+Every command is a plain HTTP request through the API server: the `pods/proxy` subresource of the leader pod, to the controller's HTTP listener on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222). It needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
 
-The controller of deckhouse main registers `/api/v1/packages`, whose answers carry registry credentials, rendered Secrets and hook snapshots, only on a Unix socket inside its container (`/tmp/deckhouse-debug.socket`), not on the TCP listener. The `packages` commands therefore answer 404 until the controller publishes them over TCP; d8 does not reach into the socket.
+The controller of deckhouse main at 8010976436 does not serve `/api/v1/packages` over HTTP yet, so there the `packages` commands answer 404.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|

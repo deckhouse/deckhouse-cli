@@ -80,7 +80,7 @@ func TestProxyTransportGoesThroughPodsProxy(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte("{\"queues\":{}}\n"))
 		case "/api/v1/namespaces/d8-system/pods/deckhouse-0:4222/proxy/api/v1/packages/dump":
-			// The controller answers with chi's plain 404: the route is socket-only.
+			// The controller answers a route it does not serve with chi's plain 404.
 			http.Error(w, "404 page not found", http.StatusNotFound)
 		default:
 			// The API server's own refusal is a metav1.Status.

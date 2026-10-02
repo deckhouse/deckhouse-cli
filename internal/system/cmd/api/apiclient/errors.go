@@ -25,9 +25,8 @@ import (
 // Sentinel errors of the client, for errors.Is. A StatusError unwraps to the one
 // of its status class; the others come wrapped with the name or object they concern.
 var (
-	// ErrNotFound is a 404: a route the listener does not serve, such as any route
-	// of a controller without Module v2 or the packages subtree that the controller
-	// keeps on its socket, or a package the controller does not know.
+	// ErrNotFound is a 404: a route the controller does not serve over HTTP, such as
+	// any route of a controller without Module v2, or a package it does not know.
 	ErrNotFound = errors.New("not found")
 	// ErrBadRequest is a 400: an output format the API does not know, or a render
 	// of a package that has no Helm chart.

@@ -15,12 +15,11 @@ limitations under the License.
 */
 
 // Package apiclient talks over HTTP to the runtime API of the Deckhouse controller
-// (Module v2), served by its TCP listener on the pod IP (the "self" port): probes,
-// metrics, pprof, queues, scheduler, requirements and packages.
+// (Module v2), served on the pod IP (the "self" port): probes, metrics, pprof,
+// queues, scheduler, requirements and packages.
 //
-// The controller of deckhouse main registers /api/v1/packages, whose answers carry
-// registry credentials, rendered Secrets and hook snapshots, only on a Unix socket
-// inside its container, so over TCP those routes answer 404 until it publishes them.
+// The controller of deckhouse main at 8010976436 does not serve /api/v1/packages
+// over HTTP yet, so there those routes answer 404.
 package apiclient
 
 import (

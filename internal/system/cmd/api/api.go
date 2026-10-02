@@ -42,10 +42,9 @@ Query the runtime API of the Deckhouse controller (/api/v1).
 
 The controller serves the API only when it runs Module v2
 (DECKHOUSE_ENABLE_MODULE_V2=true). Every route is fetched over HTTP through the
-pods/proxy subresource of the leader pod, which reaches the controller's TCP
-listener. The controller of deckhouse main keeps the packages subtree, which
-carries registry credentials and rendered Secrets, on a Unix socket inside its
-container, so the packages commands answer 404 until it publishes them over TCP.
+pods/proxy subresource of the leader pod. The controller of deckhouse main does
+not serve the packages routes over HTTP yet, so there the packages commands
+answer 404.
 
 © Flant JSC 2026`)
 
@@ -352,7 +351,7 @@ func newRequirementsCommand() *cobra.Command {
 func newPackagesCommand() *cobra.Command {
 	packagesCmd := &cobra.Command{
 		Use:   "packages",
-		Short: "Applications and modules (GET " + apiclient.APIPrefix + "/packages/...); 404 while the controller keeps them on its socket.",
+		Short: "Applications and modules (GET " + apiclient.APIPrefix + "/packages/...).",
 	}
 
 	dumpCmd := &cobra.Command{

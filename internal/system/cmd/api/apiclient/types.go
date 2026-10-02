@@ -273,8 +273,7 @@ type DisableMessages struct {
 }
 
 // Repository is the registry a package comes from. The dump carries the credentials
-// as they are, which is why the controller serves the packages subtree on its
-// socket only.
+// as they are.
 type Repository struct {
 	Name         string `json:"name"`
 	Repository   string `json:"repository"`
