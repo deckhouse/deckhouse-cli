@@ -68,9 +68,14 @@ func mainQueue(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to get output format: %w", err)
 	}
 
+	overHTTP, err := cmd.Flags().GetBool("http")
+	if err != nil {
+		return fmt.Errorf("Failed to get http flag: %w", err)
+	}
+
 	pathFromOption := "main." + format
 
-	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, false)
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, false, overHTTP)
 	if err != nil {
 		return fmt.Errorf("Error list main queue: %w", err)
 	}

@@ -26,4 +26,9 @@ func AddFlags(flagSet *pflag.FlagSet) {
 		"text",
 		"Output format: json|yaml|text.",
 	)
+	flagSet.Bool(
+		"http",
+		false,
+		"Query the Deckhouse debug server through a Kubernetes API port-forward instead of exec into the pod. Needs pods/portforward, not pods/exec.",
+	)
 }

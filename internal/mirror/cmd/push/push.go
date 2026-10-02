@@ -81,6 +81,8 @@ const pushLong = `Upload Deckhouse Kubernetes Platform distribution bundle to th
 
 This command pushes the Deckhouse Kubernetes Platform distribution into the specified container registry.
 
+When the registry path ends with an edition (ce, be, se, se-plus, ee, fe, cse), e.g. registry.example.com/deckhouse/ee, the edition-independent installer and d8 CLI (with its plugins) are pushed one level up, outside the edition: registry.example.com/deckhouse/installer and registry.example.com/deckhouse/deckhouse-cli. That is where the Deckhouse registry keeps them, once for all editions. Everything else is pushed under the given path.
+
 For more information on how to use it, consult the docs at 
 https://deckhouse.io/products/kubernetes-platform/documentation/latest/installing/#manual-loading-of-dkp-images-and-vulnerability-db-into-a-private-registry
 
@@ -270,9 +272,14 @@ func (p *Pusher) executeNewPush() error {
 
 	client := pkgclient.NewFromOptions(p.pushParams.RegistryHost, clientOpts...)
 
+	// A target that ends with an edition (.../deckhouse/ee) is an edition
+	// repo: the client is scoped to the root above it, and the push service
+	// pushes edition-scoped layouts back under the edition.
+	rootPath, edition := mirror.SplitTargetEdition(p.pushParams.RegistryPath)
+
 	// Scope to the registry path
-	if p.pushParams.RegistryPath != "" {
-		client = client.WithSegment(p.pushParams.RegistryPath)
+	if rootPath != "" {
+		client = client.WithSegment(rootPath)
 	}
 
 	svc := mirror.NewPushService(
@@ -281,6 +288,7 @@ func (p *Pusher) executeNewPush() error {
 			Packages:          Packages,
 			WorkingDir:        p.pushParams.WorkingDir,
 			ModulesPathSuffix: p.pushParams.ModulesPathSuffix,
+			Edition:           edition,
 		},
 		logger.Named("push"),
 		p.logger.(*log.SLogger),

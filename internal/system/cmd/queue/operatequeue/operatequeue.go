@@ -17,16 +17,45 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
-func OperateQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string, watch bool) error {
-	if !watch {
-		return executeQueueCommand(config, kubeCl, pathFromOption)
+const (
+	namespace     = "d8-system"
+	containerName = "deckhouse"
+
+	// The controller serves its debug API over plain HTTP on loopback only
+	// (DEBUG_HTTP_SERVER_ADDR in the deckhouse Deployment).
+	debugServerHost = "127.0.0.1"
+	debugServerPort = 9652
+)
+
+// fetchFunc returns the current dump of the queue selected on the command line.
+type fetchFunc func(ctx context.Context) (string, error)
+
+// OperateQueue prints the queue dump at pathFromOption once, or redraws it every second in watch mode.
+// By default the dump is fetched by running curl in the leader pod (pods/exec); with overHTTP the
+// request goes to the debug server through a pods/portforward tunnel instead.
+func OperateQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string, watch, overHTTP bool) error {
+	fetch := func(ctx context.Context) (string, error) {
+		return fetchQueue(ctx, config, kubeCl, pathFromOption)
 	}
 
-	return watchQueueCommand(config, kubeCl, pathFromOption)
+	if overHTTP {
+		tunnel := newDebugTunnel(config, kubeCl)
+		defer tunnel.Close()
+
+		fetch = func(ctx context.Context) (string, error) {
+			return tunnel.Get(ctx, "/queue/"+pathFromOption)
+		}
+	}
+
+	if !watch {
+		return executeQueueCommand(fetch)
+	}
+
+	return watchQueueCommand(fetch)
 }
 
-func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
-	out, err := fetchQueue(config, kubeCl, pathFromOption)
+func executeQueueCommand(fetch fetchFunc) error {
+	out, err := fetch(context.Background())
 	if err != nil {
 		return err
 	}
@@ -36,18 +65,8 @@ func executeQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, path
 	return nil
 }
 
-func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) (string, error) {
-	const (
-		apiProtocol = "http"
-		apiEndpoint = "127.0.0.1"
-		apiPort     = "9652"
-		queuePath   = "queue"
-
-		namespace     = "d8-system"
-		containerName = "deckhouse"
-	)
-
-	fullEndpointURL := fmt.Sprintf("%s://%s:%s/%s/%s", apiProtocol, apiEndpoint, apiPort, queuePath, pathFromOption)
+func fetchQueue(ctx context.Context, config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) (string, error) {
+	fullEndpointURL := fmt.Sprintf("http://%s:%d/queue/%s", debugServerHost, debugServerPort, pathFromOption)
 	getAPI := []string{"curl", fullEndpointURL}
 
 	podName, err := utilk8s.GetDeckhousePod(kubeCl)
@@ -66,7 +85,7 @@ func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOptio
 	)
 
 	if err := executor.StreamWithContext(
-		context.Background(),
+		ctx,
 		remotecommand.StreamOptions{
 			Stdout: &stdout,
 			Stderr: &stderr,
@@ -77,11 +96,10 @@ func fetchQueue(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOptio
 	return stdout.String(), nil
 }
 
-func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFromOption string) error {
-	signals := make(chan os.Signal, 1)
-
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
+func watchQueueCommand(fetch fetchFunc) error {
+	// Cancelling the context on a signal also aborts a fetch that is still in flight.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -101,7 +119,7 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 	// previous frame in place instead of wiping it first, which is what was
 	// causing the visible blinking.
 	render := func() {
-		body, fetchErr := fetchQueue(config, kubeCl, pathFromOption)
+		body, fetchErr := fetch(ctx)
 
 		var content bytes.Buffer
 		fmt.Fprintf(&content, "Watching queue - %s (press Ctrl+C to stop)\n\n", time.Now().Format("15:04:05"))
@@ -143,7 +161,7 @@ func watchQueueCommand(config *rest.Config, kubeCl *kubernetes.Clientset, pathFr
 
 	for {
 		select {
-		case <-signals:
+		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			render()

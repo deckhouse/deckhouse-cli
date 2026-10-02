@@ -79,12 +79,17 @@ func listModule(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Failed to get output format: %w", err)
 	}
 
+	overHTTP, err := cmd.Flags().GetBool("http")
+	if err != nil {
+		return fmt.Errorf("Failed to get http flag: %w", err)
+	}
+
 	pathFromOption := "list." + format
 	if empty {
 		pathFromOption += "?showEmpty=true"
 	}
 
-	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, watch)
+	err = operatequeue.OperateQueue(config, kubeCl, pathFromOption, watch, overHTTP)
 	if err != nil {
 		return fmt.Errorf("Error list queues: %w", err)
 	}

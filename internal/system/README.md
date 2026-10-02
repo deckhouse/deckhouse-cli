@@ -19,6 +19,7 @@ It is aimed at cluster administrators and SREs operating a live DKP installation
 - [Queues: `queue`](#queues-queue)
 - [Logs: `logs`](#logs-logs)
 - [Debug archive: `collect-debug-info`](#debug-archive-collect-debug-info)
+- [Runtime API: `api` (hidden)](#runtime-api-api-hidden)
 - [Examples](#examples)
 - [Behavior and safety notes](#behavior-and-safety-notes)
 
@@ -51,8 +52,16 @@ d8 system  (aliases: s, p, platform)
 │   ├── list                            Dump all queues (optionally watch)
 │   └── main                            Dump the main queue
 ├── logs                                Stream deckhouse-controller logs
-└── collect-debug-info                  Stream a gzipped debug tarball to stdout
-    └── virtualization                  Stream a d8-virtualization-only debug tarball
+├── collect-debug-info                  Stream a gzipped debug tarball to stdout
+│   └── virtualization                  Stream a d8-virtualization-only debug tarball
+└── api  (hidden)                       Query the controller runtime API (/api/v1, Module v2)
+    ├── healthz | readyz | endpoints | metrics
+    ├── pprof <name>                    Fetch a /debug/pprof profile
+    ├── get <path>                      GET any route as is
+    ├── queues dump                     Task queues
+    ├── scheduler dump                  Scheduler nodes
+    ├── requirements dump               Values for the release requirement checks
+    └── packages dump | global dump | render <name> | snapshots <name>
 ```
 
 The `s` alias is the recommended short form (`d8 s module list`). `p` and `platform` are legacy aliases kept for backward compatibility with older documentation.
@@ -76,13 +85,15 @@ Before any subcommand runs, `d8 system` validates that `--kubeconfig` points at 
 
 ## How `d8 system` reaches the cluster
 
-Commands in this subtree use one of three access paths. Knowing which a command uses explains its prerequisites and its failure modes.
+Commands in this subtree use one of four access paths. Knowing which a command uses explains its prerequisites and its failure modes.
 
 1. **Direct Kubernetes API.** The command reads or writes a specific resource through the API server using your kubeconfig credentials. Used by `get`/`edit` (Secrets in `kube-system`), `module enable`/`disable`/`maintenance` (`ModuleConfig`), `module approve`/`apply-now` (`ModuleRelease`), and `package scan` (`PackageRepositoryOperation`). Requires the corresponding RBAC (get/patch/create on those resources).
 
 2. **Exec into the Deckhouse leader pod.** The command shells into the running controller and either curls the controller's internal self-API at `http://127.0.0.1:9652/...` (`module list`/`values`/`snapshots`, `queue list`/`main`) or runs a battery of diagnostic commands (`collect-debug-info`). The leader pod is located in namespace `d8-system` by the label selector `leader=true`, container `deckhouse`. This path needs RBAC to `create pods/exec` in `d8-system`, and the relevant tools (`curl`, `kubectl`, `deckhouse-controller`, ...) must exist inside that container. If no leader pod is present the command fails with `no pods deckhouse available in namespace d8-system`.
 
-3. **Pod log stream.** `logs` reads the leader pod's `deckhouse` container log through the Kubernetes log API (not an exec).
+3. **Port-forward to the Deckhouse leader pod.** `queue list`/`main` with `--http` send the HTTP request to the same self-API at `127.0.0.1:9652` themselves, over the API server's `pods/portforward` subresource (WebSockets, falling back to SPDY, like kubectl), so nothing has to run inside the container. This path needs RBAC to `create pods/portforward` in `d8-system` instead of `pods/exec`; with user-authz that is the separate `portForwarding` switch, while exec comes with the `PrivilegedUser` level. The leader pod is found the same way as for exec. `pods/proxy` cannot replace it: the self-API listens on loopback only, and the kube-rbac-proxy that publishes it on port 4204 never receives your token, because the API server drops the `Authorization` header before proxying.
+
+4. **Pod log stream.** `logs` reads the leader pod's `deckhouse` container log through the Kubernetes log API (not an exec).
 
 ---
 
@@ -187,7 +198,7 @@ Note that `--dry-run` still contacts the cluster: the target `PackageRepository`
 
 ## Queues: `queue`
 
-Dump the controller's reconciliation queues. Both leaves exec into the leader pod and curl the controller self-API, then print its response.
+Dump the controller's reconciliation queues. Both leaves exec into the leader pod and curl the controller self-API, then print its response. With `--http` they reach the same self-API through a port-forward instead of the exec (see [How `d8 system` reaches the cluster](#how-d8-system-reaches-the-cluster)); the output is the same.
 
 ### `d8 system queue list`
 
@@ -196,12 +207,13 @@ Dump the controller's reconciliation queues. Both leaves exec into the leader po
 | `--output` | `-o` | string | `text` | Output format: `text`, `yaml`, or `json`. |
 | `--show-empty` | `-e` | bool | `false` | Include empty queues. |
 | `--watch` | `-w` | bool | `false` | Continuously re-render the queue in place. |
+| `--http` | | bool | `false` | Fetch through a `pods/portforward` tunnel instead of exec into the pod. |
 
-`--watch` is a full-screen view that refreshes about once a second until you press `Ctrl+C`; it is only valid with `--output text` (combining it with `json`/`yaml` is rejected up front).
+`--watch` is a full-screen view that refreshes about once a second until you press `Ctrl+C`; it is only valid with `--output text` (combining it with `json`/`yaml` is rejected up front). With `--http` the watch keeps one port-forward connection open and reconnects, finding the leader pod again, after a failed refresh.
 
 ### `d8 system queue main`
 
-Dumps only the main queue. Supports `--output` (`text`/`yaml`/`json`, default `text`) - it has no `--show-empty` or `--watch`.
+Dumps only the main queue. Supports `--output` (`text`/`yaml`/`json`, default `text`) and `--http` - it has no `--show-empty` or `--watch`.
 
 ---
 
@@ -265,6 +277,39 @@ The pod list is the entire payload of this archive, so the command fails (and wr
 
 ---
 
+## Runtime API: `api` (hidden)
+
+`d8 system api` covers the runtime API of the Deckhouse controller, one leaf per route. The command is hidden from help because the API exists only when the controller runs Module v2 (`DECKHOUSE_ENABLE_MODULE_V2=true`, the `enableModuleV2` setting). Without it the same port is served by addon-operator: `healthz`, `readyz` and `metrics` still answer, `/api/v1/...` and `/endpoints` answer 404.
+
+Every command is a plain HTTP request through the API server: the `pods/proxy` subresource of the leader pod, to the controller's HTTP listener on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222). It needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
+
+The controller of deckhouse main at 8010976436 does not serve `/api/v1/packages` over HTTP yet, so there the `packages` commands answer 404.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--pod` | string | the leader (`app=deckhouse,leader=true`) | Controller pod to query, e.g. a standby replica for `readyz`. |
+| `--output`, `-o` | string | `yaml` | On dumps: `yaml` or `json`, printed exactly as the controller encodes them (`?output=`); `text` gives a summary table on `queues`, `scheduler` and `packages dump`. |
+
+| Command | Route | Answer |
+|---|---|---|
+| `healthz` | `GET /healthz` | `ok` |
+| `readyz` | `GET /readyz` | 200 when ready (the leader finished its startup converge, a standby sees a ready leader), 500 with the reason otherwise; the command prints the message when ready and fails with `not ready: <reason>` otherwise |
+| `endpoints` | `GET /endpoints` | `METHOD /route` lines |
+| `metrics` | `GET /metrics` | Prometheus exposition |
+| `pprof <name>` | `GET /debug/pprof/<name>` | Profile of `heap`, `goroutine`, `allocs`, `block`, `mutex`, `threadcreate`, `profile`/`trace` (`--seconds`), `cmdline`, `symbol`; binary output is refused on a terminal unless `--debug 1` or `2` asks for text |
+| `get <path>` | any, query included | The body as is |
+| `queues dump [--name P]` | `GET /api/v1/queues/dump` | `QueuesDump`: queues by name with length and tasks; `--name` keeps the package queue, its hook queues and, for a module, its `crd` and `webhooks` queues; the name of an unknown package selects nothing, which the controller treats as every queue |
+| `scheduler dump [--name P]` | `GET /api/v1/scheduler/dump` | `SchedulerDump`, or one `SchedulerNode` (`null` for an unknown package) |
+| `requirements dump` | `GET /api/v1/requirements/dump` | `RequirementsDump`: requirement key to value |
+| `packages dump [--name P]` | `GET /api/v1/packages/dump` | `PackagesDump` (`apps` keyed by `<namespace>.<name>`, `modules`), or one `Application`/`Module` (`null` for an unknown package) |
+| `packages global dump` | `GET /api/v1/packages/global/dump` | `GlobalModule`, `null` until the runtime initializes it |
+| `packages render <name>` | `GET /api/v1/packages/render/<name>` | Rendered Helm manifests (YAML); 400 for a package without a chart, 500 when rendering fails, an unknown package included (`render failed: no package found`) |
+| `packages snapshots <name>` | `GET /api/v1/packages/snapshots/<name>` | `Snapshots`: hook to Kubernetes binding to objects and informer counters; 404 for an unknown package |
+
+The answer types live in `internal/system/cmd/api/apiclient/types.go` and mirror deckhouse main at 8010976436. The client reports failures with sentinel errors for `errors.Is` (`apiclient/errors.go`): a non-2xx answer is a `StatusError` that unwraps to `ErrNotFound` (404), `ErrBadRequest` (400) or `ErrServerError` (5xx); a dump that answers `null` for `--name` is `ErrUnknownPackage`, the global module before initialization `ErrGlobalNotLoaded`; `ErrNotReady`, `ErrNoLeader` and `ErrNoSelfPort` cover readiness and the pod lookup. Their tests decode JSON that the controller's own dump types produced (`apiclient/testdata`), refusing unknown fields, so a field the controller adds shows up as a test failure once the fixtures are regenerated.
+
+---
+
 ## Examples
 
 ```bash
@@ -316,6 +361,9 @@ d8 system queue list -o yaml --show-empty
 
 # Live-watch the queues (text only, Ctrl+C to stop)
 d8 system queue list --watch
+
+# Same, without exec: port-forward through the API server (needs pods/portforward)
+d8 system queue list --watch --http
 
 # Just the main queue
 d8 system queue main

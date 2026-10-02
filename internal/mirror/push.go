@@ -37,6 +37,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pusher"
+	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	pkgclient "github.com/deckhouse/deckhouse-cli/pkg/registry/client"
@@ -57,11 +58,19 @@ type PushServiceOptions struct {
 	// relative to the target repo. Empty value keeps the default "modules".
 	// Leading and trailing slashes are ignored.
 	ModulesPathSuffix string
+	// Edition is the edition the target repo ends with (see
+	// SplitTargetEdition). With an edition, the client given to NewPushService
+	// is the root above it: the installer and deckhouse-cli are pushed to that
+	// root, where pull reads them from, and every other layout to
+	// <root>/<edition>. NoEdition pushes everything under the client.
+	Edition pkg.Edition
 }
 
 // PushService handles pushing OCI layouts to registry.
 // It treats the layout structure as the source of truth - the relative path of each layout
-// becomes the registry segment directly.
+// becomes the registry segment directly. The one exception is a target that ends with an
+// edition: the edition-independent installer/ and deckhouse-cli/ go to the root above it
+// (see PushServiceOptions.Edition).
 //
 // Expected layout structure (after unpack):
 //
@@ -96,14 +105,20 @@ type PushServiceOptions struct {
 //	            ├── index.json
 //	            └── blobs/
 type PushService struct {
-	client     client.Client
+	// client is the target repo, <root>/<edition> when the target ends with
+	// an edition. Every edition-scoped layout is pushed under it.
+	client client.Client
+	// rootClient is the root above the edition, where the installer and
+	// deckhouse-cli are pushed. Equals client when there is no edition.
+	rootClient client.Client
 	options    *PushServiceOptions
 	pusher     *pusher.Service
 	logger     *dkplog.Logger
 	userLogger *log.SLogger
 }
 
-// NewPushService creates a new PushService
+// NewPushService creates a new PushService. client is the target repo, or the
+// root above it when options.Edition is set.
 func NewPushService(
 	client client.Client,
 	options *PushServiceOptions,
@@ -114,8 +129,14 @@ func NewPushService(
 		options = &PushServiceOptions{}
 	}
 
+	target := client
+	if options.Edition != pkg.NoEdition {
+		target = client.WithSegment(options.Edition.String())
+	}
+
 	return &PushService{
-		client:     client,
+		client:     target,
+		rootClient: client,
 		options:    options,
 		pusher:     pusher.NewService(logger, userLogger),
 		logger:     logger,
@@ -128,10 +149,16 @@ func NewPushService(
 // using its relative path as the registry segment.
 //
 // The key principle: no path transformations. Whatever path the layout has
-// in the unpacked directory becomes its path in the registry.
+// in the unpacked directory becomes its path in the registry. Only the repo
+// that path is relative to varies (see clientFor).
 func (svc *PushService) Push(ctx context.Context) (*PushSummary, error) {
 	// The modules path is known up front, so it is on the summary even on error.
 	summary := &PushSummary{ModulesPath: svc.modulesPathReport()}
+
+	if svc.options.Edition != pkg.NoEdition {
+		svc.userLogger.Infof("Target is the %s edition repo: installer and deckhouse-cli are pushed outside it, to %s",
+			strings.ToUpper(svc.options.Edition.String()), svc.rootClient.GetRegistry())
+	}
 
 	// Create unified directory for unpacking
 	dirPath := filepath.Join(svc.options.WorkingDir, "unified")
@@ -212,6 +239,42 @@ func (svc *PushService) remapModulesSegment(segment string) string {
 	default:
 		return segment
 	}
+}
+
+// clientFor returns the repo a layout at the given bundle segment is pushed
+// under. The installer and deckhouse-cli (the d8 binary and its plugins) are
+// edition-independent: pull reads them from the root above the edition (see
+// registryservice.NewService), so push writes them to that root. Every other
+// layout is edition-scoped and goes under the target repo.
+func (svc *PushService) clientFor(segment string) client.Client {
+	switch first, _, _ := strings.Cut(segment, "/"); first {
+	case internal.InstallerSegment, internal.D8CLISegment:
+		return svc.rootClient
+	default:
+		return svc.client
+	}
+}
+
+// SplitTargetEdition splits the repo path of a push target into the root
+// above the edition and the edition the path ends with:
+//
+//	/deckhouse/ee  ->  /deckhouse, ee
+//
+// Any other path comes back unchanged, with NoEdition. That includes a path
+// whose only segment is an edition, like "/ee": its root would be the bare
+// registry host, so the path names a project that happens to be called "ee",
+// not an edition repo. The in-cluster registry-packages-proxy applies the same
+// rule when it looks for deckhouse-cli above a cluster's edition repo.
+func SplitTargetEdition(repoPath string) (string, pkg.Edition) {
+	rootPath, last := path.Split(strings.TrimRight(repoPath, "/"))
+	rootPath = strings.TrimRight(rootPath, "/")
+
+	edition := pkg.Edition(last)
+	if !edition.IsValid() || rootPath == "" {
+		return repoPath, pkg.NoEdition
+	}
+
+	return rootPath, edition
 }
 
 // unpackAllPackages unpacks all tar packages into the unified directory.
@@ -373,7 +436,7 @@ func (svc *PushService) pushSingleLayout(ctx context.Context, rootDir, layoutDir
 	// Rewrite the leading "modules" component to honor --modules-path-suffix.
 	segment = svc.remapModulesSegment(segment)
 
-	targetClient := svc.client.WithSegment(pkgclient.PathToSegments(segment)...)
+	targetClient := svc.clientFor(origSegment).WithSegment(pkgclient.PathToSegments(segment)...)
 
 	svc.userLogger.Infof("Pushing %s", targetClient.GetRegistry())
 
@@ -587,7 +650,7 @@ func (svc *PushService) createPluginsIndex(ctx context.Context, rootDir string, 
 	summary.Plugins = len(pluginNames)
 	svc.userLogger.Infof("Creating plugins index with %d plugins", len(pluginNames))
 
-	pluginsClient := svc.client.WithSegment(internal.D8CLISegment, internal.D8PluginsSegment)
+	pluginsClient := svc.clientFor(internal.D8CLISegment).WithSegment(internal.D8CLISegment, internal.D8PluginsSegment)
 
 	for _, pluginName := range pluginNames {
 		if err := ctx.Err(); err != nil {
