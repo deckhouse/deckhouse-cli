@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package apiclient talks to the runtime API of the Deckhouse controller (Module v2).
+// Package apiclient talks over HTTP to the runtime API of the Deckhouse controller
+// (Module v2), served by its TCP listener on the pod IP (the "self" port): probes,
+// metrics, pprof, queues, scheduler, requirements and packages.
 //
-// The controller serves the API on two transports. Its TCP listener on the pod IP
-// (the "self" port) publishes the routes that carry no package values: probes,
-// metrics, pprof, queues, scheduler and requirements. Its Unix socket inside the
-// container serves all of that plus /api/v1/packages, whose answers carry registry
-// credentials, rendered Secrets and hook snapshots.
+// The controller of deckhouse main registers /api/v1/packages, whose answers carry
+// registry credentials, rendered Secrets and hook snapshots, only on a Unix socket
+// inside its container, so over TCP those routes answer 404 until it publishes them.
 package apiclient
 
 import (
@@ -33,13 +33,15 @@ import (
 	"strings"
 )
 
+// APIPrefix is where the controller mounts the versioned API (apiPrefix in
+// deckhouse-controller/internal/packages/api/handlers/root).
+const APIPrefix = "/api/v1"
+
 // Output formats the API encodes dumps in, chosen with the output query parameter.
 const (
 	OutputJSON = "json"
 	OutputYAML = "yaml"
 )
-
-const packagesPrefix = "/api/v1/packages"
 
 // Transport sends a GET request for path with query to the API.
 type Transport interface {
@@ -52,38 +54,24 @@ type Response struct {
 	Body       []byte
 }
 
-// StatusError is an answer of the API outside 2xx.
-type StatusError struct {
-	Path       string
-	StatusCode int
-	Body       string
-}
-
-func (e *StatusError) Error() string {
-	return fmt.Sprintf("GET %s: HTTP %d: %s", e.Path, e.StatusCode, e.Body)
-}
-
-// Client calls the API. Public reaches the TCP listener, Private the Unix socket;
-// both may be the same transport, since the socket serves every route.
+// Client calls the API through a transport.
 type Client struct {
-	Public  Transport
-	Private Transport
+	transport Transport
 }
 
-// Get returns the body of any route, reached through Private for the packages
-// subtree and through Public otherwise.
-func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte, error) {
-	transport := c.Public
-	if strings.HasPrefix(path, packagesPrefix) {
-		transport = c.Private
-	}
+// New returns a client that sends its requests through transport.
+func New(transport Transport) *Client {
+	return &Client{transport: transport}
+}
 
-	return get(ctx, transport, path, query)
+// Get returns the body of any route.
+func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte, error) {
+	return c.get(ctx, path, query)
 }
 
 // Healthz reports that the controller process is up: GET /healthz.
 func (c *Client) Healthz(ctx context.Context) (string, error) {
-	body, err := get(ctx, c.Public, "/healthz", nil)
+	body, err := c.get(ctx, "/healthz", nil)
 
 	return strings.TrimSpace(string(body)), err
 }
@@ -91,7 +79,7 @@ func (c *Client) Healthz(ctx context.Context) (string, error) {
 // Readyz reports the readiness of the replica: GET /readyz, which answers 500 with
 // the reason while the replica is not ready.
 func (c *Client) Readyz(ctx context.Context) (Readiness, error) {
-	resp, err := c.Public.Get(ctx, "/readyz", nil)
+	resp, err := c.transport.Get(ctx, "/readyz", nil)
 	if err != nil {
 		return Readiness{}, err
 	}
@@ -108,10 +96,9 @@ func (c *Client) Readyz(ctx context.Context) (Readiness, error) {
 	return Readiness{}, &StatusError{Path: "/readyz", StatusCode: resp.StatusCode, Body: message}
 }
 
-// Endpoints lists the routes Public serves: GET /endpoints. The socket lists the
-// packages subtree too.
+// Endpoints lists the routes the TCP listener serves: GET /endpoints.
 func (c *Client) Endpoints(ctx context.Context) ([]Endpoint, error) {
-	body, err := get(ctx, c.Public, "/endpoints", nil)
+	body, err := c.get(ctx, "/endpoints", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -132,14 +119,14 @@ func (c *Client) Endpoints(ctx context.Context) ([]Endpoint, error) {
 
 // Metrics returns the Prometheus exposition of the controller: GET /metrics.
 func (c *Client) Metrics(ctx context.Context) ([]byte, error) {
-	return get(ctx, c.Public, "/metrics", nil)
+	return c.get(ctx, "/metrics", nil)
 }
 
 // Pprof returns /debug/pprof/{name}: a named profile (heap, goroutine, allocs,
 // block, mutex, threadcreate), profile or trace (both take seconds), cmdline or
 // symbol. Query carries seconds, debug and the like as net/http/pprof reads them.
 func (c *Client) Pprof(ctx context.Context, name string, query url.Values) ([]byte, error) {
-	return get(ctx, c.Public, "/debug/pprof/"+url.PathEscape(name), query)
+	return c.get(ctx, "/debug/pprof/"+url.PathEscape(name), query)
 }
 
 // Queues returns the task queues: GET /api/v1/queues/dump. A non-empty pkg narrows
@@ -147,7 +134,7 @@ func (c *Client) Pprof(ctx context.Context, name string, query url.Values) ([]by
 // which selects no queue, as every queue.
 func (c *Client) Queues(ctx context.Context, pkg string) (*QueuesDump, error) {
 	dump := new(QueuesDump)
-	if _, err := getJSON(ctx, c.Public, "/api/v1/queues/dump", nameQuery(pkg), dump); err != nil {
+	if _, err := c.getJSON(ctx, APIPrefix+"/queues/dump", nameQuery(pkg), dump); err != nil {
 		return nil, err
 	}
 
@@ -157,21 +144,25 @@ func (c *Client) Queues(ctx context.Context, pkg string) (*QueuesDump, error) {
 // Scheduler returns the scheduler state of every package: GET /api/v1/scheduler/dump.
 func (c *Client) Scheduler(ctx context.Context) (*SchedulerDump, error) {
 	dump := new(SchedulerDump)
-	if _, err := getJSON(ctx, c.Public, "/api/v1/scheduler/dump", nil, dump); err != nil {
+	if _, err := c.getJSON(ctx, APIPrefix+"/scheduler/dump", nil, dump); err != nil {
 		return nil, err
 	}
 
 	return dump, nil
 }
 
-// SchedulerNode returns the scheduler state of one package, nil for an unknown one:
-// GET /api/v1/scheduler/dump?name=.
+// SchedulerNode returns the scheduler state of one package, ErrUnknownPackage for
+// an unknown one: GET /api/v1/scheduler/dump?name=.
 func (c *Client) SchedulerNode(ctx context.Context, pkg string) (*SchedulerNode, error) {
 	node := new(SchedulerNode)
 
-	found, err := getJSON(ctx, c.Public, "/api/v1/scheduler/dump", nameQuery(pkg), node)
-	if err != nil || !found {
+	found, err := c.getJSON(ctx, APIPrefix+"/scheduler/dump", nameQuery(pkg), node)
+	if err != nil {
 		return nil, err
+	}
+
+	if !found {
+		return nil, fmt.Errorf("scheduler node %q: %w", pkg, ErrUnknownPackage)
 	}
 
 	return node, nil
@@ -181,7 +172,7 @@ func (c *Client) SchedulerNode(ctx context.Context, pkg string) (*SchedulerNode,
 // GET /api/v1/requirements/dump.
 func (c *Client) Requirements(ctx context.Context) (RequirementsDump, error) {
 	var dump RequirementsDump
-	if _, err := getJSON(ctx, c.Public, "/api/v1/requirements/dump", nil, &dump); err != nil {
+	if _, err := c.getJSON(ctx, APIPrefix+"/requirements/dump", nil, &dump); err != nil {
 		return nil, err
 	}
 
@@ -191,34 +182,42 @@ func (c *Client) Requirements(ctx context.Context) (RequirementsDump, error) {
 // Packages returns every application and module: GET /api/v1/packages/dump.
 func (c *Client) Packages(ctx context.Context) (*PackagesDump, error) {
 	dump := new(PackagesDump)
-	if _, err := getJSON(ctx, c.Private, packagesPrefix+"/dump", nil, dump); err != nil {
+	if _, err := c.getJSON(ctx, APIPrefix+"/packages/dump", nil, dump); err != nil {
 		return nil, err
 	}
 
 	return dump, nil
 }
 
-// Package returns one package, nil when there is none with that name:
-// GET /api/v1/packages/dump?name=.
+// Package returns one package, ErrUnknownPackage when there is none with that
+// name: GET /api/v1/packages/dump?name=.
 func (c *Client) Package(ctx context.Context, name string) (*NamedPackage, error) {
 	pkg := new(NamedPackage)
 
-	found, err := getJSON(ctx, c.Private, packagesPrefix+"/dump", nameQuery(name), pkg)
-	if err != nil || !found {
+	found, err := c.getJSON(ctx, APIPrefix+"/packages/dump", nameQuery(name), pkg)
+	if err != nil {
 		return nil, err
+	}
+
+	if !found {
+		return nil, fmt.Errorf("package %q: %w", name, ErrUnknownPackage)
 	}
 
 	return pkg, nil
 }
 
-// Global returns the global module, nil before the runtime has initialized it:
-// GET /api/v1/packages/global/dump.
+// Global returns the global module, ErrGlobalNotLoaded before the runtime has
+// initialized it: GET /api/v1/packages/global/dump.
 func (c *Client) Global(ctx context.Context) (*GlobalModule, error) {
 	global := new(GlobalModule)
 
-	found, err := getJSON(ctx, c.Private, packagesPrefix+"/global/dump", nil, global)
-	if err != nil || !found {
+	found, err := c.getJSON(ctx, APIPrefix+"/packages/global/dump", nil, global)
+	if err != nil {
 		return nil, err
+	}
+
+	if !found {
+		return nil, ErrGlobalNotLoaded
 	}
 
 	return global, nil
@@ -228,7 +227,7 @@ func (c *Client) Global(ctx context.Context) (*GlobalModule, error) {
 // GET /api/v1/packages/render/{name}. A package without a chart is a 400, a
 // render failure a 500, and so is an unknown package ("render failed: no package found").
 func (c *Client) Render(ctx context.Context, name string) (string, error) {
-	body, err := get(ctx, c.Private, packagesPrefix+"/render/"+url.PathEscape(name), nil)
+	body, err := c.get(ctx, APIPrefix+"/packages/render/"+url.PathEscape(name), nil)
 
 	return string(body), err
 }
@@ -237,7 +236,7 @@ func (c *Client) Render(ctx context.Context, name string) (string, error) {
 // GET /api/v1/packages/snapshots/{name}.
 func (c *Client) Snapshots(ctx context.Context, name string) (Snapshots, error) {
 	var snapshots Snapshots
-	if _, err := getJSON(ctx, c.Private, packagesPrefix+"/snapshots/"+url.PathEscape(name), nil, &snapshots); err != nil {
+	if _, err := c.getJSON(ctx, APIPrefix+"/packages/snapshots/"+url.PathEscape(name), nil, &snapshots); err != nil {
 		return nil, err
 	}
 
@@ -245,8 +244,8 @@ func (c *Client) Snapshots(ctx context.Context, name string) (Snapshots, error) 
 }
 
 // get returns the body of a 2xx answer and a StatusError for any other.
-func get(ctx context.Context, transport Transport, path string, query url.Values) ([]byte, error) {
-	resp, err := transport.Get(ctx, path, query)
+func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte, error) {
+	resp, err := c.transport.Get(ctx, path, query)
 	if err != nil {
 		return nil, err
 	}
@@ -260,10 +259,8 @@ func get(ctx context.Context, transport Transport, path string, query url.Values
 
 // getJSON asks for JSON and decodes it into out. It reports false, leaving out
 // untouched, when the API answered null: the dumps do that for an unknown name.
-func getJSON(ctx context.Context, transport Transport, path string, query url.Values, out any) (bool, error) {
-	query = withOutput(query, OutputJSON)
-
-	body, err := get(ctx, transport, path, query)
+func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out any) (bool, error) {
+	body, err := c.get(ctx, path, withOutput(query, OutputJSON))
 	if err != nil {
 		return false, err
 	}

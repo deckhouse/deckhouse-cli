@@ -41,12 +41,11 @@ var apiLong = templates.LongDesc(`
 Query the runtime API of the Deckhouse controller (/api/v1).
 
 The controller serves the API only when it runs Module v2
-(DECKHOUSE_ENABLE_MODULE_V2=true). Routes published on its TCP listener (probes,
-metrics, pprof, queues, scheduler, requirements) are fetched through the
-pods/proxy subresource of the leader pod. The packages subtree carries registry
-credentials and rendered Secrets, so the controller serves it on its Unix socket
-only: those commands run curl in the deckhouse container over pods/exec, and so
-does every command with --socket.
+(DECKHOUSE_ENABLE_MODULE_V2=true). Every route is fetched over HTTP through the
+pods/proxy subresource of the leader pod, which reaches the controller's TCP
+listener. The controller of deckhouse main keeps the packages subtree, which
+carries registry credentials and rendered Secrets, on a Unix socket inside its
+container, so the packages commands answer 404 until it publishes them over TCP.
 
 © Flant JSC 2026`)
 
@@ -59,10 +58,7 @@ func NewCommand() *cobra.Command {
 		Hidden: true,
 	}
 
-	flags := apiCmd.PersistentFlags()
-	flags.String("pod", "", "Controller pod to query instead of the leader.")
-	flags.Bool("socket", false, "Reach every route through the controller's Unix socket over pods/exec instead of pods/proxy.")
-	flags.String("debug-unix-socket", apiclient.DefaultSocketPath, "Path of the API socket inside the controller container.")
+	apiCmd.PersistentFlags().String("pod", "", "Controller pod to query instead of the leader.")
 
 	apiCmd.AddCommand(
 		newHealthzCommand(),
@@ -119,11 +115,11 @@ func newReadyzCommand() *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), readiness.Message)
-
 			if !readiness.Ready {
-				return errors.New("the controller is not ready")
+				return fmt.Errorf("%w: %s", apiclient.ErrNotReady, readiness.Message)
 			}
+
+			fmt.Fprintln(cmd.OutOrStdout(), readiness.Message)
 
 			return nil
 		},
@@ -133,7 +129,7 @@ func newReadyzCommand() *cobra.Command {
 func newEndpointsCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "endpoints",
-		Short: "List the routes the API serves (GET /endpoints); --socket lists the packages subtree too.",
+		Short: "List the routes the API serves (GET /endpoints).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := newClient(cmd)
@@ -235,7 +231,7 @@ func newPprofCommand() *cobra.Command {
 func newGetCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get PATH",
-		Short: "GET any route and print the answer as it comes; /api/v1/packages goes through the socket.",
+		Short: "GET any route and print the answer as it comes.",
 		Example: `  d8 system api get '/api/v1/queues/dump?output=yaml'
   d8 system api get /debug/vars`,
 		Args: cobra.ExactArgs(1),
@@ -267,7 +263,7 @@ func newQueuesCommand() *cobra.Command {
 
 	dumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Dump the task queues with their tasks (GET /api/v1/queues/dump).",
+		Short: "Dump the task queues with their tasks (GET " + apiclient.APIPrefix + "/queues/dump).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, err := cmd.Flags().GetString("name")
@@ -275,7 +271,7 @@ func newQueuesCommand() *cobra.Command {
 				return err
 			}
 
-			return runDump(cmd, "/api/v1/queues/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
+			return runDump(cmd, apiclient.APIPrefix+"/queues/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
 				dump, err := client.Queues(ctx, name)
 				if err != nil {
 					return err
@@ -300,7 +296,7 @@ func newSchedulerCommand() *cobra.Command {
 
 	dumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Dump the scheduler nodes (GET /api/v1/scheduler/dump).",
+		Short: "Dump the scheduler nodes (GET " + apiclient.APIPrefix + "/scheduler/dump).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, err := cmd.Flags().GetString("name")
@@ -308,7 +304,7 @@ func newSchedulerCommand() *cobra.Command {
 				return err
 			}
 
-			return runDump(cmd, "/api/v1/scheduler/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
+			return runDump(cmd, apiclient.APIPrefix+"/scheduler/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
 				if name == "" {
 					dump, err := client.Scheduler(ctx)
 					if err != nil {
@@ -321,10 +317,6 @@ func newSchedulerCommand() *cobra.Command {
 				node, err := client.SchedulerNode(ctx, name)
 				if err != nil {
 					return err
-				}
-
-				if node == nil {
-					return fmt.Errorf("no scheduler node %q", name)
 				}
 
 				return printSchedulerNodes(w, map[string]apiclient.SchedulerNode{name: *node})
@@ -344,10 +336,10 @@ func newRequirementsCommand() *cobra.Command {
 
 	dumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Dump the requirement values (GET /api/v1/requirements/dump).",
+		Short: "Dump the requirement values (GET " + apiclient.APIPrefix + "/requirements/dump).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDump(cmd, "/api/v1/requirements/dump", "", nil)
+			return runDump(cmd, apiclient.APIPrefix+"/requirements/dump", "", nil)
 		},
 	}
 
@@ -360,12 +352,12 @@ func newRequirementsCommand() *cobra.Command {
 func newPackagesCommand() *cobra.Command {
 	packagesCmd := &cobra.Command{
 		Use:   "packages",
-		Short: "Applications and modules; served on the controller's socket only, so reached over pods/exec.",
+		Short: "Applications and modules (GET " + apiclient.APIPrefix + "/packages/...); 404 while the controller keeps them on its socket.",
 	}
 
 	dumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Dump the packages with their status, definition, values and hooks (GET /api/v1/packages/dump).",
+		Short: "Dump the packages with their status, definition, values and hooks (GET " + apiclient.APIPrefix + "/packages/dump).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			name, err := cmd.Flags().GetString("name")
@@ -373,7 +365,7 @@ func newPackagesCommand() *cobra.Command {
 				return err
 			}
 
-			return runDump(cmd, "/api/v1/packages/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
+			return runDump(cmd, apiclient.APIPrefix+"/packages/dump", name, func(ctx context.Context, client *apiclient.Client, w io.Writer) error {
 				if name == "" {
 					dump, err := client.Packages(ctx)
 					if err != nil {
@@ -386,10 +378,6 @@ func newPackagesCommand() *cobra.Command {
 				pkg, err := client.Package(ctx, name)
 				if err != nil {
 					return err
-				}
-
-				if pkg == nil {
-					return fmt.Errorf("no package %q", name)
 				}
 
 				dump := &apiclient.PackagesDump{}
@@ -410,10 +398,10 @@ func newPackagesCommand() *cobra.Command {
 	globalCmd := &cobra.Command{Use: "global", Short: "The global module."}
 	globalDumpCmd := &cobra.Command{
 		Use:   "dump",
-		Short: "Dump the global module (GET /api/v1/packages/global/dump).",
+		Short: "Dump the global module (GET " + apiclient.APIPrefix + "/packages/global/dump).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDump(cmd, "/api/v1/packages/global/dump", "", nil)
+			return runDump(cmd, apiclient.APIPrefix+"/packages/global/dump", "", nil)
 		},
 	}
 
@@ -422,7 +410,7 @@ func newPackagesCommand() *cobra.Command {
 
 	renderCmd := &cobra.Command{
 		Use:   "render NAME",
-		Short: "Render the Helm manifests of a package (GET /api/v1/packages/render/NAME).",
+		Short: "Render the Helm manifests of a package (GET " + apiclient.APIPrefix + "/packages/render/NAME).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient(cmd)
@@ -441,10 +429,10 @@ func newPackagesCommand() *cobra.Command {
 
 	snapshotsCmd := &cobra.Command{
 		Use:   "snapshots NAME",
-		Short: "Dump the hook snapshots of a package (GET /api/v1/packages/snapshots/NAME).",
+		Short: "Dump the hook snapshots of a package (GET " + apiclient.APIPrefix + "/packages/snapshots/NAME).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDump(cmd, "/api/v1/packages/snapshots/"+url.PathEscape(args[0]), "", nil)
+			return runDump(cmd, apiclient.APIPrefix+"/packages/snapshots/"+url.PathEscape(args[0]), "", nil)
 		},
 	}
 
@@ -455,8 +443,7 @@ func newPackagesCommand() *cobra.Command {
 	return packagesCmd
 }
 
-// newClient connects to the pod --pod names, or to the leader. Public goes through
-// pods/proxy unless --socket sends everything through the socket.
+// newClient connects through pods/proxy to the pod --pod names, or to the leader.
 func newClient(cmd *cobra.Command) (*apiclient.Client, error) {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -478,16 +465,6 @@ func newClient(cmd *cobra.Command) (*apiclient.Client, error) {
 		return nil, err
 	}
 
-	useSocket, err := cmd.Flags().GetBool("socket")
-	if err != nil {
-		return nil, err
-	}
-
-	socketPath, err := cmd.Flags().GetString("debug-unix-socket")
-	if err != nil {
-		return nil, err
-	}
-
 	var pod *corev1.Pod
 	if podName != "" {
 		pod, err = apiclient.Pod(cmd.Context(), kubeCl, podName)
@@ -499,19 +476,12 @@ func newClient(cmd *cobra.Command) (*apiclient.Client, error) {
 		return nil, err
 	}
 
-	socket := apiclient.NewSocketTransport(config, kubeCl, pod.Name, socketPath)
-	client := &apiclient.Client{Public: socket, Private: socket}
-
-	if !useSocket {
-		proxy, err := apiclient.NewProxyTransport(config, kubeCl, pod)
-		if err != nil {
-			return nil, err
-		}
-
-		client.Public = proxy
+	proxy, err := apiclient.NewProxyTransport(config, kubeCl, pod)
+	if err != nil {
+		return nil, err
 	}
 
-	return client, nil
+	return apiclient.New(proxy), nil
 }
 
 // addOutputFlag registers -o; text is offered where a summary view exists.

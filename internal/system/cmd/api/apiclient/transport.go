@@ -17,24 +17,19 @@ limitations under the License.
 package apiclient
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-
-	"github.com/deckhouse/deckhouse-cli/internal/utilk8s"
 )
 
 const (
@@ -42,13 +37,10 @@ const (
 	Namespace = "d8-system"
 	// ContainerName is the controller container of the deckhouse pod.
 	ContainerName = "deckhouse"
-	// DefaultSocketPath is the API socket inside the controller container.
-	DefaultSocketPath = "/tmp/deckhouse-debug.socket"
 
 	// selfPortName names the container port of the TCP listener (ADDON_OPERATOR_LISTEN_PORT).
-	selfPortName  = "self"
-	leaderLabels  = "app=deckhouse,leader=true"
-	statusCodeSep = '\n'
+	selfPortName = "self"
+	leaderLabels = "app=deckhouse,leader=true"
 )
 
 // LeaderPod returns the pod of the leading controller replica.
@@ -59,7 +51,7 @@ func LeaderPod(ctx context.Context, kubeCl kubernetes.Interface) (*corev1.Pod, e
 	}
 
 	if len(pods.Items) == 0 {
-		return nil, fmt.Errorf("no Deckhouse leader pod (%s) in %s", leaderLabels, Namespace)
+		return nil, fmt.Errorf("%w (%s) in %s", ErrNoLeader, leaderLabels, Namespace)
 	}
 
 	return &pods.Items[0], nil
@@ -171,60 +163,5 @@ func selfPort(pod *corev1.Pod) (int32, error) {
 		}
 	}
 
-	return 0, fmt.Errorf("pod %s/%s has no %q port on container %q", pod.Namespace, pod.Name, selfPortName, ContainerName)
-}
-
-// SocketTransport reaches the Unix socket by running curl in the controller
-// container over pods/exec: the socket is mode 0600 inside the container, so
-// nothing outside the pod can connect to it.
-type SocketTransport struct {
-	config     *rest.Config
-	kubeCl     kubernetes.Interface
-	pod        string
-	socketPath string
-}
-
-// NewSocketTransport targets socketPath in the controller container of pod.
-func NewSocketTransport(config *rest.Config, kubeCl kubernetes.Interface, pod, socketPath string) *SocketTransport {
-	return &SocketTransport{config: config, kubeCl: kubeCl, pod: pod, socketPath: socketPath}
-}
-
-// Get runs curl against the socket. The status code is appended after the body
-// with --write-out rather than read from --include output: curl prints the
-// Transfer-Encoding header of a chunked answer, but writes the body de-chunked.
-func (t *SocketTransport) Get(ctx context.Context, path string, query url.Values) (*Response, error) {
-	target := url.URL{Scheme: "http", Host: "localhost", Path: path, RawQuery: query.Encode()}
-	cmd := []string{
-		"curl", "--silent", "--show-error",
-		"--unix-socket", t.socketPath,
-		"--write-out", string(statusCodeSep) + "%{http_code}",
-		target.String(),
-	}
-
-	stdout, stderr, err := utilk8s.ExecCommandInPod(ctx, t.config, t.kubeCl, cmd, t.pod, Namespace, ContainerName)
-	if err != nil {
-		if stderr = strings.TrimSpace(stderr); stderr != "" {
-			err = fmt.Errorf("%w: %s", err, stderr)
-		}
-
-		return nil, fmt.Errorf("GET %s through %s in pod %s/%s: %w", path, t.socketPath, Namespace, t.pod, err)
-	}
-
-	return parseCurlOutput(stdout)
-}
-
-// parseCurlOutput splits what curl printed into the body and the status code that
-// --write-out appended after a newline.
-func parseCurlOutput(out []byte) (*Response, error) {
-	idx := bytes.LastIndexByte(out, statusCodeSep)
-	if idx < 0 {
-		return nil, errors.New("curl output carries no status code")
-	}
-
-	statusCode, err := strconv.Atoi(string(out[idx+1:]))
-	if err != nil || statusCode == 0 {
-		return nil, fmt.Errorf("curl got no HTTP answer (status %q)", out[idx+1:])
-	}
-
-	return &Response{StatusCode: statusCode, Body: out[:idx]}, nil
+	return 0, fmt.Errorf("pod %s/%s, container %q: %w", pod.Namespace, pod.Name, ContainerName, ErrNoSelfPort)
 }

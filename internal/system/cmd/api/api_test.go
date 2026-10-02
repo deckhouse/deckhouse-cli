@@ -206,8 +206,9 @@ func TestCommandsGoThroughPodsProxy(t *testing.T) {
 	require.Equal(t, "ok\n", out)
 
 	out, err = runAPI(t, server, "readyz")
-	require.EqualError(t, err, "the controller is not ready")
-	require.Equal(t, "Startup converge in progress\n", out)
+	require.ErrorIs(t, err, apiclient.ErrNotReady)
+	require.EqualError(t, err, "not ready: Startup converge in progress")
+	require.Empty(t, out)
 
 	_, err = runAPI(t, server, "scheduler", "dump", "-o", "table")
 	require.EqualError(t, err, `unknown output "table", want yaml, json or text`)

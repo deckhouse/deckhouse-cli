@@ -31,27 +31,6 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-func TestParseCurlOutput(t *testing.T) {
-	resp, err := parseCurlOutput([]byte("{\"queues\":{}}\n\n200"))
-	require.NoError(t, err)
-	require.Equal(t, &Response{StatusCode: http.StatusOK, Body: []byte("{\"queues\":{}}\n")}, resp)
-
-	resp, err = parseCurlOutput([]byte("package not found\n\n404"))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusNotFound, resp.StatusCode)
-	require.Equal(t, "package not found\n", string(resp.Body))
-
-	resp, err = parseCurlOutput([]byte("\n200"))
-	require.NoError(t, err)
-	require.Empty(t, resp.Body)
-
-	_, err = parseCurlOutput([]byte("\n000"))
-	require.ErrorContains(t, err, "no HTTP answer")
-
-	_, err = parseCurlOutput([]byte("200"))
-	require.ErrorContains(t, err, "no status code")
-}
-
 func deckhousePod(name string, labels map[string]string, ports ...corev1.ContainerPort) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: Namespace, Labels: labels},
@@ -82,10 +61,12 @@ func TestLeaderPodAndProxyTarget(t *testing.T) {
 	require.Equal(t, "deckhouse-standby", standby.Name)
 
 	_, err = NewProxyTransport(&rest.Config{}, kubeCl, deckhousePod("old", nil))
-	require.ErrorContains(t, err, `has no "self" port on container "deckhouse"`)
+	require.ErrorIs(t, err, ErrNoSelfPort)
+	require.EqualError(t, err, `pod d8-system/old, container "deckhouse": no "self" port`)
 
 	_, err = LeaderPod(context.Background(), fake.NewClientset())
-	require.ErrorContains(t, err, "no Deckhouse leader pod")
+	require.ErrorIs(t, err, ErrNoLeader)
+	require.EqualError(t, err, "no Deckhouse leader pod (app=deckhouse,leader=true) in d8-system")
 }
 
 func TestProxyTransportGoesThroughPodsProxy(t *testing.T) {

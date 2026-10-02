@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -135,20 +136,18 @@ func TestNamedPackageTellsAppFromModule(t *testing.T) {
 }
 
 type request struct {
-	transport string
-	path      string
-	query     url.Values
+	path  string
+	query url.Values
 }
 
 // fakeTransport answers from a table keyed by path and records the requests.
 type fakeTransport struct {
-	name      string
 	requests  *[]request
 	responses map[string]*Response
 }
 
 func (f fakeTransport) Get(_ context.Context, path string, query url.Values) (*Response, error) {
-	*f.requests = append(*f.requests, request{transport: f.name, path: path, query: query})
+	*f.requests = append(*f.requests, request{path: path, query: query})
 
 	if resp, ok := f.responses[path]; ok {
 		return resp, nil
@@ -160,10 +159,7 @@ func (f fakeTransport) Get(_ context.Context, path string, query url.Values) (*R
 func newFakeClient(responses map[string]*Response) (*Client, *[]request) {
 	var requests []request
 
-	return &Client{
-		Public:  fakeTransport{name: "public", requests: &requests, responses: responses},
-		Private: fakeTransport{name: "private", requests: &requests, responses: responses},
-	}, &requests
+	return New(fakeTransport{requests: &requests, responses: responses}), &requests
 }
 
 func ok(body []byte) *Response { return &Response{StatusCode: http.StatusOK, Body: body} }
@@ -208,26 +204,29 @@ func TestClientRoutesEveryEndpoint(t *testing.T) {
 	require.Equal(t, 2, queues.Queues["prometheus"].Length)
 
 	node, err := client.SchedulerNode(ctx, "unknown")
-	require.NoError(t, err)
-	require.Nil(t, node, "null is an unknown package")
+	require.ErrorIs(t, err, ErrUnknownPackage, "null is an unknown package")
+	require.EqualError(t, err, `scheduler node "unknown": unknown package`)
+	require.Nil(t, node)
 
 	requirements, err := client.Requirements(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "22.04", requirements["nodesMinimalOSVersionUbuntu"])
 
 	pkg, err := client.Package(ctx, "unknown")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrUnknownPackage)
+	require.EqualError(t, err, `package "unknown": unknown package`)
 	require.Nil(t, pkg)
 
 	global, err := client.Global(ctx)
-	require.NoError(t, err)
-	require.Nil(t, global, "null before the runtime initializes the global module")
+	require.ErrorIs(t, err, ErrGlobalNotLoaded, "null before the runtime initializes the global module")
+	require.Nil(t, global)
 
 	manifests, err := client.Render(ctx, "prometheus")
 	require.NoError(t, err)
 	require.Equal(t, "---\nkind: ConfigMap\n", manifests)
 
 	_, err = client.Render(ctx, "no-chart")
+	require.ErrorIs(t, err, ErrBadRequest)
 	require.EqualError(t, err, "GET /api/v1/packages/render/no-chart: HTTP 400: package has no Helm chart")
 
 	snapshots, err := client.Snapshots(ctx, "prometheus")
@@ -235,6 +234,7 @@ func TestClientRoutesEveryEndpoint(t *testing.T) {
 	require.Contains(t, snapshots, "hooks/a.go")
 
 	_, err = client.Snapshots(ctx, "missing")
+	require.ErrorIs(t, err, ErrNotFound)
 
 	var statusErr *StatusError
 	require.ErrorAs(t, err, &statusErr)
@@ -244,21 +244,40 @@ func TestClientRoutesEveryEndpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, []request{
-		{"public", "/healthz", nil},
-		{"public", "/endpoints", nil},
-		{"public", "/metrics", nil},
-		{"public", "/debug/pprof/heap", url.Values{"debug": {"1"}}},
-		{"public", "/api/v1/queues/dump", url.Values{"output": {"json"}, "name": {"prometheus"}}},
-		{"public", "/api/v1/scheduler/dump", url.Values{"output": {"json"}, "name": {"unknown"}}},
-		{"public", "/api/v1/requirements/dump", url.Values{"output": {"json"}}},
-		{"private", "/api/v1/packages/dump", url.Values{"output": {"json"}, "name": {"unknown"}}},
-		{"private", "/api/v1/packages/global/dump", url.Values{"output": {"json"}}},
-		{"private", "/api/v1/packages/render/prometheus", nil},
-		{"private", "/api/v1/packages/render/no-chart", nil},
-		{"private", "/api/v1/packages/snapshots/prometheus", url.Values{"output": {"json"}}},
-		{"private", "/api/v1/packages/snapshots/missing", url.Values{"output": {"json"}}},
-		{"private", "/api/v1/packages/dump", url.Values{"output": {"yaml"}}},
+		{"/healthz", nil},
+		{"/endpoints", nil},
+		{"/metrics", nil},
+		{"/debug/pprof/heap", url.Values{"debug": {"1"}}},
+		{"/api/v1/queues/dump", url.Values{"output": {"json"}, "name": {"prometheus"}}},
+		{"/api/v1/scheduler/dump", url.Values{"output": {"json"}, "name": {"unknown"}}},
+		{"/api/v1/requirements/dump", url.Values{"output": {"json"}}},
+		{"/api/v1/packages/dump", url.Values{"output": {"json"}, "name": {"unknown"}}},
+		{"/api/v1/packages/global/dump", url.Values{"output": {"json"}}},
+		{"/api/v1/packages/render/prometheus", nil},
+		{"/api/v1/packages/render/no-chart", nil},
+		{"/api/v1/packages/snapshots/prometheus", url.Values{"output": {"json"}}},
+		{"/api/v1/packages/snapshots/missing", url.Values{"output": {"json"}}},
+		{"/api/v1/packages/dump", url.Values{"output": {"yaml"}}},
 	}, *requests)
+}
+
+func TestStatusErrorUnwrapsToSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{http.StatusNotFound, ErrNotFound},
+		{http.StatusBadRequest, ErrBadRequest},
+		{http.StatusInternalServerError, ErrServerError},
+		{http.StatusBadGateway, ErrServerError},
+		{http.StatusConflict, nil},
+	} {
+		err := error(&StatusError{Path: "/x", StatusCode: tc.status})
+
+		for _, sentinel := range []error{ErrNotFound, ErrBadRequest, ErrServerError} {
+			require.Equal(t, sentinel == tc.want, errors.Is(err, sentinel), "HTTP %d is %v", tc.status, sentinel)
+		}
+	}
 }
 
 func TestReadyz(t *testing.T) {

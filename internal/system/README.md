@@ -279,37 +279,34 @@ The pod list is the entire payload of this archive, so the command fails (and wr
 
 ## Runtime API: `api` (hidden)
 
-`d8 system api` covers the runtime API of the Deckhouse controller, one leaf per route. The command is hidden from help because the API exists only when the controller runs Module v2 (`DECKHOUSE_ENABLE_MODULE_V2=true`, the `enableModuleV2` setting). Without it the same port is served by addon-operator: `healthz`, `readyz` and `metrics` still answer, `/api/v1/...` and `/endpoints` answer 404, and the socket does not exist.
+`d8 system api` covers the runtime API of the Deckhouse controller, one leaf per route. The command is hidden from help because the API exists only when the controller runs Module v2 (`DECKHOUSE_ENABLE_MODULE_V2=true`, the `enableModuleV2` setting). Without it the same port is served by addon-operator: `healthz`, `readyz` and `metrics` still answer, `/api/v1/...` and `/endpoints` answer 404.
 
-The controller serves the API on two transports, and the command follows them:
+Every command is a plain HTTP request through the API server: the `pods/proxy` subresource of the leader pod, to the controller's TCP listener on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222). It needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
 
-- **TCP listener** on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222): probes, metrics, pprof, queues, scheduler, requirements. The command reaches it through the `pods/proxy` subresource of the leader pod, a plain HTTP request through the API server that needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
-- **Unix socket** `/tmp/deckhouse-debug.socket` (mode 0600) inside the container: everything above plus `/api/v1/packages`, whose answers carry registry credentials, rendered Secrets and hook snapshots, so the controller never publishes it over TCP. The command runs `curl --unix-socket` in the `deckhouse` container over `pods/exec` (`create pods/exec`); `--socket` sends every route that way, for users who may exec but not proxy.
+The controller of deckhouse main registers `/api/v1/packages`, whose answers carry registry credentials, rendered Secrets and hook snapshots, only on a Unix socket inside its container (`/tmp/deckhouse-debug.socket`), not on the TCP listener. The `packages` commands therefore answer 404 until the controller publishes them over TCP; d8 does not reach into the socket.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--pod` | string | the leader (`app=deckhouse,leader=true`) | Controller pod to query, e.g. a standby replica for `readyz`. |
-| `--socket` | bool | `false` | Reach every route through the socket over `pods/exec` instead of `pods/proxy`. |
-| `--debug-unix-socket` | string | `/tmp/deckhouse-debug.socket` | Path of the socket inside the container (the controller's `PACKAGES_DEBUG_UNIX_SOCKET`). |
 | `--output`, `-o` | string | `yaml` | On dumps: `yaml` or `json`, printed exactly as the controller encodes them (`?output=`); `text` gives a summary table on `queues`, `scheduler` and `packages dump`. |
 
-| Command | Route | Transport | Answer |
-|---|---|---|---|
-| `healthz` | `GET /healthz` | pods/proxy | `ok` |
-| `readyz` | `GET /readyz` | pods/proxy | 200 when ready (the leader finished its startup converge, a standby sees a ready leader), 500 with the reason otherwise; the command exits 1 when not ready |
-| `endpoints` | `GET /endpoints` | pods/proxy | `METHOD /route` lines; with `--socket` they include `/api/v1/packages` |
-| `metrics` | `GET /metrics` | pods/proxy | Prometheus exposition |
-| `pprof <name>` | `GET /debug/pprof/<name>` | pods/proxy | Profile of `heap`, `goroutine`, `allocs`, `block`, `mutex`, `threadcreate`, `profile`/`trace` (`--seconds`), `cmdline`, `symbol`; binary output is refused on a terminal unless `--debug 1` or `2` asks for text |
-| `get <path>` | any, query included | socket for `/api/v1/packages/...`, pods/proxy otherwise | The body as is |
-| `queues dump [--name P]` | `GET /api/v1/queues/dump` | pods/proxy | `QueuesDump`: queues by name with length and tasks; `--name` keeps the package queue, its hook queues and, for a module, its `crd` and `webhooks` queues; the name of an unknown package selects nothing, which the controller treats as every queue |
-| `scheduler dump [--name P]` | `GET /api/v1/scheduler/dump` | pods/proxy | `SchedulerDump`, or one `SchedulerNode` (`null` for an unknown package) |
-| `requirements dump` | `GET /api/v1/requirements/dump` | pods/proxy | `RequirementsDump`: requirement key to value |
-| `packages dump [--name P]` | `GET /api/v1/packages/dump` | socket | `PackagesDump` (`apps` keyed by `<namespace>.<name>`, `modules`), or one `Application`/`Module` (`null` for an unknown package) |
-| `packages global dump` | `GET /api/v1/packages/global/dump` | socket | `GlobalModule`, `null` until the runtime initializes it |
-| `packages render <name>` | `GET /api/v1/packages/render/<name>` | socket | Rendered Helm manifests (YAML); 400 for a package without a chart, 500 when rendering fails, an unknown package included (`render failed: no package found`) |
-| `packages snapshots <name>` | `GET /api/v1/packages/snapshots/<name>` | socket | `Snapshots`: hook to Kubernetes binding to objects and informer counters; 404 for an unknown package |
+| Command | Route | Answer |
+|---|---|---|
+| `healthz` | `GET /healthz` | `ok` |
+| `readyz` | `GET /readyz` | 200 when ready (the leader finished its startup converge, a standby sees a ready leader), 500 with the reason otherwise; the command prints the message when ready and fails with `not ready: <reason>` otherwise |
+| `endpoints` | `GET /endpoints` | `METHOD /route` lines |
+| `metrics` | `GET /metrics` | Prometheus exposition |
+| `pprof <name>` | `GET /debug/pprof/<name>` | Profile of `heap`, `goroutine`, `allocs`, `block`, `mutex`, `threadcreate`, `profile`/`trace` (`--seconds`), `cmdline`, `symbol`; binary output is refused on a terminal unless `--debug 1` or `2` asks for text |
+| `get <path>` | any, query included | The body as is |
+| `queues dump [--name P]` | `GET /api/v1/queues/dump` | `QueuesDump`: queues by name with length and tasks; `--name` keeps the package queue, its hook queues and, for a module, its `crd` and `webhooks` queues; the name of an unknown package selects nothing, which the controller treats as every queue |
+| `scheduler dump [--name P]` | `GET /api/v1/scheduler/dump` | `SchedulerDump`, or one `SchedulerNode` (`null` for an unknown package) |
+| `requirements dump` | `GET /api/v1/requirements/dump` | `RequirementsDump`: requirement key to value |
+| `packages dump [--name P]` | `GET /api/v1/packages/dump` | `PackagesDump` (`apps` keyed by `<namespace>.<name>`, `modules`), or one `Application`/`Module` (`null` for an unknown package) |
+| `packages global dump` | `GET /api/v1/packages/global/dump` | `GlobalModule`, `null` until the runtime initializes it |
+| `packages render <name>` | `GET /api/v1/packages/render/<name>` | Rendered Helm manifests (YAML); 400 for a package without a chart, 500 when rendering fails, an unknown package included (`render failed: no package found`) |
+| `packages snapshots <name>` | `GET /api/v1/packages/snapshots/<name>` | `Snapshots`: hook to Kubernetes binding to objects and informer counters; 404 for an unknown package |
 
-The answer types live in `internal/system/cmd/api/apiclient/types.go` and mirror deckhouse main at 8010976436. Their tests decode JSON that the controller's own dump types produced (`apiclient/testdata`), refusing unknown fields, so a field the controller adds shows up as a test failure once the fixtures are regenerated.
+The answer types live in `internal/system/cmd/api/apiclient/types.go` and mirror deckhouse main at 8010976436. The client reports failures with sentinel errors for `errors.Is` (`apiclient/errors.go`): a non-2xx answer is a `StatusError` that unwraps to `ErrNotFound` (404), `ErrBadRequest` (400) or `ErrServerError` (5xx); a dump that answers `null` for `--name` is `ErrUnknownPackage`, the global module before initialization `ErrGlobalNotLoaded`; `ErrNotReady`, `ErrNoLeader` and `ErrNoSelfPort` cover readiness and the pod lookup. Their tests decode JSON that the controller's own dump types produced (`apiclient/testdata`), refusing unknown fields, so a field the controller adds shows up as a test failure once the fixtures are regenerated.
 
 ---
 
