@@ -584,10 +584,10 @@ github.com/deckhouse/elfedit v0.1.1 h1:vi9pCcFDpeVgoV7p9gAJfVBID40xJ5c8hoIfmzLqd
 github.com/deckhouse/elfedit v0.1.1/go.mod h1:Qdsqyxx1eur+519iAS4slYEf5m4QMZDERZ5WMaeqQWg=
 github.com/deckhouse/gogost/v5 v5.15.0 h1:nwv2vUvyU88QrmUmWD8RqzhqsZ2xrw4CiVqBsKmrwkQ=
 github.com/deckhouse/gogost/v5 v5.15.0/go.mod h1:RM2tLMctWU993aR//t6h0B6Tt3bZKBPCy7AEHwuu+0E=
-github.com/deckhouse/virtualization/api v1.11.1 h1:29v0t6fFEwcHkl5w5N+UefvyhZ1cdPZVI6lL/WxuNnc=
-github.com/deckhouse/virtualization/api v1.11.1/go.mod h1:VFm1AeHXM6WQ3Me+xwbU6uzQ6q73z89/tS81vg/R208=
-github.com/deckhouse/virtualization/src/cli v1.11.1 h1:KUDARICliKj7zTyCbI4h8/j8Vw84AHcLx7vhu3P4VyY=
-github.com/deckhouse/virtualization/src/cli v1.11.1/go.mod h1:kQO+J1wKaW9owceqIarqHnFEaEwgxAqQ5nnuDCrv42s=
+github.com/deckhouse/virtualization/api v1.12.2 h1:E3AvMDQVHHkYBqUAtQZs+ATfvZJHwaw1ndPYH5lEzT4=
+github.com/deckhouse/virtualization/api v1.12.2/go.mod h1:VFm1AeHXM6WQ3Me+xwbU6uzQ6q73z89/tS81vg/R208=
+github.com/deckhouse/virtualization/src/cli v1.12.2 h1:+xc3XjoQCZ8hEmR+CrwYy30+JUfQzFIpHTq9JkI/qVY=
+github.com/deckhouse/virtualization/src/cli v1.12.2/go.mod h1:mGskwrJm8LfUgNrN09X0+0XMQ692n7mlLSYXCre49Q0=
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 h1:NMZiJj8QnKe1LgsbDayM4UoHwbvwDRwnI3hwNaAHRnc=
 github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0/go.mod h1:ZXNYxsqcloTdSy/rNShjYzMhyjf0LaoftYK0p+A3h40=
 github.com/denisenkom/go-mssqldb v0.0.0-20191128021309-1d7a30a10f73/go.mod h1:xbL0rPBG9cCiLr28tMa8zpbdarY27NDyej4t/EjAShU=
