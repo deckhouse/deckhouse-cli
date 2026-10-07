@@ -464,6 +464,20 @@ func getDebugImage(cmd *cobra.Command) (string, error) {
 	return imageName, nil
 }
 
+// kubectlPluginArgs turns the d8 argv into the argv kubectl's plugin lookup
+// expects. kubectl drops the first element and searches PATH for
+// kubectl-<rest joined by "-">, so `d8 k argo rollouts get` must reach it as
+// [d8 argo rollouts get] to find kubectl-argo-rollouts. Any other d8 command
+// gets no arguments, which disables the lookup: otherwise `d8 foo` would exec
+// a kubectl-foo binary found in PATH.
+func kubectlPluginArgs(args []string) []string {
+	if len(args) < 2 || (args[1] != "k" && args[1] != "kubectl") {
+		return args[:min(len(args), 1)]
+	}
+
+	return append([]string{args[0]}, args[2:]...)
+}
+
 func NewKubectlCommand() *cobra.Command {
 	// Build a kubectl command tree with stderr wrapped by d8KubectlWriter so
 	// kubectl's "d8 <subcmd>" command hints are rewritten to "d8 k <subcmd>".
@@ -515,7 +529,7 @@ func NewKubectlCommand() *cobra.Command {
 
 	kubectlCmd := kubecmd.NewDefaultKubectlCommandWithArgs(kubecmd.KubectlOptions{
 		PluginHandler: kubecmd.NewDefaultPluginHandler(plugin.ValidPluginFilenamePrefixes),
-		Arguments:     os.Args,
+		Arguments:     kubectlPluginArgs(os.Args),
 		ConfigFlags:   configFlags,
 		IOStreams:     ioStreams,
 	})
