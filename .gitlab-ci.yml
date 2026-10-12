@@ -34,7 +34,7 @@ variables:
 
 default:
   tags:
-    - k8s-intteam-cloud-d8-ssdlc-runner
+    - docker # jobs apt-get install into the image, so they need a runner that runs it as root
   image: ubuntu:22.04
   interruptible: true
 
