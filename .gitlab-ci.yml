@@ -21,7 +21,6 @@ workflow:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_PIPELINE_SOURCE =~ /^(schedule|web)$/
-    - if: $CI_COMMIT_BRANCH == "gitlab-ci" # TEMPORARY: private-repo-check
 
 variables:
   GOPRIVATE: "flant.internal"
@@ -96,33 +95,6 @@ pr-build:
     paths:
       - dist/
     expire_in: 1 day
-
-# TEMPORARY: checks that d8 builds with SOURCE_REPO_SSH_KEY and DECKHOUSE_PRIVATE_REPO.
-# Manual; delete it and its workflow rule once it passes.
-# Shell runner: no root needed, and everything it sets up stays in the job.
-private-repo-check:
-  tags:
-    - deckhouse
-  needs: []
-  rules:
-    - if: $CI_COMMIT_BRANCH == "gitlab-ci"
-      when: manual
-  variables:
-    CGO_ENABLED: "0" # no system libs to install; the modules are the same
-    GOFLAGS: -modcacherw # so the next checkout can delete the module cache
-    GOTOOLCHAIN: local # a downloaded stock Go lacks crypto/gogost
-  script:
-    - mkdir -p .tools && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools crane
-    # GOST Go, as in the GitHub CI: Stronghold imports crypto/gogost from its std
-    - .tools/crane export "$GO_IMAGE" - | tar -x -C .tools --no-same-owner usr/local/go
-    - export PATH="$PWD/.tools/usr/local/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
-    - go version
-    - eval "$(ssh-agent -s)" && trap 'ssh-agent -k' EXIT
-    - printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d | ssh-add -
-    - export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$PWD/.tools/known_hosts"
-    - export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.ssh://git@${DECKHOUSE_PRIVATE_REPO}/.insteadOf" GIT_CONFIG_VALUE_0="https://flant.internal/"
-    - go build -o d8 ./cmd/d8
-    - ./d8 --version
 
 # Reproduces the trdl server release build; needs docker, hence the shell runner.
 trdl-build-check:
