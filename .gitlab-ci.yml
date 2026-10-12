@@ -110,9 +110,13 @@ private-repo-check:
   variables:
     CGO_ENABLED: "0" # no system libs to install; the modules are the same
     GOFLAGS: -modcacherw # so the next checkout can delete the module cache
+    GOTOOLCHAIN: local # a downloaded stock Go lacks crypto/gogost
   script:
-    - mkdir -p .tools && curl -fsSL https://go.dev/dl/go1.25.12.linux-amd64.tar.gz | tar -xz -C .tools
-    - export PATH="$PWD/.tools/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
+    - mkdir -p .tools && curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools crane
+    # GOST Go, as in the GitHub CI: Stronghold imports crypto/gogost from its std
+    - .tools/crane export "$GO_IMAGE" - | tar -x -C .tools --no-same-owner usr/local/go
+    - export PATH="$PWD/.tools/usr/local/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
+    - go version
     - eval "$(ssh-agent -s)" && trap 'ssh-agent -k' EXIT
     - printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d | ssh-add -
     - export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$PWD/.tools/known_hosts"
