@@ -1,9 +1,9 @@
 # deckhouse-cli CI. Ported from GitHub Actions.
-# GitHub is a Copybara mirror (copy.bara.sky): its commits get new SHAs and no tags,
-# so release:github tags the mirrored commit itself.
+# GitHub is a push mirror of this project (Settings -> Repository -> Mirroring repositories):
+# same commits and tags. Releases are not mirrored, release:github publishes them.
 #
 # CI/CD variables (Settings -> CI/CD -> Variables):
-#   SOURCE_REPO_SSH_KEY     SSH key for the private repo (multi-line, cannot be masked)
+#   SOURCE_REPO_SSH_KEY     SSH key for the private repo, base64 in one line so it can be masked
 #   DECKHOUSE_PRIVATE_REPO  hostname of the private repo (masked)
 #   TRDL_VAULT_ADDR         trdl server (protected, masked)
 #   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
@@ -11,18 +11,7 @@
 # Protected variables reach tag pipelines only when the v* tags are protected.
 # The GitHub token comes from Vault (role deckhouse).
 #
-# Pipeline schedules (Build -> Pipeline schedules), both on main:
-#   Copybara mirror  e.g. "*/15 * * * *", variable COPYBARA_MIRROR_ENABLE=true
-#   trdl build check "0 7 * * 1",         variable TRDL_BUILD_CHECK=true
-
-include:
-  - project: 'deckhouse/3p/deckhouse/modules-gitlab-ci'
-    ref: main
-    file: 'templates/Copybara.gitlab-ci.yml'
-    inputs:
-      destination: 'https://github.com/deckhouse/deckhouse-cli.git'
-      vault_path: '6db2f1ee-9b6f-4f4f-8381-2fb43060478a/github/boatswain/BOATSWAIN_GITHUB_TOKEN/token@projects'
-      vault_auth_role: 'deckhouse'
+# Pipeline schedule (Build -> Pipeline schedules): trdl-build-check, "0 7 * * 1" on main.
 
 workflow:
   auto_cancel:
@@ -32,6 +21,7 @@ workflow:
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_PIPELINE_SOURCE =~ /^(schedule|web)$/
+    - if: $CI_COMMIT_BRANCH == "gitlab-ci" # TEMPORARY: private-repo-check
 
 variables:
   GOPRIVATE: "flant.internal"
@@ -77,7 +67,7 @@ default:
     - export PATH="/usr/local/go/bin:$PATH" && go version
     - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin task
     - eval "$(ssh-agent -s)"
-    - printf '%s\n' "$SOURCE_REPO_SSH_KEY" | tr -d '\r' | ssh-add -
+    - printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d | ssh-add -
     - mkdir -p ~/.ssh && ssh-keyscan -H "$DECKHOUSE_PRIVATE_REPO" >> ~/.ssh/known_hosts 2>/dev/null
     - git config --global url."ssh://git@${DECKHOUSE_PRIVATE_REPO}/".insteadOf "https://flant.internal/"
     - git config --global --add safe.directory '*'
@@ -107,14 +97,25 @@ pr-build:
       - dist/
     expire_in: 1 day
 
+# TEMPORARY: checks DECKHOUSE_PRIVATE_REPO and SOURCE_REPO_SSH_KEY by building d8 for linux/amd64.
+# Manual job in push pipelines of the gitlab-ci branch; delete it and its workflow rule once it passes.
+private-repo-check:
+  extends: .go
+  rules:
+    - if: $CI_COMMIT_BRANCH == "gitlab-ci" && $CI_PIPELINE_SOURCE == "push"
+      when: manual
+  script:
+    - git ls-remote "ssh://git@${DECKHOUSE_PRIVATE_REPO}/deckhouse/stronghold.git" refs/tags/v1.18.6
+    - task build
+    - file bin/d8
+
 # Reproduces the trdl server release build; needs docker, hence the shell runner.
 trdl-build-check:
   tags:
     - deckhouse
   needs: []
   rules:
-    # Not on every schedule: the Copybara mirror runs on one too.
-    - if: $CI_PIPELINE_SOURCE == "schedule" && $TRDL_BUILD_CHECK == "true"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
     - if: $CI_PIPELINE_SOURCE == "web"
     # Variables are not passed to merge requests from forks.
     - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID
@@ -124,9 +125,10 @@ trdl-build-check:
         - go.sum
         - Taskfile.yml
         - .gitlab-ci.yml
-        - .gitlab/scripts/trdl-build-check.sh
+        - .github/scripts/trdl-build-check.sh
   script:
-    - bash .gitlab/scripts/trdl-build-check.sh
+    # The script is shared with GitHub Actions, which passes the key as plain text.
+    - SOURCE_REPO_SSH_KEY="$(printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d)" bash .github/scripts/trdl-build-check.sh
 
 # --- Release tags: GitHub and GitLab releases ---------------------------------
 
@@ -182,7 +184,6 @@ release:gitlab:
 # Users and the deckhouse CI download d8 from here: keep the asset names.
 release:github:
   extends: .publish
-  timeout: 2h # waits for the scheduled Copybara mirror
   variables:
     GH_REPO: deckhouse/deckhouse-cli
     VAULT_AUTH_PATH: fox
@@ -200,25 +201,15 @@ release:github:
     - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
   script:
     - |
-      # Copybara recreates our commits on GitHub with "GitOrigin-RevId: <our SHA>"
-      # and skips the ones touching only excluded files. Take the GitHub copy of
-      # the nearest mirrored ancestor of the tag, once its tree matches the tag:
-      # until then the mirror has not caught up.
-      excluded=(':!.gitlab' ':!.gitlab-ci.yml' ':!.github' ':!copy.bara.sky') # see copy.bara.sky
-      for i in $(seq 100); do
-        git fetch --quiet "https://github.com/$GH_REPO.git" '+refs/heads/*:refs/remotes/github/*'
-        target="$(git rev-list --first-parent "$CI_COMMIT_SHA" \
-          | awk 'NR == FNR { if (NF == 2) gh[$1] = $2; next } $1 in gh { print gh[$1]; exit }' \
-              <(git log --remotes=github --format='%(trailers:key=GitOrigin-RevId,valueonly,separator=) %H') -)"
-        if [ -n "$target" ] && git diff --quiet "$target" "$CI_COMMIT_SHA" -- . "${excluded[@]}"; then
-          break
-        fi
-        target=""
-        echo "Waiting for the mirror to bring $CI_COMMIT_SHA to GitHub ($i/100)..."
+      # The push mirror brings the tag to GitHub right after it is pushed here.
+      for i in $(seq 30); do
+        # For an annotated tag, the ^{} line (last) holds its commit.
+        sha="$(git ls-remote "https://github.com/$GH_REPO.git" "refs/tags/$CI_COMMIT_TAG" "refs/tags/$CI_COMMIT_TAG^{}" | tail -n1 | cut -f1)"
+        [ -n "$sha" ] && break
+        echo "Waiting for the mirror to push $CI_COMMIT_TAG to GitHub ($i/30)..."
         sleep 60
       done
-      [ -n "$target" ] || { echo "$CI_COMMIT_TAG is not on GitHub: is its branch mirrored?" >&2; exit 1; }
-      echo "$CI_COMMIT_TAG -> GitHub commit $target"
+      [ "$sha" = "$CI_COMMIT_SHA" ] || { echo "GitHub $CI_COMMIT_TAG is at '$sha', expected $CI_COMMIT_SHA: check the mirror" >&2; exit 1; }
     - |
       # Public notes: no service commits, no links to MRs in the internal GitLab.
       NOTES="$(grep -vE '^\* (Signed release channels|Merge branch )' <<<"$CHANGES" | sed -E 's/ \(![0-9]+\)$//')" || true
@@ -226,25 +217,8 @@ release:github:
         NOTES+=$'\n\n'"**Full Changelog**: https://github.com/$GH_REPO/compare/$prev...$CI_COMMIT_TAG"
       fi
     - |
-      # --target creates the tag on GitHub.
-      gh release create "$CI_COMMIT_TAG" --target "$target" --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
+      gh release create "$CI_COMMIT_TAG" --verify-tag --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
         || gh release upload "$CI_COMMIT_TAG" --clobber dist/*/*.tar.gz*
-
-# --- GitHub mirror ------------------------------------------------------------
-
-# copybara-mirror (from the template) mirrors main. Release branches reuse it
-# with "main" in copy.bara.sky swapped for the branch. To add a branch, create
-# it on GitHub at the mirrored copy of its fork point (the commit carrying
-# "GitOrigin-RevId: <fork point>"): Copybara resumes from that label.
-copybara-mirror-release:
-  extends: copybara-mirror
-  parallel:
-    matrix:
-      - MIRROR_BRANCH: [release-0.30, release-0.32, release-1.33]
-  before_script:
-    - config="$(<copy.bara.sky)"
-    - export COPYBARA_CONFIG="$(mktemp)"
-    - printf '%s\n' "${config//\"main\"/\"$MIRROR_BRANCH\"}" > "$COPYBARA_CONFIG"
 
 # --- trdl ---------------------------------------------------------------------
 
