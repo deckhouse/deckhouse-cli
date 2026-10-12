@@ -97,17 +97,28 @@ pr-build:
       - dist/
     expire_in: 1 day
 
-# TEMPORARY: checks DECKHOUSE_PRIVATE_REPO and SOURCE_REPO_SSH_KEY by building d8 for linux/amd64.
-# Manual job in push pipelines of the gitlab-ci branch; delete it and its workflow rule once it passes.
+# TEMPORARY: checks that d8 builds with SOURCE_REPO_SSH_KEY and DECKHOUSE_PRIVATE_REPO.
+# Manual; delete it and its workflow rule once it passes.
+# Shell runner: no root needed, and everything it sets up stays in the job.
 private-repo-check:
-  extends: .go
+  tags:
+    - deckhouse
+  needs: []
   rules:
-    - if: $CI_COMMIT_BRANCH == "gitlab-ci" && $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_COMMIT_BRANCH == "gitlab-ci"
       when: manual
+  variables:
+    CGO_ENABLED: "0" # no system libs to install; the modules are the same
+    GOFLAGS: -modcacherw # so the next checkout can delete the module cache
   script:
-    - git ls-remote "ssh://git@${DECKHOUSE_PRIVATE_REPO}/deckhouse/stronghold.git" refs/tags/v1.18.6
-    - task build
-    - file bin/d8
+    - mkdir -p .tools && curl -fsSL https://go.dev/dl/go1.25.12.linux-amd64.tar.gz | tar -xz -C .tools
+    - export PATH="$PWD/.tools/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
+    - eval "$(ssh-agent -s)" && trap 'ssh-agent -k' EXIT
+    - printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d | ssh-add -
+    - export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$PWD/.tools/known_hosts"
+    - export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.ssh://git@${DECKHOUSE_PRIVATE_REPO}/.insteadOf" GIT_CONFIG_VALUE_0="https://flant.internal/"
+    - go build -o d8 ./cmd/d8
+    - ./d8 --version
 
 # Reproduces the trdl server release build; needs docker, hence the shell runner.
 trdl-build-check:
