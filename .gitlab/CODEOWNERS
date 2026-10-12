@@ -1,0 +1,5 @@
+*                             @pavel.okhlopkov
+/cmd/delivery.go              @alexey.igrychev @ilya.lesikov
+/cmd/stronghold.go            @maksim.kiselev
+/cmd/virtualization.go        @pavel.tishkov @ivan.mikheykin
+/internal/virtualization/     @pavel.tishkov @ivan.mikheykin
