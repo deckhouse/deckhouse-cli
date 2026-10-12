@@ -1,0 +1,275 @@
+# deckhouse-cli CI. Ported from GitHub Actions.
+# GitHub is a Copybara mirror (copy.bara.sky): its commits get new SHAs and no tags,
+# so release:github tags the mirrored commit itself.
+#
+# CI/CD variables (Settings -> CI/CD -> Variables):
+#   SOURCE_REPO_SSH_KEY     SSH key for the private repo (multi-line, cannot be masked)
+#   DECKHOUSE_PRIVATE_REPO  hostname of the private repo (masked)
+#   TRDL_VAULT_ADDR         trdl server (protected, masked)
+#   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
+#   TRDL_VAULT_SECRET_ID    trdl approle (protected, masked)
+# Protected variables reach tag pipelines only when the v* tags are protected.
+# The GitHub token comes from Vault (role deckhouse).
+#
+# Pipeline schedules (Build -> Pipeline schedules), both on main:
+#   Copybara mirror  e.g. "*/15 * * * *", variable COPYBARA_MIRROR_ENABLE=true
+#   trdl build check "0 7 * * 1",         variable TRDL_BUILD_CHECK=true
+
+include:
+  - project: 'deckhouse/3p/deckhouse/modules-gitlab-ci'
+    ref: main
+    file: 'templates/Copybara.gitlab-ci.yml'
+    inputs:
+      destination: 'https://github.com/deckhouse/deckhouse-cli.git'
+      vault_path: '6db2f1ee-9b6f-4f4f-8381-2fb43060478a/github/boatswain/BOATSWAIN_GITHUB_TOKEN/token@projects'
+      vault_auth_role: 'deckhouse'
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE =~ /^(schedule|web)$/
+
+variables:
+  GOPRIVATE: "flant.internal"
+  GO_IMAGE: registry.deckhouse.io/container-factory@sha256:ce80d4ec2053430e81b1a07492a403c4fb5382a27570984318ea75b87bbe5109
+  GOLANGCI_LINT_VERSION: "2.11.4"
+  CRANE_VERSION: v0.22.1
+  TASK_VERSION: v3.41.0
+  GH_VERSION: "2.102.0"
+  DEBIAN_FRONTEND: noninteractive
+
+default:
+  tags:
+    - k8s-intteam-cloud-d8-ssdlc-runner
+  image: ubuntu:22.04
+  interruptible: true
+
+.on_merge_request:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|release-.+)$/
+
+.on_release_tag:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+
+# Go toolchain, task and access to the private repo behind flant.internal.
+.go:
+  needs: []
+  variables:
+    GIT_DEPTH: "0" # To use `git describe --tags`
+  before_script:
+    - |
+      apt-get update && apt-get install -y \
+        libbtrfs-dev \
+        libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
+        libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
+        libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
+        libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
+        file git gcc curl openssh-client
+    # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
+    - ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
+    - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
+    - crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
+    - export PATH="/usr/local/go/bin:$PATH" && go version
+    - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin task
+    - eval "$(ssh-agent -s)"
+    - printf '%s\n' "$SOURCE_REPO_SSH_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && ssh-keyscan -H "$DECKHOUSE_PRIVATE_REPO" >> ~/.ssh/known_hosts 2>/dev/null
+    - git config --global url."ssh://git@${DECKHOUSE_PRIVATE_REPO}/".insteadOf "https://flant.internal/"
+    - git config --global --add safe.directory '*'
+
+# --- Merge requests -----------------------------------------------------------
+
+test:
+  extends: [.go, .on_merge_request]
+  script:
+    - task test
+
+lint:
+  extends: [.go, .on_merge_request]
+  allow_failure: true
+  script:
+    - curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
+    - task lint:check
+
+pr-build:
+  extends: [.go, .on_merge_request]
+  stage: build
+  script:
+    - task build:dist:all
+  artifacts:
+    name: deckhouse-cli-mr-build-$CI_PIPELINE_ID
+    paths:
+      - dist/
+    expire_in: 1 day
+
+# Reproduces the trdl server release build; needs docker, hence the shell runner.
+trdl-build-check:
+  tags:
+    - deckhouse
+  needs: []
+  rules:
+    # Not on every schedule: the Copybara mirror runs on one too.
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $TRDL_BUILD_CHECK == "true"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # Variables are not passed to merge requests from forks.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID
+      changes:
+        - trdl.yaml
+        - go.mod
+        - go.sum
+        - Taskfile.yml
+        - .gitlab-ci.yml
+        - .gitlab/scripts/trdl-build-check.sh
+  script:
+    - bash .gitlab/scripts/trdl-build-check.sh
+
+# --- Release tags: GitHub and GitLab releases ---------------------------------
+
+release:build:
+  extends: [.go, .on_release_tag]
+  stage: build
+  interruptible: false
+  script:
+    - task build-and-package
+  artifacts:
+    paths:
+      - dist/*/*.tar.gz
+      - dist/*/*.tar.gz.sha256sum
+    expire_in: 1 week
+
+# Both release pages get the same files; CHANGES lists the commits since the previous tag.
+.publish:
+  extends: .on_release_tag
+  stage: deploy
+  needs: ["release:build"]
+  interruptible: false
+  variables:
+    GIT_DEPTH: "0"
+  before_script:
+    - apt-get update && apt-get install -y ca-certificates curl git jq
+    - git fetch --tags --quiet origin
+    - prev="$(git describe --tags --abbrev=0 "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
+    - CHANGES="$(git log --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG")"
+
+# A GitLab release only holds links, and job artifacts expire,
+# so the files go to the project's generic package registry.
+release:gitlab:
+  extends: .publish
+  script:
+    - |
+      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+      if curl -sSf -o /dev/null -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG"; then
+        echo "GitLab release $CI_COMMIT_TAG already exists"
+        exit 0
+      fi
+      links='[]'
+      for f in dist/*/*.tar.gz*; do
+        name="$(basename "$f")"
+        url="$api/packages/generic/d8/$CI_COMMIT_TAG/$name"
+        curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$url"
+        links="$(jq -c --arg name "$name" --arg url "$url" '. + [{name: $name, url: $url, link_type: "package"}]' <<<"$links")"
+      done
+      jq -n --arg tag "$CI_COMMIT_TAG" --arg desc "$CHANGES" --argjson links "$links" \
+          '{tag_name: $tag, name: $tag, description: $desc, assets: {links: $links}}' \
+        | curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" \
+            --data @- "$api/releases"
+
+# Users and the deckhouse CI download d8 from here: keep the asset names.
+release:github:
+  extends: .publish
+  timeout: 2h # waits for the scheduled Copybara mirror
+  variables:
+    GH_REPO: deckhouse/deckhouse-cli
+    VAULT_AUTH_PATH: fox
+    VAULT_AUTH_ROLE: deckhouse
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: gitlab-access-aud
+  secrets:
+    GH_TOKEN:
+      vault: 6db2f1ee-9b6f-4f4f-8381-2fb43060478a/github/boatswain/BOATSWAIN_GITHUB_TOKEN/token@projects
+      token: $VAULT_ID_TOKEN
+      file: false
+  before_script:
+    - !reference [.publish, before_script]
+    - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+  script:
+    - |
+      # Copybara recreates our commits on GitHub with "GitOrigin-RevId: <our SHA>"
+      # and skips the ones touching only excluded files. Take the GitHub copy of
+      # the nearest mirrored ancestor of the tag, once its tree matches the tag:
+      # until then the mirror has not caught up.
+      excluded=(':!.gitlab' ':!.gitlab-ci.yml' ':!.github' ':!copy.bara.sky') # see copy.bara.sky
+      for i in $(seq 100); do
+        git fetch --quiet "https://github.com/$GH_REPO.git" '+refs/heads/*:refs/remotes/github/*'
+        target="$(git rev-list --first-parent "$CI_COMMIT_SHA" \
+          | awk 'NR == FNR { if (NF == 2) gh[$1] = $2; next } $1 in gh { print gh[$1]; exit }' \
+              <(git log --remotes=github --format='%(trailers:key=GitOrigin-RevId,valueonly,separator=) %H') -)"
+        if [ -n "$target" ] && git diff --quiet "$target" "$CI_COMMIT_SHA" -- . "${excluded[@]}"; then
+          break
+        fi
+        target=""
+        echo "Waiting for the mirror to bring $CI_COMMIT_SHA to GitHub ($i/100)..."
+        sleep 60
+      done
+      [ -n "$target" ] || { echo "$CI_COMMIT_TAG is not on GitHub: is its branch mirrored?" >&2; exit 1; }
+      echo "$CI_COMMIT_TAG -> GitHub commit $target"
+    - |
+      # Public notes: no service commits, no links to MRs in the internal GitLab.
+      NOTES="$(grep -vE '^\* (Signed release channels|Merge branch )' <<<"$CHANGES" | sed -E 's/ \(![0-9]+\)$//')" || true
+      if [ -n "$prev" ]; then
+        NOTES+=$'\n\n'"**Full Changelog**: https://github.com/$GH_REPO/compare/$prev...$CI_COMMIT_TAG"
+      fi
+    - |
+      # --target creates the tag on GitHub.
+      gh release create "$CI_COMMIT_TAG" --target "$target" --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
+        || gh release upload "$CI_COMMIT_TAG" --clobber dist/*/*.tar.gz*
+
+# --- GitHub mirror ------------------------------------------------------------
+
+# copybara-mirror (from the template) mirrors main. Release branches reuse it
+# with "main" in copy.bara.sky swapped for the branch. To add a branch, create
+# it on GitHub at the mirrored copy of its fork point (the commit carrying
+# "GitOrigin-RevId: <fork point>"): Copybara resumes from that label.
+copybara-mirror-release:
+  extends: copybara-mirror
+  parallel:
+    matrix:
+      - MIRROR_BRANCH: [release-0.30, release-0.32, release-1.33]
+  before_script:
+    - config="$(<copy.bara.sky)"
+    - export COPYBARA_CONFIG="$(mktemp)"
+    - printf '%s\n' "${config//\"main\"/\"$MIRROR_BRANCH\"}" > "$COPYBARA_CONFIG"
+
+# --- trdl ---------------------------------------------------------------------
+
+.trdl:
+  stage: deploy
+  needs: []
+  interruptible: false
+  resource_group: trdl
+  timeout: 7h # trdl.sh keeps retrying for up to 6h
+  before_script:
+    - apt-get update && apt-get install -y ca-certificates curl jq
+
+trdl:release:
+  extends: [.trdl, .on_release_tag]
+  script:
+    - bash .gitlab/scripts/trdl.sh release "$CI_COMMIT_TAG"
+
+trdl:publish:
+  extends: .trdl
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - trdl_channels.yaml
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"
+      when: manual
+      allow_failure: true
+  script:
+    - bash .gitlab/scripts/trdl.sh publish
