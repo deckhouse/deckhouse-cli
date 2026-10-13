@@ -118,7 +118,7 @@ func TestService_versionsToMirror(t *testing.T) {
 			wantErr:        false,
 		},
 		{
-			name:       "no strict tags with SinceVersion",
+			name:       "no strict tags with SinceVersion above Rock Solid keeps the default range",
 			strictTags: []string{},
 			options: &Options{
 				SinceVersion: semver.MustParse("v1.69.0"),
@@ -129,9 +129,10 @@ func TestService_versionsToMirror(t *testing.T) {
 				"v1.71.0",  // beta
 				"v1.70.0",  // early-access
 				"v1.69.0",  // stable
+				"v1.68.0",  // rock-solid
 			},
 			wantChannels: []string{
-				"alpha", "beta", "early-access", "stable",
+				"alpha", "beta", "early-access", "stable", "rock-solid",
 			},
 			wantCustomTags: []string{},
 			wantErr:        false,
@@ -311,4 +312,11 @@ func TestService_versionsToMirror_Deduplication(t *testing.T) {
 
 	// No custom tags
 	assert.Empty(t, result.CustomTags)
+}
+
+func TestService_determineMinimumVersion_WithoutRockSolid(t *testing.T) {
+	svc := &Service{options: &Options{SinceVersion: semver.MustParse("1.67.0")}}
+	versions := channelVersions{"alpha": semver.MustParse("1.72.10")}
+
+	assert.Nil(t, svc.determineMinimumVersion(versions))
 }

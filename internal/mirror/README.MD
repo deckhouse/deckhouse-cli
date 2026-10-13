@@ -52,7 +52,7 @@ d8 mirror pull <images-bundle-path> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--since-version` | Minimal Deckhouse release to pull (lower bound, inclusive). Ignored if above current Rock Solid release. Conflicts with `--deckhouse-tag` and `--include-platform` |
+| `--since-version` | Extend discovery to older Deckhouse releases (inclusive). The lower bound is `MIN(rock-solid, since-version)`; equal or newer values keep the default range. Conflicts with `--deckhouse-tag` and `--include-platform` |
 | `--include-platform` | Select platform releases by semver constraint (e.g. `">=1.64 <=1.68"`). Uses the same constraint dialect as `--include-module`. Conflicts with `--deckhouse-tag` and `--since-version`. See [Platform Version Filtering](#platform-version-filtering) |
 | `--deckhouse-tag` | Specific Deckhouse build tag to pull. Conflicts with `--since-version` and `--include-platform`. If the registry contains a release channel image for the specified tag, all release channels in the bundle will point to it |
 
@@ -106,7 +106,7 @@ The `--include-platform` flag accepts a semver constraint expression to pull onl
 
 | Goal | Recommended flag |
 |------|-----------------|
-| Pull all releases from a given minimum upward | `--since-version 1.64.0` |
+| Extend the default range to older releases | `--since-version 1.64.0` |
 | Pull a bounded range (e.g. for an incremental update) | `--include-platform ">=1.64 <=1.68"` |
 | Pull every release of a single minor | `--include-platform "~1.65.0"` |
 | Pin a single exact release (same as `--deckhouse-tag`) | `--include-platform "=v1.65.3"` |
@@ -494,7 +494,7 @@ d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 
 ### Version Management
 
-1. **Use `--since-version`:** To pull all releases from a given minimum upward, reducing bundle size relative to a full pull
+1. **Use `--since-version`:** To add releases older than the current Rock Solid release. Equal or newer values leave the default range unchanged
 2. **Use `--include-platform`:** To pull a bounded window of releases (e.g. `">=1.64 <=1.68"`) — useful for staged incremental updates where you want to move up a few minors at a time without pulling the entire channel history
 3. **Specific Versions:** Use `--deckhouse-tag` (or `--include-platform "=vX.Y.Z"`) for fully controlled, single-release deployments
 4. **Module Versioning:** Leverage semver constraints in `--include-module` for flexible module version management; `--include-platform` speaks the same dialect
@@ -523,7 +523,7 @@ The mirror system handles three primary component types:
 
 By default, the platform service discovers releases between the current `rock-solid` channel version (lower bound) and the current `alpha` channel version (upper bound), keeping the highest patch per `(major, minor)`.
 
-`--since-version` raises the lower bound above `rock-solid` when the user wants to skip older minors.
+`--since-version` extends the range to older releases using the inclusive lower bound `MIN(rock-solid, since-version)`. Values equal to or above Rock Solid leave the default versions and channels unchanged. Numeric tags keep the latest patch per major.minor together with channel snapshots in the range, so the exact patch named by `--since-version` is not pinned. The upper bound remains the current Alpha release.
 
 `--include-platform` replaces this window with a user-supplied semver constraint, applying the same latest-patch-per-minor and inclusive-anchor rules as module version filtering. Channel snapshots outside the constraint are pruned so the bundle stays internally consistent.
 

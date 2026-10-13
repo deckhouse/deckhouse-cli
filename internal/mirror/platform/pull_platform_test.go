@@ -401,7 +401,7 @@ func TestPullPlatform_DryRun_FullDiscovery_AllVersionsAndChannels(t *testing.T) 
 	require.NoError(t, err)
 
 	rootURL := stubRootURL
-	// Every semver tag from the stub must appear.
+	// Every version between Rock Solid and Alpha must appear.
 	for _, ver := range []string{"v1.72.10", "v1.71.0", "v1.70.0", "v1.69.0", "v1.68.0"} {
 		assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
 "expected version %s in Deckhouse list", ver)
@@ -427,39 +427,102 @@ func TestPullPlatform_DryRun_FullDiscovery_AllVersionsAndChannels(t *testing.T) 
 	assert.Len(t, svc.downloadList.DeckhouseInstallStandalone, 5)
 }
 
-// ---- SinceVersion filter ----
+func TestPullPlatform_DryRun_SinceVersion(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		since   string
+		wantOld bool
+	}{
+		{name: "default range"},
+		{name: "below Rock Solid extends range", since: "1.67.0", wantOld: true},
+		{name: "equal to Rock Solid keeps range", since: "1.68.0"},
+		{name: "above Rock Solid keeps range", since: "1.70.0"},
+		{name: "equal to Alpha keeps range", since: "1.72.10"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+			userLogger := log.NewSLogger(slog.LevelWarn)
+			options := &Options{}
+			if tt.since != "" {
+				options.SinceVersion = semver.MustParse(tt.since)
+			}
 
-func TestPullPlatform_DryRun_SinceVersion_FiltersOlderChannels(t *testing.T) {
-	// SinceVersion=1.70.0 means stable(v1.69.0) and rock-solid(v1.68.0) are excluded.
+			svc := newDryRunService(localfake.NewRegistryClientStub(), options, logger, userLogger)
+			require.NoError(t, svc.PullPlatform(context.Background()))
+
+			versions := []string{"v1.68.0", "v1.69.0", "v1.70.0", "v1.71.0", "v1.72.10"}
+			if tt.wantOld {
+				versions = append(versions, "v1.67.0")
+			}
+			assert.Len(t, svc.downloadList.Deckhouse, len(versions))
+			assert.Len(t, svc.downloadList.DeckhouseInstall, len(versions))
+			assert.Len(t, svc.downloadList.DeckhouseInstallStandalone, len(versions))
+			for _, version := range versions {
+				assert.Contains(t, svc.downloadList.Deckhouse, stubRootURL+":"+version)
+				assert.Contains(t, svc.downloadList.DeckhouseInstall, stubRootURL+"/install:"+version)
+				assert.Contains(t, svc.downloadList.DeckhouseInstallStandalone, stubRootURL+"/install-standalone:"+version)
+			}
+			assert.NotContains(t, svc.downloadList.Deckhouse, stubRootURL+":v1.66.0")
+			if !tt.wantOld {
+				assert.NotContains(t, svc.downloadList.Deckhouse, stubRootURL+":v1.67.0")
+			}
+			for _, channel := range []string{"alpha", "beta", "early-access", "stable", "rock-solid"} {
+				assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel, stubRootURL+"/release-channel:"+channel)
+				assert.NotContains(t, svc.downloadList.Deckhouse, stubRootURL+":"+channel)
+			}
+		})
+	}
+}
+
+func TestService_versionsToMirror_SinceVersion_KeepsLatestPatchesAndChannelSnapshots(t *testing.T) {
+	reg := upfake.NewRegistry(stubRootURL)
+	channels := map[string]string{
+		"alpha": "v1.72.10", "beta": "v1.71.0", "early-access": "v1.70.0",
+		"stable": "v1.69.0", "rock-solid": "v1.68.0",
+	}
+	for channel, version := range channels {
+		img := upfake.NewImageBuilder().WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).MustBuild()
+		reg.MustAddImage("release-channel", channel, img)
+		reg.MustAddImage("release-channel", version, img)
+	}
+	for _, version := range []string{"v1.66.0", "v1.67.0", "v1.67.4", "v1.68.4"} {
+		img := upfake.NewImageBuilder().WithFile("version.json", fmt.Sprintf(`{"version":%q}`, version)).MustBuild()
+		reg.MustAddImage("release-channel", version, img)
+	}
+
 	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
 	userLogger := log.NewSLogger(slog.LevelWarn)
-
-	since := semver.MustParse("1.70.0")
-	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
-	err := svc.PullPlatform(context.Background())
+	svc := newDryRunService(pkgclient.Adapt(upfake.NewClient(reg)), &Options{SinceVersion: semver.MustParse("1.67.0")}, logger, userLogger)
+	result, err := svc.versionsToMirror(context.Background(), nil)
 	require.NoError(t, err)
 
-	rootURL := stubRootURL
-	// Versions at or above 1.70.0 must be present.
-	for _, ver := range []string{"v1.72.10", "v1.71.0", "v1.70.0"} {
-		assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":"+ver)
+	var versions []string
+	for _, version := range result.Versions {
+		versions = append(versions, "v"+version.String())
 	}
-	// Versions below 1.70.0 must be absent.
-	for _, ver := range []string{"v1.69.0", "v1.68.0"} {
-		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ver,
-"version %s is below SinceVersion and must be excluded", ver)
+	assert.ElementsMatch(t, []string{"v1.67.4", "v1.68.0", "v1.68.4", "v1.69.0", "v1.70.0", "v1.71.0", "v1.72.10"}, versions)
+	assert.Len(t, result.ChannelVersions, len(channels))
+	for channel, version := range channels {
+		assert.Contains(t, result.ChannelVersions, ChannelVersionTag{Channel: channel, Tag: version})
 	}
-	// Channel-aliased release channels below SinceVersion must be absent.
-	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
-		rootURL+"/release-channel:stable")
-	assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
-		rootURL+"/release-channel:rock-solid")
-	// Channel-aliased release channels at or above SinceVersion must be present.
-	for _, ch := range []string{"alpha", "beta", "early-access"} {
-		assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
-			rootURL+"/release-channel:"+ch)
-		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ch,
-"Deckhouse repo must not carry channel alias %s", ch)
+}
+
+func TestPullPlatform_DryRun_SinceVersion_LTSOnly(t *testing.T) {
+	for _, since := range []string{"", "1.67.0", "1.70.0"} {
+		t.Run("since="+since, func(t *testing.T) {
+			logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
+			userLogger := log.NewSLogger(slog.LevelWarn)
+			options := &Options{}
+			if since != "" {
+				options.SinceVersion = semver.MustParse(since)
+			}
+
+			svc := newDryRunService(ltsOnlySourceStub("v1.68.0"), options, logger, userLogger)
+			require.NoError(t, svc.PullPlatform(context.Background()))
+			assert.Len(t, svc.downloadList.Deckhouse, 1)
+			assert.Contains(t, svc.downloadList.Deckhouse, stubRootURL+":v1.68.0")
+			assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel, stubRootURL+"/release-channel:lts")
+		})
 	}
 }
 
@@ -596,30 +659,6 @@ func TestPullPlatform_DryRun_IncludePlatform_ExactTagBehavesLikeTargetTag(t *tes
 	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
 		rootURL+"/release-channel:stable",
 		"=v1.69.0 must propagate to stable because v1.69.0 is the stable channel version in the stub")
-}
-
-func TestPullPlatform_DryRun_SinceVersion_EqualToAlpha_OnlyAlpha(t *testing.T) {
-	// SinceVersion=1.72.10 means only the alpha version (== newest) survives.
-	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelWarn))
-	userLogger := log.NewSLogger(slog.LevelWarn)
-
-	since := semver.MustParse("1.72.10")
-	svc := newDryRunService(localfake.NewRegistryClientStub(), &Options{SinceVersion: since}, logger, userLogger)
-	err := svc.PullPlatform(context.Background())
-	require.NoError(t, err)
-
-	rootURL := stubRootURL
-	assert.Contains(t, svc.downloadList.Deckhouse, rootURL+":v1.72.10")
-	// alpha must be present in release-channel only.
-	assert.Contains(t, svc.downloadList.DeckhouseReleaseChannel,
-		rootURL+"/release-channel:alpha")
-	assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":alpha")
-	// All older channels must be gone everywhere.
-	for _, ch := range []string{"beta", "early-access", "stable", "rock-solid"} {
-		assert.NotContains(t, svc.downloadList.Deckhouse, rootURL+":"+ch)
-		assert.NotContains(t, svc.downloadList.DeckhouseReleaseChannel,
-			rootURL+"/release-channel:"+ch)
-	}
 }
 
 // ---- LTS channel fallback ----

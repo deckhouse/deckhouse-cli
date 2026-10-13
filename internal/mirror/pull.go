@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/installer"
@@ -34,6 +36,8 @@ import (
 
 // PullServiceOptions contains configuration options for PullService
 type PullServiceOptions struct {
+	// SinceVersion extends release discovery below the current rock-solid release.
+	SinceVersion *semver.Version
 	// SkipPlatform skips pulling platform images
 	SkipPlatform bool
 	// SkipSecurity skips pulling security databases
@@ -117,6 +121,7 @@ func NewPullService(
 			registryService,
 			tmpDir,
 			&platform.Options{
+				SinceVersion:      options.SinceVersion,
 				TargetTag:         targetTag,
 				IncludeConstraint: options.PlatformConstraint,
 				BundleDir:         options.BundleDir,
