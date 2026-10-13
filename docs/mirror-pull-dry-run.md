@@ -85,7 +85,9 @@ d8 mirror pull --dry-run /tmp/bundle \
 This resolves platform images, installer, security databases, and all modules.
 No blobs are downloaded; the bundle directory stays empty.
 
-### Since a minimum version (channel-based pull)
+### Include releases older than Rock Solid (channel-based pull)
+
+Default discovery spans current Rock Solid through Alpha, inclusively. `--since-version` extends the lower bound to an older version; values equal to or above Rock Solid leave the range unchanged. Numeric tags keep the latest patch per major.minor, together with channel snapshots in the range, so the exact patch named by `--since-version` is not pinned.
 
 ```bash
 d8 mirror pull --dry-run /tmp/bundle \
@@ -127,8 +129,7 @@ access, no credentials needed. The stub registry is activated via:
 STUB_REGISTRY_CLIENT=true
 ```
 
-The stub seeds versions `v1.68.0`–`v1.72.10`, channels `alpha`/`beta`/`early-access`/
-`stable`/`rock-solid`, and several module tags.
+The stub seeds versions `v1.66.0` through `v1.72.10`, channels `alpha`/`beta`/`early-access`/`stable`/`rock-solid`, and several module tags. Rock Solid points to `v1.68.0`, leaving two older releases available for `--since-version` tests.
 
 #### Run all dry-run unit tests
 

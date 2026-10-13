@@ -37,6 +37,8 @@ import (
 
 // PullServiceOptions contains configuration options for PullService
 type PullServiceOptions struct {
+	// SinceVersion extends release discovery below the current rock-solid release.
+	SinceVersion *semver.Version
 	// SkipPlatform skips pulling platform images
 	SkipPlatform bool
 	// SkipSecurity skips pulling security databases
@@ -130,6 +132,7 @@ func NewPullService(
 			registryService,
 			tmpDir,
 			&platform.Options{
+				SinceVersion:      options.SinceVersion,
 				TargetTag:         targetTag,
 				IncludeConstraint: options.PlatformConstraint,
 				BundleDir:         options.BundleDir,

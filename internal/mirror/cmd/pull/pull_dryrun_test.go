@@ -22,10 +22,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	pullflags "github.com/deckhouse/deckhouse-cli/internal/mirror/cmd/pull/flags"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 )
 
 // saveFlagsAndRestore captures the current state of all relevant pull flags and
@@ -34,6 +36,13 @@ func saveFlagsAndRestore(t *testing.T) func() {
 	t.Helper()
 
 	saved := struct {
+		NoPackages               bool
+		SinceVersionString       string
+		SinceVersion             *semver.Version
+		PlatformConstraintString string
+		PlatformConstraint       modules.VersionConstraint
+		ProxyRegistry            bool
+
 		TempDir                 string
 		ImagesBundlePath        string
 		SourceRegistryRepo      string
@@ -56,6 +65,13 @@ func saveFlagsAndRestore(t *testing.T) func() {
 		IgnoreSuspend           bool
 		ImagesBundleChunkSizeGB int64
 	}{
+		NoPackages:               pullflags.NoPackages,
+		SinceVersionString:       pullflags.SinceVersionString,
+		SinceVersion:             pullflags.SinceVersion,
+		PlatformConstraintString: pullflags.PlatformConstraintString,
+		PlatformConstraint:       pullflags.PlatformConstraint,
+		ProxyRegistry:            pullflags.ProxyRegistry,
+
 		TempDir:                 pullflags.TempDir,
 		ImagesBundlePath:        pullflags.ImagesBundlePath,
 		SourceRegistryRepo:      pullflags.SourceRegistryRepo,
@@ -80,6 +96,12 @@ func saveFlagsAndRestore(t *testing.T) func() {
 	}
 
 	return func() {
+		pullflags.NoPackages = saved.NoPackages
+		pullflags.SinceVersionString = saved.SinceVersionString
+		pullflags.SinceVersion = saved.SinceVersion
+		pullflags.PlatformConstraintString = saved.PlatformConstraintString
+		pullflags.PlatformConstraint = saved.PlatformConstraint
+		pullflags.ProxyRegistry = saved.ProxyRegistry
 		pullflags.TempDir = saved.TempDir
 		pullflags.ImagesBundlePath = saved.ImagesBundlePath
 		pullflags.SourceRegistryRepo = saved.SourceRegistryRepo
