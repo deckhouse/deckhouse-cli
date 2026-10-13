@@ -388,6 +388,7 @@ func (p *Puller) buildPullService() (*mirror.PullService, error) {
 		pullflags.TempDir,
 		pullflags.DeckhouseTag,
 		&mirror.PullServiceOptions{
+			SinceVersion:       p.params.SinceVersion,
 			SkipPlatform:       pullflags.NoPlatform,
 			SkipSecurity:       pullflags.NoSecurityDB,
 			SkipModules:        pullflags.NoModules,

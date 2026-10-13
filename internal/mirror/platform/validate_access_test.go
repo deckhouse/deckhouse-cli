@@ -232,17 +232,18 @@ func TestService_findTagsToMirror(t *testing.T) {
 			wantErr:      false,
 		},
 		{
-			name: "empty TargetTag with SinceVersion filters old channels",
+			name: "empty TargetTag with SinceVersion above Rock Solid keeps all channels",
 			options: &Options{
 				SinceVersion: mustParseSemver("1.70.0"),
 			},
-			// rock-solid (v1.68.0) and stable (v1.69.0) are below SinceVersion 1.70.0
 			wantVersions: []string{
 				"v1.72.10",
 				"v1.71.0",
 				"v1.70.0",
+				"v1.69.0",
+				"v1.68.0",
 			},
-			wantChannels: []string{"alpha", "beta", "early-access"},
+			wantChannels: []string{"alpha", "beta", "early-access", "stable", "rock-solid"},
 			wantErr:      false,
 		},
 	}
