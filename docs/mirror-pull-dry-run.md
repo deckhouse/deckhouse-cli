@@ -86,7 +86,9 @@ d8 mirror pull --dry-run /tmp/bundle \
 This resolves platform images, installer, security databases, and all modules.
 No blobs are downloaded; the bundle directory stays empty.
 
-### Since a minimum version (channel-based pull)
+### Include releases older than Rock Solid
+
+Default discovery spans current Rock Solid through Alpha, inclusively. `--since-version` extends the lower bound to an older version: `MIN(rock-solid, since-version)`. Values equal to or above Rock Solid leave the range and channels unchanged. Numeric tags keep the latest patch per major.minor, together with channel snapshots in the range, so the exact patch named by `--since-version` is not pinned. In an LTS-only registry without Rock Solid and Alpha, discovery keeps the LTS snapshot. The flag does not select module, package or security database versions.
 
 ```bash
 d8 mirror pull --dry-run /tmp/bundle \
@@ -128,8 +130,7 @@ access, no credentials needed. The stub registry is activated via:
 STUB_REGISTRY_CLIENT=true
 ```
 
-The stub seeds versions `v1.68.0`–`v1.72.10`, channels `alpha`/`beta`/`early-access`/
-`stable`/`rock-solid`, and several module tags.
+The stub seeds versions `v1.66.0`-`v1.72.10`, channels `alpha`/`beta`/`early-access`/`stable`/`rock-solid`, and several module tags.
 
 #### Run all dry-run unit tests
 
@@ -155,6 +156,7 @@ go test ./internal/mirror/platform/ -run 'TestDryRun' -v
 | `TestDryRunNoBundleOutput` | bundleDir has no `.tar`/`.chunk`/`.gostsum` after full run |
 | `TestDryRunNoBundleWithNoPlatform` | same, with `--no-platform --no-security-db` |
 | `TestDryRunWithDeckhouseTag` | specific `--deckhouse-tag` works in dry-run |
+| `TestPullCommandSinceVersion` | a real Cobra command extends discovery below Rock Solid and preserves the default selection for equal or newer versions; incompatible flags fail |
 | `TestDryRunExitsZeroOnSuccess` | `Execute()` returns `nil` |
 | `TestDryRun_NoBundleFilesWritten` | platform service: bundleDir empty |
 | `TestDryRun_NoOCILayoutCreated` | platform service: `<tmpDir>/platform/install/` is **not** created (digests are streamed) |
