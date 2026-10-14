@@ -46,6 +46,8 @@ platform.tar
 └── release-channel/           # channel + version metadata    -> <repo>/release-channel:<channel|version>
 ```
 
+Default platform discovery spans current Rock Solid through Alpha, inclusively. `--since-version` extends that range only when it is older than Rock Solid: the lower bound is `MIN(rock-solid, since-version)`. Numeric tags retain the latest patch per major.minor, with channel snapshots also included; the exact patch named by `--since-version` is not pinned.
+
 > `install/` is the one platform layout that carries channel tags (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts`) next to its version tags, because `docker run <repo>/install:<channel>` is the documented air-gapped install entry point. They are aliases of a version tag, not separate images: `propagateChannelAliases` in [platform.go](../internal/mirror/platform/platform.go) appends an extra index descriptor for an image already downloaded under `v<X.Y.Z>`, so it costs no extra traffic and does not require the source registry to serve `<repo>/install:<channel>` itself (LTS-only registries and registries fed by a previous `d8 mirror push` do not). The repo root and `install-standalone/` stay version-only — they are addressed by version, and channel metadata lives in `release-channel/`.
 
 **`installer.tar`** — the standalone installer layout, packed from a working dir whose only entry is `installer/`:
