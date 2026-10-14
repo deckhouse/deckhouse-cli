@@ -49,7 +49,7 @@ import (
 
 // Options contains configuration options for the platform service
 type Options struct {
-	// SinceVersion specifies the minimum version to start mirroring from (optional)
+	// SinceVersion extends release discovery below the current rock-solid release.
 	SinceVersion *semver.Version
 	// IncludeConstraint narrows platform release discovery to a user-supplied
 	// semver constraint expression, mirroring the per-module constraint syntax
@@ -897,12 +897,10 @@ func (svc *Service) determineMinimumVersion(channelVersions channelVersions) *se
 		return nil
 	}
 
-	// Use rock-solid as baseline
 	minVersion := rockSolidVersion
 
-	// If SinceVersion is provided and is newer than rock-solid, start from SinceVersion
-	// (user wants to mirror from a later version than rock-solid)
-	if svc.options.SinceVersion != nil && svc.options.SinceVersion.GreaterThan(minVersion) {
+	// Older releases extend the range; newer releases keep the rock-solid baseline.
+	if svc.options.SinceVersion != nil && svc.options.SinceVersion.LessThan(minVersion) {
 		minVersion = svc.options.SinceVersion
 	}
 

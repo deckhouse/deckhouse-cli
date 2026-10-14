@@ -213,9 +213,8 @@ func validatePluginFlags() error {
 // Notes:
 //   - --deckhouse-tag / --since-version conflicts: --deckhouse-tag asks
 //     for one tag (a tag-existence check is enough, no probe needed) and
-//     --since-version asks for "everything from X upward without an upper
-//     bound", which a probe cannot terminate safely. Both should use the
-//     non-proxy path instead.
+//     --since-version extends channel-based discovery using registry tag
+//     listings. Both use the non-proxy path.
 //   - --exclude-module is allowed but only meaningful when at least one
 //     --include-module remains, because the probe still needs concrete
 //     module names to walk.
@@ -229,7 +228,7 @@ func validateProxyRegistryFlag() error {
 	}
 
 	if pullflags.SinceVersionString != "" {
-		return errors.New("--proxy-registry cannot be combined with --since-version: --since-version has no upper bound, so the probe cannot terminate. Use --include-platform with an explicit lower bound (and optional upper bound) instead")
+		return errors.New("--proxy-registry cannot be combined with --since-version: use --include-platform with an explicit lower bound instead")
 	}
 
 	needPlatform := !pullflags.NoPlatform
