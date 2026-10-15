@@ -37,6 +37,10 @@ default:
   tags:
     - deckhouse
   interruptible: true
+  hooks:
+    # Go unpacks toolchains read-only; without this git clean cannot remove .tools from an earlier job.
+    pre_get_sources_script:
+      - chmod -R u+w "$CI_PROJECT_DIR/.tools" 2>/dev/null || true
 
 .on_merge_request:
   rules:
