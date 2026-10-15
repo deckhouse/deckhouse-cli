@@ -3,8 +3,10 @@
 # same commits and tags. Releases are not mirrored, release:github publishes them.
 #
 # CI/CD variables (Settings -> CI/CD -> Variables):
-#   SOURCE_REPO_SSH_KEY     SSH key for the private repo, base64 in one line so it can be masked
-#   DECKHOUSE_PRIVATE_REPO  hostname of the private repo (masked)
+#   SOURCE_REPO_SSH_KEY     trdl-build-check: SSH key for the private repo, as the trdl server has;
+#                           base64 in one line so it can be masked
+#   DECKHOUSE_PRIVATE_REPO  trdl-build-check: hostname of the private repo (masked)
+# Go jobs read the private repo with CI_JOB_TOKEN (see .go).
 #   TRDL_VAULT_ADDR         trdl server (protected, masked)
 #   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
 #   TRDL_VAULT_SECRET_ID    trdl approle (protected, masked)
@@ -47,6 +49,8 @@ default:
 
 # Go toolchain, task and access to the private repo behind flant.internal.
 .go:
+  tags:
+    - docker # apt-get runs in the image as root; the deckhouse runners are shell
   needs: []
   variables:
     GIT_DEPTH: "0" # To use `git describe --tags`
@@ -58,18 +62,18 @@ default:
         libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
         libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
         libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-        file git gcc curl openssh-client
+        file git gcc curl
     # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
     - ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
     - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
     - crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
     - export PATH="/usr/local/go/bin:$PATH" && go version
     - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin task
-    - eval "$(ssh-agent -s)"
-    - printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d | ssh-add -
-    - mkdir -p ~/.ssh && ssh-keyscan -H "$DECKHOUSE_PRIVATE_REPO" >> ~/.ssh/known_hosts 2>/dev/null
-    - git config --global url."ssh://git@${DECKHOUSE_PRIVATE_REPO}/".insteadOf "https://flant.internal/"
-    - git config --global --add safe.directory '*'
+    # Stronghold is read over HTTPS with the job token, as in deckhouse. Needs: this project in the
+    # stronghold job token allowlist, and read access to stronghold for whoever runs the pipeline.
+    # Env config, not --global: on a shell runner that would stay in the runner's ~/.gitconfig.
+    - export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
+    - export GIT_CONFIG_KEY_1="url.https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf" GIT_CONFIG_VALUE_1="https://flant.internal/"
 
 # --- Merge requests -----------------------------------------------------------
 
