@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: disk-a-root
+  namespace: my-app
+  uid: 5f6bd1ca-2c1a-4a2f-9f3f-000000000015
+spec:
+  accessModes:
+  - ReadWriteOnce

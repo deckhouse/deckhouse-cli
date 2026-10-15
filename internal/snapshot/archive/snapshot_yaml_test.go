@@ -1255,7 +1255,7 @@ func TestSnapshotYAML_ChecksumUnaffectedByVolumeField(t *testing.T) {
 }
 
 // TestSnapshotYAML_RoundTripV3 verifies that a fresh write stamps
-// SnapshotFormatVersionCurrent (3) and that the new payload-size fields round-trip.
+// SnapshotFormatVersionCurrent and that the payload-size fields added by version 3 round-trip.
 func TestSnapshotYAML_RoundTripV3(t *testing.T) {
 	t.Parallel()
 
@@ -1507,5 +1507,75 @@ func TestSnapshotYAML_V2ArchiveStillValidates(t *testing.T) {
 	if got.Volumes[0].RawSizeBytes != 0 || got.Volumes[0].StoredSizeBytes != 0 {
 		t.Errorf("a v2 archive's Volumes[0] payload sizes must read back as zero (never recorded), got RawSizeBytes=%d StoredSizeBytes=%d",
 			got.Volumes[0].RawSizeBytes, got.Volumes[0].StoredSizeBytes)
+	}
+}
+
+// TestSnapshotYAML_MarshalKeepsAuthenticatedVersion proves that encoding keeps the version a
+// snapshot.yaml declares, so that re-encoding a parent read from an older archive never pairs its
+// commitment with another version's encoding, and that a snapshot.yaml without an authenticated
+// version gets the current one.
+func TestSnapshotYAML_MarshalKeepsAuthenticatedVersion(t *testing.T) {
+	t.Parallel()
+
+	child := archive.ChildCommitment{
+		APIVersion: "v1", Kind: "Snapshot", Name: "child",
+		NodeChecksum: validChecksum(), ChildrenChecksum: archive.EmptyChildrenChecksum(),
+		MetadataChecksum: validChecksum(), FormatVersion: archive.SnapshotFormatVersionChildMetadata,
+	}
+
+	for _, version := range []int{
+		archive.SnapshotFormatVersionAuthenticatedChildren,
+		archive.SnapshotFormatVersionPayloadSizes,
+		archive.SnapshotFormatVersionChildMetadata,
+	} {
+		committed, err := archive.ComputeChildrenChecksumAt(version, []archive.ChildCommitment{child})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		data, err := sigsyaml.Marshal(archive.SnapshotYAML{
+			FormatVersion: version, APIVersion: "v1", Kind: "Snapshot", Name: "parent",
+			Checksum: validChecksum(), ChildrenChecksum: &committed,
+		})
+		if err != nil {
+			t.Fatalf("version %d: marshal: %v", version, err)
+		}
+
+		got, err := archive.UnmarshalSnapshotYAML(data, archive.SnapshotYAMLReadOptions{})
+		if err != nil {
+			t.Fatalf("version %d: unmarshal: %v", version, err)
+		}
+
+		if got.FormatVersion != version {
+			t.Errorf("version %d: encoded as version %d", version, got.FormatVersion)
+		}
+
+		again, err := sigsyaml.Marshal(got)
+		if err != nil {
+			t.Fatalf("version %d: marshal again: %v", version, err)
+		}
+
+		if string(again) != string(data) {
+			t.Errorf("version %d: re-encoding a decoded snapshot.yaml changed its bytes", version)
+		}
+	}
+
+	for _, version := range []int{archive.SnapshotFormatVersionLegacy, archive.SnapshotFormatVersionCurrent + 1} {
+		data, err := sigsyaml.Marshal(archive.SnapshotYAML{
+			FormatVersion: version, APIVersion: "v1", Kind: "Snapshot", Name: "n", Checksum: validChecksum(),
+		})
+		if err != nil {
+			t.Fatalf("version %d: marshal: %v", version, err)
+		}
+
+		got, err := archive.UnmarshalSnapshotYAML(data, archive.SnapshotYAMLReadOptions{})
+		if err != nil {
+			t.Fatalf("version %d: unmarshal: %v", version, err)
+		}
+
+		if got.FormatVersion != archive.SnapshotFormatVersionCurrent {
+			t.Errorf("version %d: encoded as version %d, want %d",
+				version, got.FormatVersion, archive.SnapshotFormatVersionCurrent)
+		}
 	}
 }

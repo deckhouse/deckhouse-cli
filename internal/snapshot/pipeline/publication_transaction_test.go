@@ -28,6 +28,7 @@ import (
 
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/archive"
 	"github.com/deckhouse/deckhouse-cli/internal/snapshot/source"
+	"github.com/deckhouse/deckhouse-cli/internal/snapshot/volume"
 )
 
 func publicationTestNode() *source.Node {
@@ -184,6 +185,10 @@ func TestPublicationTransactionCleanupIsDurableAndConvergent(t *testing.T) {
 		tasks,
 		map[*source.Node]bool{node: true},
 		destination.ComputeNodeChecksum,
+		func(task nodeTask, checksum, childrenChecksum archive.NodeChecksum) (archive.SnapshotYAML, error) {
+			return volume.DescribeNodeRootedContext(context.Background(), destination, task.nodeDir, task.node,
+				checksum, childrenChecksum)
+		},
 	)
 	if err != nil {
 		t.Fatalf("build transaction: %v", err)
