@@ -112,12 +112,12 @@ trdl-build-check:
         - go.sum
         - Taskfile.yml
         - .gitlab-ci.yml
-        - .github/scripts/trdl-build-check.sh
+        - .gitlab/scripts/trdl-build-check.sh
   script:
-    # The script is shared with GitHub Actions, which passes the key as plain text.
-    - SOURCE_REPO_SSH_KEY="$(printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d)" bash .github/scripts/trdl-build-check.sh
+    # The script takes the key as plain text.
+    - SOURCE_REPO_SSH_KEY="$(printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d)" bash .gitlab/scripts/trdl-build-check.sh
 
-# --- Release tags: GitHub and GitLab releases ---------------------------------
+# --- Release tags -------------------------------------------------------------
 
 release:build:
   extends: [.go, .on_release_tag]
@@ -131,47 +131,17 @@ release:build:
       - dist/*/*.tar.gz.sha256sum
     expire_in: 1 week
 
-# Both release pages get the same files; CHANGES lists the commits since the previous tag.
-.publish:
-  extends: .on_release_tag
+# Users and the deckhouse CI download d8 from here: keep the asset names.
+# Run by hand last, once trdl:release has passed (release:build artifacts live 1 week).
+release:github:
   stage: deploy
-  needs: ["release:build"]
+  needs: ["release:build", "trdl:release"]
   interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+      when: manual
   variables:
     GIT_DEPTH: "0"
-  before_script:
-    - apt-get update && apt-get install -y ca-certificates curl git jq
-    - git fetch --tags --quiet origin
-    - prev="$(git describe --tags --abbrev=0 "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
-    - CHANGES="$(git log --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG")"
-
-# A GitLab release only holds links, and job artifacts expire,
-# so the files go to the project's generic package registry.
-release:gitlab:
-  extends: .publish
-  script:
-    - |
-      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
-      if curl -sSf -o /dev/null -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG"; then
-        echo "GitLab release $CI_COMMIT_TAG already exists"
-        exit 0
-      fi
-      links='[]'
-      for f in dist/*/*.tar.gz*; do
-        name="$(basename "$f")"
-        url="$api/packages/generic/d8/$CI_COMMIT_TAG/$name"
-        curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$url"
-        links="$(jq -c --arg name "$name" --arg url "$url" '. + [{name: $name, url: $url, link_type: "package"}]' <<<"$links")"
-      done
-      jq -n --arg tag "$CI_COMMIT_TAG" --arg desc "$CHANGES" --argjson links "$links" \
-          '{tag_name: $tag, name: $tag, description: $desc, assets: {links: $links}}' \
-        | curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" \
-            --data @- "$api/releases"
-
-# Users and the deckhouse CI download d8 from here: keep the asset names.
-release:github:
-  extends: .publish
-  variables:
     GH_REPO: deckhouse/deckhouse-cli
     VAULT_AUTH_PATH: fox
     VAULT_AUTH_ROLE: deckhouse
@@ -184,7 +154,7 @@ release:github:
       token: $VAULT_ID_TOKEN
       file: false
   before_script:
-    - !reference [.publish, before_script]
+    - apt-get update && apt-get install -y ca-certificates curl git
     - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
   script:
     - |
@@ -198,8 +168,11 @@ release:github:
       done
       [ "$sha" = "$CI_COMMIT_SHA" ] || { echo "GitHub $CI_COMMIT_TAG is at '$sha', expected $CI_COMMIT_SHA: check the mirror" >&2; exit 1; }
     - |
-      # Public notes: no service commits, no links to MRs in the internal GitLab.
-      NOTES="$(grep -vE '^\* (Signed release channels|Merge branch )' <<<"$CHANGES" | sed -E 's/ \(![0-9]+\)$//')" || true
+      # Same layout as GitHub's generated notes, without service commits and links to internal MRs.
+      git fetch --tags --quiet origin
+      prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
+      NOTES="## What's Changed"$'\n'"$(git log --no-merges --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG" \
+        | grep -v '^\* Signed release channels' | sed -E 's/ \(![0-9]+\)$//')" || true
       if [ -n "$prev" ]; then
         NOTES+=$'\n\n'"**Full Changelog**: https://github.com/$GH_REPO/compare/$prev...$CI_COMMIT_TAG"
       fi
