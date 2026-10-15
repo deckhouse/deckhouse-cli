@@ -31,12 +31,11 @@ variables:
   CRANE_VERSION: v0.22.1
   TASK_VERSION: v3.41.0
   GH_VERSION: "2.102.0"
-  DEBIAN_FRONTEND: noninteractive
 
+# Shell runners, as in stronghold: no image and no root, so jobs put their tools into .tools.
 default:
   tags:
-    - deckhouse # jobs apt-get install into the image, so they need a runner that runs it as root
-  image: ubuntu:22.04
+    - deckhouse
   interruptible: true
 
 .on_merge_request:
@@ -49,26 +48,19 @@ default:
 
 # Go toolchain, task and access to the private repo behind flant.internal.
 .go:
-  tags:
-    - docker # apt-get runs in the image as root; the deckhouse runners are shell
   needs: []
   variables:
     GIT_DEPTH: "0" # To use `git describe --tags`
+    GOTOOLCHAIN: local # a downloaded stock Go lacks crypto/gogost
+    GOFLAGS: -modcacherw # so the next checkout can delete the module cache
   before_script:
-    - |
-      apt-get update && apt-get install -y \
-        libbtrfs-dev \
-        libelf-dev    `# delivery-kit: ELF binary signature support (CGO)` \
-        libssl-dev    `# delivery-kit: OpenSSL crypto for signature verification (CGO)` \
-        libuv1-dev    `# delivery-kit: async I/O for libuv-based networking (CGO)` \
-        libzstd-dev   `# delivery-kit: zstd compression support (CGO)` \
-        file git gcc curl
-    # libuv1-dev ships static lib as libuv_a.a; the linker expects libuv.a
-    - ln -fs "$(dpkg -L libuv1-dev | grep -F '/libuv_a.a')" /usr/local/lib/libuv.a
-    - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin crane
-    - crane export "$GO_IMAGE" - | tar -x -C / --no-same-owner usr/local/go
-    - export PATH="/usr/local/go/bin:$PATH" && go version
-    - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin task
+    - mkdir -p .tools/bin
+    - export PATH="$PWD/.tools/bin:$PWD/.tools/usr/local/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
+    - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools/bin crane
+    # GOST Go, as in stronghold (.ensure_go): Stronghold imports crypto/gogost from its std
+    - crane export "$GO_IMAGE" - | tar -x -C .tools --no-same-owner usr/local/go
+    - go version
+    - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C .tools/bin task
     # Stronghold is read over HTTPS with the job token, as in deckhouse. Needs: this project in the
     # stronghold job token allowlist, and read access to stronghold for whoever runs the pipeline.
     # Env config, not --global: on a shell runner that would stay in the runner's ~/.gitconfig.
@@ -86,7 +78,7 @@ lint:
   extends: [.go, .on_merge_request]
   allow_failure: true
   script:
-    - curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
+    - curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C .tools/bin --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
     - task lint:check
 
 pr-build:
@@ -158,8 +150,8 @@ release:github:
       token: $VAULT_ID_TOKEN
       file: false
   before_script:
-    - apt-get update && apt-get install -y ca-certificates curl git
-    - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C /usr/local/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+    - mkdir -p .tools/bin && export PATH="$PWD/.tools/bin:$PATH"
+    - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C .tools/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
   script:
     - |
       # The push mirror brings the tag to GitHub right after it is pushed here.
@@ -191,9 +183,7 @@ release:github:
   needs: []
   interruptible: false
   resource_group: trdl
-  timeout: 7h # trdl.sh keeps retrying for up to 6h
-  before_script:
-    - apt-get update && apt-get install -y ca-certificates curl jq
+  timeout: 7h # trdl.sh keeps retrying for up to 6h (needs curl and jq, both on the runner hosts)
 
 trdl:release:
   extends: [.trdl, .on_release_tag]
