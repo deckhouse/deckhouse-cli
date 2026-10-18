@@ -45,8 +45,14 @@ func NewCommand() *cobra.Command {
 	return staticClusterConfigurationCmd
 }
 
+const staticClusterConfigurationSecret = "d8-static-cluster-configuration"
+
 func editStaticClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := edit.BaseEditConfigCMD(cmd, "static-cluster-configuration", "d8-static-cluster-configuration", "static-cluster-configuration.yaml")
+	createOpts := &edit.CreateOptions{
+		Labels: map[string]string{"name": staticClusterConfigurationSecret},
+	}
+
+	err := edit.BaseEditConfigCMD(cmd, "static-cluster-configuration", staticClusterConfigurationSecret, "static-cluster-configuration.yaml", createOpts)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
