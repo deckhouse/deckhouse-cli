@@ -1,6 +1,6 @@
 # deckhouse-cli CI. Ported from GitHub Actions.
 # GitHub is a push mirror of this project (Settings -> Repository -> Mirroring repositories):
-# same commits and tags. Releases are not mirrored, release:github publishes them.
+# same commits and tags. Releases are not mirrored: release:gitlab and release:github make them.
 #
 # CI/CD variables (Settings -> CI/CD -> Variables):
 #   SOURCE_REPO_SSH_KEY     trdl-build-check: SSH key for the private repo, as the trdl server has;
@@ -130,6 +130,37 @@ release:build:
       - dist/*/*.tar.gz
       - dist/*/*.tar.gz.sha256sum
     expire_in: 1 week
+
+# A GitLab release only holds links, and job artifacts expire,
+# so the files go to the project's generic package registry.
+release:gitlab:
+  extends: .on_release_tag
+  stage: deploy
+  needs: ["release:build"]
+  interruptible: false
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - |
+      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+      if curl -sSf -o /dev/null -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG"; then
+        echo "GitLab release $CI_COMMIT_TAG already exists"
+        exit 0
+      fi
+      git fetch --tags --quiet origin
+      prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
+      changes="$(git log --no-merges --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG")"
+      links='[]'
+      for f in dist/*/*.tar.gz*; do
+        name="$(basename "$f")"
+        url="$api/packages/generic/d8/$CI_COMMIT_TAG/$name"
+        curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$url"
+        links="$(jq -c --arg name "$name" --arg url "$url" '. + [{name: $name, url: $url, link_type: "package"}]' <<<"$links")"
+      done
+      jq -n --arg tag "$CI_COMMIT_TAG" --arg desc "$changes" --argjson links "$links" \
+          '{tag_name: $tag, name: $tag, description: $desc, assets: {links: $links}}' \
+        | curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" \
+            --data @- "$api/releases"
 
 # Users and the deckhouse CI download d8 from here: keep the asset names.
 # Run by hand last, once trdl:release has passed (release:build artifacts live 1 week).
