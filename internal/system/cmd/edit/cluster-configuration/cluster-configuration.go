@@ -46,7 +46,7 @@ func NewCommand() *cobra.Command {
 }
 
 func editClusterConfig(cmd *cobra.Command, _ []string) error {
-	err := edit.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml")
+	err := edit.BaseEditConfigCMD(cmd, "cluster-configuration", "d8-cluster-configuration", "cluster-configuration.yaml", nil)
 	if err != nil {
 		return fmt.Errorf("Error updating secret: %w", err)
 	}
