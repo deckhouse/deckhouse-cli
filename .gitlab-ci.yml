@@ -208,7 +208,10 @@ release:github:
         NOTES+=$'\n\n'"**Full Changelog**: https://github.com/$GH_REPO/compare/$prev...$CI_COMMIT_TAG"
       fi
     - |
-      gh release create "$CI_COMMIT_TAG" --verify-tag --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
+      # GitHub makes every new release Latest; a patch to an older line must not take it.
+      newest="$(git tag -l --sort=v:refname 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -n1)"
+      latest=false; [ "$CI_COMMIT_TAG" = "$newest" ] && latest=true
+      gh release create "$CI_COMMIT_TAG" --verify-tag --latest="$latest" --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
         || gh release upload "$CI_COMMIT_TAG" --clobber dist/*/*.tar.gz*
 
 # --- trdl ---------------------------------------------------------------------
