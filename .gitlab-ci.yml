@@ -1,0 +1,241 @@
+# deckhouse-cli CI. Ported from GitHub Actions.
+# GitHub is a push mirror of this project (Settings -> Repository -> Mirroring repositories):
+# same commits and tags. Releases are not mirrored: release:gitlab and release:github make them.
+#
+# CI/CD variables (Settings -> CI/CD -> Variables):
+#   SOURCE_REPO_SSH_KEY     trdl-build-check: SSH key for the private repo, as the trdl server has;
+#                           base64 in one line so it can be masked
+#   DECKHOUSE_PRIVATE_REPO  trdl-build-check: hostname of the private repo (masked)
+# Go jobs read the private repo with CI_JOB_TOKEN (see .go).
+#   TRDL_VAULT_ADDR         trdl server (protected, masked)
+#   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
+#   TRDL_VAULT_SECRET_ID    trdl approle (protected, masked)
+# Protected variables reach tag pipelines only when the v* tags are protected.
+# The GitHub token comes from Vault (role deckhouse).
+#
+# Pipeline schedule (Build -> Pipeline schedules): trdl-build-check, "0 7 * * 1" on main.
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE =~ /^(schedule|web)$/
+
+variables:
+  GOPRIVATE: "flant.internal"
+  GO_IMAGE: registry.deckhouse.io/container-factory@sha256:ce80d4ec2053430e81b1a07492a403c4fb5382a27570984318ea75b87bbe5109
+  GOLANGCI_LINT_VERSION: "2.11.4"
+  CRANE_VERSION: v0.22.1
+  TASK_VERSION: v3.41.0
+  GH_VERSION: "2.102.0"
+
+# Shell runners, as in stronghold: no image and no root, so jobs put their tools into .tools.
+default:
+  tags:
+    - deckhouse
+  interruptible: true
+  hooks:
+    # Go unpacks toolchains read-only; without this git clean cannot remove .tools from an earlier job.
+    pre_get_sources_script:
+      - chmod -R u+w "$CI_PROJECT_DIR/.tools" 2>/dev/null || true
+
+.on_merge_request:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^(main|release-.+)$/
+
+.on_release_tag:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+
+# Go toolchain, task and access to the private repo behind flant.internal.
+.go:
+  needs: []
+  variables:
+    GIT_DEPTH: "0" # To use `git describe --tags`
+    GOTOOLCHAIN: local # a downloaded stock Go lacks crypto/gogost
+    GOFLAGS: -modcacherw # so the next checkout can delete the module cache
+  before_script:
+    - mkdir -p .tools/bin
+    - export PATH="$PWD/.tools/bin:$PWD/.tools/usr/local/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
+    - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools/bin crane
+    # GOST Go, as in stronghold (.ensure_go): Stronghold imports crypto/gogost from its std
+    - crane export "$GO_IMAGE" - | tar -x -C .tools --no-same-owner usr/local/go
+    - go version
+    - curl -fsSL "https://github.com/go-task/task/releases/download/${TASK_VERSION}/task_linux_amd64.tar.gz" | tar -xz -C .tools/bin task
+    # Stronghold is read over HTTPS with the job token, as in deckhouse. Needs: this project in the
+    # stronghold job token allowlist, and read access to stronghold for whoever runs the pipeline.
+    # Env config, not --global: on a shell runner that would stay in the runner's ~/.gitconfig.
+    - export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
+    - export GIT_CONFIG_KEY_1="url.https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf" GIT_CONFIG_VALUE_1="https://flant.internal/"
+
+# --- Merge requests -----------------------------------------------------------
+
+test:
+  extends: [.go, .on_merge_request]
+  script:
+    - task test
+
+lint:
+  extends: [.go, .on_merge_request]
+  allow_failure: true
+  script:
+    - curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64.tar.gz" | tar -xz -C .tools/bin --strip-components=1 "golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint"
+    - task lint:check
+
+pr-build:
+  extends: [.go, .on_merge_request]
+  stage: build
+  script:
+    - task build:dist:all
+  artifacts:
+    name: deckhouse-cli-mr-build-$CI_PIPELINE_ID
+    paths:
+      - dist/
+    expire_in: 1 day
+
+# Reproduces the trdl server release build; needs docker, hence the shell runner.
+trdl-build-check:
+  tags:
+    - deckhouse
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    # Variables are not passed to merge requests from forks.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID
+      changes:
+        - trdl.yaml
+        - go.mod
+        - go.sum
+        - Taskfile.yml
+        - .gitlab-ci.yml
+        - .gitlab/scripts/trdl-build-check.sh
+  script:
+    # The script takes the key as plain text.
+    - SOURCE_REPO_SSH_KEY="$(printf '%s' "$SOURCE_REPO_SSH_KEY" | base64 -d)" bash .gitlab/scripts/trdl-build-check.sh
+
+# --- Release tags -------------------------------------------------------------
+
+release:build:
+  extends: [.go, .on_release_tag]
+  stage: build
+  interruptible: false
+  script:
+    - task build-and-package
+  artifacts:
+    paths:
+      - dist/*/*.tar.gz
+      - dist/*/*.tar.gz.sha256sum
+    expire_in: 1 week
+
+# A GitLab release only holds links, and job artifacts expire,
+# so the files go to the project's generic package registry.
+release:gitlab:
+  extends: .on_release_tag
+  stage: deploy
+  needs: ["release:build"]
+  interruptible: false
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - |
+      api="$CI_API_V4_URL/projects/$CI_PROJECT_ID"
+      if curl -sSf -o /dev/null -H "JOB-TOKEN: $CI_JOB_TOKEN" "$api/releases/$CI_COMMIT_TAG"; then
+        echo "GitLab release $CI_COMMIT_TAG already exists"
+        exit 0
+      fi
+      git fetch --tags --quiet origin
+      prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
+      changes="$(git log --no-merges --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG")"
+      links='[]'
+      for f in dist/*/*.tar.gz*; do
+        name="$(basename "$f")"
+        url="$api/packages/generic/d8/$CI_COMMIT_TAG/$name"
+        curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$url"
+        links="$(jq -c --arg name "$name" --arg url "$url" '. + [{name: $name, url: $url, link_type: "package"}]' <<<"$links")"
+      done
+      jq -n --arg tag "$CI_COMMIT_TAG" --arg desc "$changes" --argjson links "$links" \
+          '{tag_name: $tag, name: $tag, description: $desc, assets: {links: $links}}' \
+        | curl -sS --fail-with-body -H "JOB-TOKEN: $CI_JOB_TOKEN" -H "Content-Type: application/json" \
+            --data @- "$api/releases"
+
+# Users and the deckhouse CI download d8 from here: keep the asset names.
+# Run by hand last, once trdl:release has passed (release:build artifacts live 1 week).
+release:github:
+  stage: deploy
+  needs: ["release:build", "trdl:release"]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+      when: manual
+  variables:
+    GIT_DEPTH: "0"
+    GH_REPO: deckhouse/deckhouse-cli
+    VAULT_AUTH_PATH: fox
+    VAULT_AUTH_ROLE: deckhouse
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: gitlab-access-aud
+  secrets:
+    GH_TOKEN:
+      vault: 6db2f1ee-9b6f-4f4f-8381-2fb43060478a/github/boatswain/BOATSWAIN_GITHUB_TOKEN/token@projects
+      token: $VAULT_ID_TOKEN
+      file: false
+  before_script:
+    - mkdir -p .tools/bin && export PATH="$PWD/.tools/bin:$PATH"
+    - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C .tools/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
+  script:
+    - |
+      # The push mirror brings the tag to GitHub right after it is pushed here.
+      for i in $(seq 30); do
+        # For an annotated tag, the ^{} line (last) holds its commit.
+        sha="$(git ls-remote "https://github.com/$GH_REPO.git" "refs/tags/$CI_COMMIT_TAG" "refs/tags/$CI_COMMIT_TAG^{}" | tail -n1 | cut -f1)"
+        [ -n "$sha" ] && break
+        echo "Waiting for the mirror to push $CI_COMMIT_TAG to GitHub ($i/30)..."
+        sleep 60
+      done
+      [ "$sha" = "$CI_COMMIT_SHA" ] || { echo "GitHub $CI_COMMIT_TAG is at '$sha', expected $CI_COMMIT_SHA: check the mirror" >&2; exit 1; }
+    - |
+      # Same layout as GitHub's generated notes, without service commits and links to internal MRs.
+      git fetch --tags --quiet origin
+      prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "${CI_COMMIT_TAG}^" 2>/dev/null || true)"
+      NOTES="## What's Changed"$'\n'"$(git log --no-merges --format='* %s' ${prev:+"${prev}.."}"$CI_COMMIT_TAG" \
+        | grep -v '^\* Signed release channels' | sed -E 's/ \(![0-9]+\)$//')" || true
+      if [ -n "$prev" ]; then
+        NOTES+=$'\n\n'"**Full Changelog**: https://github.com/$GH_REPO/compare/$prev...$CI_COMMIT_TAG"
+      fi
+    - |
+      # GitHub makes every new release Latest; a patch to an older line must not take it.
+      newest="$(git tag -l --sort=v:refname 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | tail -n1)"
+      latest=false; [ "$CI_COMMIT_TAG" = "$newest" ] && latest=true
+      gh release create "$CI_COMMIT_TAG" --verify-tag --latest="$latest" --title "$CI_COMMIT_TAG" --notes "$NOTES" dist/*/*.tar.gz* \
+        || gh release upload "$CI_COMMIT_TAG" --clobber dist/*/*.tar.gz*
+
+# --- trdl ---------------------------------------------------------------------
+
+.trdl:
+  stage: deploy
+  needs: []
+  interruptible: false
+  resource_group: trdl
+  timeout: 7h # trdl.sh keeps retrying for up to 6h (needs curl and jq, both on the runner hosts)
+
+trdl:release:
+  extends: [.trdl, .on_release_tag]
+  script:
+    - bash .gitlab/scripts/trdl.sh release "$CI_COMMIT_TAG"
+
+trdl:publish:
+  extends: .trdl
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"
+      changes:
+        - trdl_channels.yaml
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"
+      when: manual
+      allow_failure: true
+  script:
+    - bash .gitlab/scripts/trdl.sh publish
