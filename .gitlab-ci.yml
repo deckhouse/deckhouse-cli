@@ -10,8 +10,8 @@
 #   TRDL_VAULT_ADDR         trdl server (protected, masked)
 #   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
 #   TRDL_VAULT_SECRET_ID    trdl approle (protected, masked)
+#   GH_TOKEN                release:github: GitHub token of deckhouse-BOaTswain (protected, masked and hidden)
 # Protected variables reach tag pipelines only when the v* tags are protected.
-# The GitHub token comes from Vault (role deckhouse).
 #
 # Pipeline schedule (Build -> Pipeline schedules): trdl-build-check, "0 7 * * 1" on main.
 
@@ -163,27 +163,16 @@ release:gitlab:
             --data @- "$api/releases"
 
 # Users and the deckhouse CI download d8 from here: keep the asset names.
-# Run by hand last, once trdl:release has passed (release:build artifacts live 1 week).
+# Runs last, once trdl:release has passed: publishes only what trdl accepted the signature for.
 release:github:
+  extends: .on_release_tag
   stage: deploy
   needs: ["release:build", "trdl:release"]
   interruptible: false
-  rules:
-    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
-      when: manual
   variables:
     GIT_DEPTH: "0"
     GH_REPO: deckhouse/deckhouse-cli
-    VAULT_AUTH_PATH: fox
-    VAULT_AUTH_ROLE: deckhouse
-  id_tokens:
-    VAULT_ID_TOKEN:
-      aud: gitlab-access-aud
-  secrets:
-    GH_TOKEN:
-      vault: 6db2f1ee-9b6f-4f4f-8381-2fb43060478a/github/boatswain/BOATSWAIN_GITHUB_TOKEN/token@projects
-      token: $VAULT_ID_TOKEN
-      file: false
+  # GH_TOKEN: project CI/CD variable (protected, masked and hidden)
   before_script:
     - mkdir -p .tools/bin && export PATH="$PWD/.tools/bin:$PATH"
     - curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" | tar -xz -C .tools/bin --strip-components=2 "gh_${GH_VERSION}_linux_amd64/bin/gh"
