@@ -1650,7 +1650,7 @@ func TestLinuxMountedPlanEscapeHelper(t *testing.T) {
 	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
 
 	mount := func() error {
-		return bindMountForTest(sourcePath, targetPath)
+		return bindMountForTest(t, sourcePath, targetPath)
 	}
 
 	var err error
@@ -1737,11 +1737,22 @@ func matchingOutsideMountFixture(t *testing.T, root string, regularFile bool) (s
 	return source, target
 }
 
-func bindMountForTest(source, target string) error {
+func bindMountForTest(t *testing.T, source, target string) error {
+	t.Helper()
+
 	output, err := exec.Command("mount", "--bind", source, target).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mount --bind: %w: %s", err, output)
 	}
+
+	// The TempDir cleanup cannot unlink a mount point (EBUSY), so detach the
+	// bind mount first: cleanups run last-in first-out, and the TempDir one
+	// was registered before this mount.
+	t.Cleanup(func() {
+		if output, err := exec.Command("umount", target).CombinedOutput(); err != nil {
+			t.Errorf("umount %s: %v: %s", target, err, output)
+		}
+	})
 
 	return nil
 }

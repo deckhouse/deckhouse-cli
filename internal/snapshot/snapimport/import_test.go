@@ -1409,7 +1409,7 @@ func TestLinuxMountedRunEscapeHelper(t *testing.T) {
 	root := buildTwoLevelArchive(t)
 	sourcePath, targetPath := matchingOutsideMountFixture(t, root, strings.HasSuffix(scenario, "regular-file"))
 
-	if err := bindMountForTest(sourcePath, targetPath); err != nil {
+	if err := bindMountForTest(t, sourcePath, targetPath); err != nil {
 		fmt.Printf("mount namespace unavailable: %v\n", err)
 
 		return
