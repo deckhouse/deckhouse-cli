@@ -101,7 +101,9 @@ type VerifiedFile struct {
 // NodeChecksum (the child's content) and ChildrenChecksum (the child's own direct children)
 // makes a single ChildrenChecksum comparison at a node cover only that node's direct children;
 // full-tree authentication requires verifying every node's own commitment (see
-// snapimport.verifyCommitmentTree / archive.VerifyNodeWithOptions applied recursively).
+// snapimport.verifyCommitmentTree / archive.VerifyNodeWithOptions applied recursively). From
+// SnapshotFormatVersionChildMetadata onward the record also carries the child's
+// MetadataChecksum, which extends that authentication to every child's snapshot.yaml.
 type ChildCommitment struct {
 	APIVersion       string
 	Kind             string
@@ -110,6 +112,44 @@ type ChildCommitment struct {
 	UID              string
 	NodeChecksum     NodeChecksum
 	ChildrenChecksum NodeChecksum
+	// MetadataChecksum is the child's recorded MetadataChecksum; the zero value stands for a
+	// child that has none (a legacy version-zero snapshot.yaml). The commitment trusts it as
+	// recorded, so the caller validates the child's own envelope first (computeNodeChildrenChecksum
+	// does, through UnmarshalSnapshotYAML). Only the SnapshotFormatVersionChildMetadata encoding
+	// hashes it.
+	MetadataChecksum NodeChecksum
+	// FormatVersion is the child's format version. It is not hashed, because the child's
+	// MetadataChecksum covers it; a SnapshotFormatVersionChildMetadata parent requires it to be
+	// SnapshotFormatVersionChildMetadata or later.
+	FormatVersion int
+}
+
+// ChildCommitmentOf returns the commitment a parent records for the child described by sy,
+// every field filled in. It fails with ErrInvalidSnapshotYAML when sy carries no
+// ChildrenChecksum; a missing MetadataChecksum is left zero for ComputeChildrenChecksumAt to
+// judge by the parent's version.
+func ChildCommitmentOf(sy SnapshotYAML) (ChildCommitment, error) {
+	if sy.ChildrenChecksum == nil {
+		return ChildCommitment{}, fmt.Errorf("%s/%s has no authenticated children commitment: %w",
+			sy.Kind, sy.Name, ErrInvalidSnapshotYAML)
+	}
+
+	commitment := ChildCommitment{
+		APIVersion:       sy.APIVersion,
+		Kind:             sy.Kind,
+		Name:             sy.Name,
+		Namespace:        sy.Namespace,
+		UID:              sy.UID,
+		NodeChecksum:     sy.Checksum,
+		ChildrenChecksum: *sy.ChildrenChecksum,
+		FormatVersion:    sy.FormatVersion,
+	}
+
+	if sy.MetadataChecksum != nil {
+		commitment.MetadataChecksum = *sy.MetadataChecksum
+	}
+
+	return commitment, nil
 }
 
 // AuthenticatedReadStats reports chunk authentication performed while serving Read and ReadAt.
@@ -968,7 +1008,8 @@ func copyContext(ctx context.Context, writer io.Writer, reader io.Reader) error 
 }
 
 // EmptyChildrenChecksum is the canonical ChildrenChecksum committed by a node with no direct
-// children (a leaf, or an aggregator whose snapshots/ directory is absent or empty).
+// children (a leaf, or an aggregator whose snapshots/ directory is absent or empty). It is the
+// same at every format version: with no child records the encodings do not differ.
 func EmptyChildrenChecksum() NodeChecksum {
 	checksum, err := ComputeChildrenChecksum(nil)
 	if err != nil {
@@ -979,13 +1020,48 @@ func EmptyChildrenChecksum() NodeChecksum {
 	return checksum
 }
 
-// ComputeChildrenChecksum computes the canonical authenticated digest committing to an exact
-// set of direct-child identities and digests. It is deterministic regardless of input order:
-// commitments are canonicalized by sorting on the full
-// (apiVersion, kind, namespace, name, uid) identity tuple before hashing. It rejects more than
-// maxDirectChildren commitments, any commitment with an incomplete identity or malformed
-// checksum, and duplicate identities (ErrInvalidSnapshotYAML).
+// ComputeChildrenChecksum computes the digest committing to an exact set of direct children for
+// a parent at SnapshotFormatVersionCurrent (see ComputeChildrenChecksumAt).
 func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error) {
+	return ComputeChildrenChecksumAt(SnapshotFormatVersionCurrent, commitments)
+}
+
+// ComputeChildrenChecksumAt computes the canonical authenticated digest committing to an exact
+// set of direct-child identities and digests for a parent at formatVersion. It is deterministic
+// regardless of input order: commitments are canonicalized by sorting on the full
+// (apiVersion, kind, namespace, name, uid) identity tuple before hashing. The hash input is the
+// domain string "d8-snapshot-children-checksum-v1" and a zero byte, the decimal child count,
+// then for every child its apiVersion, kind, namespace, name, uid, checksum hex and
+// childrenChecksum hex and, at SnapshotFormatVersionChildMetadata, its metadataChecksum hex as
+// the eighth and last field, every string prefixed with its byte length as a big-endian uint64.
+//
+// The domain string is the same at every version. The encodings still never share a hash input
+// for a non-empty child set: the count is hashed first, and N children are 7N length-prefixed
+// fields in one encoding and 8N in the other, so a commitment recorded at one version cannot be
+// replayed at another; the empty set commits to EmptyChildrenChecksum at every version.
+//
+// At SnapshotFormatVersionChildMetadata every child must be at that version or later and carry a
+// well-formed MetadataChecksum (ErrInvalidSnapshotYAML otherwise). The older versions ignore
+// MetadataChecksum and FormatVersion and accept a child at any version. Any other formatVersion
+// fails with ErrUnsupportedSnapshotFormat.
+//
+// It rejects more than maxDirectChildren commitments (ErrTooManyDirectChildren), and any
+// commitment with an incomplete identity or malformed checksum, and duplicate identities
+// (ErrInvalidSnapshotYAML).
+func ComputeChildrenChecksumAt(formatVersion int, commitments []ChildCommitment) (NodeChecksum, error) {
+	var commitsMetadata bool
+
+	switch formatVersion {
+	case SnapshotFormatVersionLegacy,
+		SnapshotFormatVersionAuthenticatedChildren,
+		SnapshotFormatVersionPayloadSizes:
+	case SnapshotFormatVersionChildMetadata:
+		commitsMetadata = true
+	default:
+		return NodeChecksum{}, fmt.Errorf("children checksum at format version %d: %w",
+			formatVersion, ErrUnsupportedSnapshotFormat)
+	}
+
 	if len(commitments) > maxDirectChildren {
 		return NodeChecksum{}, fmt.Errorf("%d direct children exceeds bound %d: %w",
 			len(commitments), maxDirectChildren, ErrTooManyDirectChildren)
@@ -1008,6 +1084,21 @@ func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error
 
 		if err := validateChecksum(record.ChildrenChecksum); err != nil {
 			return NodeChecksum{}, fmt.Errorf("child %s/%s children checksum: %w", record.Kind, record.Name, err)
+		}
+
+		if !commitsMetadata {
+			continue
+		}
+
+		if record.FormatVersion < SnapshotFormatVersionChildMetadata {
+			return NodeChecksum{}, fmt.Errorf(
+				"child %s/%s is at format version %d, a parent at version %d requires %d or later: %w",
+				record.Kind, record.Name, record.FormatVersion, formatVersion,
+				SnapshotFormatVersionChildMetadata, ErrInvalidSnapshotYAML)
+		}
+
+		if err := validateChecksum(record.MetadataChecksum); err != nil {
+			return NodeChecksum{}, fmt.Errorf("child %s/%s metadata checksum: %w", record.Kind, record.Name, err)
 		}
 	}
 
@@ -1034,6 +1125,10 @@ func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error
 		writeLengthPrefixed(hash, record.UID)
 		writeLengthPrefixed(hash, record.NodeChecksum.Hex)
 		writeLengthPrefixed(hash, record.ChildrenChecksum.Hex)
+
+		if commitsMetadata {
+			writeLengthPrefixed(hash, record.MetadataChecksum.Hex)
+		}
 	}
 
 	hexString := fmt.Sprintf("%x", hash.Sum(nil))
@@ -1068,12 +1163,12 @@ func ComputeNodeChildrenChecksum(nodeDir string) (NodeChecksum, error) {
 
 	defer func() { _ = source.Close() }()
 
-	return computeNodeChildrenChecksum(source, SnapshotYAMLReadOptions{})
+	return computeNodeChildrenChecksum(source, SnapshotFormatVersionCurrent, SnapshotYAMLReadOptions{})
 }
 
 // ComputeNodeChildrenChecksumRooted computes a commitment through an already pinned source.
 func ComputeNodeChildrenChecksumRooted(source *RootedSource) (NodeChecksum, error) {
-	return computeNodeChildrenChecksum(source, SnapshotYAMLReadOptions{})
+	return computeNodeChildrenChecksum(source, SnapshotFormatVersionCurrent, SnapshotYAMLReadOptions{})
 }
 
 // ComputeNodeChildrenChecksum hashes one node's direct children through the locked rooted view.
@@ -1084,14 +1179,20 @@ func (d *RootedDestination) ComputeNodeChildrenChecksum(nodeDir string) (NodeChe
 	}
 	defer directory.close()
 
-	return computeNodeChildrenChecksum(directory.source, SnapshotYAMLReadOptions{})
+	return computeNodeChildrenChecksum(directory.source, SnapshotFormatVersionCurrent, SnapshotYAMLReadOptions{})
 }
 
 // computeNodeChildrenChecksum enumerates source's snapshots/ directory (its direct children),
 // bounded to maxDirectChildren entries and maxChildrenMetadataBytes of aggregate snapshot.yaml
-// content, and folds each child's identity and digests into a ComputeChildrenChecksum call.
-// A missing snapshots/ directory (a leaf) commits to EmptyChildrenChecksum.
-func computeNodeChildrenChecksum(source archiveDirectory, options SnapshotYAMLReadOptions) (NodeChecksum, error) {
+// content, and folds each child's identity and digests into a ComputeChildrenChecksumAt call for
+// a parent at formatVersion. Every child's snapshot.yaml envelope, its MetadataChecksum
+// included, is validated as it is read, before the parent commits to it. A missing snapshots/
+// directory (a leaf) commits to EmptyChildrenChecksum.
+func computeNodeChildrenChecksum(
+	source archiveDirectory,
+	formatVersion int,
+	options SnapshotYAMLReadOptions,
+) (NodeChecksum, error) {
 	snapshots, err := source.archiveOpenDirectory(SnapshotsDirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1146,23 +1247,15 @@ func computeNodeChildrenChecksum(source archiveDirectory, options SnapshotYAMLRe
 			return NodeChecksum{}, fmt.Errorf("close child %s: %w", childPath, closeErr)
 		}
 
-		if metadata.ChildrenChecksum == nil {
-			return NodeChecksum{}, fmt.Errorf(
-				"child %s has no authenticated children commitment: %w", childPath, ErrInvalidSnapshotYAML)
+		commitment, err := ChildCommitmentOf(metadata)
+		if err != nil {
+			return NodeChecksum{}, fmt.Errorf("child %s: %w", childPath, err)
 		}
 
-		children = append(children, ChildCommitment{
-			APIVersion:       metadata.APIVersion,
-			Kind:             metadata.Kind,
-			Name:             metadata.Name,
-			Namespace:        metadata.Namespace,
-			UID:              metadata.UID,
-			NodeChecksum:     metadata.Checksum,
-			ChildrenChecksum: *metadata.ChildrenChecksum,
-		})
+		children = append(children, commitment)
 	}
 
-	return ComputeChildrenChecksum(children)
+	return ComputeChildrenChecksumAt(formatVersion, children)
 }
 
 // readChildSnapshotYAMLBounded reads and unmarshals one direct child's snapshot.yaml, charging
@@ -1229,7 +1322,8 @@ func VerifyNodeChildrenChecksumRootedWithOptions(source *RootedSource, options S
 	return verifyNodeChildrenChecksum(source, metadata, options)
 }
 
-// verifyNodeChildrenChecksum recomputes source's direct-child commitment and compares it with
+// verifyNodeChildrenChecksum recomputes source's direct-child commitment with the encoding of
+// metadata's own format version, whatever versions the children are at, and compares it with
 // metadata.ChildrenChecksum. Legacy-format (version 0) metadata is exempt: it predates the
 // commitment entirely and is already unauthenticated end-to-end under
 // options.AllowUnauthenticatedLegacy (validateSnapshotEnvelope requires the field be present,
@@ -1239,7 +1333,7 @@ func verifyNodeChildrenChecksum(source archiveDirectory, metadata SnapshotYAML, 
 		return nil
 	}
 
-	computed, err := computeNodeChildrenChecksum(source, options)
+	computed, err := computeNodeChildrenChecksum(source, metadata.FormatVersion, options)
 	if err != nil {
 		return err
 	}
