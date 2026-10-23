@@ -768,9 +768,9 @@ replace (
 	github.com/docker/cli => github.com/docker/cli v25.0.6+incompatible
 	github.com/docker/docker => github.com/docker/docker v25.0.6+incompatible
 	github.com/google/gnostic-models => github.com/google/gnostic-models v0.7.0
-	github.com/hashicorp/vault => flant.internal/deckhouse/stronghold.git/images/stronghold v1.18.6
-	github.com/hashicorp/vault/api => flant.internal/deckhouse/stronghold.git/images/stronghold/api v1.18.6
-	github.com/hashicorp/vault/sdk => flant.internal/deckhouse/stronghold.git/images/stronghold/sdk v1.18.6
+	github.com/hashicorp/vault => flant.internal/deckhouse/stronghold/stronghold.git/images/stronghold v1.18.6
+	github.com/hashicorp/vault/api => flant.internal/deckhouse/stronghold/stronghold.git/images/stronghold/api v1.18.6
+	github.com/hashicorp/vault/sdk => flant.internal/deckhouse/stronghold/stronghold.git/images/stronghold/sdk v1.18.6
 	github.com/jaguilar/vt100 => github.com/tonistiigi/vt100 v0.0.0-20190402012908-ad4c4a574305 // upstream not maintained
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
 	// v1.10+ imports vault/api/cliconfig, missing from the Stronghold vault/api fork, and breaks go mod tidy; d8 never registers this KMS.
