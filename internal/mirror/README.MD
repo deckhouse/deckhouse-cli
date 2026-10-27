@@ -52,7 +52,7 @@ d8 mirror pull <images-bundle-path> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `--since-version` | Minimal Deckhouse release to pull (lower bound, inclusive). Ignored if above current Rock Solid release. Conflicts with `--deckhouse-tag` and `--include-platform` |
+| `--since-version` | Extend platform discovery to older releases, down to this inclusive lower bound. Ignored if equal to or above current Rock Solid. Keeps the latest patch per major.minor and channel snapshots. Conflicts with `--deckhouse-tag`, `--include-platform` and `--proxy-registry` |
 | `--include-platform` | Select platform releases by semver constraint (e.g. `">=1.64 <=1.68"`). Uses the same constraint dialect as `--include-module`. Conflicts with `--deckhouse-tag` and `--since-version`. See [Platform Version Filtering](#platform-version-filtering) |
 | `--deckhouse-tag` | Specific Deckhouse build to pull. Accepts a **release channel name** (`alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts`), a **semver version** (`v1.69.3`), or **any custom tag** (`pr12345`, dev builds). Conflicts with `--since-version` and `--include-platform`. If the registry contains a release channel image for the value, all release channels in the bundle will point to it. See [Release Channel Selection](#release-channel-selection) |
 | `--ignore-suspend` | Mirror even when a release channel the request resolves to is marked suspended upstream. Use with caution. See [Suspended Release Channels](#suspended-release-channels) |
@@ -129,7 +129,7 @@ The `--include-platform` flag accepts a semver constraint expression to pull onl
 
 | Goal | Recommended flag |
 |------|-----------------|
-| Pull all releases from a given minimum upward | `--since-version 1.64.0` |
+| Include releases older than current Rock Solid | `--since-version 1.64.0` |
 | Pull a bounded range (e.g. for an incremental update) | `--include-platform ">=1.64 <=1.68"` |
 | Pull every release of a single minor | `--include-platform "~1.65.0"` |
 | Pin a single exact release (same as `--deckhouse-tag`) | `--include-platform "=v1.65.3"` |
@@ -607,7 +607,7 @@ The same environment variables used by `d8 mirror pull` are also supported:
 
 1. **On a machine with internet access**, download the bundle:
    ```bash
-   # Full pull from a minimum version
+   # Extend the default pull to older platform releases
    d8 mirror pull /tmp/deckhouse-bundle \
      --license $DECKHOUSE_LICENSE_TOKEN \
      --since-version 1.59.0 \
@@ -717,7 +717,7 @@ d8 mirror pull /tmp/bundle --license $LICENSE_TOKEN
 
 ### Version Management
 
-1. **Use `--since-version`:** To pull all releases from a given minimum upward, reducing bundle size relative to a full pull
+1. **Use `--since-version`:** To extend the default range to releases older than current Rock Solid. A value equal to or above Rock Solid leaves the default range unchanged.
 2. **Use `--include-platform`:** To pull a bounded window of releases (e.g. `">=1.64 <=1.68"`) — useful for staged incremental updates where you want to move up a few minors at a time without pulling the entire channel history
 3. **Specific Versions:** Use `--deckhouse-tag` (or `--include-platform "=vX.Y.Z"`) for fully controlled, single-release deployments
 4. **Module Versioning:** Leverage semver constraints in `--include-module` for flexible module version management; `--include-platform` speaks the same dialect
@@ -750,7 +750,7 @@ For each module and package version, the pull additionally fetches release-metad
 
 By default, the platform service discovers releases between the current `rock-solid` channel version (lower bound) and the current `alpha` channel version (upper bound), keeping the highest patch per `(major, minor)`. To narrow this to a single channel, a single version, or a custom build, use `--deckhouse-tag` — see [Release Channel Selection](#release-channel-selection). Suspended channels, the `lts`/CSE special cases, and VEX attestation images are covered there as well.
 
-`--since-version` raises the lower bound above `rock-solid` when the user wants to skip older minors.
+`--since-version` extends discovery to older releases: the lower bound is `MIN(rock-solid, since-version)`, inclusive, and the upper bound remains the current `alpha` version. A value equal to or above `rock-solid` is ignored. Numeric tags still keep only the latest patch per `(major, minor)`, so the exact version named by the flag can be replaced by a newer patch in that line. Channel snapshots within the resulting range are also retained. In an LTS-only registry without `rock-solid` and `alpha`, discovery keeps the LTS snapshot. The flag does not select module, package or security database versions.
 
 `--include-platform` replaces this window with a user-supplied semver constraint, applying the same latest-patch-per-minor and inclusive-anchor rules as module version filtering. Channel snapshots outside the constraint are pruned so the bundle stays internally consistent.
 
