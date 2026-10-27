@@ -74,11 +74,12 @@ const stubPluginContract = `{
 // ("registry.deckhouse.ru/deckhouse/fe") with the following structure:
 //
 //   - root repository (empty path): tags alpha, beta, early-access, stable,
-//     rock-solid, v1.72.10, v1.71.0, v1.70.0, v1.69.0, v1.68.0, pr12345.
+//     rock-solid, v1.72.10, v1.71.0, v1.70.0, v1.69.0, v1.68.0, v1.67.0,
+//     v1.66.0, pr12345.
 //
 //   - "release-channel" repository: tags alpha, beta, early-access, stable,
-//     rock-solid.  Each image carries version.json with the channel's current
-//     version (e.g. alpha → v1.72.10).
+//     rock-solid, plus numeric version tags for each release. Each image
+//     carries version.json with its release version (e.g. alpha → v1.72.10).
 //
 //   - "install" and "install-standalone" repositories: same tags as root.
 //
@@ -102,6 +103,10 @@ func NewRegistryClientStub() localreg.Client {
 		reg.MustAddImage("release-channel", version, img)
 	}
 
+	for _, version := range []string{"v1.67.0", "v1.66.0"} {
+		reg.MustAddImage("release-channel", version, releaseChannelImage(version))
+	}
+
 	// ---- root-level and installer repositories ----
 	rootTags := []struct {
 		tag     string
@@ -117,6 +122,8 @@ func NewRegistryClientStub() localreg.Client {
 		{"v1.70.0", "v1.70.0"},
 		{"v1.69.0", "v1.69.0"},
 		{"v1.68.0", "v1.68.0"},
+		{"v1.67.0", "v1.67.0"},
+		{"v1.66.0", "v1.66.0"},
 		{"pr12345", "v1.72.10"}, // custom non-semver tag
 	}
 
