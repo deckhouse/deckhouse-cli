@@ -943,13 +943,23 @@ func (svc *Service) getReleaseChannelInfoFromRegistry(ctx context.Context, relea
 		return releaseChannelInfo{}, fmt.Errorf("cannot get %s release channel version.json: %w", releaseChannel, err)
 	}
 
-	ver, err := semver.NewVersion(meta.Version)
+	channelVersion, err := semver.NewVersion(meta.Version)
 	if err != nil {
 		return releaseChannelInfo{}, fmt.Errorf("release channel version is not semver %q: %w", meta.Version, err)
 	}
 
 	if meta.Suspend && !svc.options.IgnoreSuspend {
-		return releaseChannelInfo{version: ver, suspended: true}, nil
+		return releaseChannelInfo{version: channelVersion, suspended: true}, nil
+	}
+
+	includePlatformRange, hasIncludePlatformRange :=
+		svc.options.IncludeConstraint.(*modules.SemanticVersionConstraint)
+
+	if hasIncludePlatformRange {
+		channelVersionIsInRange := includePlatformRange.Match(channelVersion)
+		if !channelVersionIsInRange {
+			return releaseChannelInfo{version: channelVersion}, nil
+		}
 	}
 
 	digest, err := image.Digest()
@@ -968,7 +978,7 @@ func (svc *Service) getReleaseChannelInfoFromRegistry(ctx context.Context, relea
 	// Just record in downloadList for later pull
 	svc.downloadList.DeckhouseReleaseChannel[imageMeta.GetTagReference()] = puller.NewImageMeta(meta.Version, imageMeta.GetTagReference(), &digest)
 
-	return releaseChannelInfo{version: ver}, nil
+	return releaseChannelInfo{version: channelVersion}, nil
 }
 
 func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []string) error {
