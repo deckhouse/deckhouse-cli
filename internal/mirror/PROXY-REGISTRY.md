@@ -207,7 +207,7 @@ The reason this works: every operation other than the three `ListTags` calls is 
 | `--no-modules` is set | `--include-module` is **not** required |
 | `--exclude-module` | Honoured (subtracts from the include list) |
 | `--deckhouse-tag` | **Conflict**: a single pinned tag is already a direct check; do not combine with `--proxy-registry` |
-| `--since-version` | **Conflict**: `--since-version` has no upper bound and the probe cannot terminate. Use `--include-platform` with an explicit range instead |
+| `--since-version` | **Conflict**: requires channel-based discovery with registry tag listings. Use `--include-platform` with an explicit lower bound instead |
 | `--dry-run` | Honoured — runs the probe and prints the plan without downloading any blobs |
 
 ---

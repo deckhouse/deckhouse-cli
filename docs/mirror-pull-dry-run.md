@@ -77,14 +77,16 @@ d8 mirror pull --dry-run /tmp/bundle \
 This resolves platform images, installer, security databases, and all modules.
 No blobs are downloaded; the bundle directory stays empty.
 
-### Since a minimum version (channel-based pull)
+### Include releases older than Rock Solid
 
 ```bash
 d8 mirror pull --dry-run /tmp/bundle \
   --source registry.deckhouse.io/deckhouse/fe \
   --license <your-token> \
-  --since-version 1.68.0
+  --since-version 1.67.0
 ```
+
+Default discovery spans current Rock Solid through Alpha, inclusively. `--since-version` extends this range only when the requested version is older than Rock Solid. The lower bound is `MIN(rock-solid, since-version)`; equal or newer values leave the default versions and channels unchanged. Numeric tags retain the latest patch per major.minor together with channel snapshots in the range, so the exact patch named by `--since-version` is not pinned.
 
 ### Module whitelist
 
@@ -119,8 +121,7 @@ access, no credentials needed. The stub registry is activated via:
 STUB_REGISTRY_CLIENT=true
 ```
 
-The stub seeds versions `v1.68.0`–`v1.72.10`, channels `alpha`/`beta`/`early-access`/
-`stable`/`rock-solid`, and several module tags.
+The stub seeds versions `v1.66.0` through `v1.72.10` and channels `alpha`/`beta`/`early-access`/`stable`/`rock-solid`. Rock Solid points to `v1.68.0`, so the default selection excludes `v1.66.0` and `v1.67.0`. With `--since-version 1.67.0`, the plan adds `v1.67.0` but still excludes `v1.66.0`.
 
 #### Run all dry-run unit tests
 
