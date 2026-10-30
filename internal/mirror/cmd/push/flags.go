@@ -55,7 +55,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&TempDir,
 		"tmp-dir",
 		"",
-		"Path to a directory for temporary files, <bundle>/.tmp by default. Push creates a "+workDirName+" subdirectory in it, unpacks the bundle there and removes it on exit, on failure too; nothing else in the directory is touched. Push refuses to start if "+workDirName+" already exists. Make sure there is enough free disk space to accommodate the entire unpacked bundle.",
+		"Path to a directory for temporary files, <bundle>/.tmp by default. Push creates a "+workDirName+" subdirectory in it, unpacks the bundle there and removes it on exit, on failure too; nothing else in the directory is touched. Push refuses to start if "+workDirName+" already exists. A directory that does not exist is created and left in place, empty, after the run. Make sure there is enough free disk space to accommodate the entire unpacked bundle.",
 	)
 	flagSet.StringVar(
 		&ModulesPathSuffix,

@@ -24,7 +24,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	ggcrregistry "github.com/google/go-containerregistry/pkg/registry"
@@ -175,15 +178,15 @@ func headImage(ref string) error {
 func TestPush_TempDirContract(t *testing.T) {
 	// setup builds a bundle inside a user temp dir that also holds foreign data,
 	// the way --tmp-dir /llm/ held both the bundle and a database.
-	setup := func(t *testing.T, failManifests bool) (host, tmpDir, bundleDir, foreignFile string) {
+	setup := func(t *testing.T, wrap func(http.Handler) http.Handler) (host, tmpDir, bundleDir, foreignFile string) {
 		t.Helper()
 
 		resetPushState()
 		t.Cleanup(resetPushState)
 
-		var handler http.Handler = ggcrregistry.New()
-		if failManifests {
-			handler = rejectManifestUploads(handler)
+		handler := ggcrregistry.New()
+		if wrap != nil {
+			handler = wrap(handler)
 		}
 
 		srv := httptest.NewServer(handler)
@@ -203,7 +206,7 @@ func TestPush_TempDirContract(t *testing.T) {
 	}
 
 	t.Run("success removes only the work dir", func(t *testing.T) {
-		host, tmpDir, bundleDir, foreignFile := setup(t, false)
+		host, tmpDir, bundleDir, foreignFile := setup(t, nil)
 
 		TempDir = tmpDir
 		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
@@ -218,7 +221,7 @@ func TestPush_TempDirContract(t *testing.T) {
 	})
 
 	t.Run("failure removes only the work dir", func(t *testing.T) {
-		host, tmpDir, bundleDir, foreignFile := setup(t, true)
+		host, tmpDir, bundleDir, foreignFile := setup(t, rejectManifestUploads)
 
 		TempDir = tmpDir
 		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
@@ -233,7 +236,7 @@ func TestPush_TempDirContract(t *testing.T) {
 	})
 
 	t.Run("existing work dir stops push and is left intact", func(t *testing.T) {
-		host, tmpDir, bundleDir, foreignFile := setup(t, false)
+		host, tmpDir, bundleDir, foreignFile := setup(t, nil)
 		leftover := filepath.Join(tmpDir, workDirName, "leftover")
 		require.NoError(t, os.MkdirAll(filepath.Dir(leftover), 0o755))
 		require.NoError(t, os.WriteFile(leftover, []byte("keep"), 0o644))
@@ -245,13 +248,14 @@ func TestPush_TempDirContract(t *testing.T) {
 		err := NewPusher().Execute()
 		require.ErrorContains(t, err, filepath.Join(tmpDir, workDirName)+" already exists and is not empty")
 
+		assert.Error(t, headImage(host+"/deckhouse/ee:d8WriteCheck"), "the registry must not be contacted")
 		assert.Error(t, headImage(host+"/deckhouse/ee:v1.76.2"), "nothing must be pushed")
 		assert.FileExists(t, leftover)
 		assert.FileExists(t, foreignFile)
 	})
 
 	t.Run("default temp dir is removed once empty", func(t *testing.T) {
-		host, _, bundleDir, _ := setup(t, false)
+		host, _, bundleDir, _ := setup(t, nil)
 
 		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
 		Insecure = true
@@ -261,18 +265,94 @@ func TestPush_TempDirContract(t *testing.T) {
 		assert.NoDirExists(t, filepath.Join(bundleDir, ".tmp"))
 		assert.FileExists(t, filepath.Join(bundleDir, "platform.tar"))
 	})
+
+	// Both cancellations exit 0, like a graceful Ctrl+C, and still clean up.
+	cancelTests := []struct {
+		name      string
+		interrupt func(*http.Request) bool
+		pushed    bool
+	}{
+		{
+			name:      "cancellation during the pre-check removes only the work dir",
+			interrupt: func(*http.Request) bool { return true },
+		},
+		{
+			name: "cancellation during the push removes only the work dir",
+			interrupt: func(r *http.Request) bool {
+				return r.Method == http.MethodPut && isLayoutManifestUpload(r)
+			},
+		},
+	}
+
+	for _, tt := range cancelTests {
+		t.Run(tt.name, func(t *testing.T) {
+			host, tmpDir, bundleDir, foreignFile := setup(t, func(next http.Handler) http.Handler {
+				return interruptOn(t, tt.interrupt, next)
+			})
+
+			TempDir = tmpDir
+			require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
+			Insecure = true
+
+			require.NoError(t, NewPusher().Execute())
+
+			assert.Error(t, headImage(host+"/deckhouse/ee:v1.76.2"), "the interrupted manifest must not land")
+			assert.NoDirExists(t, filepath.Join(tmpDir, workDirName))
+			assert.FileExists(t, foreignFile)
+			assert.FileExists(t, filepath.Join(bundleDir, "platform.tar"))
+		})
+	}
+}
+
+// isLayoutManifestUpload reports a manifest upload of the pushed bundle, as
+// opposed to the write probe of the registry access check.
+func isLayoutManifestUpload(r *http.Request) bool {
+	return strings.Contains(r.URL.Path, "/manifests/") && !strings.HasSuffix(r.URL.Path, "/d8WriteCheck")
 }
 
 // rejectManifestUploads fails every manifest upload except the write probe of
 // the registry access check, so push fails mid-run, after the work dir is populated.
 func rejectManifestUploads(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/manifests/") &&
-			!strings.HasSuffix(r.URL.Path, "/d8WriteCheck") {
+		if r.Method == http.MethodPut && isLayoutManifestUpload(r) {
 			http.Error(w, "manifest uploads are disabled", http.StatusBadRequest)
 			return
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+// interruptOn sends SIGINT to the test process on the first request that
+// matches, the way Ctrl+C does, and fails that request once the client gives it
+// up or after a short delay, whichever comes first: not every request is bound
+// to the push context, and push then sees the cancellation on its next step.
+// Execute is running while a request is served, so its signal handler is set
+// and the signal never reaches the default action.
+func interruptOn(t *testing.T, match func(*http.Request) bool, next http.Handler) http.Handler {
+	t.Helper()
+
+	var once sync.Once
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fired := false
+		if match(r) {
+			once.Do(func() {
+				fired = true
+				require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGINT))
+			})
+		}
+
+		if !fired {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+
+		http.Error(w, "interrupted", http.StatusServiceUnavailable)
 	})
 }

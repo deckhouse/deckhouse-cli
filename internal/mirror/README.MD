@@ -556,7 +556,7 @@ d8 mirror push <registry> --file platform.tar --file module-foo.tar [flags]
 |------|-------------|
 | `--tls-skip-verify` | Disable TLS certificate validation |
 | `--insecure` | Interact with registries over HTTP |
-| `--tmp-dir` | Directory for temporary files, `<bundle>/.tmp` by default. Push works only in its `.d8-mirror-tmp` subdirectory and removes it on exit, on failure too; nothing else in the directory is touched. Push refuses to start if `.d8-mirror-tmp` already exists. Ensure sufficient disk space for the entire unpacked bundle |
+| `--tmp-dir` | Directory for temporary files, `<bundle>/.tmp` by default. Push works only in its `.d8-mirror-tmp` subdirectory and removes it on exit, on failure too; nothing else in the directory is touched. Push refuses to start if `.d8-mirror-tmp` already exists. A `--tmp-dir` that does not exist is created and left in place, empty, after the run. Ensure sufficient disk space for the entire unpacked bundle |
 
 #### Package Selection
 

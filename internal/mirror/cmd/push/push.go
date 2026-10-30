@@ -51,8 +51,8 @@ import (
 //     from the registry argument, plus Packages, ImagesBundlePath, and TempDir
 //     with removeEmptyTempDir when --tmp-dir is not set, via resolvePackages.
 //   - RunE (NewPusher().Execute()) reads them to build the push params and the
-//     push service options. It creates the work dir inside TempDir and removes
-//     it before returning (see createWorkDir).
+//     push service options. It creates the work dir inside TempDir before the
+//     registry pre-check and removes it before returning (see createWorkDir).
 //
 // The remaining vars are bound to flags by addFlags before Run.
 var (
@@ -198,7 +198,7 @@ func NewPusher() *Pusher {
 }
 
 // Execute runs the full push process
-func (p *Pusher) Execute() error {
+func (p *Pusher) Execute() (err error) {
 	summaryui.ConfigureColor()
 
 	p.logger.Infof("d8 version: %s", version.Version)
@@ -209,7 +209,33 @@ func (p *Pusher) Execute() error {
 		p.pushParams.RegistryAuth = authn.FromConfig(authn.AuthConfig{Username: RegistryUsername, Password: RegistryPassword})
 	}
 
-	if err := p.validateRegistryAccess(); err != nil {
+	// Set up graceful cancellation on Ctrl+C before the work dir is created, so
+	// a signal unwinds through the deferred cleanup instead of killing the
+	// process with the work dir left.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// The work dir is claimed before the registry is contacted, so a leftover
+	// one stops push without any network call or write to the registry.
+	workDir, cleanupWorkDir, err := createWorkDir(TempDir, removeEmptyTempDir)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		err = errors.Join(err, cleanupWorkDir())
+	}()
+
+	p.pushParams.WorkingDir = workDir
+
+	if err := p.validateRegistryAccess(ctx); err != nil {
+		// Nothing is pushed yet, so a cancelled pre-check is a clean exit,
+		// like a cancelled push.
+		if errors.Is(err, context.Canceled) {
+			p.logger.WarnLn("Operation cancelled by user")
+			return nil
+		}
+
 		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
@@ -217,7 +243,7 @@ func (p *Pusher) Execute() error {
 		return err
 	}
 
-	if err := p.executeNewPush(); err != nil {
+	if err := p.executeNewPush(ctx); err != nil {
 		if diag := errdetect.Diagnose(err); diag != nil {
 			return diag
 		}
@@ -248,24 +274,9 @@ func (p *Pusher) warnNonDefaultModulesPath() {
 // This service expects the bundle to have the exact same structure as the registry:
 // - Each OCI layout's relative path becomes its registry segment
 // - Works with unified bundles where pull saved the structure as-is
-func (p *Pusher) executeNewPush() (err error) {
-	// Set up graceful cancellation on Ctrl+C
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	// Created after the signal handler is set up, so Ctrl+C unwinds through the
-	// deferred cleanup instead of killing the process with the work dir left.
-	workDir, cleanupWorkDir, err := createWorkDir(TempDir, removeEmptyTempDir)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = errors.Join(err, cleanupWorkDir())
-	}()
-
-	p.pushParams.WorkingDir = workDir
-
+//
+// ctx is cancelled on SIGINT/SIGTERM; p.pushParams.WorkingDir must already exist.
+func (p *Pusher) executeNewPush(ctx context.Context) error {
 	logger := dkplog.NewNop()
 
 	if log.DebugLogLevel() >= 3 {
@@ -342,7 +353,7 @@ func classifyPushOutcome(summary *mirror.PushSummary, err error) error {
 }
 
 // validateRegistryAccess validates access to the registry
-func (p *Pusher) validateRegistryAccess() error {
+func (p *Pusher) validateRegistryAccess(parent context.Context) error {
 	p.logger.InfoLn("Validating registry access")
 
 	// Add timeout to prevent hanging on slow/unreachable registries
@@ -351,10 +362,16 @@ func (p *Pusher) validateRegistryAccess() error {
 		timeout = MirrorTimeout
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	err := validateRegistryAccess(ctx, p.pushParams)
+
+	// A cancellation is never bypassed: it stops the run, not just the check.
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
+
 	if err != nil && os.Getenv("MIRROR_BYPASS_ACCESS_CHECKS") != "1" {
 		return fmt.Errorf("registry credentials validation failure: %w", err)
 	}
