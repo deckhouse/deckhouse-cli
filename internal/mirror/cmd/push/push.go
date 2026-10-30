@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -49,15 +48,20 @@ import (
 // Shared state passed between the command's hooks, relying on cobra's
 // PreRun -> Run -> PostRun ordering:
 //   - PreRunE (parseAndValidateParameters) writes RegistryHost and RegistryPath
-//     from the registry argument, plus Packages, TempDir and ImagesBundlePath
-//     via resolvePackages.
+//     from the registry argument, plus Packages, ImagesBundlePath, and TempDir
+//     with removeEmptyTempDir when --tmp-dir is not set, via resolvePackages.
 //   - RunE (NewPusher().Execute()) reads them to build the push params and the
-//     push service options.
-//   - PostRunE reads TempDir to remove the temporary directory.
+//     push service options. It creates the work dir inside TempDir and removes
+//     it before returning (see createWorkDir).
 //
 // The remaining vars are bound to flags by addFlags before Run.
 var (
+	// TempDir is the parent of the work dir, never cleaned itself: it may be
+	// any user directory, including "/".
 	TempDir string
+	// removeEmptyTempDir is set when TempDir is the default one push picked,
+	// which may then be removed once it is empty.
+	removeEmptyTempDir bool
 
 	RegistryHost      string
 	RegistryPath      string
@@ -121,9 +125,6 @@ func NewCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return NewPusher().Execute()
 		},
-		PostRunE: func(_ *cobra.Command, _ []string) error {
-			return os.RemoveAll(TempDir)
-		},
 	}
 
 	addFlags(pushCmd.Flags())
@@ -151,7 +152,6 @@ func buildPushParams(logger params.Logger) *params.PushParams {
 			RegistryPath:        RegistryPath,
 			ModulesPathSuffix:   ModulesPathSuffix,
 			BundleDir:           ImagesBundlePath,
-			WorkingDir:          filepath.Join(TempDir, "push"),
 		},
 
 		Parallelism: params.ParallelismConfig{
@@ -248,10 +248,23 @@ func (p *Pusher) warnNonDefaultModulesPath() {
 // This service expects the bundle to have the exact same structure as the registry:
 // - Each OCI layout's relative path becomes its registry segment
 // - Works with unified bundles where pull saved the structure as-is
-func (p *Pusher) executeNewPush() error {
+func (p *Pusher) executeNewPush() (err error) {
 	// Set up graceful cancellation on Ctrl+C
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Created after the signal handler is set up, so Ctrl+C unwinds through the
+	// deferred cleanup instead of killing the process with the work dir left.
+	workDir, cleanupWorkDir, err := createWorkDir(TempDir, removeEmptyTempDir)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		err = errors.Join(err, cleanupWorkDir())
+	}()
+
+	p.pushParams.WorkingDir = workDir
 
 	logger := dkplog.NewNop()
 

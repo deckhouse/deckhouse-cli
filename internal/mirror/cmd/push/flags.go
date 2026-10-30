@@ -55,7 +55,7 @@ func addFlags(flagSet *pflag.FlagSet) {
 		&TempDir,
 		"tmp-dir",
 		"",
-		"Path to a temporary directory to use for image pulling and pushing. All processing is done in this directory, so make sure there is enough free disk space to accommodate the entire bundle you are downloading;",
+		"Path to a directory for temporary files, <bundle>/.tmp by default. Push creates a "+workDirName+" subdirectory in it, unpacks the bundle there and removes it on exit, on failure too; nothing else in the directory is touched. Push refuses to start if "+workDirName+" already exists. Make sure there is enough free disk space to accommodate the entire unpacked bundle.",
 	)
 	flagSet.StringVar(
 		&ModulesPathSuffix,

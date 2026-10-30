@@ -18,6 +18,7 @@ package push
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path"
@@ -167,4 +168,111 @@ func headImage(ref string) error {
 	_, err = remote.Head(parsed)
 
 	return err
+}
+
+// TestPush_TempDirContract checks that push keeps its temporary files in
+// <tmp-dir>/.d8-mirror-tmp and removes only that directory, whatever the outcome.
+func TestPush_TempDirContract(t *testing.T) {
+	// setup builds a bundle inside a user temp dir that also holds foreign data,
+	// the way --tmp-dir /llm/ held both the bundle and a database.
+	setup := func(t *testing.T, failManifests bool) (host, tmpDir, bundleDir, foreignFile string) {
+		t.Helper()
+
+		resetPushState()
+		t.Cleanup(resetPushState)
+
+		var handler http.Handler = ggcrregistry.New()
+		if failManifests {
+			handler = rejectManifestUploads(handler)
+		}
+
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		host = strings.TrimPrefix(srv.URL, "http://")
+
+		tmpDir = t.TempDir()
+		foreignFile = filepath.Join(tmpDir, "db", "data.db")
+		require.NoError(t, os.MkdirAll(filepath.Dir(foreignFile), 0o755))
+		require.NoError(t, os.WriteFile(foreignFile, []byte("keep"), 0o644))
+
+		bundleDir = filepath.Join(tmpDir, "upload")
+		require.NoError(t, os.Mkdir(bundleDir, 0o755))
+		writeLayoutTar(t, bundleDir, "platform.tar", "", "v1.76.2")
+
+		return host, tmpDir, bundleDir, foreignFile
+	}
+
+	t.Run("success removes only the work dir", func(t *testing.T) {
+		host, tmpDir, bundleDir, foreignFile := setup(t, false)
+
+		TempDir = tmpDir
+		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
+		Insecure = true
+
+		require.NoError(t, NewPusher().Execute())
+
+		assert.NoError(t, headImage(host+"/deckhouse/ee:v1.76.2"))
+		assert.NoDirExists(t, filepath.Join(tmpDir, workDirName))
+		assert.FileExists(t, foreignFile)
+		assert.FileExists(t, filepath.Join(bundleDir, "platform.tar"))
+	})
+
+	t.Run("failure removes only the work dir", func(t *testing.T) {
+		host, tmpDir, bundleDir, foreignFile := setup(t, true)
+
+		TempDir = tmpDir
+		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
+		Insecure = true
+
+		// Failing past the access check means the work dir was created and used.
+		require.ErrorContains(t, NewPusher().Execute(), "push to registry")
+
+		assert.NoDirExists(t, filepath.Join(tmpDir, workDirName))
+		assert.FileExists(t, foreignFile)
+		assert.FileExists(t, filepath.Join(bundleDir, "platform.tar"))
+	})
+
+	t.Run("existing work dir stops push and is left intact", func(t *testing.T) {
+		host, tmpDir, bundleDir, foreignFile := setup(t, false)
+		leftover := filepath.Join(tmpDir, workDirName, "leftover")
+		require.NoError(t, os.MkdirAll(filepath.Dir(leftover), 0o755))
+		require.NoError(t, os.WriteFile(leftover, []byte("keep"), 0o644))
+
+		TempDir = tmpDir
+		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
+		Insecure = true
+
+		err := NewPusher().Execute()
+		require.ErrorContains(t, err, filepath.Join(tmpDir, workDirName)+" already exists and is not empty")
+
+		assert.Error(t, headImage(host+"/deckhouse/ee:v1.76.2"), "nothing must be pushed")
+		assert.FileExists(t, leftover)
+		assert.FileExists(t, foreignFile)
+	})
+
+	t.Run("default temp dir is removed once empty", func(t *testing.T) {
+		host, _, bundleDir, _ := setup(t, false)
+
+		require.NoError(t, parseAndValidateParameters(nil, []string{bundleDir, host + "/deckhouse/ee"}))
+		Insecure = true
+
+		require.NoError(t, NewPusher().Execute())
+
+		assert.NoDirExists(t, filepath.Join(bundleDir, ".tmp"))
+		assert.FileExists(t, filepath.Join(bundleDir, "platform.tar"))
+	})
+}
+
+// rejectManifestUploads fails every manifest upload except the write probe of
+// the registry access check, so push fails mid-run, after the work dir is populated.
+func rejectManifestUploads(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/manifests/") &&
+			!strings.HasSuffix(r.URL.Path, "/d8WriteCheck") {
+			http.Error(w, "manifest uploads are disabled", http.StatusBadRequest)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

@@ -28,8 +28,6 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/spf13/cobra"
-
-	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 )
 
 func parseAndValidateParameters(_ *cobra.Command, args []string) error {
@@ -75,6 +73,7 @@ func resolvePackages(bundleArg []string) error {
 	// BaseParams.BundleDir, so leaving it set would leak across --file-only runs.
 	ImagesBundlePath = ""
 	Packages = nil
+	removeEmptyTempDir = false
 
 	if len(bundleArg) == 1 {
 		if err := collectBundlePathPackages(bundleArg[0]); err != nil {
@@ -93,10 +92,17 @@ func resolvePackages(bundleArg []string) error {
 	Packages = uniquePaths(Packages)
 
 	if TempDir == "" {
-		TempDir = filepath.Join(filepath.Dir(Packages[0]), ".tmp", mirror.TmpMirrorFolderName)
+		setDefaultTempDir(filepath.Dir(Packages[0]))
 	}
 
 	return nil
+}
+
+// setDefaultTempDir points TempDir at <base>/.tmp. The user did not choose that
+// directory, so push may remove it once nothing is left in it.
+func setDefaultTempDir(base string) {
+	TempDir = filepath.Join(base, ".tmp")
+	removeEmptyTempDir = true
 }
 
 // uniquePaths drops repeated paths and keeps the first occurrence of each, so Packages[0] stays put.
@@ -151,7 +157,7 @@ func collectBundlePathPackages(arg string) error {
 
 		// Default temp dir lives inside the bundle directory, as before.
 		if TempDir == "" {
-			TempDir = filepath.Join(ImagesBundlePath, ".tmp", mirror.TmpMirrorFolderName)
+			setDefaultTempDir(ImagesBundlePath)
 		}
 
 		return nil

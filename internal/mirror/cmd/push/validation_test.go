@@ -23,8 +23,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/deckhouse/deckhouse-cli/internal/mirror"
 )
 
 // resetPushState clears every package-level flag var this file touches.
@@ -36,6 +34,7 @@ func resetPushState() {
 	TLSSkipVerify = false
 	Insecure = false
 	TempDir = ""
+	removeEmptyTempDir = false
 	ModulesPathSuffix = ""
 	Files = nil
 	ImagesBundlePath = ""
@@ -302,7 +301,8 @@ func TestResolvePackages(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, []string{filepath.Join(dir, "platform.tar")}, Packages)
-		assert.Equal(t, filepath.Join(dir, ".tmp", mirror.TmpMirrorFolderName), TempDir)
+		assert.Equal(t, filepath.Join(dir, ".tmp"), TempDir)
+		assert.True(t, removeEmptyTempDir, "push may remove the default temp dir it picked once empty")
 	})
 
 	t.Run("single archive bundle path derives temp dir next to the file", func(t *testing.T) {
@@ -317,7 +317,8 @@ func TestResolvePackages(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, []string{tarFile}, Packages)
-		assert.Equal(t, filepath.Join(dir, ".tmp", mirror.TmpMirrorFolderName), TempDir)
+		assert.Equal(t, filepath.Join(dir, ".tmp"), TempDir)
+		assert.True(t, removeEmptyTempDir, "push may remove the default temp dir it picked once empty")
 	})
 
 	t.Run("--file alone, no bundle path argument", func(t *testing.T) {
@@ -388,6 +389,7 @@ func TestResolvePackages(t *testing.T) {
 		err := resolvePackages([]string{dir})
 		require.NoError(t, err)
 		assert.Equal(t, "/custom/tmp", TempDir)
+		assert.False(t, removeEmptyTempDir, "a user-chosen temp dir must never be removed")
 	})
 }
 
