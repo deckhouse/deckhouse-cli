@@ -36,7 +36,7 @@ require (
 	github.com/werf/3p-helm v0.0.0-20260211143448-0b619e3cc3bf
 	github.com/werf/common-go v0.0.0-20260414103517-0558f83edc6d
 	github.com/werf/logboek v0.7.1
-	github.com/werf/nelm v1.30.5-0.20260918172005-312d2f269472
+	github.com/werf/nelm v1.31.2-0.20261021180502-7d1c80c67c12
 	github.com/werf/werf/v2 v2.79.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0
 	go.uber.org/zap v1.28.0
@@ -96,7 +96,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
 	github.com/cockroachdb/apd/v3 v3.2.1 // indirect
 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be // indirect
-	github.com/deckhouse/elfedit v0.1.1 // indirect
+	github.com/deckhouse/elfedit v0.3.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/digitorus/pkcs7 v0.0.0-20230818184609-3a137a874352 // indirect
 	github.com/digitorus/timestamp v0.0.0-20231217203849-220c5c2851b7 // indirect
@@ -278,7 +278,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
-	github.com/deckhouse/delivery-kit-sdk v1.4.2 // indirect
+	github.com/deckhouse/delivery-kit-sdk v1.4.4 // indirect
 	github.com/deckhouse/virtualization/api v1.12.2 // indirect; must match src/cli
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
@@ -670,8 +670,8 @@ require (
 	github.com/walle/targz v0.0.0-20140417120357-57fe4206da5a // indirect
 	github.com/werf/3p-helm-for-werf-helm v0.0.0-20241217155820-089f92cd5c9d // indirect
 	github.com/werf/copy-recurse v0.3.1 // indirect
-	github.com/werf/kubedog v0.13.1-0.20260912145640-ad1e8a134607 // indirect
-	github.com/werf/kubedog-for-werf-helm v0.0.0-20241217155728-9d45c48b82b6 // indirect
+	github.com/werf/kubedog v0.13.1-0.20261028084433-60827212f828 // indirect
+	github.com/werf/kubedog-for-werf-helm v0.0.0-20261028084224-acddc89799e7 // indirect
 	github.com/werf/lockgate v0.1.1 // indirect
 	github.com/werf/nelm-for-werf-helm v0.0.0-20241217155925-b0e6734d1dbf // indirect
 	github.com/x448/float16 v0.8.4 // indirect
@@ -775,7 +775,7 @@ replace (
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.14
 	// v1.10+ imports vault/api/cliconfig, missing from the Stronghold vault/api fork, and breaks go mod tidy; d8 never registers this KMS.
 	github.com/sigstore/sigstore/pkg/signature/kms/hashivault => github.com/sigstore/sigstore/pkg/signature/kms/hashivault v1.9.5
-	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.79.1-dk.1
+	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.84.1-dk.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0 => github.com/deckhouse/gogost/v5 v5.15.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc => go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0
 )
