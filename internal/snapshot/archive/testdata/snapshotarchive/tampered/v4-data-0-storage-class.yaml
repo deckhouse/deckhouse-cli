@@ -1,0 +1,35 @@
+apiVersion: snapshot.storage.k8s.io/v1
+checksum:
+  algorithm: sha256
+  hex: d7d0fd4cda95f3a51fe7383dcca30c81fc9cca29ed5f143a463d9d5152758e01
+  short: d7d0fd4c
+childrenChecksum:
+  algorithm: sha256
+  hex: 926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701
+  short: 926e8250
+formatVersion: 4
+kind: VolumeSnapshot
+metadataChecksum:
+  algorithm: sha256
+  hex: 7f8de1718337b1dc49055d1f70981ed8580a4a5137f86221b7139e8c75693446
+  short: 7f8de171
+name: data-0
+namespace: my-app
+sourceName: data-0
+uid: 5f6bd1ca-2c1a-4a2f-9f3f-000000000002
+volumes:
+- artifact:
+    apiVersion: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshotContent
+    name: snapcontent-data-0
+  rawSizeBytes: 8192
+  size: 8Ki
+  storageClassName: other-storage-class
+  storedSizeBytes: 8192
+  target:
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    name: data-0
+    namespace: my-app
+    uid: 5f6bd1ca-2c1a-4a2f-9f3f-000000000012
+  volumeMode: Block

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app
+  namespace: my-app
+data:
+  key: "<value & more>"

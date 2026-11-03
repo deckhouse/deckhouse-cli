@@ -46,8 +46,16 @@ const (
 	// SnapshotFormatVersionPayloadSizes adds VolumeInfo.RawSizeBytes/StoredSizeBytes, the
 	// measured on-disk payload footprint (as opposed to Size's nominal restoreSize).
 	SnapshotFormatVersionPayloadSizes = 3
-	// SnapshotFormatVersionCurrent is written by every snapshot.yaml marshal.
-	SnapshotFormatVersionCurrent = SnapshotFormatVersionPayloadSizes
+	// SnapshotFormatVersionChildMetadata makes the direct-child commitment cover every child's
+	// MetadataChecksum as well (see ComputeChildrenChecksumAt), so that a child's formatVersion,
+	// sourceName, sourceObjectRef and volumes entry are authenticated by its parent, and a root at
+	// this version authenticates every snapshot.yaml of its tree. A parent at this version accepts
+	// only children at this version or later. The schema is that of
+	// SnapshotFormatVersionPayloadSizes.
+	SnapshotFormatVersionChildMetadata = 4
+	// SnapshotFormatVersionCurrent is stamped by SealSnapshotYAML, and by MarshalJSON on a
+	// snapshot.yaml that declares no authenticated version.
+	SnapshotFormatVersionCurrent = SnapshotFormatVersionChildMetadata
 )
 
 // sha256HexLen is the length of a hex-encoded SHA-256 digest (32 bytes → 64 hex chars).
@@ -100,7 +108,8 @@ type SnapshotYAMLReadOptions struct {
 // sigs.k8s.io/yaml uses json struct tags for marshaling and unmarshaling.
 type SnapshotYAML struct {
 	// FormatVersion identifies the snapshot.yaml envelope schema. Missing decodes as legacy
-	// version zero, which normal readers reject; writers always stamp SnapshotFormatVersionCurrent.
+	// version zero, which normal readers reject; a new snapshot.yaml is always stamped
+	// SnapshotFormatVersionCurrent (see SealSnapshotYAML and MarshalJSON).
 	FormatVersion int `json:"formatVersion,omitempty"`
 	// APIVersion is the apiVersion of the snapshot CR (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
 	APIVersion string `json:"apiVersion"`
@@ -126,7 +135,9 @@ type SnapshotYAML struct {
 	Checksum NodeChecksum `json:"checksum"`
 	// ChildrenChecksum authenticates the canonical set of this node's direct children: their
 	// identities (apiVersion/kind/name/namespace/uid) and their own Checksum/ChildrenChecksum
-	// digests. A node with no children commits to EmptyChildrenChecksum. It is mandatory on
+	// digests and, from SnapshotFormatVersionChildMetadata onward, their MetadataChecksum. It is
+	// computed with the encoding of this node's own FormatVersion (see ComputeChildrenChecksumAt).
+	// A node with no children commits to EmptyChildrenChecksum. It is mandatory on
 	// every snapshot.yaml (see validateSnapshotEnvelope): local inspection, upload, and
 	// restore all fail closed on an archive that lacks it, and on any archive whose physical
 	// direct-child set does not match the committed one (a "hybrid tree").
@@ -146,10 +157,53 @@ type SnapshotYAML struct {
 
 type snapshotYAMLWire SnapshotYAML
 
-// MarshalJSON stamps the current envelope version and canonical metadata checksum. Both rooted
-// and path-based snapshot.yaml writers use sigs.k8s.io/yaml, which delegates to this method.
+// MarshalJSON encodes the sealed snapshot.yaml (see SealSnapshotYAML). Both rooted and
+// path-based snapshot.yaml writers use sigs.k8s.io/yaml, which delegates to this method.
+//
+// A snapshot.yaml that already declares an authenticated version
+// (SnapshotFormatVersionAuthenticatedChildren or later) keeps it, because its ChildrenChecksum
+// was committed with that version's encoding and restamping it would pair the commitment with
+// another encoding; any other snapshot.yaml, a new one included, is stamped
+// SnapshotFormatVersionCurrent. A snapshot.yaml read from an archive therefore encodes back
+// unchanged.
 func (sy SnapshotYAML) MarshalJSON() ([]byte, error) {
-	sy.FormatVersion = SnapshotFormatVersionCurrent
+	version := SnapshotFormatVersionCurrent
+
+	switch sy.FormatVersion {
+	case SnapshotFormatVersionAuthenticatedChildren,
+		SnapshotFormatVersionPayloadSizes,
+		SnapshotFormatVersionChildMetadata:
+		version = sy.FormatVersion
+	}
+
+	sealed, err := sealSnapshotYAMLAt(sy, version)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := json.Marshal(snapshotYAMLWire(sealed))
+	if err != nil {
+		return nil, fmt.Errorf("marshal versioned snapshot.yaml envelope: %w", err)
+	}
+
+	return data, nil
+}
+
+// SealSnapshotYAML returns sy stamped with SnapshotFormatVersionCurrent, with a nil
+// ChildrenChecksum replaced by EmptyChildrenChecksum, and with MetadataChecksum set to its
+// canonical value: exactly what a writer records for sy. Checksum and ChildrenChecksum must
+// already hold the node's digests, the latter computed at SnapshotFormatVersionCurrent (see
+// ComputeChildrenChecksum).
+func SealSnapshotYAML(sy SnapshotYAML) (SnapshotYAML, error) {
+	return sealSnapshotYAMLAt(sy, SnapshotFormatVersionCurrent)
+}
+
+// sealSnapshotYAMLAt is SealSnapshotYAML stamping formatVersion instead of
+// SnapshotFormatVersionCurrent. Writers never stamp an older version: it serves MarshalJSON,
+// which keeps the version of a snapshot.yaml already sealed, and the tests that reproduce
+// archives of the older versions.
+func sealSnapshotYAMLAt(sy SnapshotYAML, formatVersion int) (SnapshotYAML, error) {
+	sy.FormatVersion = formatVersion
 	sy.MetadataChecksum = nil
 
 	if sy.ChildrenChecksum == nil {
@@ -159,17 +213,12 @@ func (sy SnapshotYAML) MarshalJSON() ([]byte, error) {
 
 	checksum, err := computeSnapshotMetadataChecksum(sy)
 	if err != nil {
-		return nil, err
+		return SnapshotYAML{}, err
 	}
 
 	sy.MetadataChecksum = &checksum
 
-	data, err := json.Marshal(snapshotYAMLWire(sy))
-	if err != nil {
-		return nil, fmt.Errorf("marshal versioned snapshot.yaml envelope: %w", err)
-	}
-
-	return data, nil
+	return sy, nil
 }
 
 // UnmarshalJSON validates envelope version and metadata integrity before exposing semantic fields.
@@ -216,7 +265,9 @@ func validateSnapshotEnvelope(sy SnapshotYAML, options SnapshotYAMLReadOptions) 
 		}
 
 		return validateChildrenChecksumPresent(sy)
-	case SnapshotFormatVersionAuthenticatedChildren, SnapshotFormatVersionCurrent:
+	case SnapshotFormatVersionAuthenticatedChildren,
+		SnapshotFormatVersionPayloadSizes,
+		SnapshotFormatVersionChildMetadata:
 	default:
 		return fmt.Errorf("%d: %w", sy.FormatVersion, ErrUnsupportedSnapshotFormat)
 	}

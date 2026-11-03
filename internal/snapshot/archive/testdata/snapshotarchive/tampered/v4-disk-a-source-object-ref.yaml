@@ -1,0 +1,23 @@
+apiVersion: demo.deckhouse.io/v1alpha1
+checksum:
+  algorithm: sha256
+  hex: cbc6d0e5aaaf57420ac28e87d90046e068fb27641ec674f82d268780ede55648
+  short: cbc6d0e5
+childrenChecksum:
+  algorithm: sha256
+  hex: 7aceac2581f7f4712ecf167e334ccb48f2b574e44a29c2315f786390e506191d
+  short: 7aceac25
+formatVersion: 4
+kind: DemoVirtualDiskSnapshot
+metadataChecksum:
+  algorithm: sha256
+  hex: a98a737a0de4aed30596b2249f0fe75ba9d0c7654326ed8d96c70fdbf1bb92d7
+  short: a98a737a
+name: disk-a
+namespace: my-app
+sourceName: disk-a
+sourceObjectRef:
+  apiVersion: demo.deckhouse.io/v1alpha1
+  kind: DemoVirtualDisk
+  name: disk-b
+uid: 5f6bd1ca-2c1a-4a2f-9f3f-000000000004

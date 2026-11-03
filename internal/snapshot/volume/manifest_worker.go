@@ -250,8 +250,9 @@ func finalizeNodeWithChecksum(
 	checksum archive.NodeChecksum,
 ) error {
 	// The direct-child commitment is computed from whatever children are on disk at this
-	// point, so callers MUST finalize every child (recursively) before finalizing a parent:
-	// the pipeline's bottom-up publication order (pipeline.run) guarantees this.
+	// point, their snapshot.yaml metadataChecksum included, so callers MUST finalize every
+	// child (recursively) before finalizing a parent: the pipeline's bottom-up publication
+	// order (pipeline.run) guarantees this.
 	var (
 		childrenChecksum archive.NodeChecksum
 		err              error
@@ -267,6 +268,56 @@ func finalizeNodeWithChecksum(
 		return fmt.Errorf("compute children checksum for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
+	sy, err := describeNode(ctx, destination, nodeDir, node, checksum, childrenChecksum)
+	if err != nil {
+		return err
+	}
+
+	return publishNodeSnapshotYAML(ctx, destination, nodeDir, node, sy)
+}
+
+// DescribeNodeRootedContext returns the snapshot.yaml that finalizing nodeDir with the given
+// content and children checksums writes, before it is sealed. A publication plan uses it to
+// learn a node's MetadataChecksum, which the node's parent commits to, before the node is
+// finalized; PublishNodeSnapshotYAMLRootedContext then writes exactly that snapshot.yaml.
+func DescribeNodeRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	checksum, childrenChecksum archive.NodeChecksum,
+) (archive.SnapshotYAML, error) {
+	if destination == nil {
+		return archive.SnapshotYAML{}, errors.New("describe node: rooted destination must be set")
+	}
+
+	return describeNode(ctx, destination, nodeDir, node, checksum, childrenChecksum)
+}
+
+// PublishNodeSnapshotYAMLRootedContext finalizes nodeDir with a snapshot.yaml built by
+// DescribeNodeRootedContext from the node's current content: it writes sy and then removes the
+// resume identity marker, as FinalizeNodeContext does.
+func PublishNodeSnapshotYAMLRootedContext(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	sy archive.SnapshotYAML,
+) error {
+	if destination == nil {
+		return errors.New("publish node snapshot.yaml: rooted destination must be set")
+	}
+
+	return publishNodeSnapshotYAML(ctx, destination, nodeDir, node, sy)
+}
+
+func describeNode(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	checksum, childrenChecksum archive.NodeChecksum,
+) (archive.SnapshotYAML, error) {
 	// The recorded payload size cannot be threaded through in memory from wherever the
 	// volume was downloaded: this call may finalize a node that downloaded nothing in
 	// THIS run (a crash-resume or a re-publication triggered by a re-published child), so
@@ -274,10 +325,10 @@ func finalizeNodeWithChecksum(
 	// disk, here, at finalize time.
 	payload, err := MeasurePayload(ctx, destination, nodeDir)
 	if err != nil {
-		return fmt.Errorf("measure payload for %s/%s: %w", node.Kind, node.Name, err)
+		return archive.SnapshotYAML{}, fmt.Errorf("measure payload for %s/%s: %w", node.Kind, node.Name, err)
 	}
 
-	sy := archive.SnapshotYAML{
+	return archive.SnapshotYAML{
 		APIVersion:       node.APIVersion,
 		Kind:             node.Kind,
 		Name:             node.Name,
@@ -288,8 +339,16 @@ func finalizeNodeWithChecksum(
 		Checksum:         checksum,
 		ChildrenChecksum: &childrenChecksum,
 		Volumes:          buildVolumesList(node, payload),
-	}
+	}, nil
+}
 
+func publishNodeSnapshotYAML(
+	ctx context.Context,
+	destination *archive.RootedDestination,
+	nodeDir string,
+	node *source.Node,
+	sy archive.SnapshotYAML,
+) error {
 	if err := writeSnapshotYAML(ctx, destination, nodeDir, sy); err != nil {
 		return fmt.Errorf("write snapshot.yaml for %s/%s: %w", node.Kind, node.Name, err)
 	}
