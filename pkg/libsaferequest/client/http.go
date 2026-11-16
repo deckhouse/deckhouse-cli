@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -50,7 +52,16 @@ func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
 }
 
 type SafeClient struct {
-	restConfig *rest.Config
+	restConfig        *rest.Config
+	skipDataTLSVerify bool
+}
+
+var warnSkipDataTLSVerifyOnce sync.Once
+
+// SetSkipDataTLSVerify makes SetTLSCAData build a transport that does not verify
+// the server certificate of the data endpoint. The setting is kept by Copy.
+func (c *SafeClient) SetSkipDataTLSVerify(skip bool) {
+	c.skipDataTLSVerify = skip
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
@@ -59,7 +70,7 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 		return nil, err
 	}
 
-	return &SafeClient{restConfig}, nil
+	return &SafeClient{restConfig: restConfig}, nil
 }
 
 // NewSafeClientForConfig derives a SafeClient from an already-resolved REST
@@ -196,6 +207,14 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 	c.restConfig.TLSClientConfig.Insecure = false
 	c.restConfig.TLSClientConfig.ServerName = ""
 	prev := c.restConfig.WrapTransport
+	skipVerify := c.skipDataTLSVerify
+
+	if skipVerify {
+		warnSkipDataTLSVerifyOnce.Do(func() {
+			fmt.Fprintln(os.Stderr, "WARNING: TLS certificate verification of the data endpoint is disabled; "+
+				"the identity of the server is not verified and the credentials may be exposed")
+		})
+	}
 
 	c.restConfig.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
 		if prev != nil {
@@ -216,7 +235,7 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 		}
 
 		clonedTransport.TLSClientConfig.RootCAs = sysPool
-		clonedTransport.TLSClientConfig.InsecureSkipVerify = false
+		clonedTransport.TLSClientConfig.InsecureSkipVerify = skipVerify
 		clonedTransport.TLSClientConfig.ServerName = ""
 
 		return clonedTransport
@@ -224,7 +243,7 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 }
 
 func (c *SafeClient) Copy() *SafeClient {
-	return &SafeClient{rest.CopyConfig(c.restConfig)}
+	return &SafeClient{restConfig: rest.CopyConfig(c.restConfig), skipDataTLSVerify: c.skipDataTLSVerify}
 }
 
 // RESTConfig returns a copy of the client's Kubernetes configuration, for callers that need a

@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -459,4 +460,48 @@ func TestSafeClient_SetTLSCAData_ClonesTransport(t *testing.T) {
 	if orig.TLSClientConfig != nil && orig.TLSClientConfig.RootCAs != nil {
 		t.Error("orig.TLSClientConfig.RootCAs was mutated, want nil (RootCAs must only be set on the clone)")
 	}
+}
+
+func TestSafeClient_SkipDataTLSVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(srv.Close)
+
+	do := func(t *testing.T, skip bool) error {
+		t.Helper()
+
+		sc := &SafeClient{restConfig: &rest.Config{BearerToken: "token"}}
+		sc.SetSkipDataTLSVerify(skip)
+
+		sub := sc.Copy()
+		sub.SetTLSCAData(nil)
+
+		req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		resp, err := sub.HTTPDo(req)
+		if err != nil {
+			return err
+		}
+
+		return resp.Body.Close()
+	}
+
+	t.Run("verification is on by default", func(t *testing.T) {
+		err := do(t, false)
+
+		var unknownAuthority x509.UnknownAuthorityError
+		if !errors.As(err, &unknownAuthority) {
+			t.Fatalf("err = %v, want x509.UnknownAuthorityError", err)
+		}
+	})
+
+	t.Run("self-signed certificate is accepted when skipped", func(t *testing.T) {
+		if err := do(t, true); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+	})
 }

@@ -44,6 +44,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().BoolP("publish", "P", false, "publish the uploaded file")
 	cmd.Flags().StringP("dstPath", "d", "", "destination path of the uploaded file")
 	cmd.Flags().Bool("resume", false, "resume upload if process was interrupted")
+	dataio.AddSkipTLSVerifyFlag(cmd)
 
 	return cmd
 }
@@ -70,6 +71,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
+
+	dataio.ApplySkipTLSVerify(cmd, httpClient)
 
 	diName, _, err := dataio.ParseArgs(args)
 	if err != nil {

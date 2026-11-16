@@ -69,6 +69,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 	cmd.Flags().Bool("cleanup", false, "Delete auto-created DataExport without prompting (--cleanup=true to delete, --cleanup=false to keep)")
+	dataio.AddSkipTLSVerifyFlag(cmd)
 
 	return cmd
 }
@@ -187,6 +188,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
+
+	dataio.ApplySkipTLSVerify(cmd, sClient)
 
 	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {
