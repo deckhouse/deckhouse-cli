@@ -9,9 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
 
 const (
@@ -31,6 +34,22 @@ const (
 	defaultOnNonTTY   = false
 	defaultInputOnErr = "no"
 )
+
+// SkipTLSVerifyFlag disables verification of the data endpoint certificate. It does not
+// touch the connection to kube-apiserver, which follows the kubeconfig and kubectl flags.
+const SkipTLSVerifyFlag = "data-insecure-skip-tls-verify"
+
+// AddSkipTLSVerifyFlag registers SkipTLSVerifyFlag on a command that talks to the data endpoint.
+func AddSkipTLSVerifyFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool(SkipTLSVerifyFlag, false,
+		"Skip verification of the data endpoint TLS certificate (insecure; does not affect the connection to kube-apiserver)")
+}
+
+// ApplySkipTLSVerify passes the value of SkipTLSVerifyFlag to the client.
+func ApplySkipTLSVerify(cmd *cobra.Command, sc *safeClient.SafeClient) {
+	skip, _ := cmd.Flags().GetBool(SkipTLSVerifyFlag)
+	sc.SetSkipDataTLSVerify(skip)
+}
 
 // ShouldCleanup decides whether to delete an auto-created DataExport.
 // When the --cleanup flag was explicitly set by the user, its value is used directly.

@@ -79,6 +79,8 @@ func cmdExamples() string {
 		fmt.Sprintf("    ... %s -n target-namespace vd/my-virtualdisk -o file.img", cmdName),
 		"  # Start exporter + Download + Stop for VirtualDiskSnapshot (Block)",
 		fmt.Sprintf("    ... %s -n target-namespace vds/my-virtualdisk-snapshot -o file.img", cmdName),
+		"  # Published endpoint with a self-signed certificate (certificate is not verified)",
+		fmt.Sprintf("    ... %s --publish --data-insecure-skip-tls-verify pvc/my-file-volume file.txt -o file.txt", cmdName),
 	}
 
 	return strings.Join(resp, "\n")
@@ -103,6 +105,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 	cmd.Flags().Bool("cleanup", false, "Delete auto-created DataExport without prompting (--cleanup=true to delete, --cleanup=false to keep)")
+	dataio.AddSkipTLSVerifyFlag(cmd)
 
 	return cmd
 }
@@ -560,6 +563,8 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	if err != nil {
 		return err
 	}
+
+	dataio.ApplySkipTLSVerify(cmd, sClient)
 
 	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {
