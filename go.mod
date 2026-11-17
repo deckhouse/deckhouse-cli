@@ -1,13 +1,13 @@
 module github.com/deckhouse/deckhouse-cli
 
-go 1.26.1
+go 1.26.10
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/deckhouse/deckhouse/go_lib/controlplane v0.0.0-20260602082302-91957e5e124e
 	github.com/deckhouse/deckhouse/pkg/log v0.2.1
 	github.com/deckhouse/deckhouse/pkg/registry v0.0.1
-	github.com/deckhouse/virtualization/src/cli v1.12.2
+	github.com/deckhouse/virtualization/src/cli v1.13.0
 	github.com/fatih/color v1.19.0
 	github.com/fluxcd/flagger v1.36.1
 	github.com/go-logr/logr v1.4.4
@@ -305,7 +305,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/deckhouse/delivery-kit-sdk v1.4.4 // indirect
-	github.com/deckhouse/virtualization/api v1.12.2 // indirect; must match src/cli
+	github.com/deckhouse/virtualization/api v1.13.0 // indirect; must match src/cli
 	github.com/deislabs/oras v1.1.0 // indirect
 	github.com/denisenkom/go-mssqldb v0.12.2 // indirect
 	github.com/dgryski/go-metro v0.0.0-20180109044635-280f6062b5bc // indirect

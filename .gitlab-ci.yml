@@ -26,7 +26,7 @@ workflow:
 
 variables:
   GOPRIVATE: "flant.internal"
-  GO_IMAGE: registry.deckhouse.io/container-factory@sha256:ce80d4ec2053430e81b1a07492a403c4fb5382a27570984318ea75b87bbe5109
+  GO_IMAGE: registry.deckhouse.io/container-factory@sha256:1216331c4d89540ca5c4e54e8eb5013dbad0b37e02d598d11d49185f3d3befaa # GOST go1.26.11, base-images v3.1.27
   GOLANGCI_LINT_VERSION: "2.11.4"
   CRANE_VERSION: v0.22.1
   TASK_VERSION: v3.41.0
