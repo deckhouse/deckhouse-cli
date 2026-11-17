@@ -63,7 +63,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().StringP("file", "f", "", "PVC manifest file path")
@@ -77,7 +77,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	defer cancel()
 
 	name := args[0]
-	namespace, _ := cmd.Flags().GetString("namespace")
+	namespace, _ := cmd.Flags().GetString(dataio.NamespaceFlag)
 	ttl, _ := cmd.Flags().GetString("ttl")
 	pvcFilePath, _ := cmd.Flags().GetString("file")
 	wffc, _ := cmd.Flags().GetBool("wffc")
@@ -100,11 +100,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	if namespace == "" {
-		if pvcSpec.Namespace == "" {
-			return fmt.Errorf("namespace is required")
-		}
-
 		namespace = pvcSpec.Namespace
+	}
+
+	if namespace == "" {
+		namespace, err = sc.Namespace()
+		if err != nil {
+			return err
+		}
 	}
 
 	// Resolved only once the namespace is final: the producer is picked partly from what the user

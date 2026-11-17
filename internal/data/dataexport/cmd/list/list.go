@@ -65,7 +65,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 	cmd.Flags().Bool("cleanup", false, "Delete auto-created DataExport without prompting (--cleanup=true to delete, --cleanup=false to keep)")
@@ -171,7 +171,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 	cleanup, _ := cmd.Flags().GetBool("cleanup")
 	cleanupExplicit := cmd.Flags().Changed("cleanup")
@@ -190,6 +189,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	dataio.ApplySkipTLSVerify(cmd, sClient)
+
+	namespace, err := dataio.ResolveNamespace(cmd, sClient)
+	if err != nil {
+		return err
+	}
 
 	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {

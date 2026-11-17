@@ -100,7 +100,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().StringP("output", "o", "", "file to save data (default: same as resource)") // TODO support /dev/stdout
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 	cmd.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
@@ -545,7 +545,6 @@ func (s *fileStream) checkLength() error {
 }
 
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
-	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("output")
 	ttl, _ := cmd.Flags().GetString("ttl")
 	cleanup, _ := cmd.Flags().GetBool("cleanup")
@@ -565,6 +564,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	dataio.ApplySkipTLSVerify(cmd, sClient)
+
+	namespace, err := dataio.ResolveNamespace(cmd, sClient)
+	if err != nil {
+		return err
+	}
 
 	backend, rtClient, err := util.ResolveClientFunc(ctx, sClient, namespace, log)
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	dataio "github.com/deckhouse/deckhouse-cli/internal/data"
 	"github.com/deckhouse/deckhouse-cli/internal/data/dataimport/util"
 	safeClient "github.com/deckhouse/deckhouse-cli/pkg/libsaferequest/client"
 )
@@ -39,7 +40,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", "d8-storage-volume-data-manager", "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 
 	return cmd
 }
@@ -56,8 +57,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 
-	namespace, _ := cmd.Flags().GetString("namespace")
-
 	diName, err := parseArgs(args)
 	if err != nil {
 		return err
@@ -66,6 +65,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	flags := cmd.PersistentFlags()
 
 	safeClient, err := safeClient.NewSafeClient(flags)
+	if err != nil {
+		return err
+	}
+
+	namespace, err := dataio.ResolveNamespace(cmd, safeClient)
 	if err != nil {
 		return err
 	}

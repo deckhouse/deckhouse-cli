@@ -16,6 +16,7 @@ import (
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrlrtclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -24,7 +25,7 @@ var (
 	Insecure      = false
 )
 
-func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
+func newClientConfig(flags ...*pflag.FlagSet) clientcmd.ClientConfig {
 	kubeConfigFlags := genericclioptions.ConfigFlags{}
 
 	if len(flags) == 0 {
@@ -37,7 +38,11 @@ func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
 		}
 	}
 
-	restConfig, err := kubeConfigFlags.ToRESTConfig()
+	return kubeConfigFlags.ToRawKubeConfigLoader()
+}
+
+func newRestConfig(clientConfig clientcmd.ClientConfig) (*rest.Config, error) {
+	restConfig, err := clientConfig.ClientConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +58,7 @@ func newRestConfig(flags ...*pflag.FlagSet) (*rest.Config, error) {
 
 type SafeClient struct {
 	restConfig        *rest.Config
+	clientConfig      clientcmd.ClientConfig
 	skipDataTLSVerify bool
 }
 
@@ -65,12 +71,29 @@ func (c *SafeClient) SetSkipDataTLSVerify(skip bool) {
 }
 
 func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
-	restConfig, err := newRestConfig(flags...)
+	clientConfig := newClientConfig(flags...)
+
+	restConfig, err := newRestConfig(clientConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	return &SafeClient{restConfig: restConfig}, nil
+	return &SafeClient{restConfig: restConfig, clientConfig: clientConfig}, nil
+}
+
+// Namespace returns the namespace of the kubeconfig context the client connects through,
+// or "default" when the context sets none, as kubectl does.
+func (c *SafeClient) Namespace() (string, error) {
+	if c == nil || c.clientConfig == nil {
+		return "", errors.New("the client was not built from a kubeconfig")
+	}
+
+	namespace, _, err := c.clientConfig.Namespace()
+	if err != nil {
+		return "", fmt.Errorf("resolve the namespace of the kubeconfig context: %w", err)
+	}
+
+	return namespace, nil
 }
 
 // NewSafeClientForConfig derives a SafeClient from an already-resolved REST
@@ -243,7 +266,11 @@ func (c *SafeClient) SetTLSCAData(caData []byte) {
 }
 
 func (c *SafeClient) Copy() *SafeClient {
-	return &SafeClient{restConfig: rest.CopyConfig(c.restConfig), skipDataTLSVerify: c.skipDataTLSVerify}
+	return &SafeClient{
+		restConfig:        rest.CopyConfig(c.restConfig),
+		clientConfig:      c.clientConfig,
+		skipDataTLSVerify: c.skipDataTLSVerify,
+	}
 }
 
 // RESTConfig returns a copy of the client's Kubernetes configuration, for callers that need a

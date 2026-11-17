@@ -23,7 +23,7 @@ const (
 	VolumeSnapshotKind        = "VolumeSnapshot"
 	VirtualDiskKind           = "VirtualDisk"
 	VirtualDiskSnapshotKind   = "VirtualDiskSnapshot"
-	Namespace                 = "d8-storage-volume-data-manager"
+	NamespaceFlag             = "namespace"
 )
 
 var (
@@ -49,6 +49,20 @@ func AddSkipTLSVerifyFlag(cmd *cobra.Command) {
 func ApplySkipTLSVerify(cmd *cobra.Command, sc *safeClient.SafeClient) {
 	skip, _ := cmd.Flags().GetBool(SkipTLSVerifyFlag)
 	sc.SetSkipDataTLSVerify(skip)
+}
+
+// AddNamespaceFlag registers NamespaceFlag; left empty, ResolveNamespace takes the namespace of the kubeconfig context.
+func AddNamespaceFlag(cmd *cobra.Command) {
+	cmd.Flags().StringP(NamespaceFlag, "n", "", "data volume namespace (default: the namespace of the current kubeconfig context)")
+}
+
+// ResolveNamespace returns NamespaceFlag when it is set, otherwise the namespace of the client's kubeconfig context.
+func ResolveNamespace(cmd *cobra.Command, sc *safeClient.SafeClient) (string, error) {
+	if namespace, _ := cmd.Flags().GetString(NamespaceFlag); namespace != "" {
+		return namespace, nil
+	}
+
+	return sc.Namespace()
 }
 
 // ShouldCleanup decides whether to delete an auto-created DataExport.

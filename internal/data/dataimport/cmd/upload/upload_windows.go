@@ -38,7 +38,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().StringP("file", "f", "", "file to upload")
 	cmd.Flags().IntP("chunks", "c", 10, "number of chunks to upload")
 	cmd.Flags().BoolP("publish", "P", false, "publish the uploaded file")
@@ -62,7 +62,6 @@ func cmdExamples() string {
 func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []string) error {
 	pathToFile, _ := cmd.Flags().GetString("file")
 	chunks, _ := cmd.Flags().GetInt("chunks")
-	namespace, _ := cmd.Flags().GetString("namespace")
 	dstPath, _ := cmd.Flags().GetString("dstPath")
 	resume, _ := cmd.Flags().GetBool("resume")
 
@@ -73,6 +72,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	}
 
 	dataio.ApplySkipTLSVerify(cmd, httpClient)
+
+	namespace, err := dataio.ResolveNamespace(cmd, httpClient)
+	if err != nil {
+		return err
+	}
 
 	diName, _, err := dataio.ParseArgs(args)
 	if err != nil {

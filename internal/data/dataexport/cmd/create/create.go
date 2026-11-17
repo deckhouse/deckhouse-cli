@@ -59,7 +59,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
 
@@ -101,7 +101,6 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	namespace, _ := cmd.Flags().GetString("namespace")
 	ttl, _ := cmd.Flags().GetString("ttl")
 
 	deName, volumeKind, volumeName, err := parseArgs(args)
@@ -112,6 +111,11 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	flags := cmd.PersistentFlags()
 
 	sc, err := safeClient.NewSafeClient(flags)
+	if err != nil {
+		return err
+	}
+
+	namespace, err := dataio.ResolveNamespace(cmd, sc)
 	if err != nil {
 		return err
 	}

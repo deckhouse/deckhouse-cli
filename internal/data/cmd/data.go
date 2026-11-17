@@ -97,7 +97,7 @@ func NewCommand() *cobra.Command {
 			return exportCreateRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedCreate.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(deprecatedCreate)
 	deprecatedCreate.Flags().String("ttl", "2m", "Time to live")
 	deprecatedCreate.Flags().Bool("publish", false, "Provide access outside of cluster")
 
@@ -111,7 +111,7 @@ func NewCommand() *cobra.Command {
 			return exportListRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedList.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(deprecatedList)
 	deprecatedList.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedList.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
 
@@ -125,7 +125,7 @@ func NewCommand() *cobra.Command {
 			return exportDownloadRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedDownload.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(deprecatedDownload)
 	deprecatedDownload.Flags().StringP("output", "o", "", "file to save data (default: same as resource)")
 	deprecatedDownload.Flags().Bool("publish", false, "Provide access outside of cluster")
 	deprecatedDownload.Flags().String("ttl", "2m", "Time to live for auto-created DataExport")
@@ -140,7 +140,7 @@ func NewCommand() *cobra.Command {
 			return exportDeleteRun(ctx, logger, c, args)
 		},
 	}
-	deprecatedDelete.Flags().StringP("namespace", "n", dataio.Namespace, "data volume namespace")
+	dataio.AddNamespaceFlag(deprecatedDelete)
 
 	root.AddCommand(exportCmd, importCmd, deprecatedCreate, deprecatedList, deprecatedDownload, deprecatedDelete)
 
