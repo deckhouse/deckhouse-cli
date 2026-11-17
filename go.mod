@@ -762,6 +762,7 @@ require (
 replace (
 	// containers/storage still calls securejoin.OpenInRoot/Reopen, removed in v0.6.
 	github.com/cyphar/filepath-securejoin => github.com/cyphar/filepath-securejoin v0.5.2
+	github.com/deckhouse/delivery-kit-sdk => flant.internal/deckhouse/delivery/delivery-kit-sdk.git v1.4.4
 	github.com/deislabs/oras => github.com/werf/3p-oras v0.9.1-0.20240115121544-03962ecbd40a // upstream not maintained
 	github.com/distribution/reference => github.com/distribution/reference v0.5.0
 	github.com/docker/cli => github.com/docker/cli v25.0.6+incompatible
@@ -779,7 +780,7 @@ replace (
 	// stronghold pulls unused modules that disrupt build through bumping common modules, this workaround pins versions
 	github.com/tonistiigi/fsutil => github.com/tonistiigi/fsutil v0.0.0-20240301111122-7525a1af2bb5
 	github.com/werf/trdl/server => github.com/trublast/trdl/server v0.0.0-20260907131148-61850079d62c
-	github.com/werf/werf/v2 => github.com/deckhouse/delivery-kit/v2 v2.84.1-dk.1
+	github.com/werf/werf/v2 => flant.internal/deckhouse/delivery/delivery-kit.git/v2 v2.84.1-dk.1
 	go.cypherpunks.ru/gogost/v5 v5.15.0 => github.com/deckhouse/gogost/v5 v5.15.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc => go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0
 )
