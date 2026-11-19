@@ -53,7 +53,7 @@ func ApplySkipTLSVerify(cmd *cobra.Command, sc *safeClient.SafeClient) {
 
 // AddNamespaceFlag registers NamespaceFlag; left empty, ResolveNamespace takes the namespace of the kubeconfig context.
 func AddNamespaceFlag(cmd *cobra.Command) {
-	cmd.Flags().StringP(NamespaceFlag, "n", "", "data volume namespace (default: the namespace of the current kubeconfig context)")
+	cmd.Flags().StringP(NamespaceFlag, "n", "", "data volume namespace (defaults to the kubeconfig context namespace)")
 }
 
 // ResolveNamespace returns NamespaceFlag when it is set, otherwise the namespace of the client's kubeconfig context.

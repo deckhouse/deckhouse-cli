@@ -40,7 +40,7 @@ const (
 func cmdExamples() string {
 	resp := []string{
 		"  # Create DataImport",
-		fmt.Sprintf("    ... %s my-import -n d8-storage-volume-data-manager -f - --ttl 2m --publish --wffc", cmdName),
+		fmt.Sprintf("    ... %s my-import -n project -f - --ttl 2m --publish --wffc", cmdName),
 	}
 
 	return strings.Join(resp, "\n")
@@ -99,8 +99,12 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("parse PVC: %w", err)
 	}
 
-	if namespace == "" {
+	switch {
+	case namespace == "":
 		namespace = pvcSpec.Namespace
+	case pvcSpec.Namespace != "" && pvcSpec.Namespace != namespace:
+		return fmt.Errorf("the namespace from the PVC manifest %q does not match the namespace %q given by --namespace",
+			pvcSpec.Namespace, namespace)
 	}
 
 	if namespace == "" {

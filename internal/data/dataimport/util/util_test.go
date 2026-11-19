@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -593,4 +594,35 @@ func TestGetDataImportWithRestart_CompletedIsNotTreatedAsExpired(t *testing.T) {
 	var stored v1alpha1.DataImport
 	require.NoError(t, c.Get(ctx, ctrlclient.ObjectKey{Name: "test-di", Namespace: "test-ns"}, &stored))
 	assert.Len(t, stored.Status.Conditions, 1, "Completed reason must not trigger a recreate")
+}
+
+func TestGetDataImportNotFoundNamesNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	tests := []struct {
+		name string
+		get  func() error
+	}{
+		{"GetDataImport", func() error {
+			_, err := GetDataImport(ctx, "missing", "team-ns", c)
+			return err
+		}},
+		{"GetDataImportWithRestart", func() error {
+			_, err := GetDataImportWithRestart(ctx, foundationBackend(), "missing", "team-ns", c, slog.Default())
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.get()
+			require.Error(t, err)
+			assert.True(t, apierrors.IsNotFound(err), "the not-found error must stay matchable: %v", err)
+			assert.Contains(t, err.Error(), "DataImport team-ns/missing")
+		})
+	}
 }

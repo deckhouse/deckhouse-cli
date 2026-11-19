@@ -81,8 +81,9 @@ func NewSafeClient(flags ...*pflag.FlagSet) (*SafeClient, error) {
 	return &SafeClient{restConfig: restConfig, clientConfig: clientConfig}, nil
 }
 
-// Namespace returns the namespace of the kubeconfig context the client connects through,
-// or "default" when the context sets none, as kubectl does.
+// Namespace returns the namespace of the kubeconfig context the client connects through, as kubectl
+// does. When the context sets none, inside a pod it is POD_NAMESPACE, then the namespace of the
+// pod's service account; otherwise it is "default".
 func (c *SafeClient) Namespace() (string, error) {
 	if c == nil || c.clientConfig == nil {
 		return "", errors.New("the client was not built from a kubeconfig")

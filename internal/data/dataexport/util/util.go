@@ -80,7 +80,7 @@ func GetDataExport(ctx context.Context, deName, namespace string, rtClient ctrlr
 
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
-		return nil, fmt.Errorf("kube Get dataexport: %s", err.Error())
+		return nil, fmt.Errorf("get DataExport %s/%s: %w", namespace, deName, err)
 	}
 
 	// An object with no Ready condition at all has not been reconciled yet rather than failed,
@@ -103,7 +103,7 @@ func GetDataExportWithRestart(ctx context.Context, deName, namespace string, rtC
 		// get DataExport from k8s by name
 		err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 		if err != nil {
-			return nil, fmt.Errorf("kube Get dataexport with restart: %s", err.Error())
+			return nil, fmt.Errorf("get DataExport %s/%s: %w", namespace, deName, err)
 		}
 
 		// An expired export is recreated here rather than waited out: after expiry the producer's
@@ -327,7 +327,7 @@ func getExportStatus(ctx context.Context, log *slog.Logger, deName, namespace st
 
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: deName}, deObj)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to get dataExport: %w", err)
+		return "", "", "", fmt.Errorf("get DataExport %s/%s: %w", namespace, deName, err)
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.

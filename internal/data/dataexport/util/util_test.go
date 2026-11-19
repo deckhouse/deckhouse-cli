@@ -538,3 +538,38 @@ func TestEnsureDataExportPublish(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDataExportNotFoundNamesNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	tests := []struct {
+		name string
+		get  func() error
+	}{
+		{"GetDataExport", func() error {
+			_, err := GetDataExport(ctx, "missing", "team-ns", c)
+			return err
+		}},
+		{"GetDataExportWithRestart", func() error {
+			_, err := GetDataExportWithRestart(ctx, "missing", "team-ns", c, slog.Default())
+			return err
+		}},
+		{"getExportStatus", func() error {
+			_, _, _, err := getExportStatus(ctx, slog.Default(), "missing", "team-ns", false, c)
+			return err
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.get()
+			require.Error(t, err)
+			assert.True(t, apierrors.IsNotFound(err), "the not-found error must stay matchable: %v", err)
+			assert.Contains(t, err.Error(), "DataExport team-ns/missing")
+		})
+	}
+}

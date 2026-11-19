@@ -69,7 +69,7 @@ d8 k auth can-i get dataimports.storage.deckhouse.io -n NAMESPACE
 Create DataImport, providing PVC template via file path:
 ```bash
 d8 data import create my-import \
-  -n d8-storage-volume-data-manager \
+  -n project \
   -f ./pvctemplate-block.yaml \
   --ttl 60m --publish --wffc=false
 ```
@@ -77,22 +77,22 @@ d8 data import create my-import \
 #### upload
 Upload a local file (auto-detects uid/gid/permissions from the file):
 ```bash
-d8 data import upload my-import -n d8-storage-volume-data-manager -P -d /myfile -f ./test-file
+d8 data import upload my-import -n project -P -d /myfile -f ./test-file
 ```
 
 Resume an interrupted upload:
 ```bash
-d8 data import upload my-import -n d8-storage-volume-data-manager -P -d /myfile -f ./test-file --resume
+d8 data import upload my-import -n project -P -d /myfile -f ./test-file --resume
 ```
 
 Split upload into chunks:
 ```bash
-d8 data import upload my-import -n d8-storage-volume-data-manager -P -d /myfile -f ./test-file -c 4
+d8 data import upload my-import -n project -P -d /myfile -f ./test-file -c 4
 ```
 
 #### delete
 ```bash
-d8 data import delete my-import -n d8-storage-volume-data-manager
+d8 data import delete my-import -n project
 ```
 
 

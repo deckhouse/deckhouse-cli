@@ -77,7 +77,7 @@ func GetDataImport(ctx context.Context, diName, namespace string, rtClient ctrlr
 
 	err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
-		return nil, fmt.Errorf("kube Get dataimport: %s", err.Error())
+		return nil, fmt.Errorf("get DataImport %s/%s: %w", namespace, diName, err)
 	}
 
 	// An object with no Ready condition at all has not been reconciled yet rather than failed,
@@ -179,7 +179,7 @@ func GetDataImportWithRestart(
 
 		diObj := &v1alpha1.DataImport{}
 		if err := rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj); err != nil {
-			return nil, fmt.Errorf("kube Get dataimport with ready: %s", err.Error())
+			return nil, fmt.Errorf("get DataImport %s/%s: %w", namespace, diName, err)
 		}
 
 		var notReadyErr error
@@ -290,7 +290,7 @@ func PrepareUpload(
 
 	err = rtClient.Get(ctx, ctrlrtclient.ObjectKey{Namespace: namespace, Name: diName}, diObj)
 	if err != nil {
-		return "", "", "", nil, fmt.Errorf("failed to get dataImport: %w", err)
+		return "", "", "", nil, fmt.Errorf("get DataImport %s/%s: %w", namespace, diName, err)
 	}
 
 	// Patch Spec.Publish if the resolved value differs from what the object has.

@@ -90,30 +90,36 @@ func TestSubcommandsTakeNamespaceFromKubeconfig(t *testing.T) {
 	pvcWithNamespace := writeFile(t, "pvc-ns.yaml", "metadata: {namespace: team-manifest}\nspec: {}\n")
 
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name    string
+		args    []string
+		want    string
+		wantErr string
 	}{
-		{"export create", []string{"export", "create", "e", "pvc/p"}, "team-work"},
-		{"export create -n", []string{"export", "create", "-n", "team-flag", "e", "pvc/p"}, "team-flag"},
-		{"export delete", []string{"export", "delete", "e"}, "team-work"},
-		{"export delete -n", []string{"export", "delete", "-n", "team-flag", "e"}, "team-flag"},
-		{"export download", []string{"export", "download", "e", "/f"}, "team-work"},
-		{"export download -n", []string{"export", "download", "--namespace", "team-flag", "e", "/f"}, "team-flag"},
-		{"export list", []string{"export", "list", "e"}, "team-work"},
-		{"export list -n", []string{"export", "list", "-n", "team-flag", "e"}, "team-flag"},
-		{"import create", []string{"import", "create", "i", "-f", pvc}, "team-work"},
-		{"import create manifest namespace", []string{"import", "create", "i", "-f", pvcWithNamespace}, "team-manifest"},
-		{"import create -n", []string{"import", "create", "-n", "team-flag", "i", "-f", pvcWithNamespace}, "team-flag"},
-		{"import delete", []string{"import", "delete", "i"}, "team-work"},
-		{"import delete -n", []string{"import", "delete", "-n", "team-flag", "i"}, "team-flag"},
-		{"import upload", []string{"import", "upload", "i"}, "team-work"},
-		{"import upload -n", []string{"import", "upload", "-n", "team-flag", "i"}, "team-flag"},
-		{"deprecated create", []string{"create", "e", "pvc/p"}, "team-work"},
-		{"deprecated create -n", []string{"create", "-n", "team-flag", "e", "pvc/p"}, "team-flag"},
-		{"deprecated delete", []string{"delete", "e"}, "team-work"},
-		{"deprecated download", []string{"download", "e", "/f"}, "team-work"},
-		{"deprecated list", []string{"list", "e"}, "team-work"},
+		{"export create", []string{"export", "create", "e", "pvc/p"}, "team-work", ""},
+		{"export create -n", []string{"export", "create", "-n", "team-flag", "e", "pvc/p"}, "team-flag", ""},
+		{"export delete", []string{"export", "delete", "e"}, "team-work", ""},
+		{"export delete -n", []string{"export", "delete", "-n", "team-flag", "e"}, "team-flag", ""},
+		{"export download", []string{"export", "download", "e", "/f"}, "team-work", ""},
+		{"export download -n", []string{"export", "download", "--namespace", "team-flag", "e", "/f"}, "team-flag", ""},
+		{"export list", []string{"export", "list", "e"}, "team-work", ""},
+		{"export list -n", []string{"export", "list", "-n", "team-flag", "e"}, "team-flag", ""},
+		{"import create", []string{"import", "create", "i", "-f", pvc}, "team-work", ""},
+		{"import create manifest namespace", []string{"import", "create", "i", "-f", pvcWithNamespace}, "team-manifest", ""},
+		{"import create -n", []string{"import", "create", "-n", "team-flag", "i", "-f", pvc}, "team-flag", ""},
+		{"import create -n same as manifest", []string{"import", "create", "-n", "team-manifest", "i", "-f", pvcWithNamespace}, "team-manifest", ""},
+		{
+			"import create -n other than manifest", []string{"import", "create", "-n", "team-flag", "i", "-f", pvcWithNamespace}, "",
+			`the namespace from the PVC manifest "team-manifest" does not match the namespace "team-flag" given by --namespace`,
+		},
+		{"import delete", []string{"import", "delete", "i"}, "team-work", ""},
+		{"import delete -n", []string{"import", "delete", "-n", "team-flag", "i"}, "team-flag", ""},
+		{"import upload", []string{"import", "upload", "i"}, "team-work", ""},
+		{"import upload -n", []string{"import", "upload", "-n", "team-flag", "i"}, "team-flag", ""},
+		{"deprecated create", []string{"create", "e", "pvc/p"}, "team-work", ""},
+		{"deprecated create -n", []string{"create", "-n", "team-flag", "e", "pvc/p"}, "team-flag", ""},
+		{"deprecated delete", []string{"delete", "e"}, "team-work", ""},
+		{"deprecated download", []string{"download", "e", "/f"}, "team-work", ""},
+		{"deprecated list", []string{"list", "e"}, "team-work", ""},
 	}
 
 	for _, tt := range tests {
@@ -125,7 +131,13 @@ func TestSubcommandsTakeNamespaceFromKubeconfig(t *testing.T) {
 			root.SetErr(io.Discard)
 			root.SetArgs(tt.args)
 
-			require.ErrorIs(t, root.Execute(), errResolved)
+			err := root.Execute()
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr)
+			} else {
+				require.ErrorIs(t, err, errResolved)
+			}
+
 			require.Equal(t, tt.want, *got)
 		})
 	}
