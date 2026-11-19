@@ -19,6 +19,7 @@ package create
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -66,7 +67,7 @@ func NewCommand(ctx context.Context, log *slog.Logger) *cobra.Command {
 	dataio.AddNamespaceFlag(cmd)
 	cmd.Flags().String("ttl", "2m", "Time to live")
 	cmd.Flags().Bool("publish", false, "Provide access outside of cluster")
-	cmd.Flags().StringP("file", "f", "", "PVC manifest file path")
+	cmd.Flags().StringP("file", "f", "", "PVC manifest file path, or - to read it from stdin")
 	cmd.Flags().Bool("wffc", false, "Wait for first consumer")
 
 	return cmd
@@ -82,14 +83,14 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	pvcFilePath, _ := cmd.Flags().GetString("file")
 	wffc, _ := cmd.Flags().GetBool("wffc")
 
-	flags := cmd.PersistentFlags()
+	flags := cmd.Flags()
 
 	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {
 		return err
 	}
 
-	data, err := os.ReadFile(pvcFilePath)
+	data, err := readManifest(cmd.InOrStdin(), pvcFilePath)
 	if err != nil {
 		return err
 	}
@@ -139,4 +140,17 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	log.Info("DataImport created", slog.String("name", name), slog.String("namespace", namespace))
 
 	return nil
+}
+
+func readManifest(stdin io.Reader, path string) ([]byte, error) {
+	if path == "-" {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, fmt.Errorf("read the PVC manifest from stdin: %w", err)
+		}
+
+		return data, nil
+	}
+
+	return os.ReadFile(path)
 }

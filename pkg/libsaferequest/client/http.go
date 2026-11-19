@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/spf13/pflag"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	kubescheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // load all auth plugins
 	"k8s.io/client-go/rest"
@@ -25,20 +25,47 @@ var (
 	Insecure      = false
 )
 
-func newClientConfig(flags ...*pflag.FlagSet) clientcmd.ClientConfig {
-	kubeConfigFlags := genericclioptions.ConfigFlags{}
+const (
+	kubeconfigFlag = "kubeconfig"
+	contextFlag    = "context"
+)
 
+func newClientConfig(flags ...*pflag.FlagSet) clientcmd.ClientConfig {
 	if len(flags) == 0 {
 		flags = []*pflag.FlagSet{pflag.CommandLine}
 	}
 
-	for _, f := range flags {
-		if flags != nil {
-			kubeConfigFlags.AddFlags(f)
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
+
+	if kubeconfig := lookupFlag(kubeconfigFlag, flags); kubeconfig != nil && kubeconfig.Changed {
+		if paths := filepath.SplitList(kubeconfig.Value.String()); len(paths) > 1 {
+			loadingRules.Precedence = paths
+		} else {
+			loadingRules.ExplicitPath = kubeconfig.Value.String()
 		}
 	}
 
-	return kubeConfigFlags.ToRawKubeConfigLoader()
+	overrides := &clientcmd.ConfigOverrides{ClusterDefaults: clientcmd.ClusterDefaults}
+	if kubeContext := lookupFlag(contextFlag, flags); kubeContext != nil {
+		overrides.CurrentContext = kubeContext.Value.String()
+	}
+
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
+}
+
+func lookupFlag(name string, flags []*pflag.FlagSet) *pflag.Flag {
+	for _, f := range flags {
+		if f == nil {
+			continue
+		}
+
+		if flag := f.Lookup(name); flag != nil {
+			return flag
+		}
+	}
+
+	return nil
 }
 
 func newRestConfig(clientConfig clientcmd.ClientConfig) (*rest.Config, error) {

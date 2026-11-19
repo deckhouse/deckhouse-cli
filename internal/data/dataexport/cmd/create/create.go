@@ -108,7 +108,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return err
 	}
 
-	flags := cmd.PersistentFlags()
+	flags := cmd.Flags()
 
 	sc, err := safeClient.NewSafeClient(flags)
 	if err != nil {

@@ -50,10 +50,12 @@ d8 k auth can-i get dataimports.storage.deckhouse.io -n NAMESPACE
 ### Flags
 - Common
   - `-n, --namespace` – target namespace
+  - `-k, --kubeconfig` – path to the kubeconfig file
+  - `--context` – name of the kubeconfig context to use
   - `-P, --publish` – expose public URL for access
 
 - create
-  - `-f, --file` – PATH to PVC template file (path string; stdin is not supported)
+  - `-f, --file` – PATH to PVC template file, or `-` to read it from stdin
   - `--ttl` – resource time-to-live (e.g. `60m`)
   - `--wffc` – wait for first consumer (true/false)
 

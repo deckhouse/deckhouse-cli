@@ -555,7 +555,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 		return fmt.Errorf("arguments parsing error: %s", err.Error())
 	}
 
-	flags := cmd.PersistentFlags()
+	flags := cmd.Flags()
 	safeClient.SupportNoAuth = false
 
 	sClient, err := safeClient.NewSafeClient(flags)

@@ -65,7 +65,7 @@ func Run(ctx context.Context, log *slog.Logger, cmd *cobra.Command, args []strin
 	dstPath, _ := cmd.Flags().GetString("dstPath")
 	resume, _ := cmd.Flags().GetBool("resume")
 
-	flags := cmd.PersistentFlags()
+	flags := cmd.Flags()
 	httpClient, err := client.NewSafeClient(flags)
 	if err != nil {
 		return err

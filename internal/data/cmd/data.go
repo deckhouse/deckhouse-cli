@@ -31,6 +31,7 @@ import (
 	diCreate "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/create"
 	diDelete "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/delete"
 	diUpload "github.com/deckhouse/deckhouse-cli/internal/data/dataimport/cmd/upload"
+	systemflags "github.com/deckhouse/deckhouse-cli/internal/system/flags"
 )
 
 const (
@@ -56,6 +57,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	root.SetOut(os.Stdout)
+	systemflags.AddPersistentFlags(root)
 
 	ctx := context.Background()
 	logger := slog.Default()
