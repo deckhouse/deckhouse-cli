@@ -455,7 +455,7 @@ The exit status is 0 when the run completes, and when it is cancelled, that is w
 | an install image with neither metadata file | warning, exit 0 | exit 1 (`both files is not found in installer`) |
 | an install image whose metadata entry is `./`-prefixed or whose layers are not all gzip (§11.7) | warning, exit 0, no component planned | the components stored |
 | `E:<version>` of a version the dry-run did not pin, a component image, or, in a discovery pull, `E/release-channel:<version>` missing | exit 0, nothing logged | exit 1 |
-| a lookup of a platform VEX attestation failing with anything but not found (`FindVexImage`) | exit 0, no lookup | exit 1 |
+| a lookup of a platform VEX attestation, in either format, failing with anything but not found (`vex.Find` in [vex/vex.go](../internal/mirror/vex/vex.go)) | exit 0, no lookup | exit 1 |
 | a persistent registry error on a module or package version image, which a real pull reads for `extra_images.json` | exit 0 | exit 1 |
 | a disk failure creating `<dir>`, `<tmp>` or module or package scaffolding | exit 1 | exit 1 |
 | a read, disk or packing failure while storing | not reached | exit 1 |

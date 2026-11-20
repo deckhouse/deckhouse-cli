@@ -19,17 +19,21 @@ package puller
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync/atomic"
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex/vextest"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
@@ -185,11 +189,93 @@ func TestPullImageSet_CompletePullPassesVerification(t *testing.T) {
 	require.NoError(t, ps.PullImageSet(context.Background(), imageSet, imgLayout, getter))
 }
 
+// TestPullIndexes_StoresReferrersIndexWhole covers the VEX referrers index: it
+// must land in the layout byte for byte under its sha256-<hex> tag, with the
+// artifactType and annotations of its descriptors, by which consumers find the
+// attestation, and with the attestation artifact itself.
+func TestPullIndexes_StoresReferrersIndexWhole(t *testing.T) {
+	const payload = `{"payloadType":"application/vnd.in-toto+json"}`
+
+	subject := upfake.NewImageBuilder().WithFile("payload.txt", "subject").MustBuild()
+	subjectDigest, err := subject.Digest()
+	require.NoError(t, err)
+
+	idx, err := vextest.ReferrersIndex(subject, payload)
+	require.NoError(t, err)
+	idxDigest, err := idx.Digest()
+	require.NoError(t, err)
+	srcRaw, err := idx.RawManifest()
+	require.NoError(t, err)
+
+	tag := "sha256-" + subjectDigest.Hex
+	reg := upfake.NewRegistry("reg.example")
+	reg.MustAddIndex("repo", tag, idx)
+	client := upfake.NewClient(reg).WithSegment("repo")
+
+	imgLayout, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	ref := "reg.example/repo:" + tag
+	cfg := PullConfig{
+		Name:          "VEX indexes",
+		ImageSet:      map[string]*ImageMeta{ref: nil},
+		Layout:        imgLayout,
+		GetterService: &fakeGetterService{getDigest: client.GetDigest, getIndex: client.GetIndex},
+	}
+
+	ps := NewPullerService(dkplog.NewLogger(dkplog.WithLevel(slog.LevelError)), log.NewNop())
+	require.NoError(t, ps.PullIndexes(context.Background(), cfg))
+
+	layoutIndex, err := imgLayout.Path().ImageIndex()
+	require.NoError(t, err)
+	layoutManifest, err := layoutIndex.IndexManifest()
+	require.NoError(t, err)
+	require.Len(t, layoutManifest.Manifests, 1)
+
+	desc := layoutManifest.Manifests[0]
+	assert.Equal(t, tag, desc.Annotations[regimage.AnnotationImageShortTag])
+	assert.Equal(t, ref, desc.Annotations[regimage.AnnotationImageReferenceName])
+	assert.Equal(t, types.OCIImageIndex, desc.MediaType, "stored as an index, not resolved to a platform image")
+	assert.Equal(t, idxDigest, desc.Digest)
+
+	stored, err := layoutIndex.ImageIndex(desc.Digest)
+	require.NoError(t, err)
+	storedRaw, err := stored.RawManifest()
+	require.NoError(t, err)
+	assert.Equal(t, string(srcRaw), string(storedRaw), "the index must be stored byte for byte")
+
+	storedManifest, err := stored.IndexManifest()
+	require.NoError(t, err)
+	require.Len(t, storedManifest.Manifests, 1)
+
+	artifactDesc := storedManifest.Manifests[0]
+	assert.Equal(t, vextest.BundleMediaType, artifactDesc.ArtifactType)
+	assert.Equal(t, vextest.OpenVEXPredicateType, artifactDesc.Annotations[vextest.PredicateTypeAnnotation])
+
+	artifact, err := stored.Image(artifactDesc.Digest)
+	require.NoError(t, err)
+	artifactManifest, err := artifact.Manifest()
+	require.NoError(t, err)
+	require.NotNil(t, artifactManifest.Subject)
+	assert.Equal(t, subjectDigest, artifactManifest.Subject.Digest)
+
+	layers, err := artifact.Layers()
+	require.NoError(t, err)
+	require.Len(t, layers, 1)
+	rc, err := layers[0].Compressed()
+	require.NoError(t, err)
+	defer rc.Close()
+	storedPayload, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(storedPayload), "the attestation blob must be in the layout")
+}
+
 // fakeGetterService is a tiny pkg.BasicService that lets each test rewire
 // only the call it cares about.
 type fakeGetterService struct {
 	getDigest        func(ctx context.Context, tag string) (*v1.Hash, error)
 	getImage         func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error)
+	getIndex         func(ctx context.Context, tag string) (v1.ImageIndex, error)
 	checkImageExists func(ctx context.Context, tag string) error
 	listTags         func(ctx context.Context) ([]string, error)
 }
@@ -206,6 +292,13 @@ func (f *fakeGetterService) GetImage(ctx context.Context, tag string, opts ...re
 		return f.getImage(ctx, tag, opts...)
 	}
 	return nil, errors.New("getImage not implemented")
+}
+
+func (f *fakeGetterService) GetIndex(ctx context.Context, tag string) (v1.ImageIndex, error) {
+	if f.getIndex != nil {
+		return f.getIndex(ctx, tag)
+	}
+	return nil, errors.New("getIndex not implemented")
 }
 
 func (f *fakeGetterService) CheckImageExists(ctx context.Context, tag string) error {

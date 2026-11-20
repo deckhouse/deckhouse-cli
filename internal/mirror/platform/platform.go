@@ -40,6 +40,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -1032,19 +1033,24 @@ func (svc *Service) pullDeckhousePlatform(ctx context.Context, tagsToMirror []st
 	for _, tag := range uniqueImages {
 		svc.userLogger.Infof("Extracting images digests from Deckhouse installer %s", tag)
 
-		digests, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(tag, prevDigests)
+		digests, vexIndexes, err := svc.ExtractImageDigestsFromDeckhouseInstallerNew(ctx, tag, prevDigests)
 		if err != nil {
 			return fmt.Errorf("extract images digests: %w", err)
 		}
 
 		maps.Copy(svc.downloadList.Deckhouse, digests)
+		maps.Copy(svc.downloadList.DeckhouseVEX, vexIndexes)
 	}
 
-	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse))
+	logger.Infof("Found %d images", len(svc.downloadList.Deckhouse)+len(svc.downloadList.DeckhouseVEX))
 
 	if err = logger.Process("Pull Deckhouse images", func() error {
 		if err := svc.pullDeckhouseImages(ctx); err != nil {
 			return fmt.Errorf("pull deckhouse images: %w", err)
+		}
+
+		if err := svc.pullDeckhouseVEXIndexes(ctx); err != nil {
+			return fmt.Errorf("pull deckhouse VEX indexes: %w", err)
 		}
 
 		return nil
@@ -1242,6 +1248,24 @@ func (svc *Service) pullDeckhouseImages(ctx context.Context) error {
 	return svc.pullerService.PullImages(ctx, config)
 }
 
+// pullDeckhouseVEXIndexes pulls the VEX referrers indexes found for Deckhouse
+// images. Like the legacy .att attestations, an index found is required.
+func (svc *Service) pullDeckhouseVEXIndexes(ctx context.Context) error {
+	if len(svc.downloadList.DeckhouseVEX) == 0 {
+		return nil
+	}
+
+	config := puller.PullConfig{
+		Name:             "Deckhouse VEX indexes",
+		ImageSet:         svc.downloadList.DeckhouseVEX,
+		Layout:           svc.layout.Deckhouse,
+		AllowMissingTags: false,
+		GetterService:    svc.deckhouseService,
+	}
+
+	return svc.pullerService.PullIndexes(ctx, config)
+}
+
 func (svc *Service) generateDeckhouseReleaseManifests(
 	tagsToMirror []string,
 ) error {
@@ -1261,28 +1285,35 @@ func (svc *Service) generateDeckhouseReleaseManifests(
 	return nil
 }
 
+// ExtractImageDigestsFromDeckhouseInstallerNew returns the images the installer
+// under tag lists, skipping those in prevDigests, and records them there.
+// Unless VEX images are skipped, it also returns their VEX attestations: the
+// legacy .att images along with the images, and the referrers indexes apart,
+// since those are pulled whole (see package vex).
 func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
+	ctx context.Context,
 	tag string,
 	prevDigests map[string]struct{},
-) (map[string]*puller.ImageMeta, error) {
+) (map[string]*puller.ImageMeta, map[string]*puller.ImageMeta, error) {
 	logger := svc.userLogger
 
 	logger.Debugf("Extracting images digests from Deckhouse installer %s", tag)
 
 	img, err := svc.layout.DeckhouseInstall.GetImage(tag)
 	if err != nil {
-		return nil, fmt.Errorf("get installer image %q from layout: %w", tag, err)
+		return nil, nil, fmt.Errorf("get installer image %q from layout: %w", tag, err)
 	}
 
 	images, err := extractDeckhouseReleaseExtraImages(img.Extract(), svc.deckhouseService.GetRoot())
 	if err != nil {
-		return nil, fmt.Errorf("extract extra images from installer %q: %w", tag, err)
+		return nil, nil, fmt.Errorf("extract extra images from installer %q: %w", tag, err)
 	}
 
 	logger.Infof("Deckhouse digests found: %d", len(images))
 
-	vex := make([]string, 0)
+	vexFound := 0
 	result := make(map[string]*puller.ImageMeta, len(images))
+	vexIndexes := make(map[string]*puller.ImageMeta)
 
 	const scanPrintInterval = 20
 
@@ -1306,7 +1337,7 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 		logger.Infof("[%d / %d] Scanning images", counter, len(images))
 		logger.Infof("Deckhouse digests found: %d", len(images))
 
-		return result, nil
+		return result, vexIndexes, nil
 	}
 
 	logger.Infof("Searching for VEX images")
@@ -1321,24 +1352,26 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 			continue
 		}
 
-		vexImageName := strings.Replace(strings.Replace(image, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
-		if _, ok := prevDigests[vexImageName]; ok {
-			continue
-		}
+		logger.Debugf("Checking VEX images of %s", image)
 
-		vexImageName, err := svc.FindVexImage(image)
+		found, err := vex.Find(ctx, svc.deckhouseService, image)
 		if err != nil {
-			return nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
+			return nil, nil, fmt.Errorf("find VEX image for digest %q: %w", image, err)
 		}
 
-		if vexImageName != "" {
-			logger.Debugf("Vex image found %s", vexImageName)
-			vex = append(vex, vexImageName)
-			result[vexImageName] = nil
+		for _, ref := range found {
+			logger.Debugf("Vex image found %s", ref.Name)
+
+			vexFound++
+
+			if ref.Index {
+				vexIndexes[ref.Name] = nil
+			} else {
+				result[ref.Name] = nil
+			}
 		}
 
 		prevDigests[image] = struct{}{}
-		prevDigests[vexImageName] = struct{}{}
 
 		result[image] = nil
 	}
@@ -1346,9 +1379,9 @@ func (svc *Service) ExtractImageDigestsFromDeckhouseInstallerNew(
 	logger.Infof("[%d / %d] Scanning images for VEX", counter, len(images))
 
 	logger.Infof("Deckhouse digests found: %d", len(images))
-	logger.Infof("VEX images found: %d", len(vex))
+	logger.Infof("VEX images found: %d", vexFound)
 
-	return result, nil
+	return result, vexIndexes, nil
 }
 
 func extractDeckhouseReleaseExtraImages(rc io.ReadCloser, rootURL string) (map[string]struct{}, error) {
@@ -1399,32 +1432,6 @@ func extractDeckhouseReleaseExtraImages(rc io.ReadCloser, rootURL string) (map[s
 	}
 
 	return nil, fmt.Errorf("both files is not found in installer")
-}
-
-func (svc *Service) FindVexImage(
-	digest string,
-) (string, error) {
-	logger := svc.userLogger
-
-	// vex image reference check
-	vexImageName := strings.Replace(strings.Replace(digest, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
-
-	logger.Debugf("Checking vex image from %s", vexImageName)
-
-	splitIndex := strings.LastIndex(vexImageName, ":")
-	tag := vexImageName[splitIndex+1:]
-
-	err := svc.deckhouseService.CheckImageExists(context.TODO(), tag)
-	if errors.Is(err, client.ErrImageNotFound) {
-		// Image not found, which is expected for non-vulnerable images
-		return "", nil
-	}
-
-	if err != nil {
-		return "", fmt.Errorf("check VEX image exists: %w", err)
-	}
-
-	return vexImageName, nil
 }
 
 // filterVersionsBetween filters release tags to include only versions

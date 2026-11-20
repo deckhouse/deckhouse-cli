@@ -87,6 +87,23 @@ func (s *BasicService) GetImage(ctx context.Context, tag string, opts ...registr
 	return newImage, nil
 }
 
+// GetIndex retrieves an image index from the registry as published: no
+// platform is resolved, and the index manifest keeps its original bytes.
+func (s *BasicService) GetIndex(ctx context.Context, tag string) (v1.ImageIndex, error) {
+	logger := s.logger.With(slog.String("service", s.name), slog.String("tag", tag))
+
+	logger.Debug("Getting index")
+
+	idx, err := s.client.GetIndex(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get index: %w", err)
+	}
+
+	logger.Debug("Index retrieved successfully")
+
+	return idx, nil
+}
+
 // GetDigest retrieves a digest from the registry
 func (s *BasicService) GetDigest(ctx context.Context, tag string) (*v1.Hash, error) {
 	logger := s.logger.With(slog.String("service", s.name), slog.String("tag", tag))

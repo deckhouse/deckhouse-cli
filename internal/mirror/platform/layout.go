@@ -31,7 +31,11 @@ import (
 type ImageDownloadList struct {
 	rootURL string
 
-	Deckhouse                  map[string]*puller.ImageMeta
+	Deckhouse map[string]*puller.ImageMeta
+	// DeckhouseVEX holds the VEX referrers indexes (<root>:sha256-<hex>) of
+	// Deckhouse images, which are pulled whole into the Deckhouse layout. The
+	// legacy .att attestations are single images and go to Deckhouse.
+	DeckhouseVEX               map[string]*puller.ImageMeta
 	DeckhouseExtra             map[string]*puller.ImageMeta
 	DeckhouseInstall           map[string]*puller.ImageMeta
 	DeckhouseInstallStandalone map[string]*puller.ImageMeta
@@ -43,6 +47,7 @@ func NewImageDownloadList(rootURL string) *ImageDownloadList {
 		rootURL: rootURL,
 
 		Deckhouse:                  make(map[string]*puller.ImageMeta),
+		DeckhouseVEX:               make(map[string]*puller.ImageMeta),
 		DeckhouseExtra:             make(map[string]*puller.ImageMeta),
 		DeckhouseInstall:           make(map[string]*puller.ImageMeta),
 		DeckhouseInstallStandalone: make(map[string]*puller.ImageMeta),

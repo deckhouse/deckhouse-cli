@@ -65,6 +65,45 @@ func NewPullerService(
 func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) error {
 	ps.userLogger.InfoLn("Beginning to pull " + config.Name)
 
+	if err := ps.pullMeta(ctx, config); err != nil {
+		return err
+	}
+
+	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetImage); err != nil {
+		return err
+	}
+
+	ps.userLogger.InfoLn("All required " + config.Name + " are pulled!")
+
+	return nil
+}
+
+// PullIndexes is PullImages for references that name image indexes, such as
+// the referrers indexes of VEX attestations. Each index is stored whole and
+// byte for byte, with all its children, instead of being resolved to the
+// image of one platform: the children of a referrers index carry no platform,
+// and consumers find them by the artifactType and annotations of their
+// descriptors, which a rebuilt index would not keep.
+func (ps *PullerService) PullIndexes(ctx context.Context, config PullConfig) error {
+	ps.userLogger.InfoLn("Beginning to pull " + config.Name)
+
+	if err := ps.pullMeta(ctx, config); err != nil {
+		return err
+	}
+
+	if err := ps.PullIndexSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetIndex); err != nil {
+		return err
+	}
+
+	ps.userLogger.InfoLn("All required " + config.Name + " are pulled!")
+
+	return nil
+}
+
+// pullMeta resolves the digest of every image of config.ImageSet that has no
+// metadata yet. With AllowMissingTags, an image whose tag does not resolve
+// keeps nil metadata, and the pull skips it.
+func (ps *PullerService) pullMeta(ctx context.Context, config PullConfig) error {
 	ps.userLogger.InfoLn("Pull " + config.Name + " meta")
 
 	for image, meta := range config.ImageSet {
@@ -125,12 +164,6 @@ func (ps *PullerService) PullImages(ctx context.Context, config PullConfig) erro
 
 	ps.userLogger.InfoLn("All required " + config.Name + " meta are pulled!")
 
-	if err := ps.PullImageSet(ctx, config.ImageSet, config.Layout, config.GetterService.GetImage); err != nil {
-		return err
-	}
-
-	ps.userLogger.InfoLn("All required " + config.Name + " are pulled!")
-
 	return nil
 }
 
@@ -140,6 +173,71 @@ func (ps *PullerService) PullImageSet(
 	imageSet map[string]*ImageMeta,
 	imageSetLayout *image.ImageLayout,
 	imageGetter ImageGetter,
+) error {
+	logger := ps.userLogger
+
+	return ps.pullSet(ctx, imageSet, imageSetLayout, func(ctx context.Context, imageMeta *ImageMeta) error {
+		img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
+		if err != nil {
+			logger.Debugf("failed to pull image %s: %v", imageMeta.TagReference, err)
+
+			return fmt.Errorf("pull image %s (digest %s): %w", imageMeta.TagReference, imageMeta.Digest.String(), err)
+		}
+
+		img.SetMetadata(&image.ImageMeta{
+			TagReference:    imageMeta.TagReference,
+			DigestReference: "@" + imageMeta.Digest.String(),
+			Digest:          imageMeta.Digest,
+		})
+
+		err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
+		if err != nil {
+			logger.Debugf("failed to add image %s: %v", imageMeta.ImageTag, err)
+
+			return fmt.Errorf("add image %s to layout: %w", imageMeta.ImageTag, err)
+		}
+
+		return nil
+	})
+}
+
+// PullIndexSet is PullImageSet for image indexes, see PullIndexes.
+func (ps *PullerService) PullIndexSet(
+	ctx context.Context,
+	imageSet map[string]*ImageMeta,
+	imageSetLayout *image.ImageLayout,
+	indexGetter IndexGetter,
+) error {
+	logger := ps.userLogger
+
+	return ps.pullSet(ctx, imageSet, imageSetLayout, func(ctx context.Context, imageMeta *ImageMeta) error {
+		// A bare digest, not "@"+digest as for images: the upstream fake
+		// client resolves only this form in GetIndex, the real one both.
+		idx, err := indexGetter(ctx, imageMeta.Digest.String())
+		if err != nil {
+			logger.Debugf("failed to pull index %s: %v", imageMeta.TagReference, err)
+
+			return fmt.Errorf("pull index %s (digest %s): %w", imageMeta.TagReference, imageMeta.Digest.String(), err)
+		}
+
+		err = imageSetLayout.AddIndex(idx, imageMeta.ImageTag, imageMeta.TagReference)
+		if err != nil {
+			logger.Debugf("failed to add index %s: %v", imageMeta.ImageTag, err)
+
+			return fmt.Errorf("add index %s to layout: %w", imageMeta.ImageTag, err)
+		}
+
+		return nil
+	})
+}
+
+// pullSet stores every image of imageSet in imageSetLayout with store, which
+// gets each image's metadata, and then checks that none went missing.
+func (ps *PullerService) pullSet(
+	ctx context.Context,
+	imageSet map[string]*ImageMeta,
+	imageSetLayout *image.ImageLayout,
+	store func(ctx context.Context, imageMeta *ImageMeta) error,
 ) error {
 	logger := ps.userLogger
 
@@ -165,27 +263,7 @@ func (ps *PullerService) PullImageSet(
 					return nil
 				}
 
-				img, err := imageGetter(ctx, "@"+imageMeta.Digest.String())
-				if err != nil {
-					logger.Debugf("failed to pull image %s: %v", imageMeta.TagReference, err)
-
-					return fmt.Errorf("pull image %s (digest %s): %w", imageMeta.TagReference, imageMeta.Digest.String(), err)
-				}
-
-				img.SetMetadata(&image.ImageMeta{
-					TagReference:    imageMeta.TagReference,
-					DigestReference: "@" + imageMeta.Digest.String(),
-					Digest:          imageMeta.Digest,
-				})
-
-				err = imageSetLayout.AddImage(img, imageMeta.ImageTag)
-				if err != nil {
-					logger.Debugf("failed to add image %s: %v", imageMeta.ImageTag, err)
-
-					return fmt.Errorf("add image %s to layout: %w", imageMeta.ImageTag, err)
-				}
-
-				return nil
+				return store(ctx, imageMeta)
 			}))
 		if err != nil {
 			ref := imageReference

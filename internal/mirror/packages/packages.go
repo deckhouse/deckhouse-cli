@@ -51,6 +51,7 @@ import (
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/modules"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/pack"
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/puller"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/bundle"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/layouts"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
@@ -835,7 +836,8 @@ func (svc *Service) pullExtraImages(ctx context.Context, packageName string, ver
 	return nil
 }
 
-// pullVexImages finds and pulls VEX attestation images for package images.
+// pullVexImages finds and pulls the VEX attestations of package images, in
+// both formats (see package vex): legacy .att images and referrers indexes.
 func (svc *Service) pullVexImages(ctx context.Context, packageName string, downloadList *ImageDownloadList) {
 	allImages := make([]string, 0, len(downloadList.Package)+len(downloadList.PackageExtra))
 
@@ -848,18 +850,25 @@ func (svc *Service) pullVexImages(ctx context.Context, packageName string, downl
 	}
 
 	vexImageSet := make(map[string]*puller.ImageMeta)
+	vexIndexSet := make(map[string]*puller.ImageMeta)
 
 	for _, img := range allImages {
-		vexImageName, err := svc.findVexImage(ctx, packageName, img)
+		found, err := vex.Find(ctx, svc.packagesService.Package(packageName), img)
 		if err != nil {
 			svc.logger.Debug(fmt.Sprintf("Failed to find VEX image for %s: %v", img, err))
 			continue
 		}
 
-		if vexImageName != "" {
-			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
-			vexImageSet[vexImageName] = nil
-			downloadList.Package[vexImageName] = nil
+		for _, ref := range found {
+			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", ref.Name))
+
+			if ref.Index {
+				vexIndexSet[ref.Name] = nil
+			} else {
+				vexImageSet[ref.Name] = nil
+			}
+
+			downloadList.Package[ref.Name] = nil
 		}
 	}
 
@@ -876,29 +885,20 @@ func (svc *Service) pullVexImages(ctx context.Context, packageName string, downl
 			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX images for %s: %v", packageName, err))
 		}
 	}
-}
 
-// findVexImage checks if a VEX attestation image exists for the given image.
-func (svc *Service) findVexImage(ctx context.Context, packageName string, imageRef string) (string, error) {
-	vexImageName := strings.Replace(strings.Replace(imageRef, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
+	if len(vexIndexSet) > 0 {
+		config := puller.PullConfig{
+			Name:             packageName + " VEX indexes",
+			ImageSet:         vexIndexSet,
+			Layout:           svc.layout.Package(packageName).Packages,
+			AllowMissingTags: true,
+			GetterService:    svc.packagesService.Package(packageName),
+		}
 
-	splitIndex := strings.LastIndex(vexImageName, ":")
-	if splitIndex == -1 {
-		return "", nil
+		if err := svc.pullerService.PullIndexes(ctx, config); err != nil {
+			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX indexes for %s: %v", packageName, err))
+		}
 	}
-
-	tag := vexImageName[splitIndex+1:]
-
-	err := svc.packagesService.Package(packageName).CheckImageExists(ctx, tag)
-	if errors.Is(err, client.ErrImageNotFound) {
-		return "", nil
-	}
-
-	if err != nil {
-		return "", err
-	}
-
-	return vexImageName, nil
 }
 
 // extractVersionsFromVersionChannels extracts version tags from pulled version channel images.

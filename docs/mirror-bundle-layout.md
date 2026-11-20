@@ -133,7 +133,7 @@ A layout MUST be self-contained: every blob its manifests and indexes reference 
 
 | Field | Content |
 |---|---|
-| `mediaType` | The manifest media type as published by the source: an image manifest (`application/vnd.docker.distribution.manifest.v2+json`, `application/vnd.oci.image.manifest.v1+json`), or, in the d8 CLI and plugin layouts only, an image index (`application/vnd.oci.image.index.v1+json`, a Docker manifest list) for a multi-platform image (§7.4). |
+| `mediaType` | The manifest media type as published by the source: an image manifest (`application/vnd.docker.distribution.manifest.v2+json`, `application/vnd.oci.image.manifest.v1+json`), or an image index (`application/vnd.oci.image.index.v1+json`, a Docker manifest list): in the d8 CLI and plugin layouts for a multi-platform image, and in the platform root, module and package layouts for a VEX referrers index (§5.4, §7.4). |
 | `digest`, `size` | Those of the manifest or index blob. |
 | `annotations["io.deckhouse.image.short_tag"]` | The tag in the target registry. Required: push skips a descriptor without it. |
 | `annotations["org.opencontainers.image.ref.name"]` | The full source reference the image came from, `<source repository>:<tag>` or `<source repository>@sha256:<hex>`; for an alias, the source repository with the alias tag, which need not exist in the source. Informational: unlike the OCI image-layout convention it is not a tag. Push does not route by it, but uses it as part of the merge key and as the merge sort key (§8.5), which can decide the winner among duplicate short tags. |
@@ -153,8 +153,10 @@ A layout MUST be self-contained: every blob its manifests and indexes reference 
 | release channel | `alpha`, `beta`, `early-access`, `stable`, `rock-solid`, `lts` | `release-channel/`, `install/`, module `release/`, package `version/` |
 | fixed | `latest`; `2`, `1`, `1`, `0` | installer (default of `--installer-tag`); trivy-db, trivy-bdu, trivy-java-db, trivy-checks |
 | digest | 64 lowercase hex characters, the digest without `sha256:` | images the source references by digest (§6.1, §6.4) |
-| VEX | `sha256-<hex>.att`, `<tag>.att` | vulnerability attestation of a digest- or tag-referenced image |
+| VEX | `sha256-<hex>.att`, `<tag>.att`; `sha256-<hex>` | vulnerability attestation of a digest- or tag-referenced image, as a single attestation image; the referrers index of a digest-referenced image (below) |
 | other | `pr12345`, `v3` | custom `--deckhouse-tag` builds, tags from `extra_images.json`, tags listed in `images_tags.json` (platform root, taken verbatim) |
+
+A VEX referrers index is the OCI image index that the [referrers tag schema](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#referrers-tag-schema) of the OCI distribution spec tags `sha256-<hex>` for the image `sha256:<hex>`. delivery-kit publishes VEX this way instead of `.att`: the attestation is an artifact manifest with no tag, no platform and a `subject` pointing at the image, listed in the index under a descriptor whose `artifactType` (`application/vnd.dev.sigstore.bundle.v0.3+json` when signed, `application/vnd.dsse.envelope.v1+json` otherwise) and annotations (`dev.sigstore.bundle.predicateType` and others) are what consumers such as cosign and `werf attest` look the attestation up by. The index can list other attestations of the image as well, and every one is mirrored with it. A source can hold both VEX forms for one image, and pull takes both, so consumers that read only `.att` keep working (`vex.Find` in [vex/vex.go](../internal/mirror/vex/vex.go)). Pull stores the index whole and push writes it unchanged (§7.4, §8.7), so the target serves the same index under the same tag, with the same digest, and answers a referrers lookup as the source does, whether or not it implements the referrers API.
 
 A digest-form image is pushed as `<repo>:<hex>`, which makes it addressable by tag (registries may garbage-collect untagged manifests). Push writes manifests unchanged, so `<repo>@sha256:<hex>`, the form the platform uses, resolves as well, provided the referenced digest is an image manifest and not an index (§7.4).
 
@@ -172,7 +174,7 @@ Staged in `<tmp>/platform` and packed without a prefix ([platform/platform.go](.
 
 | Layout path | Source repository | Short tags |
 |---|---|---|
-| *(root)* | `E` | `vX.Y.Z` of every selected version (required); every image listed in `deckhouse/candi/images_tags.json` of every pulled `install` image, or in `deckhouse/candi/images_digests.json` (digest form) when there is no tags file (required; an install image with neither file, or with both empty, fails the pull); VEX tags of those images that the source has (required once found), unless `--skip-vex-images` |
+| *(root)* | `E` | `vX.Y.Z` of every selected version (required); every image listed in `deckhouse/candi/images_tags.json` of every pulled `install` image, or in `deckhouse/candi/images_digests.json` (digest form) when there is no tags file (required; an install image with neither file, or with both empty, fails the pull); VEX tags (§5.4) of those images that the source has, both forms where it has both (required once found), unless `--skip-vex-images` |
 | `install/` | `E/install` | `vX.Y.Z` of every selected version (required: the download tolerates a missing tag, but pull then crashes, §11.10); channel aliases (below) |
 | `install-standalone/` | `E/install-standalone` | `vX.Y.Z` of every selected version (tolerated) |
 | `release-channel/` | `E/release-channel` | in discovery mode every published release channel whose version satisfies `--include-platform` when a range is supplied, and a suspended one fails the pull unless `--ignore-suspend` is given; in a tag-pinned pull every published channel that is not suspended (every one with `--ignore-suspend`); in both cases whatever version the channel points to (§11.4); `vX.Y.Z` of every selected version (required in discovery mode, tolerated when tag-pinned); re-pointed channels (below) |
@@ -217,7 +219,7 @@ Pull writes the archive only when the source has `trivy-db:2`. The other three d
 
 | Layout path | Source repository | Short tags |
 |---|---|---|
-| `modules/<name>/` | `E/M/<name>` | `vX.Y.Z` of every selected version (tolerated); every `sha256:<hex>` found in the `images_digests.json` of each version image, in digest form (best effort); VEX tags of the version images, internal images and extra images that the module repository has (best effort), unless `--skip-vex-images` |
+| `modules/<name>/` | `E/M/<name>` | `vX.Y.Z` of every selected version (tolerated); every `sha256:<hex>` found in the `images_digests.json` of each version image, in digest form (best effort); VEX tags (§5.4) of the version images, internal images and extra images that the module repository has, both forms where it has both (best effort), unless `--skip-vex-images` |
 | `modules/<name>/release/` | `E/M/<name>/release` | `alpha`, `beta`, `early-access`, `stable`, `rock-solid`, plus `lts` when published (tolerated); `vX.Y.Z` of every selected version (best effort); exact-pin aliases (below) |
 | `modules/<name>/extra/<extra>/` | `E/M/<name>/extra/<extra>` | for every selected version, the tag its `extra_images.json` (`{"<extra>": "<tag>"}`, numbers allowed) gives `<extra>` (tolerated; an `extra_images.json` that cannot be read after 5 tries fails the pull) |
 
@@ -308,6 +310,7 @@ The plugins phase runs last because it selects plugins against the module and pl
 ### 7.4. Download
 
 - An image is resolved to a digest by tag, or taken from a digest reference without checking that it exists, and downloaded by digest; every download is tried up to 5 times, 10 s apart ([puller/puller.go](../internal/mirror/puller/puller.go)). The d8 CLI and plugins bypass this puller: they are fetched by tag, with index children by digest, under their own 5 tries 10 s apart, and the check below does not apply to them.
+- A VEX referrers index (§5.4) is stored whole in every phase that pulls VEX: it is resolved to a digest by its tag like an image, and then the index and its children are stored byte for byte, the index under its short tag and the children as blobs only (`PullIndexes` in [puller/puller.go](../internal/mirror/puller/puller.go)).
 - Only the d8 CLI and plugin phases keep multi-platform images whole (`pullTag` in [dist/image.go](../internal/mirror/dist/image.go)). Every other phase stores single-platform images: when a source tag or digest names an image index, the registry client resolves it to the linux/amd64 child (`remote.Image`), and that child is stored under the short tag. For a digest-form short tag (§5.4) this means `<repo>@sha256:<hex>` does not resolve in the target, because the index itself is not pushed.
 - Each tag is required, tolerated or best effort as listed in §6.
 - After a download batch completes, pull checks that each image it resolved is in the layout under its short tag (`verifyPlannedImagesLanded`) and fails otherwise.
@@ -392,6 +395,7 @@ For each layout (`PushLayout` in [pusher/pusher.go](../internal/mirror/pusher/pu
 - descriptors without a short tag are skipped, logged only at debug level;
 - for a short tag that occurs more than once, the last descriptor is pushed, at the position of the first;
 - every remaining descriptor is pushed to `<destination>:<short tag>`, as a whole index when its media type is an index and as an image otherwise; manifests are written unchanged, so digests are preserved; a short tag that starts with `sha256:` or `@sha256:` is pushed by digest and gets no tag;
+- a VEX referrers index (§5.4) replaces the `sha256-<hex>` tag of the target rather than merging into it. While its children are pushed, go-containerregistry, seeing their `subject`, adds them to that tag itself when the target lacks the referrers API, and the index then overwrites the tag. Referrers that other tools attached in the target drop out of the tag, though a target with the referrers API still lists them through that API;
 - every push is tried up to 4 times, 3 s apart, on top of the transport retries go-containerregistry makes for transient errors, and a final failure stops the whole push.
 
 `ref.name` plays no part in pushing.
@@ -467,12 +471,12 @@ bundle/
 ```
 registry.example.com/deckhouse/ee:d8WriteCheck                            pre-check
 registry.example.com/deckhouse/ee:v1.70.3 :v1.71.2 :v1.72.1               platform versions
-registry.example.com/deckhouse/ee:<hex> :sha256-<hex>.att                 images from images_digests.json, VEX
+registry.example.com/deckhouse/ee:<hex> :sha256-<hex>.att :sha256-<hex>   images from images_digests.json, VEX in both forms
 registry.example.com/deckhouse/ee/install:v1.70.3 … :alpha … :stable      versions and channel aliases
 registry.example.com/deckhouse/ee/install-standalone:v1.70.3 …
 registry.example.com/deckhouse/ee/release-channel:alpha … :v1.72.1
 registry.example.com/deckhouse/ee/security/trivy-db:2                     and trivy-bdu:1, trivy-java-db:1, trivy-checks:0
-registry.example.com/deckhouse/ee/modules/foo:v1.2.0 :v1.2.0.att :<hex>
+registry.example.com/deckhouse/ee/modules/foo:v1.2.0 :v1.2.0.att :<hex> :sha256-<hex>
 registry.example.com/deckhouse/ee/modules/foo/release:alpha … :v1.2.0
 registry.example.com/deckhouse/ee/modules/foo/extra/scanner:v3
 registry.example.com/deckhouse/ee/packages/bar:v0.3.0

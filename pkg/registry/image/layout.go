@@ -149,7 +149,8 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 // AddIndex stores idx in the layout under tag. The index goes in whole:
 // per-platform children, their descriptors, and index annotations stay as
 // published. Use it for multi-platform images (e.g. CLI plugins), where
-// flattening to a single platform would lose the rest. tagReference is the
+// flattening to a single platform would lose the rest, and for VEX referrers
+// indexes, whose children have no platform at all. tagReference is the
 // full registry reference for the descriptor annotations, same as AddImage
 // records.
 //
@@ -270,7 +271,8 @@ func CountManifests(paths []layout.Path) int {
 
 // CountManifestsMatching counts manifests whose descriptor annotations satisfy
 // match. It feeds summary subsets in the same single pass - notably the VEX
-// tally (".att" short-tag). Unreadable paths are skipped, as in CountManifests.
+// tally (sha256-<hex>.att and sha256-<hex> short tags). Unreadable paths are
+// skipped, as in CountManifests.
 func CountManifestsMatching(paths []layout.Path, match func(annotations map[string]string) bool) int {
 	total := 0
 
