@@ -1,0 +1,5 @@
+apiVersion: demo.deckhouse.io/v1alpha1
+kind: DemoVirtualDisk
+metadata:
+  name: disk-a
+  namespace: my-app

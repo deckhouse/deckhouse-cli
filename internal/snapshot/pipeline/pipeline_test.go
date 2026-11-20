@@ -6328,6 +6328,100 @@ func TestPipeline_CancelAfterAllNodesSucceed_ReturnsNil(t *testing.T) {
 	assertNodeComplete(t, outputDir)
 }
 
+// TestPipeline_WritesCurrentFormatAndRewritesOlderArchive proves that a download seals every
+// node at archive.SnapshotFormatVersionCurrent, children before their parent, and that a rerun
+// over the same archive downgraded to format version 3 rewrites every snapshot.yaml at the
+// current version without downloading anything again: a current parent admits only children at
+// the current version.
+func TestPipeline_WritesCurrentFormatAndRewritesOlderArchive(t *testing.T) {
+	t.Parallel()
+
+	rawBlock := bytes.Repeat([]byte("V"), 600)
+
+	srv := makeBlockServer(t, rawBlock)
+	defer srv.Close()
+
+	c := buildFakeClient(t)
+	outputDir := t.TempDir()
+	diskSnapDir := filepath.Join(outputDir, archive.SnapshotsDirName, archive.NodeDirName(childKind, diskSnapName))
+
+	cfg := pipeline.Config{
+		Namespace:            testNS,
+		RootSnapshot:         rootSnapshot,
+		OutputDir:            outputDir,
+		Workers:              1,
+		PerVolumeConcurrency: 1,
+		KubeClient:           c,
+		OpenExport: func(_ context.Context, namespace string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+			return exporter.NewExport(namespace, "de-mock", "Block", srv.URL, dataplane.NewFetcher(srv.Client())), nil
+		},
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	requireCurrentFormat := func(dir string) archive.SnapshotYAML {
+		t.Helper()
+
+		assertNodeComplete(t, dir)
+
+		sy, err := archive.ReadSnapshotYAML(dir)
+		require.NoError(t, err)
+		require.Equal(t, archive.SnapshotFormatVersionCurrent, sy.FormatVersion, "format version of %s", dir)
+
+		return sy
+	}
+
+	leaf := requireCurrentFormat(diskSnapDir)
+	root := requireCurrentFormat(outputDir)
+
+	leafCommitment, err := archive.ChildCommitmentOf(leaf)
+	require.NoError(t, err)
+
+	rootCommitment, err := archive.ComputeChildrenChecksum([]archive.ChildCommitment{leafCommitment})
+	require.NoError(t, err)
+	require.Equal(t, rootCommitment.Hex, root.ChildrenChecksum.Hex,
+		"the root must commit to its child's current snapshot.yaml, metadataChecksum included")
+
+	// Downgrade the archive to version 3, as an older d8 wrote it: the leaf first, then the root
+	// committing to it with the version 3 encoding.
+	leaf.FormatVersion = archive.SnapshotFormatVersionPayloadSizes
+	require.NoError(t, archive.WriteSnapshotYAML(diskSnapDir, leaf))
+
+	leaf, err = archive.ReadSnapshotYAML(diskSnapDir)
+	require.NoError(t, err)
+
+	leafCommitment, err = archive.ChildCommitmentOf(leaf)
+	require.NoError(t, err)
+
+	oldCommitment, err := archive.ComputeChildrenChecksumAt(archive.SnapshotFormatVersionPayloadSizes,
+		[]archive.ChildCommitment{leafCommitment})
+	require.NoError(t, err)
+
+	root.FormatVersion = archive.SnapshotFormatVersionPayloadSizes
+	root.ChildrenChecksum = &oldCommitment
+	require.NoError(t, archive.WriteSnapshotYAML(outputDir, root))
+	require.NoError(t, archive.VerifyNode(outputDir), "the downgraded archive must verify at version 3")
+
+	block, found, err := archive.ClassifyBlockPayload(diskSnapDir)
+	require.NoError(t, err)
+	require.True(t, found, "the leaf must hold a block payload")
+
+	payload := block.Path
+	payloadBefore := statMtime(t, payload)
+
+	cfg.OpenExport = func(_ context.Context, _ string, _ aggapi.NodeRef, _ string) (*exporter.Export, error) {
+		t.Error("OpenExport must not be called for a complete archive")
+
+		return nil, errors.New("unexpected OpenExport call")
+	}
+
+	require.NoError(t, runPipeline(context.Background(), cfg))
+
+	requireCurrentFormat(diskSnapDir)
+	requireCurrentFormat(outputDir)
+	require.Equal(t, payloadBefore, statMtime(t, payload), "the payload must not be rewritten")
+}
+
 // TestPipeline_BestEffort_OneNodeFailureDoesNotCancelSiblings is the regression
 // test for the best-effort per-node download design: one node's permanent
 // download failure must not cancel sibling nodes that are still downloading.
