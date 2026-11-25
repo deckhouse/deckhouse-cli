@@ -74,10 +74,13 @@ func (m *Manager) SetDirectory(dir string) {
 	m.pluginDirectory = dir
 }
 
-// EnsureInstallRoot creates <pluginDirectory>/plugins; on permission denied
-// falls back to ~/.deckhouse-cli, updates m.pluginDirectory, and retries.
+// EnsureInstallRoot creates <pluginDirectory>/plugins and checks that the current
+// user can write to it; on permission denied falls back to ~/.deckhouse-cli,
+// updates m.pluginDirectory, and retries. d8 runs with the caller's own uid, so a
+// regular user only reads the root-owned /opt/deckhouse/lib/deckhouse-cli and
+// installs into the home fallback.
 func (m *Manager) EnsureInstallRoot() error {
-	err := os.MkdirAll(layout.PluginsRoot(m.pluginDirectory), 0755)
+	err := ensureWritable(layout.PluginsRoot(m.pluginDirectory))
 	if err == nil {
 		return nil
 	}
@@ -97,4 +100,21 @@ func (m *Manager) EnsureInstallRoot() error {
 	m.pluginDirectory = fallback
 
 	return os.MkdirAll(layout.PluginsRoot(m.pluginDirectory), 0755)
+}
+
+// ensureWritable creates dir and proves the current user can create files in it.
+// MkdirAll alone is not enough: it succeeds on an existing root-owned directory.
+func ensureWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	probe, err := os.CreateTemp(dir, ".write-probe-*")
+	if err != nil {
+		return err
+	}
+
+	_ = probe.Close()
+
+	return os.Remove(probe.Name())
 }

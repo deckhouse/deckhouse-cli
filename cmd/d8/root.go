@@ -189,7 +189,7 @@ func (r *RootCommand) registerCommands() {
 	ctx := commands.NewRootContext()
 	r.cmd.SetContext(ctx)
 
-	installRoot, installed := r.installedPlugins()
+	installed := r.installedPlugins()
 
 	// Names still served by a built-in once the override pass is done. A name an
 	// installed plugin took over drops off the list: the plugin itself now satisfies
@@ -197,7 +197,7 @@ func (r *RootCommand) registerCommands() {
 	var builtinDeps []string
 
 	for _, o := range r.overridableCommands(ctx) {
-		if _, override := installed[o.name]; override {
+		if installRoot, override := installed[o.name]; override {
 			r.cmd.AddCommand(pluginscmd.NewPluginCommand(
 				o.name,
 				o.short,
@@ -237,27 +237,19 @@ func (r *RootCommand) registerCommands() {
 	r.cmd.AddCommand(distcmd.NewCommand(r.logger.Named("dist-command"), builtinDeps))
 }
 
-// installedPlugins returns the plugins root actually holding installs and the set of
-// plugin names in it, empty when nothing is installed.
+// installedPlugins maps each installed plugin name to the root holding it: the
+// system root (/opt/deckhouse/lib/deckhouse-cli) wins, the user's ~/.deckhouse-cli
+// is next. Empty when nothing is installed.
 //
 // This runs at registration time, before flag parsing, so only the DECKHOUSE_CLI_PATH
 // env override (applied in NewRootCommand) can retarget it: --plugins-dir is parsed
 // far too late to decide which commands get registered.
-func (r *RootCommand) installedPlugins() (string, map[string]struct{}) {
-	root, names, ok := layout.ResolveInstalled(flags.DeckhousePluginsDir)
-	if !ok {
-		return "", nil
-	}
+func (r *RootCommand) installedPlugins() map[string]string {
+	installed := layout.InstalledPluginRoots(flags.DeckhousePluginsDir)
 
-	set := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		set[name] = struct{}{}
-	}
+	r.logger.Debug("resolved installed plugins for command override", slog.Any("plugins", installed))
 
-	r.logger.Debug("resolved installed plugins for command override",
-		slog.String("root", root), slog.Any("plugins", names))
-
-	return root, set
+	return installed
 }
 
 func (r *RootCommand) Execute() error {
