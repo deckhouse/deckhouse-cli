@@ -158,9 +158,8 @@ func RootHasInstall(root string) bool {
 // one is not writable. The final result is false when no plugins are installed
 // anywhere, and the root is then empty and the names nil.
 //
-// Callers resolving a plugin by name must use this rather than the configured root
-// alone: with an unwritable default root the installs live in the fallback, and
-// looking only at the configured root would miss every one of them.
+// Callers resolving a plugin by name use InstalledPluginRoots instead: a user's own
+// installs live in the fallback even when the system root holds plugins too.
 func ResolveInstalled(configured string) (string, []string, bool) {
 	if names, err := InstalledNames(configured); err == nil && len(names) > 0 {
 		return configured, names, true
@@ -176,6 +175,30 @@ func ResolveInstalled(configured string) (string, []string, bool) {
 	}
 
 	return "", nil, false
+}
+
+// InstalledPluginRoots maps every installed plugin name to the root holding it:
+// the configured (system) root first, then the home fallback (~/.deckhouse-cli).
+// A plugin present in both runs from the configured root; a plugin only the user
+// installed is still found next to the system ones.
+func InstalledPluginRoots(configured string) map[string]string {
+	roots := []string{configured}
+	if fallback, err := HomeFallbackPath(); err == nil && fallback != configured {
+		roots = append(roots, fallback)
+	}
+
+	found := make(map[string]string)
+
+	for _, root := range roots {
+		names, _ := InstalledNames(root)
+		for _, name := range names {
+			if _, ok := found[name]; !ok {
+				found[name] = root
+			}
+		}
+	}
+
+	return found
 }
 
 // ResolveInstallRoot reports just the root resolved by ResolveInstalled.

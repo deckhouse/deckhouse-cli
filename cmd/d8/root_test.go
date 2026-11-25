@@ -50,7 +50,7 @@ import (
 // The invariant: building the command tree writes nothing to stdout, even
 // when the plugins directory cannot be read. The plugins directory is read
 // during construction (root.go:97 registerCommands -> installedPlugins ->
-// layout.ResolveInstalled), and root.go:67 builds the logger that used to
+// layout.InstalledPluginRoots), and root.go:67 builds the logger that used to
 // carry the message - so this test covers both halves of the failure.
 func TestNewRootCommand_WritesNothingToStdout(t *testing.T) {
 	// NewRootCommand overwrites this package-level global from the

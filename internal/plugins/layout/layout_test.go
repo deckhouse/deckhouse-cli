@@ -124,6 +124,20 @@ func TestResolveInstalledFallsBackToHome(t *testing.T) {
 	assert.Equal(t, []string{"stronghold"}, names)
 }
 
+// TestInstalledPluginRoots: each plugin resolves on its own - the system root wins,
+// and a plugin only the user installed is found in ~/.deckhouse-cli next to it.
+func TestInstalledPluginRoots(t *testing.T) {
+	configured, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+
+	fallback := path.Join(home, ".deckhouse-cli")
+	installPlugin(t, configured, "system")
+	installPlugin(t, fallback, "system")
+	installPlugin(t, fallback, "iam")
+
+	assert.Equal(t, map[string]string{"system": configured, "iam": fallback}, InstalledPluginRoots(configured))
+}
+
 func TestResolveInstalledNothingInstalled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
