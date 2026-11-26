@@ -1,6 +1,6 @@
 dockerImage: registry.deckhouse.io/container-factory@sha256:18657807b894c4be8d7c4ffa4da2afb457c96d955e1e47b8e0c1458e3dbae807 # builder/golang-debian-1.26 from base-images v3.1.27 (debian:13.1, root, GOST go1.26.11)
 commands:
-  - apt-get update && apt-get install -y libbtrfs-dev apt-utils file git gcc dnsutils
+  - apt-get update && apt-get install -y libbtrfs-dev apt-utils file git gcc dnsutils curl
   # The builder image ships no curl/wget. task is a Go program, so
   # install it with the in-image toolchain: /go/bin is already on PATH.
   - go install github.com/go-task/task/v3/cmd/task@v3.41.0

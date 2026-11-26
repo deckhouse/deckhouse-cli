@@ -186,6 +186,14 @@ tasks:
       - build:dist:darwin:amd64
       - build:dist:darwin:arm64
       - build:dist:windows:amd64
+    cmds:
+      - task: check:secrets
+
+  check:secrets:
+    desc: Scan build artifacts for secrets
+    cmds:
+      - curl --fail --silent --show-error --location https://galleon.flant.ru/repository/deckhouse-ssdlc-raw/trufflehog/trufflehog-3.100.1 --output /tmp/trufflehog && chmod 755 /tmp/trufflehog
+      - /tmp/trufflehog filesystem ./dist/{{ .version }} --filter-entropy=5.0 --fail
 
   build:dist:linux:amd64:
     desc: Build release binary for linux/amd64
