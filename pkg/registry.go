@@ -114,6 +114,8 @@ type RegistryClient interface {
 // BasicService defines common registry operations with standardized logging
 type BasicService interface {
 	GetImage(ctx context.Context, tag string, opts ...registry.ImageGetOption) (RegistryImage, error)
+	// GetIndex returns the image index under tag whole, resolving no platform.
+	GetIndex(ctx context.Context, tag string) (v1.ImageIndex, error)
 	GetDigest(ctx context.Context, tag string) (*v1.Hash, error)
 	CheckImageExists(ctx context.Context, tag string) error
 	ListTags(ctx context.Context) ([]string, error)
