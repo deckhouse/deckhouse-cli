@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package apiclient talks over HTTP to the runtime API of the Deckhouse controller
-// (Module v2), served on the pod IP (the "self" port): probes, metrics, pprof,
-// queues, scheduler, requirements and packages.
+// Package apiclient queries the Deckhouse controller runtime API: probes, metrics,
+// pprof, queues, scheduler, requirements and packages. Pod configuration determines
+// whether requests use the Pod's protected HTTPS port or the Kubernetes pods/proxy subresource.
 //
 // The controller of deckhouse main at 8010976436 does not serve /api/v1/packages
 // over HTTP yet, so there those routes answer 404.
@@ -42,7 +42,7 @@ const (
 	OutputYAML = "yaml"
 )
 
-// Transport sends a GET request for path with query to the API.
+// Transport sends a GET request for an escaped absolute path with query to the API.
 type Transport interface {
 	Get(ctx context.Context, path string, query url.Values) (*Response, error)
 }
@@ -63,7 +63,7 @@ func New(transport Transport) *Client {
 	return &Client{transport: transport}
 }
 
-// Get returns the body of any route.
+// Get returns the body of an escaped absolute route path.
 func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte, error) {
 	return c.get(ctx, path, query)
 }
@@ -102,7 +102,8 @@ func (c *Client) Endpoints(ctx context.Context) ([]Endpoint, error) {
 		return nil, err
 	}
 
-	var endpoints []Endpoint
+	// Each route occupies one line; the final line may lack a newline.
+	endpoints := make([]Endpoint, 0, bytes.Count(body, []byte("\n"))+1)
 
 	for line := range strings.Lines(string(body)) {
 		method, path, ok := strings.Cut(strings.TrimSpace(line), " ")
@@ -111,6 +112,10 @@ func (c *Client) Endpoints(ctx context.Context) ([]Endpoint, error) {
 		}
 
 		endpoints = append(endpoints, Endpoint{Method: method, Path: path})
+	}
+
+	if len(endpoints) == 0 {
+		return nil, nil
 	}
 
 	return endpoints, nil

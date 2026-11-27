@@ -123,7 +123,8 @@ func fakeAPIServer(t *testing.T, log *requestLog) *httptest.Server {
 		case "/api/v1/namespaces/d8-system/pods":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"kind":"PodList","apiVersion":"v1","items":[{"metadata":{"name":"deckhouse-0","namespace":"d8-system"},`+
-				`"spec":{"containers":[{"name":"deckhouse","ports":[{"name":"self","containerPort":4222}]}]}}]}`)
+				`"spec":{"containers":[{"name":"deckhouse","ports":[{"name":"self","containerPort":4222}],`+
+				`"env":[{"name":"ADDON_OPERATOR_LISTEN_ADDRESS","valueFrom":{"fieldRef":{"fieldPath":"status.podIP"}}}]}]}}]}`)
 		case proxy + "/healthz":
 			fmt.Fprint(w, "ok")
 		case proxy + "/readyz":

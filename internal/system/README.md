@@ -281,7 +281,21 @@ The pod list is the entire payload of this archive, so the command fails (and wr
 
 `d8 system api` covers the runtime API of the Deckhouse controller, one leaf per route. The command is hidden from help because the API exists only when the controller runs Module v2 (`DECKHOUSE_ENABLE_MODULE_V2=true`, the `enableModuleV2` setting). Without it the same port is served by addon-operator: `healthz`, `readyz` and `metrics` still answer, `/api/v1/...` and `/endpoints` answer 404.
 
-Every command is a plain HTTP request through the API server: the `pods/proxy` subresource of the leader pod, to the controller's HTTP listener on the pod IP, port `self` (`ADDON_OPERATOR_LISTEN_PORT`, 4222). It needs `get pods/proxy` in `d8-system`. A port-forward cannot reach this listener: port-forwarding dials localhost inside the pod's network namespace, and the listener binds the pod IP. With user-authz, `get pods/proxy` comes only with wildcard roles such as SuperAdmin; the RBACv2 `proxy_resources` capability grants `create` only.
+The command selects the leader pod, or the replica named by `--pod`, through the Kubernetes API. It chooses a transport from `ADDON_OPERATOR_LISTEN_ADDRESS` in that pod's `deckhouse` container:
+
+| Pod configuration | Connection |
+|---|---|
+| `valueFrom.fieldRef.fieldPath: status.podIP` | Legacy HTTP listener through Kubernetes `pods/proxy`, port `self` (normally 4222). No proxy CA lookup is needed. |
+| `value: "127.0.0.1"` and a port named `https` in the Pod | Direct HTTPS to the Pod IP and that port (normally 4204), with the `/controller/` prefix. The controller serves the port itself; a proxy container may own it instead. Requires `hostNetwork: true`. |
+| Loopback listener without an `https` port, as in the initial bootstrap Pod | The command reports that the protected network endpoint is not configured yet. |
+
+For protected pods, the client reads the public serving CA from ConfigMap `d8-system/kube-rbac-proxy-ca.crt`, key `ca.crt`. It verifies the server name `deckhouse-kube-rbac-proxy.d8-system.svc` and presents the current kubeconfig identity using a bearer token, client certificate, or exec credentials. The workstation must have network access to the Pod/node IP. Kubernetes API access alone does not provide this connectivity.
+
+Permissions are checked independently: `list pods` to find the leader or `get pods` for `--pod`; `get configmaps` for the named serving CA; and the route permission of the protected endpoint. In namespace `d8-system`, the metrics route checks `get` on `apps/deployments/prometheus-metrics` named `deckhouse`; API and pprof routes check `get` on `apps/deployments/http` named `debugSrv`. Exact probe routes are excluded from that authorization, but pod selection and CA discovery still require Kubernetes access. Legacy pods retain the `get pods/proxy` requirement.
+
+Unknown listener configurations are rejected, and so is a Pod that declares different `https` ports. TLS/authentication/authorization errors and redirects never trigger a fallback to another transport. Kubeconfig impersonation and custom transports are unsupported for the protected endpoint. An old CLI using only `pods/proxy` cannot reach a controller whose listener is loopback-only.
+
+This section describes the built-in command. An installed `system` plugin can replace that command tree; its command set and version are managed separately.
 
 The controller of deckhouse main at 8010976436 does not serve `/api/v1/packages` over HTTP yet, so there the `packages` commands answer 404.
 

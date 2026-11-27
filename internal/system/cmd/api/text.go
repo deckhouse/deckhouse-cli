@@ -100,7 +100,7 @@ func printPackages(w io.Writer, dump *apiclient.PackagesDump) error {
 // issues lists the conditions that are not in their good state: everything but
 // True, except MaintenanceMode, whose polarity is inverted.
 func issues(conditions []apiclient.Condition) string {
-	var parts []string
+	parts := make([]string, 0, len(conditions))
 
 	for _, condition := range conditions {
 		good := condition.Status == "True"

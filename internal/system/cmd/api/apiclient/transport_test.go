@@ -122,3 +122,23 @@ func mustParseQuery(t *testing.T, raw string) url.Values {
 
 	return query
 }
+
+func TestProxyTransportPreservesEscapedPath(t *testing.T) {
+	requests := make(chan string, 1)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.RequestURI()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer apiServer.Close()
+
+	config := &rest.Config{Host: apiServer.URL}
+	kubeCl, err := kubernetes.NewForConfig(config)
+	require.NoError(t, err)
+	pod := deckhousePod("deckhouse-0", nil, corev1.ContainerPort{Name: "self", ContainerPort: 4222})
+	proxy, err := NewProxyTransport(config, kubeCl, pod)
+	require.NoError(t, err)
+
+	_, err = proxy.Get(t.Context(), "/debug/a%2Fb%25c", url.Values{"x": {"a+b"}})
+	require.NoError(t, err)
+	require.Equal(t, "/api/v1/namespaces/d8-system/pods/deckhouse-0:4222/proxy/debug/a%2Fb%25c?x=a%2Bb", <-requests)
+}

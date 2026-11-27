@@ -41,10 +41,10 @@ var apiLong = templates.LongDesc(`
 Query the runtime API of the Deckhouse controller (/api/v1).
 
 The controller serves the API only when it runs Module v2
-(DECKHOUSE_ENABLE_MODULE_V2=true). Every route is fetched over HTTP through the
-pods/proxy subresource of the leader pod. The controller of deckhouse main does
-not serve the packages routes over HTTP yet, so there the packages commands
-answer 404.
+(DECKHOUSE_ENABLE_MODULE_V2=true). A protected controller API is reached over
+HTTPS on the Pod's own port with the current kubeconfig identity. Pods with
+a Pod-IP listener use the Kubernetes pods/proxy subresource. The controller does
+not serve the packages routes over HTTP yet, so those commands answer 404.
 
 © Flant JSC 2026`)
 
@@ -245,7 +245,7 @@ func newGetCommand() *cobra.Command {
 				return err
 			}
 
-			body, err := client.Get(cmd.Context(), target.Path, target.Query())
+			body, err := client.Get(cmd.Context(), target.EscapedPath(), target.Query())
 			if err != nil {
 				return err
 			}
@@ -442,7 +442,7 @@ func newPackagesCommand() *cobra.Command {
 	return packagesCmd
 }
 
-// newClient connects through pods/proxy to the pod --pod names, or to the leader.
+// newClient connects to the named replica or leader using its configured API transport.
 func newClient(cmd *cobra.Command) (*apiclient.Client, error) {
 	kubeconfigPath, err := cmd.Flags().GetString("kubeconfig")
 	if err != nil {
@@ -475,12 +475,12 @@ func newClient(cmd *cobra.Command) (*apiclient.Client, error) {
 		return nil, err
 	}
 
-	proxy, err := apiclient.NewProxyTransport(config, kubeCl, pod)
-	if err != nil {
-		return nil, err
-	}
-
-	return apiclient.New(proxy), nil
+	return apiclient.NewForPod(
+		cmd.Context(),
+		config,
+		kubeCl,
+		pod,
+	)
 }
 
 // addOutputFlag registers -o; text is offered where a summary view exists.

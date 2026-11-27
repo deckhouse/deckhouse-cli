@@ -109,8 +109,8 @@ func (t *ProxyTransport) Get(ctx context.Context, path string, query url.Values)
 		Resource("pods").
 		Name(t.target).
 		SubResource("proxy").
-		Suffix(path).
 		URL()
+	proxyURL = proxyURL.JoinPath(path)
 	proxyURL.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxyURL.String(), nil)
