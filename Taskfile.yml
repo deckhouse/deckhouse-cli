@@ -7,6 +7,7 @@ vars:
     sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
   version:
     sh: git describe --tags
+  extraBuildTags: ""
   kubectlVersion: v1.35.9
   kubectlLDFlags:
     sh: |
@@ -78,8 +79,9 @@ tasks:
     internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/bin/d8"
-        -compiler gc -ldflags="{{ .cgoReleaseLDFlags }}" -tags="{{ .cgoTags }}" {{ .CLI_ARGS }} ./cmd/d8/
+        -compiler gc -ldflags="{{ .cgoReleaseLDFlags }}" -tags="{{ .cgoTags }} ${D8_EXTRA_BUILD_TAGS}" {{ .CLI_ARGS }} ./cmd/d8/
     env:
+      D8_EXTRA_BUILD_TAGS: '{{ .extraBuildTags }}'
       CGO_ENABLED: "1"
       GOOS: "{{ .targetOS }}"
       GOARCH: "{{ .targetArch }}"
@@ -98,8 +100,9 @@ tasks:
     internal: true
     cmds:
       - go build -o "{{ .outputDir | default (printf "./dist/%s/%s-%s" .version .targetOS .targetArch) }}/bin/d8{{ if (eq .targetOS "windows") }}.exe{{ end }}"
-        -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }}" {{ .CLI_ARGS }} ./cmd/d8/
+        -ldflags="{{ .goReleaseLDFlags }}" -tags="{{ .goTags }} ${D8_EXTRA_BUILD_TAGS}" {{ .CLI_ARGS }} ./cmd/d8/
     env:
+      D8_EXTRA_BUILD_TAGS: '{{ .extraBuildTags }}'
       CGO_ENABLED: "0"
       GOOS: "{{ .targetOS }}"
       GOARCH: "{{ .targetArch }}"

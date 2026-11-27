@@ -1,6 +1,6 @@
 # deckhouse-cli CI. Ported from GitHub Actions.
 # GitHub is a push mirror of this project (Settings -> Repository -> Mirroring repositories):
-# same commits and tags. Releases are not mirrored: release:gitlab and release:github make them.
+# same commits and tags. Releases are not mirrored: release:upload:gitlab and release:upload:github make them.
 #
 # CI/CD variables (Settings -> CI/CD -> Variables):
 #   SOURCE_REPO_SSH_KEY     trdl-build-check: SSH key for the private repo, as the trdl server has;
@@ -10,7 +10,12 @@
 #   TRDL_VAULT_ADDR         trdl server (protected, masked)
 #   TRDL_VAULT_ROLE_ID      trdl approle (protected, masked)
 #   TRDL_VAULT_SECRET_ID    trdl approle (protected, masked)
-#   GH_TOKEN                release:github: GitHub token of deckhouse-BOaTswain (protected, masked and hidden)
+#   GH_TOKEN                release:upload:github: GitHub token of deckhouse-BOaTswain (protected, masked and hidden)
+#   DEV_CLI_REGISTRY_LOGIN / DEV_CLI_REGISTRY_PASSWORD     DEV CLI repository, pull and push
+#   STAGE_CLI_REGISTRY_LOGIN / STAGE_CLI_REGISTRY_PASSWORD STAGE CLI repository, pull and push
+#   PROD_CLI_REGISTRY_LOGIN / PROD_CLI_REGISTRY_PASSWORD   PROD CLI repository, pull and push
+# Protect the registry credentials and mask the passwords. PROD also reads the STAGE repository.
+#   DEV_CLI_BUILD_TAGS     optional space-separated Go build tags for DEV binaries
 # Protected variables reach tag pipelines only when the v* tags are protected.
 #
 # Pipeline schedule (Build -> Pipeline schedules): trdl-build-check, "0 7 * * 1" on main.
@@ -50,6 +55,10 @@ default:
   rules:
     - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
 
+.on_oci_release_tag:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/
+
 # Go toolchain, task and access to the private repo behind flant.internal.
 .go:
   needs: []
@@ -60,7 +69,7 @@ default:
   before_script:
     - mkdir -p .tools/bin
     - export PATH="$PWD/.tools/bin:$PWD/.tools/usr/local/go/bin:$PATH" GOPATH="$PWD/.tools/gopath" GOCACHE="$PWD/.tools/gocache"
-    - curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools/bin crane
+    - &install_crane curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz -C .tools/bin crane
     # GOST Go, as in stronghold (.ensure_go): Stronghold imports crypto/gogost from its std
     - crane export "$GO_IMAGE" - | tar -x -C .tools --no-same-owner usr/local/go
     - go version
@@ -70,6 +79,11 @@ default:
     # Env config, not --global: on a shell runner that would stay in the runner's ~/.gitconfig.
     - export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'
     - export GIT_CONFIG_KEY_1="url.https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf" GIT_CONFIG_VALUE_1="https://flant.internal/"
+
+.crane:
+  before_script:
+    - mkdir -p .tools/bin && export PATH="$PWD/.tools/bin:$PATH"
+    - *install_crane
 
 # --- Merge requests -----------------------------------------------------------
 
@@ -119,24 +133,80 @@ trdl-build-check:
 
 # --- Release tags -------------------------------------------------------------
 
-release:build:
+release:validate:
+  extends: .on_release_tag
+  stage: .pre
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - bash .gitlab/scripts/validate-release.sh
+
+release:build:stage:
   extends: [.go, .on_release_tag]
+  needs:
+    - job: release:validate
+      artifacts: false
   stage: build
   interruptible: false
   script:
-    - task build-and-package
+    - task build-and-package version="$CI_COMMIT_TAG"
   artifacts:
     paths:
       - dist/*/*.tar.gz
       - dist/*/*.tar.gz.sha256sum
     expire_in: 1 week
 
+release:build:dev:
+  extends: [release:build:stage, .on_oci_release_tag]
+  script:
+    - task build-and-package version="$CI_COMMIT_TAG" extraBuildTags="${DEV_CLI_BUILD_TAGS:-}"
+
+.oci-release:
+  extends: [.crane, .on_oci_release_tag]
+  stage: deploy
+  interruptible: false
+  resource_group: cli-oci-$CI_COMMIT_TAG
+  variables:
+    DEV_CLI_REPOSITORY: dev-registry.deckhouse.io/sys/deckhouse-oss/deckhouse-cli
+    STAGE_CLI_REPOSITORY: registry-stage.deckhouse.io/deckhouse/deckhouse-cli
+    PROD_CLI_REPOSITORY: registry-write.deckhouse.io/deckhouse/deckhouse-cli
+
+release:registry:dev:
+  extends: .oci-release
+  resource_group: cli-oci-dev-$CI_COMMIT_TAG
+  needs: ["release:build:dev"]
+  script:
+    - python3 .gitlab/scripts/package-oci.py "$CI_COMMIT_TAG" "dist/$CI_COMMIT_TAG" .tools/oci-layout
+    - bash .gitlab/scripts/publish-oci.sh dev .tools/oci-layout
+
+release:registry:stage:
+  extends: .oci-release
+  needs: ["release:build:stage"]
+  script:
+    - python3 .gitlab/scripts/package-oci.py "$CI_COMMIT_TAG" "dist/$CI_COMMIT_TAG" .tools/oci-layout
+    - bash .gitlab/scripts/publish-oci.sh stage .tools/oci-layout
+  artifacts:
+    paths: [stage-index.digest]
+    expire_in: never
+
+# Approve after checking the release with d8 dist update through the STAGE cluster's RPP.
+release:promote:prod:
+  extends: .oci-release
+  needs:
+    - job: release:registry:stage
+    - job: trdl:release
+      artifacts: false
+  when: manual
+  allow_failure: false
+  script:
+    - bash .gitlab/scripts/publish-oci.sh prod
+
 # A GitLab release only holds links, and job artifacts expire,
 # so the files go to the project's generic package registry.
-release:gitlab:
+release:upload:gitlab:
   extends: .on_release_tag
   stage: deploy
-  needs: ["release:build"]
+  needs: ["release:build:stage"]
   interruptible: false
   variables:
     GIT_DEPTH: "0"
@@ -164,10 +234,10 @@ release:gitlab:
 
 # Users and the deckhouse CI download d8 from here: keep the asset names.
 # Runs last, once trdl:release has passed: publishes only what trdl accepted the signature for.
-release:github:
+release:upload:github:
   extends: .on_release_tag
   stage: deploy
-  needs: ["release:build", "trdl:release"]
+  needs: ["release:build:stage", "trdl:release"]
   interruptible: false
   variables:
     GIT_DEPTH: "0"
@@ -214,6 +284,9 @@ release:github:
 
 trdl:release:
   extends: [.trdl, .on_release_tag]
+  needs:
+    - job: release:validate
+      artifacts: false
   script:
     - bash .gitlab/scripts/trdl.sh release "$CI_COMMIT_TAG"
 
