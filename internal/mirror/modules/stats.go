@@ -18,13 +18,10 @@ package modules
 
 import (
 	"sort"
-	"strings"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
 )
-
-// vexTagSuffix marks a manifest as a VEX attestation (cosign ".att" convention).
-const vexTagSuffix = ".att"
 
 // ModuleStat is one module's contribution to the pull.
 type ModuleStat struct {
@@ -64,7 +61,7 @@ type moduleName = string
 type modulePullStat struct {
 	// images is the total image manifest count across the module's layouts.
 	images int
-	// vex is how many of images are VEX attestations (".att" suffix), a subset.
+	// vex is how many of images are VEX attestations (vex.IsTag), a subset.
 	vex int
 	// versions are the versions selected for pull, e.g. ["v1.10.3", "v1.9.16"].
 	versions []string
@@ -126,11 +123,11 @@ func (svc *Service) capturePulledImages(modules []moduleData) {
 		stat := svc.moduleStats[module.name]
 		stat.images = regimage.CountManifests(paths)
 		// VEX attestations live in the same layouts as regular images and are
-		// recognised by the ".att" suffix on their short-tag annotation; count
-		// them as a subset of the total.
+		// recognised by their short tag, sha256-<hex>.att or sha256-<hex>;
+		// count them as a subset of the total.
 		stat.vex = regimage.CountManifestsMatching(paths,
 			func(annotations map[string]string) bool {
-				return strings.HasSuffix(annotations[regimage.AnnotationImageShortTag], vexTagSuffix)
+				return vex.IsTag(annotations[regimage.AnnotationImageShortTag])
 			})
 		svc.moduleStats[module.name] = stat
 	}

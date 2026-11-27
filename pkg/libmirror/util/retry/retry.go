@@ -30,11 +30,19 @@ type Task interface {
 	MaxRetries() uint
 }
 
+// RunTask runs task until it succeeds or runs out of retries.
+// It logs name before every attempt.
 func RunTask(ctx context.Context, logger params.Logger, name string, task Task) error {
-	return runTaskWithContext(ctx, logger, name, task)
+	return runTaskWithContext(ctx, logger, name, task, true)
 }
 
-func runTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task) error {
+// RunQuietTask is RunTask that logs only the retries.
+// Use it for many small tasks when the caller reports the progress itself.
+func RunQuietTask(ctx context.Context, logger params.Logger, name string, task Task) error {
+	return runTaskWithContext(ctx, logger, name, task, false)
+}
+
+func runTaskWithContext(ctx context.Context, logger params.Logger, name string, task Task, logAttempts bool) error {
 	restarts := uint(0)
 
 	var lastErr error
@@ -52,7 +60,9 @@ func runTaskWithContext(ctx context.Context, logger params.Logger, name string, 
 			}
 		}
 
-		logger.InfoLn(name)
+		if logAttempts {
+			logger.InfoLn(name)
+		}
 
 		lastErr = task.Do(ctx, restarts)
 		if lastErr == nil {

@@ -4,7 +4,7 @@
 
 `--dry-run` runs the full planning pipeline of `d8 mirror pull` — version resolution, release-channel discovery, module and package filtering, installer tag lookup — then **prints the images that would be downloaded** and exits without writing any bundle output to the bundle directory.
 
-> The **platform** plan is complete (the full component digest list is streamed from the installer image). For **modules** and **packages**, the plan lists release-channel refs and per-version images, but does **not** resolve `extra_images.json` extra images or `.att` VEX attestations — those require a real pull, so the plan and its counts undercount what a real pull downloads for each module/package.
+> The platform plan reads the full component digest list from the installer. The dry-run omits VEX for Deckhouse, its components, its installers and module or package images. A real pull discovers legacy `.att` tags and OCI referrers indexes unless `--skip-vex-images` is set. For modules and packages, extra images from `extra_images.json` also require a real pull.
 
 The key distinction from a no-op:
 

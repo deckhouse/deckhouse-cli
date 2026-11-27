@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/v1/match"
 
 	"github.com/deckhouse/deckhouse/pkg/registry/client"
 
@@ -28,7 +29,13 @@ type ImageLayout struct {
 	wrapped         layout.Path
 	defaultPlatform v1.Platform
 
-	metaByTag map[string]*ImageMeta
+	metaByTag map[string]layoutEntry
+}
+
+type layoutEntry struct {
+	*ImageMeta
+	// selectedImage is the local platform image used to inspect a multi-platform subject.
+	selectedImage v1.Image
 }
 
 func NewImageLayout(path string) (*ImageLayout, error) {
@@ -39,7 +46,7 @@ func NewImageLayout(path string) (*ImageLayout, error) {
 
 	return &ImageLayout{
 		wrapped:   l,
-		metaByTag: make(map[string]*ImageMeta),
+		metaByTag: make(map[string]layoutEntry),
 	}, nil
 }
 
@@ -141,7 +148,7 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 	}
 
 	// TODO: support nesting tags in image
-	l.metaByTag[tag] = typedMeta
+	l.metaByTag[tag] = layoutEntry{ImageMeta: typedMeta}
 
 	return nil
 }
@@ -149,7 +156,8 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 // AddIndex stores idx in the layout under tag. The index goes in whole:
 // per-platform children, their descriptors, and index annotations stay as
 // published. Use it for multi-platform images (e.g. CLI plugins), where
-// flattening to a single platform would lose the rest. tagReference is the
+// flattening to a single platform would lose the rest, and for VEX referrers
+// indexes, whose children have no platform at all. tagReference is the
 // full registry reference for the descriptor annotations, same as AddImage
 // records.
 //
@@ -157,6 +165,20 @@ func (l *ImageLayout) AddImage(img pkg.RegistryImage, tag string) error {
 // metaByTag is written only after AppendIndex succeeds, so a failed write is
 // retried, not skipped.
 func (l *ImageLayout) AddIndex(idx v1.ImageIndex, tag, tagReference string) error {
+	return l.storeIndex(idx, tag, tagReference, nil)
+}
+
+// PreserveSubjectIndex stores the published subject under its tag and keeps its selected platform image available for local inspection.
+func (l *ImageLayout) PreserveSubjectIndex(idx v1.ImageIndex, tag, tagReference string) error {
+	img, err := l.GetImage(tag)
+	if err != nil {
+		return fmt.Errorf("get platform image of subject %q: %w", tag, err)
+	}
+
+	return l.storeIndex(idx, tag, tagReference, img)
+}
+
+func (l *ImageLayout) storeIndex(idx v1.ImageIndex, tag, tagReference string, selectedImage v1.Image) error {
 	digest, err := idx.Digest()
 	if err != nil {
 		return fmt.Errorf("get index digest: %w", err)
@@ -168,14 +190,18 @@ func (l *ImageLayout) AddIndex(idx v1.ImageIndex, tag, tagReference string) erro
 		}
 	}
 
-	err = l.wrapped.AppendIndex(idx,
-		layout.WithAnnotations(map[string]string{
-			AnnotationImageReferenceName: tagReference,
-			AnnotationImageShortTag:      tag,
-		}),
-	)
+	annotations := layout.WithAnnotations(map[string]string{
+		AnnotationImageReferenceName: tagReference,
+		AnnotationImageShortTag:      tag,
+	})
+	if selectedImage != nil {
+		err = l.wrapped.ReplaceIndex(idx, match.Annotation(AnnotationImageShortTag, tag), annotations)
+	} else {
+		err = l.wrapped.AppendIndex(idx, annotations)
+	}
+
 	if err != nil {
-		return fmt.Errorf("append index: %w", err)
+		return fmt.Errorf("store index %q: %w", tag, err)
 	}
 
 	meta := &ImageMeta{
@@ -187,28 +213,31 @@ func (l *ImageLayout) AddIndex(idx v1.ImageIndex, tag, tagReference string) erro
 		meta.DigestReference = repo + "@" + digest.String()
 	}
 
-	l.metaByTag[tag] = meta
+	l.metaByTag[tag] = layoutEntry{ImageMeta: meta, selectedImage: selectedImage}
 
 	return nil
 }
 
 func (l *ImageLayout) GetImage(tag string) (pkg.RegistryImage, error) {
-	index, err := l.wrapped.ImageIndex()
-	if err != nil {
-		return nil, fmt.Errorf("images index: %w", err)
+	entry, found := l.metaByTag[tag]
+	if !found {
+		return nil, fmt.Errorf("no metadata found for tag %q: %w", tag, ErrImageMetaNotFound)
 	}
 
-	imageMeta, err := l.GetMeta(tag)
-	if err != nil {
-		return nil, fmt.Errorf("get image metadata for %q: %w", tag, err)
+	img := entry.selectedImage
+	if img == nil {
+		var err error
+
+		img, err = l.wrapped.Image(*entry.Digest)
+		if err != nil {
+			return nil, fmt.Errorf("cannot read image from index: %w", err)
+		}
 	}
 
-	img, err := index.Image(*imageMeta.GetDigest())
-	if err != nil {
-		return nil, fmt.Errorf("cannot read image from index: %w", err)
-	}
+	// The selected platform and the published subject can have different digests.
+	meta := *entry.ImageMeta
 
-	newImage, err := NewImage(img, WithMetadata(imageMeta))
+	newImage, err := NewImage(img, WithMetadata(&meta))
 	if err != nil {
 		return nil, fmt.Errorf("create new image: %w", err)
 	}
@@ -257,7 +286,7 @@ func (l *ImageLayout) GetMeta(tag string) (*ImageMeta, error) {
 		return nil, fmt.Errorf("no metadata found for tag %q: %w", tag, ErrImageMetaNotFound)
 	}
 
-	return meta, nil
+	return meta.ImageMeta, nil
 }
 
 // CountManifests returns the total image-manifest count across the given layout
@@ -270,7 +299,8 @@ func CountManifests(paths []layout.Path) int {
 
 // CountManifestsMatching counts manifests whose descriptor annotations satisfy
 // match. It feeds summary subsets in the same single pass - notably the VEX
-// tally (".att" short-tag). Unreadable paths are skipped, as in CountManifests.
+// tally (sha256-<hex>.att and sha256-<hex> short tags). Unreadable paths are
+// skipped, as in CountManifests.
 func CountManifestsMatching(paths []layout.Path, match func(annotations map[string]string) bool) int {
 	total := 0
 

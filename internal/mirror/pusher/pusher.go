@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -32,6 +33,7 @@ import (
 	client "github.com/deckhouse/deckhouse/pkg/registry"
 
 	"github.com/deckhouse/deckhouse-cli/internal/mirror/chunked"
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/retry/task"
@@ -93,6 +95,11 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 		return nil
 	}
 
+	// Some registries reject attestations until their subject exists in the repository.
+	sort.SliceStable(manifests, func(i, j int) bool {
+		return !isReferrersIndex(manifests[i]) && isReferrersIndex(manifests[j])
+	})
+
 	s.userLogger.Infof("Pushing %d images", len(manifests))
 
 	for i, manifest := range manifests {
@@ -112,6 +119,10 @@ func (s *Service) PushLayout(ctx context.Context, layoutPath layout.Path, client
 	}
 
 	return nil
+}
+
+func isReferrersIndex(desc v1.Descriptor) bool {
+	return desc.MediaType.IsIndex() && vex.IsReferrersTag(desc.Annotations[regimage.AnnotationImageShortTag])
 }
 
 // pushManifest reads one descriptor's content from the layout and pushes it

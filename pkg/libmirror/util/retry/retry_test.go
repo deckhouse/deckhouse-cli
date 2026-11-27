@@ -111,3 +111,32 @@ func (s *eventualSuccessTask) Interval(_ uint) time.Duration {
 func (s *eventualSuccessTask) MaxRetries() uint {
 	return 4
 }
+
+// TestRunQuietTaskLogsOnlyRetries: RunTask announces every attempt, RunQuietTask
+// only the retry, so a caller that reports its own progress is not flooded.
+func TestRunQuietTaskLogsOnlyRetries(t *testing.T) {
+	loud := &recordingLogger{}
+	require.NoError(t, RunTask(t.Context(), loud, "task", &eventualSuccessTask{}))
+	require.Equal(t, 2, loud.attempts, "RunTask logs the name before each of the 2 attempts")
+	require.Equal(t, 1, loud.retries)
+
+	quiet := &recordingLogger{}
+	require.NoError(t, RunQuietTask(t.Context(), quiet, "task", &eventualSuccessTask{}))
+	require.Equal(t, 0, quiet.attempts, "RunQuietTask must not log the attempts")
+	require.Equal(t, 1, quiet.retries, "RunQuietTask still logs the retry")
+}
+
+// recordingLogger counts the lines the retry loop prints: InfoLn before an
+// attempt, Infof before a retry.
+type recordingLogger struct {
+	attempts int
+	retries  int
+}
+
+func (l *recordingLogger) InfoLn(_ ...interface{})                  { l.attempts++ }
+func (l *recordingLogger) Infof(_ string, _ ...interface{})         { l.retries++ }
+func (l *recordingLogger) Debugf(_ string, _ ...interface{})        {}
+func (l *recordingLogger) DebugLn(_ ...interface{})                 {}
+func (l *recordingLogger) Warnf(_ string, _ ...interface{})         {}
+func (l *recordingLogger) WarnLn(_ ...interface{})                  {}
+func (l *recordingLogger) Process(_ string, run func() error) error { return run() }

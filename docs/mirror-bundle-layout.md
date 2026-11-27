@@ -103,6 +103,14 @@ package-versions.tar
     └── <name-b>/version/
 ```
 
+#### VEX attestations in an image's layout
+
+Unless `--skip-vex-images` is set, pull looks up VEX in the source repository of the Deckhouse image, its components, `install` and `install-standalone`, and module and package version, internal and extra images. The attestation goes into the image's layout, including `extra/<extra-name>/` for an extra image. The separate `installer.tar` has no VEX lookup.
+
+For an image with digest `sha256:<hex>`, the short tags `sha256-<hex>.att` and `sha256-<hex>` identify a legacy attestation image and an OCI referrers index, respectively. A tagged source may also have `<tag>.att`. Pull keeps all published forms. It stores the referrers index and its children with their original digests, descriptor annotations and artifact types.
+
+For a multi-platform image, pull checks both the digest of the source index and the digest of the selected platform manifest. An attestation of the whole image index requires preserving that index and all its platforms. If only the selected platform has an attestation, its manifest and VEX are sufficient.
+
 ### 1.3. Naming rules and why
 
 - **Monolithic components get one fixed-name archive.** `platform`, `installer` and `security` are always pulled as a whole, so each is a single archive with a stable name. This keeps the bundle predictable and lets a user pass a single archive to `push --file platform.tar`.
@@ -177,6 +185,8 @@ All discovered archives are unpacked into a single `unified/` working directory,
 ### 2.5. The `short_tag` annotation decides the image tag
 
 Within a layout, `push` does not invent tags. It reads the destination tag from each manifest's `io.deckhouse.image.short_tag` annotation (`AnnotationImageShortTag` in [layout.go](../pkg/registry/image/layout.go)). Descriptors without that annotation are **skipped with a warning**; when two descriptors carry the same short tag, the last one wins (`dedupManifestsByShortTag` in [pusher.go](../internal/mirror/pusher/pusher.go)). So the section is chosen by layout path, and the tag within that section is chosen by the annotation — both are read from the archive, never derived from the file name.
+
+Within each layout, push publishes referrers indexes after the images they attest. A registry that validates an artifact's `subject` can then resolve it by digest. The source index replaces the destination's `sha256-<hex>` tag, including its complete list of referrers.
 
 ### 2.6. Discovery index tags
 

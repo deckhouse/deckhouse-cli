@@ -215,6 +215,34 @@ func TestAddIndex_PreservesIndexStructure(t *testing.T) {
 	assert.Equal(t, "example.io/deckhouse-cli/plugins/foo@"+idxDigest.String(), meta.GetDigestReference())
 }
 
+func TestPreserveSubjectIndexKeepsSelectedPlatform(t *testing.T) {
+	l, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+	idx := buildMultiPlatformIndex(t, "contract")
+	manifest, err := idx.IndexManifest()
+	require.NoError(t, err)
+	childDigest := manifest.Manifests[1].Digest
+	selected, err := idx.Image(childDigest)
+	require.NoError(t, err)
+
+	const ref = "example.io/install:main"
+	require.NoError(t, l.AddImage(wrapImage(t, selected, ref), "main"))
+	require.NoError(t, l.PreserveSubjectIndex(idx, "main", ref))
+	require.NoError(t, l.PreserveSubjectIndex(idx, "main", ref))
+	require.Equal(t, 1, indexDescriptorCount(t, l))
+
+	platform, err := l.GetImage("main")
+	require.NoError(t, err)
+	got, err := platform.Digest()
+	require.NoError(t, err)
+	require.Equal(t, childDigest, got)
+	subject, err := l.GetMeta("main")
+	require.NoError(t, err)
+	parentDigest, err := idx.Digest()
+	require.NoError(t, err)
+	require.Equal(t, parentDigest, *subject.Digest)
+}
+
 // TestAddIndex_IdempotentForSameTagAndDigest: same guard as AddImage - a
 // repeated call with the same (tag, digest) must not append a duplicate
 // descriptor, or retried pulls would inflate the layout and the push.

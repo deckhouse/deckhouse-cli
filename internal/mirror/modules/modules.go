@@ -442,15 +442,7 @@ func (svc *Service) pullSingleModule(ctx context.Context, module moduleData) err
 		svc.pullInternalDigestImages(ctx, module.name, moduleVersions, downloadList)
 	}
 
-	if err := svc.pullExtraImages(ctx, module.name, moduleVersions, downloadList); err != nil {
-		return err
-	}
-
-	if !svc.options.SkipVexImages {
-		svc.pullVexImages(ctx, module.name, downloadList)
-	}
-
-	return nil
+	return svc.pullExtraImages(ctx, module.name, moduleVersions, downloadList)
 }
 
 // discoverChannelVersions enqueues release-channel refs into downloadList,
@@ -658,7 +650,7 @@ func (svc *Service) pullModuleImages(ctx context.Context, moduleName string, ver
 		GetterService:    svc.modulesService.Module(moduleName),
 	}
 
-	if err := svc.pullerService.PullImages(ctx, config); err != nil {
+	if err := svc.pullerService.PullImagesWithOptionalVEX(ctx, config, !svc.options.SkipVexImages); err != nil {
 		return fmt.Errorf("pull module images: %w", err)
 	}
 
@@ -715,7 +707,7 @@ func (svc *Service) pullInternalDigestImages(ctx context.Context, moduleName str
 		GetterService:    svc.modulesService.Module(moduleName),
 	}
 
-	if err := svc.pullerService.PullImages(ctx, config); err != nil {
+	if err := svc.pullerService.PullImagesWithOptionalVEX(ctx, config, !svc.options.SkipVexImages); err != nil {
 		svc.logger.Debug(fmt.Sprintf("Failed to pull internal digest images for %s: %v", moduleName, err))
 	}
 }
@@ -752,83 +744,12 @@ func (svc *Service) pullExtraImages(ctx context.Context, moduleName string, vers
 			GetterService:    svc.modulesService.Module(moduleName).ExtraImage(extraName),
 		}
 
-		if err := svc.pullerService.PullImages(ctx, config); err != nil {
+		if err := svc.pullerService.PullImagesWithOptionalVEX(ctx, config, !svc.options.SkipVexImages); err != nil {
 			return fmt.Errorf("pull extra image %s: %w", extraName, err)
 		}
 	}
 
 	return nil
-}
-
-// pullVexImages finds and pulls VEX attestation images for module images
-func (svc *Service) pullVexImages(ctx context.Context, moduleName string, downloadList *ImageDownloadList) {
-	allImages := make([]string, 0, len(downloadList.Module)+len(downloadList.ModuleExtra))
-
-	for img := range downloadList.Module {
-		allImages = append(allImages, img)
-	}
-
-	for img := range downloadList.ModuleExtra {
-		allImages = append(allImages, img)
-	}
-
-	// Find VEX images and add to a separate set for pulling
-	vexImageSet := make(map[string]*puller.ImageMeta)
-
-	for _, img := range allImages {
-		vexImageName, err := svc.findVexImage(ctx, moduleName, img)
-		if err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to find VEX image for %s: %v", img, err))
-			continue
-		}
-
-		if vexImageName != "" {
-			svc.logger.Debug(fmt.Sprintf("Found VEX image: %s", vexImageName))
-			vexImageSet[vexImageName] = nil
-			downloadList.Module[vexImageName] = nil
-		}
-	}
-
-	// Pull VEX images if any found
-	if len(vexImageSet) > 0 {
-		config := puller.PullConfig{
-			Name:             moduleName + " VEX images",
-			ImageSet:         vexImageSet,
-			Layout:           svc.layout.Module(moduleName).Modules,
-			AllowMissingTags: true, // VEX images may not exist
-			GetterService:    svc.modulesService.Module(moduleName),
-		}
-
-		if err := svc.pullerService.PullImages(ctx, config); err != nil {
-			svc.logger.Debug(fmt.Sprintf("Failed to pull VEX images for %s: %v", moduleName, err))
-			// Don't fail on VEX image pull errors
-		}
-	}
-}
-
-// findVexImage checks if a VEX attestation image exists for the given image
-func (svc *Service) findVexImage(ctx context.Context, moduleName string, imageRef string) (string, error) {
-	// VEX image reference format: sha256-xxx.att
-	vexImageName := strings.Replace(strings.Replace(imageRef, "@sha256:", "@sha256-", 1), "@sha256", ":sha256", 1) + ".att"
-
-	// Extract tag from vex image name
-	splitIndex := strings.LastIndex(vexImageName, ":")
-	if splitIndex == -1 {
-		return "", nil
-	}
-
-	tag := vexImageName[splitIndex+1:]
-
-	err := svc.modulesService.Module(moduleName).CheckImageExists(ctx, tag)
-	if errors.Is(err, client.ErrImageNotFound) {
-		return "", nil
-	}
-
-	if err != nil {
-		return "", err
-	}
-
-	return vexImageName, nil
 }
 
 // extractVersionsFromReleaseChannels extracts version tags from pulled release channel images

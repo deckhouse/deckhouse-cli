@@ -94,7 +94,7 @@ d8 CLI plugins that the mirrored modules need are selected **automatically** (se
 | `--only-extra-images` | Pull only the extra images (scanners, etc.) of modules **and packages**, without their main images. Also re-enables the modules/packages phase even when `--no-modules`/`--no-packages` is set |
 | `--no-installer` | Do not pull the standalone Deckhouse installer (`installer.tar`). Does not affect the installer images embedded in `platform.tar`, which are governed by `--no-platform` |
 | `--installer-tag` | Specific Deckhouse installer build tag to pull (default: `latest`) |
-| `--skip-vex-images` | Do not pull VEX vulnerability-attestation (`.att`) images. Applies to platform, modules and packages. See [VEX Images](#vex-vulnerability-attestation-images) |
+| `--skip-vex-images` | Do not pull VEX vulnerability attestations (`.att` images and `sha256-<hex>` referrers indexes). Applies to platform, modules and packages. See [VEX Images](#vex-vulnerability-attestation-images) |
 
 #### Bundle Options
 
@@ -219,7 +219,12 @@ Pass `--ignore-suspend` to mirror regardless. Use with caution — you may distr
 
 #### VEX (Vulnerability Attestation) Images
 
-For each platform image, the pull looks up a matching VEX attestation — an `.att` tag carrying Vulnerability-Exploitability-eXchange data — and, when present, adds it to the bundle. This happens by default. Pass `--skip-vex-images` to exclude these attestations and produce a smaller bundle.
+Pull looks up VEX attestations for the Deckhouse image, its components, `install`, `install-standalone`, and module and package images. It uses the downloaded image's digest and repository. For example, the attestations of a module's `extra/scanner:v3` stay in that `extra/scanner` repository. An image can have both formats.
+
+- `sha256-<hex>.att` contains a legacy cosign-style attestation. For a tagged image, pull also checks `<tag>.att`.
+- `sha256-<hex>` points to the OCI index listing the image's attestations. Pull copies the index and all its artifacts byte for byte. Push publishes the image before the index's artifacts so a registry that requires an existing `subject` can accept the attestations on the first push.
+
+This happens by default. Pass `--skip-vex-images` to exclude these attestations and produce a smaller bundle.
 
 ---
 
@@ -744,7 +749,7 @@ The mirror system handles these component types, each packed into its own archiv
 4. **Packages** (`package-<name>.tar`, plus the always-present `package-versions.tar`) — see [Package Mirroring](#package-mirroring).
 5. **Security databases** (`security.tar`) — four Trivy databases; see [Security Databases](#security-databases).
 
-For each module and package version, the pull additionally fetches release-metadata images, images referenced by the release image's `images_digests.json`, extra images listed in `extra_images.json`, and (unless `--skip-vex-images` is set) `.att` VEX attestation images.
+For each module and package version, the pull additionally fetches release-metadata images, images referenced by the release image's `images_digests.json`, extra images listed in `extra_images.json`, and (unless `--skip-vex-images` is set) VEX attestations in both formats (see [VEX Images](#vex-vulnerability-attestation-images)).
 
 ### Platform Release Discovery
 

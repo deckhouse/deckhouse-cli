@@ -19,20 +19,28 @@ package puller
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dkplog "github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/deckhouse/pkg/registry"
 	upfake "github.com/deckhouse/deckhouse/pkg/registry/fake"
 
+	"github.com/deckhouse/deckhouse-cli/internal/mirror/vex/vextest"
 	"github.com/deckhouse/deckhouse-cli/pkg"
 	"github.com/deckhouse/deckhouse-cli/pkg/libmirror/util/log"
 	regimage "github.com/deckhouse/deckhouse-cli/pkg/registry/image"
+	"github.com/deckhouse/deckhouse-cli/pkg/registry/service"
 )
 
 // TestPullImages_AllowMissingTagsDoesNotSwallowContextCancellation locks in
@@ -185,11 +193,276 @@ func TestPullImageSet_CompletePullPassesVerification(t *testing.T) {
 	require.NoError(t, ps.PullImageSet(context.Background(), imageSet, imgLayout, getter))
 }
 
+// TestPullIndexes_StoresReferrersIndexWhole covers the VEX referrers index: it
+// must land in the layout byte for byte under its sha256-<hex> tag, with the
+// artifactType and annotations of its descriptors, by which consumers find the
+// attestation, and with the attestation artifact itself.
+func TestPullIndexes_StoresReferrersIndexWhole(t *testing.T) {
+	const payload = `{"payloadType":"application/vnd.in-toto+json"}`
+
+	subject := upfake.NewImageBuilder().WithFile("payload.txt", "subject").MustBuild()
+	subjectDigest, err := subject.Digest()
+	require.NoError(t, err)
+
+	idx, err := vextest.ReferrersIndex(subject, payload)
+	require.NoError(t, err)
+	idxDigest, err := idx.Digest()
+	require.NoError(t, err)
+	srcRaw, err := idx.RawManifest()
+	require.NoError(t, err)
+
+	tag := "sha256-" + subjectDigest.Hex
+	reg := upfake.NewRegistry("reg.example")
+	reg.MustAddIndex("repo", tag, idx)
+	client := upfake.NewClient(reg).WithSegment("repo")
+
+	imgLayout, err := regimage.NewImageLayout(t.TempDir())
+	require.NoError(t, err)
+
+	ref := "reg.example/repo:" + tag
+	cfg := PullConfig{
+		Name:          "VEX indexes",
+		ImageSet:      map[string]*ImageMeta{ref: nil},
+		Layout:        imgLayout,
+		GetterService: &fakeGetterService{getDigest: client.GetDigest, getIndex: client.GetIndex},
+	}
+
+	ps := NewPullerService(dkplog.NewLogger(dkplog.WithLevel(slog.LevelError)), log.NewNop())
+	require.NoError(t, ps.PullIndexes(context.Background(), cfg))
+
+	layoutIndex, err := imgLayout.Path().ImageIndex()
+	require.NoError(t, err)
+	layoutManifest, err := layoutIndex.IndexManifest()
+	require.NoError(t, err)
+	require.Len(t, layoutManifest.Manifests, 1)
+
+	desc := layoutManifest.Manifests[0]
+	assert.Equal(t, tag, desc.Annotations[regimage.AnnotationImageShortTag])
+	assert.Equal(t, ref, desc.Annotations[regimage.AnnotationImageReferenceName])
+	assert.Equal(t, types.OCIImageIndex, desc.MediaType, "stored as an index, not resolved to a platform image")
+	assert.Equal(t, idxDigest, desc.Digest)
+
+	stored, err := layoutIndex.ImageIndex(desc.Digest)
+	require.NoError(t, err)
+	storedRaw, err := stored.RawManifest()
+	require.NoError(t, err)
+	assert.Equal(t, string(srcRaw), string(storedRaw), "the index must be stored byte for byte")
+
+	storedManifest, err := stored.IndexManifest()
+	require.NoError(t, err)
+	require.Len(t, storedManifest.Manifests, 1)
+
+	artifactDesc := storedManifest.Manifests[0]
+	assert.Equal(t, vextest.BundleMediaType, artifactDesc.ArtifactType)
+	assert.Equal(t, vextest.OpenVEXPredicateType, artifactDesc.Annotations[vextest.PredicateTypeAnnotation])
+
+	artifact, err := stored.Image(artifactDesc.Digest)
+	require.NoError(t, err)
+	artifactManifest, err := artifact.Manifest()
+	require.NoError(t, err)
+	require.NotNil(t, artifactManifest.Subject)
+	assert.Equal(t, subjectDigest, artifactManifest.Subject.Digest)
+
+	layers, err := artifact.Layers()
+	require.NoError(t, err)
+	require.Len(t, layers, 1)
+	rc, err := layers[0].Compressed()
+	require.NoError(t, err)
+	defer rc.Close()
+	storedPayload, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, payload, string(storedPayload), "the attestation blob must be in the layout")
+}
+
+// TestPullVEX_RetriesFailedLookup covers a registry that fails the VEX lookup.
+// One failure is retried and the attestation still lands in the layout. A
+// lookup that fails every time stops a required pull, and a best-effort pull
+// goes on without the VEX of that image.
+func TestPullVEX_RetriesFailedLookup(t *testing.T) {
+	restore := vexLookupRetryDelay
+	vexLookupRetryDelay = time.Millisecond
+
+	t.Cleanup(func() { vexLookupRetryDelay = restore })
+
+	subject := upfake.NewImageBuilder().WithFile("payload.txt", "subject").MustBuild()
+	subjectDigest, err := subject.Digest()
+	require.NoError(t, err)
+
+	idx, err := vextest.ReferrersIndex(subject, `{"vex":"test"}`)
+	require.NoError(t, err)
+
+	const subjectRef = "reg.example/repo:v1"
+
+	indexTag := "sha256-" + subjectDigest.Hex
+	reg := upfake.NewRegistry("reg.example")
+	reg.MustAddIndex("repo", indexTag, idx)
+	client := upfake.NewClient(reg).WithSegment("repo")
+
+	outage := errors.New("registry unavailable")
+	allAttempts := int32(vexLookupRetries)
+
+	for _, tc := range []struct {
+		name       string
+		failures   int32
+		bestEffort bool
+		wantErr    bool
+		wantVEX    bool
+		wantCalls  int32
+	}{
+		{name: "one failure is retried", failures: 1, wantVEX: true, wantCalls: 2},
+		{name: "a required pull stops", failures: allAttempts, wantErr: true, wantCalls: allAttempts},
+		{name: "a best-effort pull goes on", failures: allAttempts, bestEffort: true, wantCalls: allAttempts},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imgLayout, err := regimage.NewImageLayout(t.TempDir())
+			require.NoError(t, err)
+
+			stored, err := regimage.NewImage(subject)
+			require.NoError(t, err)
+			stored.SetMetadata(&regimage.ImageMeta{
+				TagReference:    subjectRef,
+				DigestReference: "@" + subjectDigest.String(),
+				Digest:          &subjectDigest,
+			})
+			require.NoError(t, imgLayout.AddImage(stored, "v1"))
+
+			var indexLookups atomic.Int32
+
+			cfg := PullConfig{
+				Name:     "test",
+				ImageSet: map[string]*ImageMeta{subjectRef: NewImageMeta("v1", subjectRef, &subjectDigest)},
+				Layout:   imgLayout,
+				GetterService: &fakeGetterService{
+					getDigest: func(ctx context.Context, tag string) (*v1.Hash, error) {
+						if tag == indexTag && indexLookups.Add(1) <= tc.failures {
+							return nil, outage
+						}
+
+						return client.GetDigest(ctx, tag)
+					},
+					getIndex: client.GetIndex,
+				},
+			}
+
+			ps := NewPullerService(dkplog.NewLogger(dkplog.WithLevel(slog.LevelError)), log.NewNop())
+			err = ps.pullVEX(context.Background(), cfg, tc.bestEffort)
+
+			if tc.wantErr {
+				require.ErrorIs(t, err, outage)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tc.wantCalls, indexLookups.Load())
+
+			layoutIndex, err := imgLayout.Path().ImageIndex()
+			require.NoError(t, err)
+			layoutManifest, err := layoutIndex.IndexManifest()
+			require.NoError(t, err)
+
+			tags := make([]string, 0, len(layoutManifest.Manifests))
+			for _, desc := range layoutManifest.Manifests {
+				tags = append(tags, desc.Annotations[regimage.AnnotationImageShortTag])
+			}
+
+			if tc.wantVEX {
+				assert.ElementsMatch(t, []string{"v1", indexTag}, tags)
+			} else {
+				assert.Equal(t, []string{"v1"}, tags)
+			}
+		})
+	}
+}
+
+func TestPullVEX_MultiPlatformLookupFailure(t *testing.T) {
+	restore := vexLookupRetryDelay
+	vexLookupRetryDelay = time.Millisecond
+	t.Cleanup(func() { vexLookupRetryDelay = restore })
+
+	child := upfake.NewImageBuilder().WithFile("payload.txt", "linux/amd64").MustBuild()
+	parent := mutate.AppendManifests(empty.Index, mutate.IndexAddendum{
+		Add: child, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}},
+	})
+	parentDigest, err := parent.Digest()
+	require.NoError(t, err)
+	childDigest, err := child.Digest()
+	require.NoError(t, err)
+	parentVEX, err := vextest.ReferrersIndex(parent, `{"vex":"index"}`)
+	require.NoError(t, err)
+	childVEX, err := vextest.ReferrersIndex(child, `{"vex":"amd64"}`)
+	require.NoError(t, err)
+	parentTag, childTag := "sha256-"+parentDigest.Hex, "sha256-"+childDigest.Hex
+
+	reg := upfake.NewRegistry("reg.example")
+	reg.MustAddIndex("repo", "v1", parent)
+	reg.MustAddIndex("repo", parentTag, parentVEX)
+	reg.MustAddIndex("repo", childTag, childVEX)
+	logger := dkplog.NewLogger(dkplog.WithLevel(slog.LevelError))
+	source := service.NewBasicService("repo", upfake.NewClient(reg).WithSegment("repo"), logger)
+	ps := NewPullerService(logger, log.NewNop())
+	outage := errors.New("attestation tag unavailable")
+
+	for _, tc := range []struct {
+		name        string
+		failedTag   string
+		wantTag     string
+		wantSubject v1.Hash
+		bestEffort  bool
+	}{
+		{"optional child fails", childTag, parentTag, parentDigest, true},
+		{"optional parent fails", parentTag, childTag, childDigest, true},
+		{"required child fails", childTag, "", v1.Hash{}, false},
+		{"required parent fails", parentTag, "", v1.Hash{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout, err := regimage.NewImageLayout(t.TempDir())
+			require.NoError(t, err)
+			cfg := PullConfig{
+				Name:     "repo",
+				ImageSet: map[string]*ImageMeta{"reg.example/repo:v1": nil},
+				Layout:   layout,
+				GetterService: &fakeGetterService{
+					getImage: source.GetImage,
+					getIndex: source.GetIndex,
+					getDigest: func(ctx context.Context, tag string) (*v1.Hash, error) {
+						if tag == tc.failedTag {
+							return nil, outage
+						}
+						return source.GetDigest(ctx, tag)
+					},
+				},
+			}
+
+			ctx := context.Background()
+			require.NoError(t, ps.PullImages(ctx, cfg))
+			err = ps.pullVEX(ctx, cfg, tc.bestEffort)
+			if !tc.bestEffort {
+				require.ErrorIs(t, err, outage)
+				return
+			}
+			require.NoError(t, err)
+
+			wantVEX, err := source.GetDigest(ctx, tc.wantTag)
+			require.NoError(t, err)
+			layoutIndex, err := layout.Path().ImageIndex()
+			require.NoError(t, err)
+			manifest, err := layoutIndex.IndexManifest()
+			require.NoError(t, err)
+			tags := map[string]v1.Hash{}
+			for _, desc := range manifest.Manifests {
+				tags[desc.Annotations[regimage.AnnotationImageShortTag]] = desc.Digest
+			}
+			require.Equal(t, map[string]v1.Hash{"v1": tc.wantSubject, tc.wantTag: *wantVEX}, tags)
+		})
+	}
+}
+
 // fakeGetterService is a tiny pkg.BasicService that lets each test rewire
 // only the call it cares about.
 type fakeGetterService struct {
 	getDigest        func(ctx context.Context, tag string) (*v1.Hash, error)
 	getImage         func(ctx context.Context, tag string, opts ...registry.ImageGetOption) (pkg.RegistryImage, error)
+	getIndex         func(ctx context.Context, tag string) (v1.ImageIndex, error)
 	checkImageExists func(ctx context.Context, tag string) error
 	listTags         func(ctx context.Context) ([]string, error)
 }
@@ -206,6 +479,13 @@ func (f *fakeGetterService) GetImage(ctx context.Context, tag string, opts ...re
 		return f.getImage(ctx, tag, opts...)
 	}
 	return nil, errors.New("getImage not implemented")
+}
+
+func (f *fakeGetterService) GetIndex(ctx context.Context, tag string) (v1.ImageIndex, error) {
+	if f.getIndex != nil {
+		return f.getIndex(ctx, tag)
+	}
+	return nil, errors.New("getIndex not implemented")
 }
 
 func (f *fakeGetterService) CheckImageExists(ctx context.Context, tag string) error {
